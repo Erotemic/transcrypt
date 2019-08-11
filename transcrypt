@@ -281,37 +281,58 @@ save_helper_scripts() {
 	# (keyed with a combination of the filename and transcrypt password), and
 	# then use the last 16 bytes of that HMAC for the file's unique salt.
 
+    # The clean script encrypts files before git sends them to the remote.
+    # Note the "Salted" check is part of openssl and not anything we do here.
+    # It allows anyone (including us) to check if a file was already encrypted
+    # but this does compromise the encrypted stream of data (which starts on
+    # the 17th byte).
+    # References: https://crypto.stackexchange.com/questions/8776/what-is-u2fsdgvkx1
 	cat <<-'EOF' >"${GIT_DIR}/crypt/clean"
 		#!/usr/bin/env bash
 		filename=$1
 		# ignore empty files
 		if [[ -s $filename ]]; then
 		  # cache STDIN to test if it's already encrypted
+		  # First, create the tempfile, then
+		  # set a trap to remove the tempfile when we exit or if anything goes wrong 
+		  # finally Write the stdin of this script to the tempfile
 		  tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
 		  trap 'rm -f "$tempfile"' EXIT
 		  tee "$tempfile" &>/dev/null
 		  # the first bytes of an encrypted file are always "Salted" in Base64
+		  # this is an openssl standard. The actual encrypted stream starts on the 17th byte.
 		  read -n 8 firstbytes <"$tempfile"
 		  if [[ $firstbytes == "U2FsdGVk" ]]; then
+		    # The file is already encrypted, so just pass it back
 		    cat "$tempfile"
 		  else
+		    # Otherwise we need to encrypt the file
 		    cipher=$(git config --get --local transcrypt.cipher)
 		    password=$(git config --get --local transcrypt.password)
-		    salt=$(openssl dgst -hmac "${filename}:${password}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
-		    ENC_PASS=$password openssl enc -$cipher -md MD5 -pass env:ENC_PASS -e -a -S "$salt" -in "$tempfile"
+		    #salt=$(openssl dgst -hmac "${filename}:${password}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
+		    #ENC_PASS=$password openssl enc -$cipher -md MD5 -pass env:ENC_PASS -e -a -S "$salt" -in "$tempfile"
+            # NOTE: salt must be 16 bytes, its openssl standard
+		    salt=$(openssl dgst -hmac "${filename}:${password}" -sha512 "$filename" | tr -d '\r\n' | tail -c 16)
+		    ENC_PASS=$password openssl enc -$cipher -md SHA512 -pass env:ENC_PASS -pbkdf2 -e -a -S "$salt" -in "$tempfile"
 		  fi
 		fi
 	EOF
 
+	# The smudge script decrypts files when they are checked out by an authenticated repository.
+	# the file contents are passed via stdin
 	cat <<-'EOF' >"${GIT_DIR}/crypt/smudge"
 		#!/usr/bin/env bash
 		tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
 		trap 'rm -f "$tempfile"' EXIT
 		cipher=$(git config --get --local transcrypt.cipher)
 		password=$(git config --get --local transcrypt.password)
-		tee "$tempfile" | ENC_PASS=$password openssl enc -$cipher -md MD5 -pass env:ENC_PASS -d -a 2>/dev/null || cat "$tempfile"
+		#tee "$tempfile" | ENC_PASS=$password openssl enc -$cipher -md MD5 -pass env:ENC_PASS -d -a 2>/dev/null || cat "$tempfile"
+		tee "$tempfile" | ENC_PASS=$password openssl enc -$cipher -md SHA512 -pass env:ENC_PASS -pbkdf2 -d -a 2>/dev/null || cat "$tempfile"
 	EOF
 
+	# The textconv script allows users to see git diffs in plaintext. 
+	# It does this by decrypting the encrypted git globs into plain text before
+	# passing them to the diff command. 
 	cat <<-'EOF' >"${GIT_DIR}/crypt/textconv"
 		#!/usr/bin/env bash
 		filename=$1
@@ -319,7 +340,8 @@ save_helper_scripts() {
 		if [[ -s $filename ]]; then
 		  cipher=$(git config --get --local transcrypt.cipher)
 		  password=$(git config --get --local transcrypt.password)
-		  ENC_PASS=$password openssl enc -$cipher -md MD5 -pass env:ENC_PASS -d -a -in "$filename" 2>/dev/null || cat "$filename"
+		  #ENC_PASS=$password openssl enc -$cipher -md MD5 -pass env:ENC_PASS -d -a -in "$filename" 2>/dev/null || cat "$filename"
+		  ENC_PASS=$password openssl enc -$cipher -md SHA512 -pass env:ENC_PASS -pbkdf2 -d -a -in "$filename" 2>/dev/null || cat "$filename"
 		fi
 	EOF
 
