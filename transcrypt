@@ -154,7 +154,7 @@ git_clean() {
 		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -e -a -S "$salt" -in "$tempfile"
 		# NOTE: salt must be 16 bytes, its openssl standard
 		salt=$("$openssl_path" dgst -hmac "${filename}:${password}" -sha512 "$filename" | tr -d '\r\n' | tail -c 16)
-		ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md SHA512 -pass env:ENC_PASS -pbkdf2 -e -a -S "$salt" -in "$tempfile"
+		ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf_arg}" -e -a -S "$salt" -in "$tempfile"
 	fi
 }
 
@@ -167,7 +167,7 @@ git_smudge() {
 	password=$(git config --get --local transcrypt.password)
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
 	#tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a 2>/dev/null || cat "$tempfile"
-	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md SHA512 -pass env:ENC_PASS -pbkdf2 -d -a 2>/dev/null || cat "$tempfile"
+	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf_arg}" -d -a 2>/dev/null || cat "$tempfile"
 }
 
 git_textconv() {
@@ -183,7 +183,7 @@ git_textconv() {
 	password=$(git config --get --local transcrypt.password)
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
 	#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a -in "$filename" 2>/dev/null || cat "$filename"
-	ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md SHA512 -pass env:ENC_PASS -pbkdf2 -d -a -in "$filename" 2>/dev/null || cat "$filename"
+	ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf_arg}" -d -a -in "$filename" 2>/dev/null || cat "$filename"
 }
 
 # shellcheck disable=SC2005,SC2002,SC2181
@@ -1005,6 +1005,12 @@ show_file=''
 uninstall=''
 upgrade=''
 openssl_path='openssl'
+
+# TODO: make these configurable
+#md_digest='MD5'
+#pbkdf_arg=''
+md_digest='SHA512'
+pbkdf_arg='-pbkdf2'
 
 # used to bypass certain safety checks
 requires_existing_config=''
