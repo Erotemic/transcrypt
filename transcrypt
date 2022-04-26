@@ -167,6 +167,10 @@ git_clean() {
         # Use a different kind of salt
         # Ok, we want a random salt, but we also dont want a random salt....
         # oh this is tricky
+        # Lets use the commit hash from the last time this file was modified?
+        # If the file is not under version control this is a ""
+        # commit_id=$(git log -n 1 --pretty=format:%H "$filename")
+        # actually, do we want this?
         salt=$("$openssl_path" dgst -hmac "${filename}:${static_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
         #printf "Cleaning: $filename $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/clean_logs.txt"
         ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
