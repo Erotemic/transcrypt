@@ -116,8 +116,18 @@ die() {
 # deterministic for everything to work transparently. To do that, the same
 # salt must be used each time we encrypt the same file. An HMAC has been
 # proven to be a PRF, so we generate an HMAC-SHA256 for each decrypted file
-# (keyed with a combination of the filename and transcrypt password), and
+# (keyed with a combination of the filename and ~~transcrypt password~~), and
 # then use the last 16 bytes of that HMAC for the file's unique salt.
+
+_load_transcrypt_config_vars(){
+    # Populate bash vars with our config
+    md_digest='SHA512'
+    pbkdf2_arg='-pbkdf2'
+    static_salt="1107307616081495"
+	cipher=$(git config --get --local transcrypt.cipher)
+	password=$(git config --get --local transcrypt.password)
+	openssl_path=$(git config --get --local transcrypt.openssl-path)
+}
 
 git_clean() {
 
@@ -147,17 +157,22 @@ git_clean() {
 		# The file is already encrypted, so just pass it back
 		cat "$tempfile"
 	else
-		cipher=$(git config --get --local transcrypt.cipher)
-		password=$(git config --get --local transcrypt.password)
-		openssl_path=$(git config --get --local transcrypt.openssl-path)
+		_load_transcrypt_config_vars
 		#salt=$("${openssl_path}" dgst -hmac "${filename}:${password}" -sha256 "$tempfile" | tr -d '\r\n' | tail -c16)
 		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -e -a -S "$salt" -in "$tempfile"
 		# NOTE: salt must be 16 bytes, its openssl standard
 		#salt=$("$openssl_path" dgst -hmac "${filename}:${password}" -sha512 "$filename" | tr -d '\r\n' | tail -c 16)
-		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf_arg}" -e -a -S "$salt" -in "$tempfile"
+		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -S "$salt" -in "$tempfile"
+
+        # Use a different kind of salt
+        # Ok, we want a random salt, but we also dont want a random salt....
+        # oh this is tricky
+        salt=$("$openssl_path" dgst -hmac "${filename}:${static_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
+        #printf "Cleaning: $filename $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/clean_logs.txt"
+        ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
 
 		# Try using a random salt instead
-		ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf_arg}" -e -a -salt -in "$tempfile"
+		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -salt -in "$tempfile"
 	fi
 }
 
@@ -166,11 +181,10 @@ git_smudge() {
 	# the file contents are passed via stdin
 	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
 	trap 'rm -f "$tempfile"' EXIT
-	cipher=$(git config --get --local transcrypt.cipher)
-	password=$(git config --get --local transcrypt.password)
-	openssl_path=$(git config --get --local transcrypt.openssl-path)
+	_load_transcrypt_config_vars
+    #printf "Smudging $pbkdf2_arg $cipher $md_digest\n" >> "$HOME/code/erotemic5/smudge_logs.txt"
 	#tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a 2>/dev/null || cat "$tempfile"
-	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf_arg}" -d -a 2>/dev/null || cat "$tempfile"
+	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a 2>/dev/null || cat "$tempfile"
 }
 
 git_textconv() {
@@ -182,11 +196,10 @@ git_textconv() {
 	if [[ ! -s $filename ]]; then
 		return
 	fi
-	cipher=$(git config --get --local transcrypt.cipher)
-	password=$(git config --get --local transcrypt.password)
-	openssl_path=$(git config --get --local transcrypt.openssl-path)
+	_load_transcrypt_config_vars
 	#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a -in "$filename" 2>/dev/null || cat "$filename"
-	ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf_arg}" -d -a -in "$filename" 2>/dev/null || cat "$filename"
+    #printf "Textconv: $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/textconv_logs.txt"
+	ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a -in "$filename" 2>/dev/null || cat "$filename"
 }
 
 # shellcheck disable=SC2005,SC2002,SC2181
@@ -248,6 +261,7 @@ git_pre_commit() {
 				: # Do nothing
 			# The first bytes of an encrypted file must be "Salted" in Base64
 			elif [[ $firstbytes != "U2FsdGVk" ]]; then
+                echo "firstbytes = $firstbytes"
 				printf 'Transcrypt managed file is not encrypted in the Git index: %s\n' "$secret_file" >&2
 				printf '\n' >&2
 				printf 'You probably staged this file using a tool that does not apply' >&2
@@ -475,7 +489,9 @@ save_helper_scripts() {
 
 	local current_transcrypt
 	current_transcrypt=$(realpath "$0" 2>/dev/null)
-	cp "$current_transcrypt" "${CRYPT_DIR}/transcrypt"
+	#cp "$current_transcrypt" "${CRYPT_DIR}/transcrypt"
+    # Debug mode
+    ln -fs "$current_transcrypt" "${CRYPT_DIR}/transcrypt"
 
 	# make scripts executable
 	for script in {transcrypt,}; do
@@ -552,8 +568,10 @@ display_configuration() {
 	[[ ! $REPO ]] || printf '  GIT_WORK_TREE:  %s\n' "$REPO"
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
-	printf '  CIPHER:   %s\n' "$current_cipher"
-	printf '  PASSWORD: %s\n\n' "$current_password"
+	printf '  MD_DIGEST:  %s\n' "$md_digest"
+	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
+	printf '  CIPHER:     %s\n' "$current_cipher"
+	printf '  PASSWORD:   %s\n\n' "$current_password"
 	printf 'Copy and paste the following command to initialize a cloned repository:\n\n'
 	printf "  transcrypt -c %s -p '%s'\n" "$current_cipher" "$escaped_password"
 }
@@ -1011,9 +1029,9 @@ openssl_path='openssl'
 
 # TODO: make these configurable
 #md_digest='MD5'
-#pbkdf_arg=''
+#pbkdf2_arg=''
 md_digest='SHA512'
-pbkdf_arg='-pbkdf2'
+pbkdf2_arg='-pbkdf2'
 
 # used to bypass certain safety checks
 requires_existing_config=''
