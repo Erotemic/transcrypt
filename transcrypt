@@ -480,7 +480,7 @@ _get_user_input() {
 # ensure we have a cipher to encrypt with
 get_cipher() {
     _get_user_input cipher "$DEFAULT_CIPHER" "validate_fn" \
-        'Encrypt using which cipher? [%s] ' "$DEFAULT_CIPHER"
+        "$(printf 'Encrypt using which cipher? [%s] ' \"$DEFAULT_CIPHER\")"
 
 	#while [[ ! $cipher ]]; do
 	#    local answer=
