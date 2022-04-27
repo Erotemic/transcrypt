@@ -496,8 +496,10 @@ _get_user_input() {
         # validate function, which should set the varname to empty if it is
         # invalid and the user should continue, otherwise it should die.
 		if [[ ! $answer ]]; then
+            echo "default = $default"
 			declare "$varname"="$default"
 		else
+            echo "answer = $answer"
 			declare "$varname"="$answer"
             ${validate_fn}
 		fi
@@ -508,6 +510,7 @@ _get_user_input() {
 get_digest() {
     _get_user_input digest "$DEFAULT_DIGEST" "validate_digest" \
         "$(printf 'Encrypt using which digest? [%s] ' \"$DEFAULT_DIGEST\")"
+    echo "digest = $digest"
 }
 
 
@@ -515,6 +518,7 @@ get_digest() {
 get_cipher() {
     _get_user_input cipher "$DEFAULT_CIPHER" "validate_cipher" \
         "$(printf 'Encrypt using which cipher? [%s] ' \"$DEFAULT_CIPHER\")"
+    echo "cipher = $cipher"
 
 	#while [[ ! $cipher ]]; do
 	#    local answer=
