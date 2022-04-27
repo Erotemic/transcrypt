@@ -20,6 +20,8 @@ readonly VERSION='2.2.0-pre'
 
 # the default cipher to utilize
 readonly DEFAULT_CIPHER='aes-256-cbc'
+readonly DEFAULT_MD_DIGEST='MD5'
+readonly DEFAULT_USE_PBKDF2='0'
 
 ##### FUNCTIONS
 
@@ -452,6 +454,32 @@ validate_cipher() {
 }
 
 
+validate_md_digest() {
+	local list_digest_commands
+	if "${openssl_path}" list-digest-commands &>/dev/null; then
+		# OpenSSL < v1.1.0
+		list_digest_commands="${openssl_path} list-digest-commands"
+	else
+		# OpenSSL >= v1.1.0
+		list_digest_commands="${openssl_path} list -digest-commands"
+	fi
+
+	local supported
+	supported=$($list_digest_commands | tr -s ' ' '\n' | grep -Fxi "$digest") || true
+	if [[ ! $supported ]]; then
+		if [[ $interactive ]]; then
+			printf '"%s" is not a valid digest; choose one of the following:\n\n' "$digest"
+			$list_digest_commands | column -c 80
+			printf '\n'
+			digest=''
+		else
+			# shellcheck disable=SC2016
+			die 1 '"%s" is not a valid digest; see `%s`' "$digest" "$list_digest_commands"
+		fi
+	fi
+}
+
+
 _get_user_input() {
     local varname=$1
     local default=$2
@@ -477,9 +505,15 @@ _get_user_input() {
 }
 
 
+get_digest() {
+    _get_user_input md_digest "$DEFAULT_MD_DIGEST" "validate_md_digest" \
+        "$(printf 'Encrypt using which md digest? [%s] ' \"$DEFAULT_MD_DIGEST\")"
+}
+
+
 # ensure we have a cipher to encrypt with
 get_cipher() {
-    _get_user_input cipher "$DEFAULT_CIPHER" "validate_fn" \
+    _get_user_input cipher "$DEFAULT_CIPHER" "validate_cipher" \
         "$(printf 'Encrypt using which cipher? [%s] ' \"$DEFAULT_CIPHER\")"
 
 	#while [[ ! $cipher ]]; do
