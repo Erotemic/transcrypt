@@ -497,6 +497,7 @@ _get_user_input() {
         # invalid and the user should continue, otherwise it should die.
 		if [[ ! $answer ]]; then
             echo "default = $default"
+            echo "varname = $varname"
 			declare "$varname"="$default"
 		else
             echo "answer = $answer"
