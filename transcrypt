@@ -173,7 +173,7 @@ git_clean() {
         # actually, do we want this?
         salt=$("$openssl_path" dgst -hmac "${filename}:${static_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
         #printf "Cleaning: $filename $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/clean_logs.txt"
-        ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
+        ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
 
 		# Try using a random salt instead
 		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -salt -in "$tempfile"
