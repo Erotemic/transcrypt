@@ -129,7 +129,7 @@ die() {
 
 
 # shellcheck disable=SC2155
-_load_versioned_config(){
+_check_config_poc(){
     # Notes on custom config
     # https://unix.stackexchange.com/questions/175648/use-config-file-for-my-shell-script
     mkdir -p "${VERSIONED_CONFIG_DPATH}"
@@ -210,22 +210,29 @@ _load_transcrypt_config_vars(){
     # Populate bash vars with our config
     #digest='SHA512'
 
-    use_pbkdf2=$(git config --get --local transcrypt.use-pbkdf2)
+	cipher=$(git config --get --local transcrypt.cipher)
     digest=$(git config --get --local transcrypt.digest)
+    use_pbkdf2=$(git config --get --local transcrypt.use-pbkdf2)
+    salt_method=$(git config --get --local transcrypt.salt-method)
 
     if [[ "$use_pbkdf2" == "1" ]]; then
         pbkdf2_arg='-pbkdf2'
     else
         pbkdf2_arg=''
     fi
+    #salt_method='password'
+    #extra_salt="1107307616081495"
 
-    salt_method='password'
-
-    extra_salt="1107307616081495"
-
-	cipher=$(git config --get --local transcrypt.cipher)
 	password=$(git config --get --local transcrypt.password)
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
+
+    if [[ "$salt_method" == "password" ]]; then
+        extra_salt=$password
+    elif [[ "$salt_method" == "configured" ]]; then
+        extra_salt=$(_load_versioned_config_var "transcrypt.extra-salt")
+    else
+        die "unknown salt method"
+    fi
 }
 
 git_clean() {
@@ -271,17 +278,7 @@ git_clean() {
         # commit_id=$(git log -n 1 --pretty=format:%H "$filename")
         # actually, do we want this?
         
-        if [[ "$salt_method" == "password" ]]; then
-            salt=$("$openssl_path" dgst -hmac "${filename}:${password}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
-        elif [[ "$salt_method" == "configured" ]]; then
-            extra_salt=$(_load_versioned_config_var "transcrypt.extra-salt")
-            if [[ "$salt_method" == "" ]]; then
-                die "transcrypt.extra-salt is empty"
-            fi
-            salt=$("$openssl_path" dgst -hmac "${filename}:${extra_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
-        else
-            die "unknown salt method"
-        fi
+        salt=$("$openssl_path" dgst -hmac "${filename}:${extra_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
         ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
 	fi
 }
@@ -793,6 +790,16 @@ save_configuration() {
 display_configuration() {
 	local current_cipher
 	current_cipher=$(git config --get --local transcrypt.cipher)
+
+	local current_digest
+	current_digest=$(git config --get --local transcrypt.digest)
+
+	local current_salt_method
+	current_salt_method=$(git config --get --local transcrypt.salt-method)
+
+	local current_use_pbkdf2
+	current_use_pbkdf2=$(git config --get --local transcrypt.use-pbkdf2)
+
 	local current_password
 	current_password=$(git config --get --local transcrypt.password)
 	local escaped_password=${current_password//\'/\'\\\'\'}
@@ -802,9 +809,9 @@ display_configuration() {
 	[[ ! $REPO ]] || printf '  GIT_WORK_TREE:  %s\n' "$REPO"
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
-	printf '  DIGEST:  %s\n' "$digest"
-	printf '  USE_PBKDF2: %s\n' "$use_pbkdf2"
-	printf '  SALT_METHOD: %s\n' "$salt_method"
+	printf '  DIGEST:  %s\n' "$current_digest"
+	printf '  USE_PBKDF2: %s\n' "$current_use_pbkdf2"
+	printf '  SALT_METHOD: %s\n' "$current_salt_method"
 	printf '  CIPHER:     %s\n' "$current_cipher"
 	printf '  PASSWORD:   %s\n\n' "$current_password"
 	printf 'Copy and paste the following command to initialize a cloned repository:\n\n'
