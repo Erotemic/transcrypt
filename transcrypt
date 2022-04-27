@@ -90,6 +90,11 @@ gather_repo_metadata() {
 	else
 		readonly GIT_ATTRIBUTES="${REPO}/.gitattributes"
 	fi
+
+    # This is the place where transcrypt can store state that will be
+    # checked into the repo
+    readonly VERSIONED_TC_DIR="${REPO}/.transcrypt"
+    readonly VERSIONED_TC_CONFIG="${VERSIONED_TC_DIR}/config"
 }
 
 # print a message to stderr
@@ -119,11 +124,79 @@ die() {
 # (keyed with a combination of the filename and ~~transcrypt password~~), and
 # then use the last 16 bytes of that HMAC for the file's unique salt.
 
+
+# shellcheck disable=SC2155
+_load_versioned_config(){
+    # Notes on custom config
+    # https://unix.stackexchange.com/questions/175648/use-config-file-for-my-shell-script
+    mkdir -p "${VERSIONED_CONFIG_DPATH}"
+    touch "${VERSIONED_TC_CONFIG}"
+    git config -f "$VERSIONED_TC_CONFIG" --get transcrypt.cipher
+    git config -f "$VERSIONED_TC_CONFIG" --get transcrypt.rotating.salt
+
+    # POC for using git to store cross-checkout configs 
+    extra_salt=$(openssl rand -hex 32)
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.cipher "aes-256-cbc"
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.use-pbkdf2 "true" --type=bool
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.md-digest "SHA512"
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.salt-method "auto"
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.extra-salt "${extra_salt}"
+}
+
+_versioned_blocklist_check(){
+    # These are keys we are not allowed to store in the plaintext config
+    local key=1
+    local key_blocklist=(
+        "transcrypt.password"
+        "transcrypt.openssl-path"
+    )
+    for blocked_key in "${key_blocklist[@]}"; 
+    do
+        if [[ "${key}" == "${blocked_key}" ]]; then
+            warn "Cannot use ${key} in versioned the transcrypt config"
+            return 1
+        fi
+    done
+    return 0
+}
+
+_load_versioned_config_var(){
+    local KEY=$1
+    # Test for blocked variables that should not go into a plaintext config file
+    if [[ "${KEY}" == "transcrypt.password" ]]; then
+        return 1
+    fi
+    git config --file "${VERSIONED_TC_CONFIG}" --get "${KEY}"
+}
+
+_set_versioned_config_var(){
+    local KEY=$1
+    local VAL=$1
+    # Test for blocked variables that should not go into a plaintext config file
+    if ! _versioned_blocklist_check "${KEY}" ; then
+        return 1
+    fi
+    mkdir -p "${VERSIONED_TC_DIR}"
+    git config --file "${VERSIONED_TC_CONFIG}" "${KEY}" "${VAL}"
+}
+
+_load_config_var(){
+    # First try loading from the local checkout-independent .git/config file
+    # If that doesn't work, then look in the .transcrypt/config file
+    # (which is expected to be stored in plaintext and checked into the repo)
+    # Certain values will be blocked from being placed here (like the password)
+    local KEY=$1
+    git config --get --local "${KEY}"
+	if [[ "$?" != "0" ]]; then
+        _load_versioned_config_var "${KEY}"
+	fi
+}
+
 _load_transcrypt_config_vars(){
     # Populate bash vars with our config
     md_digest='SHA512'
     pbkdf2_arg='-pbkdf2'
-    static_salt="1107307616081495"
+    extra_salt="1107307616081495"
 	cipher=$(git config --get --local transcrypt.cipher)
 	password=$(git config --get --local transcrypt.password)
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
@@ -171,7 +244,7 @@ git_clean() {
         # If the file is not under version control this is a ""
         # commit_id=$(git log -n 1 --pretty=format:%H "$filename")
         # actually, do we want this?
-        salt=$("$openssl_path" dgst -hmac "${filename}:${static_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
+        salt=$("$openssl_path" dgst -hmac "${filename}:${extra_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
         #printf "Cleaning: $filename $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/clean_logs.txt"
         ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
 
