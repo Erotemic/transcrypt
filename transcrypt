@@ -1354,6 +1354,7 @@ fi
 
 # perform function calls to configure transcrypt
 get_cipher
+get_digest
 get_password
 
 if [[ $rekey ]] && [[ $interactive ]]; then
