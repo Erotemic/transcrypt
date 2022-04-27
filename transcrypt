@@ -432,6 +432,8 @@ confirm_configuration() {
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
 	printf 'The following configuration will be saved:\n\n'
+	printf '  MD_DIGEST:  %s\n' "$md_digest"
+	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
 	printf '  CIPHER:   %s\n' "$cipher"
 	printf '  PASSWORD: %s\n\n' "$password"
 	printf 'Does this look correct? [Y/n] '
@@ -455,6 +457,8 @@ confirm_rekey() {
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
 	printf 'The following configuration will be saved:\n\n'
+	printf '  MD_DIGEST:  %s\n' "$md_digest"
+	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
 	printf '  CIPHER:   %s\n' "$cipher"
 	printf '  PASSWORD: %s\n\n' "$password"
 	printf 'You are about to re-encrypt all encrypted files using new credentials.\n'
