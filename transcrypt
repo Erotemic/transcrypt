@@ -20,7 +20,7 @@ readonly VERSION='2.2.0-pre'
 
 # the default cipher to utilize
 readonly DEFAULT_CIPHER='aes-256-cbc'
-readonly DEFAULT_MD_DIGEST='MD5'
+readonly DEFAULT_DIGEST='MD5'
 readonly DEFAULT_USE_PBKDF2='0'
 
 ##### FUNCTIONS
@@ -196,7 +196,7 @@ _load_config_var(){
 
 _load_transcrypt_config_vars(){
     # Populate bash vars with our config
-    md_digest='SHA512'
+    digest='SHA512'
     pbkdf2_arg='-pbkdf2'
     extra_salt="1107307616081495"
 	cipher=$(git config --get --local transcrypt.cipher)
@@ -237,7 +237,7 @@ git_clean() {
 		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -e -a -S "$salt" -in "$tempfile"
 		# NOTE: salt must be 16 bytes, its openssl standard
 		#salt=$("$openssl_path" dgst -hmac "${filename}:${password}" -sha512 "$filename" | tr -d '\r\n' | tail -c 16)
-		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -S "$salt" -in "$tempfile"
+		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -S "$salt" -in "$tempfile"
 
         # Use a different kind of salt
         # Ok, we want a random salt, but we also dont want a random salt....
@@ -248,10 +248,10 @@ git_clean() {
         # actually, do we want this?
         salt=$("$openssl_path" dgst -hmac "${filename}:${extra_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
         #printf "Cleaning: $filename $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/clean_logs.txt"
-        ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
+        ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
 
 		# Try using a random salt instead
-		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -salt -in "$tempfile"
+		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -salt -in "$tempfile"
 	fi
 }
 
@@ -261,9 +261,9 @@ git_smudge() {
 	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
 	trap 'rm -f "$tempfile"' EXIT
 	_load_transcrypt_config_vars
-    #printf "Smudging $pbkdf2_arg $cipher $md_digest\n" >> "$HOME/code/erotemic5/smudge_logs.txt"
+    #printf "Smudging $pbkdf2_arg $cipher $digest\n" >> "$HOME/code/erotemic5/smudge_logs.txt"
 	#tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a 2>/dev/null || cat "$tempfile"
-	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a 2>/dev/null || cat "$tempfile"
+	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a 2>/dev/null || cat "$tempfile"
 }
 
 git_textconv() {
@@ -278,7 +278,7 @@ git_textconv() {
 	_load_transcrypt_config_vars
 	#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a -in "$filename" 2>/dev/null || cat "$filename"
     #printf "Textconv: $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/textconv_logs.txt"
-	ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${md_digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a -in "$filename" 2>/dev/null || cat "$filename"
+	ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a -in "$filename" 2>/dev/null || cat "$filename"
 }
 
 # shellcheck disable=SC2005,SC2002,SC2181
@@ -454,7 +454,7 @@ validate_cipher() {
 }
 
 
-validate_md_digest() {
+validate_digest() {
 	local list_digest_commands
 	if "${openssl_path}" list-digest-commands &>/dev/null; then
 		# OpenSSL < v1.1.0
@@ -506,8 +506,8 @@ _get_user_input() {
 
 
 get_digest() {
-    _get_user_input md_digest "$DEFAULT_MD_DIGEST" "validate_md_digest" \
-        "$(printf 'Encrypt using which md digest? [%s] ' \"$DEFAULT_MD_DIGEST\")"
+    _get_user_input digest "$DEFAULT_DIGEST" "validate_digest" \
+        "$(printf 'Encrypt using which digest? [%s] ' \"$DEFAULT_DIGEST\")"
 }
 
 
@@ -568,7 +568,7 @@ confirm_configuration() {
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
 	printf 'The following configuration will be saved:\n\n'
-	printf '  MD_DIGEST:  %s\n' "$md_digest"
+	printf '  MD_DIGEST:  %s\n' "$digest"
 	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
 	printf '  CIPHER:   %s\n' "$cipher"
 	printf '  PASSWORD: %s\n\n' "$password"
@@ -593,7 +593,7 @@ confirm_rekey() {
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
 	printf 'The following configuration will be saved:\n\n'
-	printf '  MD_DIGEST:  %s\n' "$md_digest"
+	printf '  MD_DIGEST:  %s\n' "$digest"
 	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
 	printf '  CIPHER:   %s\n' "$cipher"
 	printf '  PASSWORD: %s\n\n' "$password"
@@ -712,7 +712,7 @@ display_configuration() {
 	[[ ! $REPO ]] || printf '  GIT_WORK_TREE:  %s\n' "$REPO"
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
-	printf '  MD_DIGEST:  %s\n' "$md_digest"
+	printf '  MD_DIGEST:  %s\n' "$digest"
 	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
 	printf '  CIPHER:     %s\n' "$current_cipher"
 	printf '  PASSWORD:   %s\n\n' "$current_password"
@@ -1172,9 +1172,9 @@ upgrade=''
 openssl_path='openssl'
 
 # TODO: make these configurable
-#md_digest='MD5'
+#digest='MD5'
 #pbkdf2_arg=''
-md_digest='SHA512'
+digest='SHA512'
 pbkdf2_arg='-pbkdf2'
 
 # used to bypass certain safety checks
@@ -1354,6 +1354,7 @@ fi
 
 # perform function calls to configure transcrypt
 get_cipher
+echo "cipher = $cipher"
 get_digest
 get_password
 
