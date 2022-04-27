@@ -22,6 +22,7 @@ readonly VERSION='2.2.0-pre'
 readonly DEFAULT_CIPHER='aes-256-cbc'
 readonly DEFAULT_DIGEST='MD5'
 readonly DEFAULT_USE_PBKDF2='0'
+readonly DEFAULT_SALT_METHOD='password'
 
 ##### FUNCTIONS
 
@@ -140,10 +141,25 @@ _load_versioned_config(){
     extra_salt=$(openssl rand -hex 32)
     git config --file "${VERSIONED_TC_CONFIG}" transcrypt.cipher "aes-256-cbc"
     git config --file "${VERSIONED_TC_CONFIG}" transcrypt.use-pbkdf2 "true" --type=bool
-    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.md-digest "SHA512"
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.digest "SHA512"
     git config --file "${VERSIONED_TC_CONFIG}" transcrypt.salt-method "auto"
     git config --file "${VERSIONED_TC_CONFIG}" transcrypt.extra-salt "${extra_salt}"
 }
+
+
+_check_in(){
+    # The first argument must be equal to one of the subsequent arguments
+    local arg=$1
+    shift
+    local arr=("$@")
+    for val in "${arr[@]}"; 
+    do
+        if [[ "${arg}" == "${val}" ]]; then
+            return 1
+        fi
+    done
+}
+
 
 _versioned_blocklist_check(){
     # These are keys we are not allowed to store in the plaintext config
@@ -152,14 +168,10 @@ _versioned_blocklist_check(){
         "transcrypt.password"
         "transcrypt.openssl-path"
     )
-    for blocked_key in "${key_blocklist[@]}"; 
-    do
-        if [[ "${key}" == "${blocked_key}" ]]; then
-            warn "Cannot use ${key} in versioned the transcrypt config"
-            return 1
-        fi
-    done
-    return 0
+    if ! _check_in $key "${key_blocklist[@]}"; then
+        warn "Cannot use ${key} in versioned the transcrypt config"
+        return 1
+    fi
 }
 
 _load_versioned_config_var(){
@@ -196,9 +208,21 @@ _load_config_var(){
 
 _load_transcrypt_config_vars(){
     # Populate bash vars with our config
-    digest='SHA512'
-    pbkdf2_arg='-pbkdf2'
+    #digest='SHA512'
+
+    use_pbkdf2=$(git config --get --local transcrypt.use-pbkdf2)
+    digest=$(git config --get --local transcrypt.digest)
+
+    if [[ "$use_pbkdf2" == "1" ]]; then
+        pbkdf2_arg='-pbkdf2'
+    else
+        pbkdf2_arg=''
+    fi
+
+    salt_method='password'
+
     extra_salt="1107307616081495"
+
 	cipher=$(git config --get --local transcrypt.cipher)
 	password=$(git config --get --local transcrypt.password)
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
@@ -246,12 +270,19 @@ git_clean() {
         # If the file is not under version control this is a ""
         # commit_id=$(git log -n 1 --pretty=format:%H "$filename")
         # actually, do we want this?
-        salt=$("$openssl_path" dgst -hmac "${filename}:${extra_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
-        #printf "Cleaning: $filename $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/clean_logs.txt"
+        
+        if [[ "$salt_method" == "password" ]]; then
+            salt=$("$openssl_path" dgst -hmac "${filename}:${password}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
+        elif [[ "$salt_method" == "configured" ]]; then
+            extra_salt=$(_load_versioned_config_var "transcrypt.extra-salt")
+            if [[ "$salt_method" == "" ]]; then
+                die "transcrypt.extra-salt is empty"
+            fi
+            salt=$("$openssl_path" dgst -hmac "${filename}:${extra_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
+        else
+            die "unknown salt method"
+        fi
         ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
-
-		# Try using a random salt instead
-		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -salt -in "$tempfile"
 	fi
 }
 
@@ -261,7 +292,6 @@ git_smudge() {
 	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
 	trap 'rm -f "$tempfile"' EXIT
 	_load_transcrypt_config_vars
-    #printf "Smudging $pbkdf2_arg $cipher $digest\n" >> "$HOME/code/erotemic5/smudge_logs.txt"
 	#tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a 2>/dev/null || cat "$tempfile"
 	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a 2>/dev/null || cat "$tempfile"
 }
@@ -479,8 +509,43 @@ validate_digest() {
 	fi
 }
 
+validate_use_pbkdf2() {
+    if [[ "$use_pbkdf2" == "0" ]] || [[ "$use_pbkdf2" == "1" ]] ; then
+		if [[ $interactive ]]; then
+            printf "choose 0 or 1"
+			use_pbkdf2=''
+		else
+			# shellcheck disable=SC2016
+			die 1 '"%s" is must be 0 or 1' "$use_pbkdf2" "$list_digest_commands"
+		fi
+
+    fi
+}
+
+
+validate_salt_method(){
+    if [[ "$salt_method" == "auto" ]]; then
+        if [[ -f "$VERSIONED_TC_CONFIG" ]]; then
+            salt_method="configured"
+        else
+            salt_method="password"
+        fi
+    fi
+    if ! _check_in $salt_method "configured" "password"; then
+        die "Salt method must be auto, configured, or password"
+    fi
+}
+
+_set_global(){
+    # sets a global variable by name
+    key=$1
+    val=$2
+    printf -v "$key" '%s' "$val"
+}
+
 
 _get_user_input() {
+    # 
     local varname=$1
     local default=$2
     local validate_fn=$3
@@ -496,12 +561,9 @@ _get_user_input() {
         # validate function, which should set the varname to empty if it is
         # invalid and the user should continue, otherwise it should die.
 		if [[ ! $answer ]]; then
-            echo "default = $default"
-            echo "varname = $varname"
-			declare "$varname"="$default"
+            _set_global "$varname" "$default"
 		else
-            echo "answer = $answer"
-			declare "$varname"="$answer"
+            _set_global "$varname" "$answer"
             ${validate_fn}
 		fi
 	done
@@ -511,7 +573,6 @@ _get_user_input() {
 get_digest() {
     _get_user_input digest "$DEFAULT_DIGEST" "validate_digest" \
         "$(printf 'Encrypt using which digest? [%s] ' \"$DEFAULT_DIGEST\")"
-    echo "digest = $digest"
 }
 
 
@@ -519,15 +580,12 @@ get_digest() {
 get_cipher() {
     _get_user_input cipher "$DEFAULT_CIPHER" "validate_cipher" \
         "$(printf 'Encrypt using which cipher? [%s] ' \"$DEFAULT_CIPHER\")"
-    echo "cipher = $cipher"
-
 	#while [[ ! $cipher ]]; do
 	#    local answer=
 	#    if [[ $interactive ]]; then
 	#        printf 'Encrypt using which cipher? [%s] ' "$DEFAULT_CIPHER"
 	#        read -r answer
 	#    fi
-
 	#    # use the default cipher if the user gave no answer;
 	#    # otherwise verify the given cipher is supported by openssl
 	#    if [[ ! $answer ]]; then
@@ -537,6 +595,17 @@ get_cipher() {
 	#        validate_cipher
 	#    fi
 	#done
+}
+
+get_use_pbkdf2() {
+    _get_user_input use_pbkdf2 "$DEFAULT_USE_PBKDF2" "validate_use_pbkdf2" \
+        "$(printf 'Use pbkdf2? [%s] ' \"$DEFAULT_USE_PBKDF2\")"
+}
+
+
+get_salt_method() {
+    _get_user_input salt_method "$DEFAULT_SALT_METHOD" "validate_salt_method" \
+        "$(printf 'Which salt method? [%s] ' \"$DEFAULT_SALT_METHOD\")"
 }
 
 # ensure we have a password to encrypt with
@@ -573,8 +642,9 @@ confirm_configuration() {
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
 	printf 'The following configuration will be saved:\n\n'
-	printf '  MD_DIGEST:  %s\n' "$digest"
-	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
+	printf '  DIGEST:  %s\n' "$digest"
+	printf '  USE_PBKDF2: %s\n' "$use_pbkdf2"
+	printf '  SALT_METHOD: %s\n' "$salt_method"
 	printf '  CIPHER:   %s\n' "$cipher"
 	printf '  PASSWORD: %s\n\n' "$password"
 	printf 'Does this look correct? [Y/n] '
@@ -598,8 +668,9 @@ confirm_rekey() {
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
 	printf 'The following configuration will be saved:\n\n'
-	printf '  MD_DIGEST:  %s\n' "$digest"
-	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
+	printf '  DIGEST:  %s\n' "$digest"
+	printf '  USE_PBKDF2: %s\n' "$use_pbkdf2"
+	printf '  SALT_METHOD: %s\n' "$salt_method"
 	printf '  CIPHER:   %s\n' "$cipher"
 	printf '  PASSWORD: %s\n\n' "$password"
 	printf 'You are about to re-encrypt all encrypted files using new credentials.\n'
@@ -681,9 +752,23 @@ save_configuration() {
 
 	# write the encryption info
 	git config transcrypt.version "$VERSION"
-	git config transcrypt.cipher "$cipher"
-	git config transcrypt.password "$password"
+
 	git config transcrypt.openssl-path "$openssl_path"
+
+	git config transcrypt.cipher "$cipher"
+	git config transcrypt.digest "$digest"
+	git config transcrypt.use-pbkdf2 "$use_pbkdf2"
+	git config transcrypt.salt-method "$salt_method"
+
+	git config transcrypt.password "$password"
+
+    use_versioned_config=1
+    if [[ "$use_versioned_config" == "1" ]]; then
+        _set_versioned_config_var "transcrypt.cipher" "$cipher"
+        _set_versioned_config_var "transcrypt.digest" "$digest"
+        _set_versioned_config_var "transcrypt.use-pbkdf2" "$use_pbkdf2"
+        #_set_versioned_config_var "transcrypt.extra-salt" "$use_pbkdf2"
+    fi
 
 	# write the filter settings. Sorry for the horrific quote escaping below...
 	# shellcheck disable=SC2016
@@ -717,8 +802,9 @@ display_configuration() {
 	[[ ! $REPO ]] || printf '  GIT_WORK_TREE:  %s\n' "$REPO"
 	printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
-	printf '  MD_DIGEST:  %s\n' "$digest"
-	printf '  PBKDF2_ARG: %s\n' "$pbkdf2_arg"
+	printf '  DIGEST:  %s\n' "$digest"
+	printf '  USE_PBKDF2: %s\n' "$use_pbkdf2"
+	printf '  SALT_METHOD: %s\n' "$salt_method"
 	printf '  CIPHER:     %s\n' "$current_cipher"
 	printf '  PASSWORD:   %s\n\n' "$current_password"
 	printf 'Copy and paste the following command to initialize a cloned repository:\n\n'
@@ -1179,8 +1265,12 @@ openssl_path='openssl'
 # TODO: make these configurable
 #digest='MD5'
 #pbkdf2_arg=''
-digest='SHA512'
-pbkdf2_arg='-pbkdf2'
+#digest='SHA512'
+#pbkdf2_arg='-pbkdf2'
+use_pbkdf2=''
+digest=''
+salt_method=''
+#pbkdf2_arg='-pbkdf2'
 
 # used to bypass certain safety checks
 requires_existing_config=''
@@ -1359,8 +1449,9 @@ fi
 
 # perform function calls to configure transcrypt
 get_cipher
-echo "cipher = $cipher"
 get_digest
+get_use_pbkdf2
+get_salt_method
 get_password
 
 if [[ $rekey ]] && [[ $interactive ]]; then
