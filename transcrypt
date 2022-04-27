@@ -451,24 +451,53 @@ validate_cipher() {
 	fi
 }
 
-# ensure we have a cipher to encrypt with
-get_cipher() {
-	while [[ ! $cipher ]]; do
+
+_get_user_input() {
+    local varname=$1
+    local default=$2
+    local validate_fn=$3
+    local prompt=$4
+
+	while [[ ! ${!varname} ]]; do
 		local answer=
 		if [[ $interactive ]]; then
-			printf 'Encrypt using which cipher? [%s] ' "$DEFAULT_CIPHER"
+			printf '%s' "$prompt"
 			read -r answer
 		fi
-
-		# use the default cipher if the user gave no answer;
-		# otherwise verify the given cipher is supported by openssl
+        # use the default value if the user gave no answer; otherwise call the
+        # validate function, which should set the varname to empty if it is
+        # invalid and the user should continue, otherwise it should die.
 		if [[ ! $answer ]]; then
-			cipher=$DEFAULT_CIPHER
+			declare "$varname"="$default"
 		else
-			cipher=$answer
-			validate_cipher
+			declare "$varname"="$answer"
+            ${validate_fn}
 		fi
 	done
+}
+
+
+# ensure we have a cipher to encrypt with
+get_cipher() {
+    _get_user_input cipher "$DEFAULT_CIPHER" "validate_fn" \
+        'Encrypt using which cipher? [%s] ' "$DEFAULT_CIPHER"
+
+	#while [[ ! $cipher ]]; do
+	#    local answer=
+	#    if [[ $interactive ]]; then
+	#        printf 'Encrypt using which cipher? [%s] ' "$DEFAULT_CIPHER"
+	#        read -r answer
+	#    fi
+
+	#    # use the default cipher if the user gave no answer;
+	#    # otherwise verify the given cipher is supported by openssl
+	#    if [[ ! $answer ]]; then
+	#        cipher=$DEFAULT_CIPHER
+	#    else
+	#        cipher=$answer
+	#        validate_cipher
+	#    fi
+	#done
 }
 
 # ensure we have a password to encrypt with
