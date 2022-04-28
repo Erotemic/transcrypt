@@ -216,9 +216,9 @@ _load_transcrypt_config_vars(){
     salt_method=$(git config --get --local transcrypt.salt-method)
 
     if [[ "$use_pbkdf2" == "1" ]]; then
-        pbkdf2_arg='-pbkdf2'
+        pbkdf2_args=('-pbkdf2')
     else
-        pbkdf2_arg=''
+        pbkdf2_args=()
     fi
     #salt_method='password'
     #extra_salt="1107307616081495"
@@ -268,7 +268,7 @@ git_clean() {
 		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -e -a -S "$salt" -in "$tempfile"
 		# NOTE: salt must be 16 bytes, its openssl standard
 		#salt=$("$openssl_path" dgst -hmac "${filename}:${password}" -sha512 "$filename" | tr -d '\r\n' | tail -c 16)
-		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -e -a -S "$salt" -in "$tempfile"
+		#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_args[@]}" -e -a -S "$salt" -in "$tempfile"
 
         # Use a different kind of salt
         # Ok, we want a random salt, but we also dont want a random salt....
@@ -279,7 +279,7 @@ git_clean() {
         # actually, do we want this?
         
         salt=$("$openssl_path" dgst -hmac "${filename}:${extra_salt}" -sha256 "$filename" | tr -d '\r\n' | tail -c 16)
-        ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_arg}" -in "$tempfile"
+        ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS -e -a -S "$salt" "${pbkdf2_args[@]}" -in "$tempfile"
 	fi
 }
 
@@ -290,7 +290,7 @@ git_smudge() {
 	trap 'rm -f "$tempfile"' EXIT
 	_load_transcrypt_config_vars
 	#tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a 2>/dev/null || cat "$tempfile"
-	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a 2>/dev/null || cat "$tempfile"
+	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_args[@]}" -d -a 2>/dev/null || cat "$tempfile"
 }
 
 git_textconv() {
@@ -304,8 +304,7 @@ git_textconv() {
 	fi
 	_load_transcrypt_config_vars
 	#ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md MD5 -pass env:ENC_PASS -d -a -in "$filename" 2>/dev/null || cat "$filename"
-    #printf "Textconv: $pbkdf2_arg $salt\n" >> "$HOME/code/erotemic5/textconv_logs.txt"
-	ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_arg}" -d -a -in "$filename" 2>/dev/null || cat "$filename"
+	ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_args[@]}" -d -a -in "$filename" 2>/dev/null || cat "$filename"
 }
 
 # shellcheck disable=SC2005,SC2002,SC2181
@@ -1318,6 +1317,30 @@ while [[ "${1:-}" != '' ]]; do
 		;;
 	--cipher=*)
 		cipher=${1#*=}
+		;;
+	-md | --digest)
+		digest=$2
+		shift
+		;;
+	--digest=*)
+		digest=${1#*=}
+		;;
+	-pbkdf2)
+		use_pbkdf2=1
+		;;
+	--use-pbkdf2)
+		use_pbkdf2=${2}
+		shift
+		;;
+	--use-pbkdf2=*)
+		use_pbkdf2=${1#*=}
+		;;
+	-sm | --salt-method)
+		salt_method=$2
+		shift
+		;;
+	--salt-method=*)
+		salt_method=${1#*=}
 		;;
 	-p | --password)
 		password=$2
