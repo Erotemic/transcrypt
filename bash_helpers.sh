@@ -220,3 +220,21 @@ _openssl_list(){
 	fi
 }
 
+
+# shellcheck disable=SC2155
+_check_config_poc(){
+    # Notes on custom config
+    # https://unix.stackexchange.com/questions/175648/use-config-file-for-my-shell-script
+    mkdir -p "${VERSIONED_CONFIG_DPATH}"
+    touch "${VERSIONED_TC_CONFIG}"
+    git config -f "$VERSIONED_TC_CONFIG" --get transcrypt.cipher
+    git config -f "$VERSIONED_TC_CONFIG" --get transcrypt.rotating.salt
+
+    # POC for using git to store cross-checkout configs 
+    extra_salt=$(openssl rand -hex 32)
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.cipher "aes-256-cbc"
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.use-pbkdf2 "true" --type=bool
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.digest "SHA512"
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.salt-method "auto"
+    git config --file "${VERSIONED_TC_CONFIG}" transcrypt.extra-salt "${extra_salt}"
+}
