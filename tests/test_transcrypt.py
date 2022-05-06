@@ -16,7 +16,7 @@ class TranscryptAPI:
         'digest': 'md5',
         'use_pbkdf2': '0',
         'salt_method': 'password',
-        'custom_salt': '',
+        'config_salt': '',
     }
 
     def __init__(self, dpath, config=None, verbose=2, transcript_exe=None):
@@ -37,7 +37,7 @@ class TranscryptAPI:
             "{transcript_exe} -c '{cipher}' -p '{password}' "
             "-md '{digest}' --use-pbkdf2 '{use_pbkdf2}' "
             "-sm '{salt_method}' "
-            "-cs '{custom_salt}' "
+            "-cs '{config_salt}' "
             "-y"
         ).format(transcript_exe=self.transcript_exe, **self.config)
         self.cmd(command)
@@ -51,11 +51,11 @@ class TranscryptAPI:
     def export_gpg(self, recipient):
         self.cmd(f'{self.transcript_exe} --export-gpg "{recipient}"')
         self.crypt_dpath = self.cmd('git config --local transcrypt.crypt-dir')['out'] or self.dpath / '.git/crypt'
-        asc_fpath = (self.crypt_dpath / (recipient + '.asc')).exists()
+        asc_fpath = (self.crypt_dpath / (recipient + '.asc'))
         return asc_fpath
 
     def import_gpg(self, asc_fpath):
-        command = f"{self.transcript_exe} --import-gpg '{asc_fpath}'"
+        command = f"{self.transcript_exe} --import-gpg '{asc_fpath}' -y"
         self.cmd(command)
 
     def show_raw(self, fpath):
@@ -106,13 +106,11 @@ class TestEnvironment:
             key_curve='Ed25519',
             subkey_curve='Curve25519'
         )
-
         # Fix GNUPG permissions
-        dpath = os.environ.get('GNUPGHOME', ub.expandpath('$HOME/.gnupg'))
         (self.gpg_home / 'private-keys-v1.d').ensuredir()
         # 600 for files and 700 for directories
-        ub.cmd('find ' + dpath + r' -type f -exec chmod 600 {} \;', shell=True, verbose=self.verbose)
-        ub.cmd('find ' + dpath + r' -type d -exec chmod 700 {} \;', shell=True, verbose=self.verbose)
+        ub.cmd('find ' + str(self.gpg_home) + r' -type f -exec chmod 600 {} \;', shell=True, verbose=self.verbose, cwd=self.gpg_home)
+        ub.cmd('find ' + str(self.gpg_home) + r' -type d -exec chmod 700 {} \;', shell=True, verbose=self.verbose, cwd=self.gpg_home)
 
     def _setup_git(self):
         import git
@@ -157,19 +155,59 @@ class TestEnvironment:
             self.tc.env['GNUPGHOME'] = str(self.gpg_home)
 
     def test_round_trip(self):
-        content = self.tc.show_raw(self.secret_fpath)
-        assert content.startswith(SALTED)
-        assert self.secret_fpath.read_text().startswith('secret content')
+        ciphertext = self.tc.show_raw(self.secret_fpath)
+        plaintext = self.secret_fpath.read_text()
+        assert ciphertext.startswith(SALTED)
+        assert plaintext.startswith('secret content')
+        assert not plaintext.startswith(SALTED)
+
         self.tc.logout()
-        assert self.secret_fpath.read_text().startswith(SALTED)
+        logged_out_text = self.secret_fpath.read_text()
+        assert logged_out_text == ciphertext
+
         self.tc.login()
-        assert self.secret_fpath.read_text().startswith('secret content')
+        logged_in_text = self.secret_fpath.read_text()
+
+        assert logged_out_text == ciphertext
+        assert logged_in_text == plaintext
 
     def test_export_gpg(self):
         self.tc.display()
         asc_fpath = self.tc.export_gpg(self.gpg_fpr)
+
+        info = self.tc.cmd(f'gpg --batch --quiet --decrypt "{asc_fpath}"')
+        content = info['out']
+
+        got_config = dict([p.split('=', 1) for p in content.split('\n') if p])
+        config = self.tc.config.copy()
+        is_ok = got_config == config
+        if not is_ok:
+            if config['salt_method'] == 'configured':
+                if config['config_salt'] == '':
+                    config.pop('config_salt')
+                    got_config.pop('config_salt')
+                    is_ok = got_config == config
+            else:
+                config.pop('config_salt')
+                got_config.pop('config_salt')
+                is_ok = got_config == config
+
+        if not is_ok:
+            print(f'got_config={got_config}')
+            print(f'config={config}')
+            raise AssertionError
+
+        # content = io.StringIO()
+        # with open(asc_fpath, 'r') as file:
+        #     ciphertext = file.read()
+        # self.gpg_store.decrypt(ciphertext, content)
+
+        assert asc_fpath.exists()
         self.tc.logout()
         self.tc.import_gpg(asc_fpath)
+
+        plaintext = self.secret_fpath.read_text()
+        assert plaintext.startswith('secret content')
 
 
 def run_tests():
@@ -184,7 +222,6 @@ def run_tests():
         >>> self = TestEnvironment()
         >>> self.setup()
         >>> self.tc._manual_hack_info()
-
         >>> self.test_round_trip()
         >>> self.test_export_gpg()
 
@@ -192,4 +229,31 @@ def run_tests():
         self.setup()
         self.test_round_trip()
         self.test_export_gpg()
+
+        self = TestEnvironment(config={'use_pbkdf2': 1})
     """
+
+    # Test that transcrypt works under a variety of config conditions
+    basis = {
+        'cipher': ['aes-256-cbc'],
+        'password': ['correct horse battery staple'],
+        'digest': ['md5', 'sha256'],
+        'use_pbkdf2': ['0', '1'],
+        'salt_method': ['password', 'configured'],
+        'config_salt': ['', 'mylittlecustomsalt'],
+    }
+
+    for params in ub.named_product(basis):
+        config = params.copy()
+        self = TestEnvironment(config=config)
+        self.setup()
+        self.test_round_trip()
+        self.test_export_gpg()
+
+
+if __name__ == '__main__':
+    """
+    CommandLine:
+        python ~/code/transcrypt/tests/test_transcrypt.py
+    """
+    run_tests()

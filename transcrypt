@@ -143,7 +143,7 @@ _is_contained_str(){
 # shellcheck disable=SC2155
 _load_versioned_config_var(){
 	# the current git repository's top-level directory
-    if [[ "$VERSIONED_TC_CONFIG" == "" ]]; then
+    if [ -z "${VERSIONED_TC_CONFIG+x}" ]; then
         readonly REPO=$(git rev-parse --show-toplevel 2>/dev/null)
         # This is the place where transcrypt can store state that will be
         # "versioned" (i.e. checked into the repo)
@@ -342,7 +342,8 @@ git_smudge() {
 	# the file contents are passed via stdin
 	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
 	trap 'rm -f "$tempfile"' EXIT
-	_load_transcrypt_config_vars
+	#_load_transcrypt_config_vars
+    _load_vars_for_encryption
 	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc "-${cipher}" -md "${digest}" -pass env:ENC_PASS "${pbkdf2_args[@]}" -d -a 2>/dev/null || cat "$tempfile"
 }
 
@@ -709,8 +710,8 @@ save_configuration() {
     if [[ "$salt_method" == "configured" ]]; then
         # TODO: we may want to also write the config-salt variable to the local config
         # The user might not care about cross machine transparency
-        git config transcrypt.config-salt "$extra_salt"
-        _set_versioned_config_var "transcrypt.config-salt" "$extra_salt"
+        git config transcrypt.config-salt "$config_salt"
+        _set_versioned_config_var "transcrypt.config-salt" "$config_salt"
         if ! git ls-files --error-unmatch "$RELATIVE_VERSIONED_TC_CONFIG" > /dev/null 2>&1; then
             git add "${RELATIVE_VERSIONED_TC_CONFIG}"
             printf "*** The contents of %s were configured. ***\n" "${RELATIVE_VERSIONED_TC_CONFIG}"
@@ -769,14 +770,14 @@ display_configuration() {
 	printf 'The current repository was configured using transcrypt version %s\n' "$CONFIGURED"
 	printf 'and has the following configuration:\n\n'
     _display_git_configuration
+    _display_runtime_configuration
 	printf 'Copy and paste the following command to initialize a cloned repository:\n\n'
-	printf "  transcrypt -c %s -p '%s' --md '%s' --use_pbkdf2 '%s' -sm '%s' -cs '%s'\n" \
+	printf "  transcrypt -c '%s' -p '%s' -md '%s' --use-pbkdf2 '%s' -sm '%s' -cs '%s'\n" \
         "$cipher" "$escaped_password" "$digest" "$use_pbkdf2" "$salt_method" "$config_salt"
 
 	#[[ ! $REPO ]] || printf '  GIT_WORK_TREE:  %s\n' "$REPO"
 	#printf '  GIT_DIR:        %s\n' "$GIT_DIR"
 	#printf '  GIT_ATTRIBUTES: %s\n\n' "$GIT_ATTRIBUTES"
-    _display_git_configuration
 	#printf '  DIGEST:  %s\n' "$current_digest"
 	#printf '  USE_PBKDF2: %s\n' "$current_use_pbkdf2"
 	#printf '  SALT_METHOD: %s\n' "$current_salt_method"
@@ -786,7 +787,7 @@ display_configuration() {
 	#printf '  CIPHER:     %s\n' "$current_cipher"
 	#printf '  PASSWORD:   %s\n\n' "$current_password"
 	#printf 'Copy and paste the following command to initialize a cloned repository:\n\n'
-	#printf "  transcrypt -c %s -p '%s' --md '%s' --use_pbkdf2 '%s' -sm '%s'\n" \
+	#printf "  transcrypt -c %s -p '%s' -md '%s' --use_pbkdf2 '%s' -sm '%s'\n" \
     #    "$current_cipher" "$escaped_password" "$current_digest" "$current_use_pbkdf2" "$current_salt_method"
 }
 
@@ -1059,14 +1060,6 @@ export_gpg() {
 
     _load_transcrypt_config_vars
 
-    if [[ "$salt_method" == "password" ]]; then
-        extra_salt=$password
-    elif [[ "$salt_method" == "configured" ]]; then
-        extra_salt=$(_load_versioned_config_var "transcrypt.config-salt")
-    else
-        die "unknown salt method"
-    fi
-
 	#local current_cipher
 	#current_cipher=$(git config --get --local transcrypt.cipher)
 	#local current_password
@@ -1075,7 +1068,9 @@ export_gpg() {
 
 	local gpg_encrypt_cmd="gpg --batch --recipient $gpg_recipient --trust-model always --yes --armor --quiet --encrypt -"
 	#printf 'password=%s\ncipher=%s\n' "$current_password" "$current_cipher" | $gpg_encrypt_cmd >"${CRYPT_DIR}/${gpg_recipient}.asc"
-    printf 'password=%s\ncipher=%s\ndigest=%s\n\n' "$current_password" "$current_cipher" | $gpg_encrypt_cmd >"${CRYPT_DIR}/${gpg_recipient}.asc"
+    printf 'password=%s\ncipher=%s\ndigest=%s\nuse_pbkdf2=%s\nsalt_method=%s\nconfig_salt=%s\n\n' \
+        "$password" "$cipher" "$digest" "$use_pbkdf2" "$salt_method" "$config_salt" | \
+        $gpg_encrypt_cmd >"${CRYPT_DIR}/${gpg_recipient}.asc"
 	printf "The transcrypt configuration has been encrypted and exported to:\n%s/crypt/%s.asc\n" "$GIT_DIR" "$gpg_recipient"
 }
 
@@ -1108,6 +1103,10 @@ import_gpg() {
 
 	cipher=$(printf '%s' "$configuration" | grep '^cipher' | cut -d'=' -f 2-)
 	password=$(printf '%s' "$configuration" | grep '^password' | cut -d'=' -f 2-)
+	digest=$(printf '%s' "$configuration" | grep '^digest' | cut -d'=' -f 2-)
+	use_pbkdf2=$(printf '%s' "$configuration" | grep '^use_pbkdf2' | cut -d'=' -f 2-)
+	salt_method=$(printf '%s' "$configuration" | grep '^salt_method' | cut -d'=' -f 2-)
+	config_salt=$(printf '%s' "$configuration" | grep '^config_salt' | cut -d'=' -f 2-)
 }
 
 # print this script's usage message to stderr
