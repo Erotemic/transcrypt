@@ -267,11 +267,21 @@ openssl_enc_supports() {
 	"${openssl_path}" enc -help 2>&1 | grep -q -- "$option"
 }
 
-# Print the configured crypto setting for the current context, with a default.
+# Return the path to the committed, non-secret crypto configuration.
+public_crypto_config_path() {
+	printf '%s/.transcrypt/config' "$REPO"
+}
+
+# Print a crypto setting from .git/config or the committed .transcrypt/config.
 current_crypto_setting() {
 	local key=$1
 	local default_value=$2
-	git config --get --local "transcrypt${CONTEXT_CONFIG_GROUP}.${key}" 2>/dev/null || printf '%s' "$default_value"
+	local public_config
+	public_config=$(public_crypto_config_path)
+
+	git config --get --local "transcrypt${CONTEXT_CONFIG_GROUP}.${key}" 2>/dev/null || \
+		git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.${key}" 2>/dev/null || \
+		printf '%s' "$default_value"
 }
 
 # Print a one-page diagnostic summary of local crypto tool capabilities.
@@ -808,6 +818,65 @@ save_helper_hooks() {
 	fi
 }
 
+
+# Initialize crypto policy variables from .transcrypt/config when available.
+load_public_crypto_config_defaults() {
+	local public_config
+	public_config=$(public_crypto_config_path)
+	if [[ ! -f $public_config ]]; then
+		return 0
+	fi
+
+	cipher=${cipher:-$(git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.cipher" 2>/dev/null || true)}
+	crypto_format=${crypto_format:-$(git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.crypto-format" 2>/dev/null || true)}
+	digest=${digest:-$(git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.digest" 2>/dev/null || true)}
+	kdf=${kdf:-$(git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.kdf" 2>/dev/null || true)}
+	iterations=${iterations:-$(git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.iterations" 2>/dev/null || true)}
+	auth=${auth:-$(git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.auth" 2>/dev/null || true)}
+	repo_salt=${repo_salt:-$(git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.salt" 2>/dev/null || true)}
+}
+
+# Fill any unspecified crypto policy variables with safe defaults for their format.
+finalize_crypto_policy() {
+	crypto_format=${crypto_format:-$DEFAULT_CRYPTO_FORMAT}
+	if [[ $crypto_format == 'legacy' ]]; then
+		digest=${digest:-$DEFAULT_DIGEST}
+		kdf=${kdf:-$DEFAULT_KDF}
+		iterations=${iterations:-$DEFAULT_ITERATIONS}
+		auth=${auth:-$DEFAULT_AUTH}
+		repo_salt=${repo_salt:-}
+	else
+		digest=${digest:-sha256}
+		kdf=${kdf:-pbkdf2}
+		iterations=${iterations:-$DEFAULT_ITERATIONS}
+		auth=${auth:-hmac-sha256}
+		if [[ ! $repo_salt ]]; then
+			repo_salt=$("${openssl_path}" rand -hex 16)
+		fi
+	fi
+}
+
+# Save non-secret crypto settings to a committed config file so clones can use
+# the same crypto format without copying long commands. Passwords are never
+# written here; they remain in local Git config or an external secret backend.
+save_public_crypto_config() {
+	local public_config
+	public_config=$(public_crypto_config_path)
+	mkdir -p "${public_config%/*}"
+
+	git config -f "$public_config" "transcrypt${CONTEXT_CONFIG_GROUP}.cipher" "$cipher"
+	git config -f "$public_config" "transcrypt${CONTEXT_CONFIG_GROUP}.crypto-format" "$crypto_format"
+	git config -f "$public_config" "transcrypt${CONTEXT_CONFIG_GROUP}.digest" "$digest"
+	git config -f "$public_config" "transcrypt${CONTEXT_CONFIG_GROUP}.kdf" "$kdf"
+	git config -f "$public_config" "transcrypt${CONTEXT_CONFIG_GROUP}.iterations" "$iterations"
+	git config -f "$public_config" "transcrypt${CONTEXT_CONFIG_GROUP}.auth" "$auth"
+	if [[ $repo_salt ]]; then
+		git config -f "$public_config" "transcrypt${CONTEXT_CONFIG_GROUP}.salt" "$repo_salt"
+	else
+		git config -f "$public_config" --unset "transcrypt${CONTEXT_CONFIG_GROUP}.salt" 2>/dev/null || true
+	fi
+}
+
 # write the configuration to the repository's git config
 save_configuration() {
 	# prevent clobbering existing configuration
@@ -827,11 +896,24 @@ save_configuration() {
 	save_helper_scripts
 	save_helper_hooks
 
+	finalize_crypto_policy
+
 	# write the encryption info
 	git config transcrypt.version "$VERSION"
 	git config "transcrypt${CONTEXT_CONFIG_GROUP}.cipher" "$cipher"
+	git config "transcrypt${CONTEXT_CONFIG_GROUP}.crypto-format" "$crypto_format"
+	git config "transcrypt${CONTEXT_CONFIG_GROUP}.digest" "$digest"
+	git config "transcrypt${CONTEXT_CONFIG_GROUP}.kdf" "$kdf"
+	git config "transcrypt${CONTEXT_CONFIG_GROUP}.iterations" "$iterations"
+	git config "transcrypt${CONTEXT_CONFIG_GROUP}.auth" "$auth"
+	if [[ $repo_salt ]]; then
+		git config "transcrypt${CONTEXT_CONFIG_GROUP}.salt" "$repo_salt"
+	else
+		git config --unset "transcrypt${CONTEXT_CONFIG_GROUP}.salt" 2>/dev/null || true
+	fi
 	save_password "$password" "$CONTEXT_CONFIG_GROUP"
 	git config transcrypt.openssl-path "$openssl_path"
+	save_public_crypto_config
 
 	# write the filter settings. Sorry for the horrific quote escaping below...
 	# shellcheck disable=SC2016
@@ -1141,14 +1223,21 @@ upgrade_transcrypt() {
 	# Keep current cipher and password for each context
 	ORIG_CONFIGS=()
 	for context_name in $CONFIGURED_CONTEXTS; do
+		local config_group
 		if [[ "$context_name" = 'default' ]]; then
-			cipher=$(git config --get --local transcrypt.cipher)
-			password=$(git config --get --local transcrypt.password)
+			config_group=''
 		else
-			cipher=$(git config --get --local transcrypt."${context_name}".cipher)
-			password=$(git config --get --local transcrypt."${context_name}".password)
+			config_group=".${context_name}"
 		fi
-		ORIG_CONFIGS+=("${context_name}|${cipher}|${password}")
+		cipher=$(git config --get --local "transcrypt${config_group}.cipher")
+		password=$(git config --get --local "transcrypt${config_group}.password")
+		crypto_format=$(git config --get --local "transcrypt${config_group}.crypto-format" 2>/dev/null || printf '%s' "$DEFAULT_CRYPTO_FORMAT")
+		digest=$(git config --get --local "transcrypt${config_group}.digest" 2>/dev/null || printf '%s' "$DEFAULT_DIGEST")
+		kdf=$(git config --get --local "transcrypt${config_group}.kdf" 2>/dev/null || printf '%s' "$DEFAULT_KDF")
+		iterations=$(git config --get --local "transcrypt${config_group}.iterations" 2>/dev/null || printf '%s' "$DEFAULT_ITERATIONS")
+		auth=$(git config --get --local "transcrypt${config_group}.auth" 2>/dev/null || printf '%s' "$DEFAULT_AUTH")
+		repo_salt=$(git config --get --local "transcrypt${config_group}.salt" 2>/dev/null || true)
+		ORIG_CONFIGS+=("${context_name}|${cipher}|${password}|${crypto_format}|${digest}|${kdf}|${iterations}|${auth}|${repo_salt}")
 	done
 
 	uninstall_transcrypt
@@ -1158,6 +1247,12 @@ upgrade_transcrypt() {
 		context=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $1 }')
 		cipher=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $2 }')
 		password=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $3 }')
+		crypto_format=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $4 }')
+		digest=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $5 }')
+		kdf=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $6 }')
+		iterations=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $7 }')
+		auth=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $8 }')
+		repo_salt=$(echo "$orig_config_line" | awk 'BEGIN { FS = "|" }; { print $9 }')
 
 		set_context_globals # This prepares all the variables needed to save config
 		save_configuration
@@ -1239,10 +1334,17 @@ export_gpg() {
 	current_cipher=$(git config --get --local "transcrypt${CONTEXT_CONFIG_GROUP}.cipher")
 	local current_password
 	current_password=$(load_password "$CONTEXT_CONFIG_GROUP")
+	local current_format current_digest current_kdf current_iterations current_auth current_salt
+	current_format=$(current_crypto_setting 'crypto-format' "$DEFAULT_CRYPTO_FORMAT")
+	current_digest=$(current_crypto_setting 'digest' "$DEFAULT_DIGEST")
+	current_kdf=$(current_crypto_setting 'kdf' "$DEFAULT_KDF")
+	current_iterations=$(current_crypto_setting 'iterations' "$DEFAULT_ITERATIONS")
+	current_auth=$(current_crypto_setting 'auth' "$DEFAULT_AUTH")
+	current_salt=$(current_crypto_setting 'salt' '')
 	mkdir -p "${CRYPT_DIR}"
 
 	local gpg_encrypt_cmd="gpg --batch --recipient $gpg_recipient --trust-model always --yes --armor --quiet --encrypt -"
-	printf 'password=%s\ncipher=%s\n' "$current_password" "$current_cipher" | $gpg_encrypt_cmd >"${CRYPT_DIR}/${gpg_recipient}.asc"
+	printf 'password=%s\ncipher=%s\ncrypto-format=%s\ndigest=%s\nkdf=%s\niterations=%s\nauth=%s\nsalt=%s\n' "$current_password" "$current_cipher" "$current_format" "$current_digest" "$current_kdf" "$current_iterations" "$current_auth" "$current_salt" | $gpg_encrypt_cmd >"${CRYPT_DIR}/${gpg_recipient}.asc"
 	printf "The transcrypt configuration has been encrypted and exported to:\n%s/crypt/%s.asc\n" "$GIT_DIR" "$gpg_recipient"
 }
 
@@ -1275,6 +1377,12 @@ import_gpg() {
 
 	cipher=$(printf '%s' "$configuration" | grep '^cipher' | cut -d'=' -f 2-)
 	password=$(printf '%s' "$configuration" | grep '^password' | cut -d'=' -f 2-)
+	crypto_format=$(printf '%s' "$configuration" | grep '^crypto-format' | cut -d'=' -f 2-)
+	digest=$(printf '%s' "$configuration" | grep '^digest' | cut -d'=' -f 2-)
+	kdf=$(printf '%s' "$configuration" | grep '^kdf' | cut -d'=' -f 2-)
+	iterations=$(printf '%s' "$configuration" | grep '^iterations' | cut -d'=' -f 2-)
+	auth=$(printf '%s' "$configuration" | grep '^auth' | cut -d'=' -f 2-)
+	repo_salt=$(printf '%s' "$configuration" | grep '^salt' | cut -d'=' -f 2-)
 }
 
 # Echo space-delimited list of context names defined in the git config
@@ -1574,6 +1682,12 @@ help() {
 # reset all variables that might be set
 context=''
 cipher=''
+crypto_format=''
+digest=''
+kdf=''
+iterations=''
+auth=''
+repo_salt=''
 display_config=''
 audit_security_command=''
 diagnose_crypto_command=''
@@ -1783,6 +1897,9 @@ gather_repo_metadata
 
 # always run our safety checks
 run_safety_checks
+
+# non-secret crypto config can provide cipher/KDF defaults in fresh clones
+load_public_crypto_config_defaults
 
 # regular expression used to test user input
 readonly YES_REGEX='^[Yy]$'

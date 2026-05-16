@@ -19,3 +19,14 @@ load "$BATS_TEST_DIRNAME/_test_helper.bash"
   [[ "$output" = *"[HIGH] Legacy password derivation is enabled."* ]]
   [[ "$output" = *"[HIGH] Ciphertext authentication is not enabled."* ]]
 }
+
+@test "security: init writes non-secret public crypto config" {
+  [ -f .transcrypt/config ]
+  run cat .transcrypt/config
+  [ "$status" -eq 0 ]
+  [[ "$output" = *"cipher = aes-256-cbc"* ]]
+  [[ "$output" = *"crypto-format = legacy"* ]]
+  [[ "$output" = *"kdf = legacy"* ]]
+  [[ "$output" != *"abc 123"* ]]
+  [[ "$output" != *"password"* ]]
+}
