@@ -75,3 +75,29 @@ PY
   [[ "$output" = *"unable to authenticate or decrypt transcrypt v3 payload"* ]]
   rm -f tampered-v3
 }
+
+@test "security: upgrade-crypto migrates legacy files to v3" {
+  echo "Legacy secret" > sensitive_file
+  echo "sensitive_file filter=crypt diff=crypt merge=crypt" > .gitattributes
+  git add .gitattributes .transcrypt/config sensitive_file
+  git commit -m "Encrypt legacy file"
+
+  run git show HEAD:sensitive_file --no-textconv
+  [ "$status" -eq 0 ]
+  [[ "$output" = U2FsdGVk* ]]
+
+  run "$BATS_TEST_DIRNAME"/../transcrypt --upgrade-crypto --iterations=10000 --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" = *"rekeyed files have been staged"* ]]
+  git commit -m "Upgrade crypto"
+
+  run git show HEAD:sensitive_file --no-textconv
+  [ "$status" -eq 0 ]
+  [[ "$output" = *"transcrypt:v3"* ]]
+  [[ "$output" = *"digest=sha256"* ]]
+  [[ "$output" = *"auth=hmac-sha256"* ]]
+
+  run git show HEAD:sensitive_file --textconv
+  [ "$status" -eq 0 ]
+  [ "$output" = "Legacy secret" ]
+}

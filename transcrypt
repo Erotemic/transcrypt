@@ -1090,6 +1090,21 @@ finalize_crypto_policy() {
 # Save non-secret crypto settings to a committed config file so clones can use
 # the same crypto format without copying long commands. Passwords are never
 # written here; they remain in local Git config or an external secret backend.
+
+# Preserve existing credentials while switching future writes to secure v3.
+prepare_upgrade_crypto() {
+	cipher=${cipher:-$(git config --get --local "transcrypt${CONTEXT_CONFIG_GROUP}.cipher")}
+	password=${password:-$(load_password "$CONTEXT_CONFIG_GROUP")}
+	crypto_format='v3'
+	if [[ ! ${digest_user:-} ]]; then
+		digest='sha256'
+	fi
+	kdf='pbkdf2'
+	iterations=${iterations:-$DEFAULT_ITERATIONS}
+	auth='hmac-sha256'
+	repo_salt=${repo_salt:-$(current_crypto_setting 'salt' '')}
+}
+
 save_public_crypto_config() {
 	local public_config
 	public_config=$(public_crypto_config_path)
@@ -1796,6 +1811,10 @@ help() {
 		            apply the  latest transcrypt scripts  in the  repository without
 		            changing your configuration settings
 
+		     --upgrade-crypto
+		            re-encrypt tracked encrypted files using authenticated v3 crypto
+		            while preserving the existing cipher and password
+
 		     --audit
 		            summarize security-relevant crypto settings for this repository
 
@@ -1921,6 +1940,7 @@ context=''
 cipher=''
 crypto_format=''
 digest=''
+digest_user=''
 kdf=''
 iterations=''
 auth=''
@@ -1941,6 +1961,7 @@ rekey=''
 show_file=''
 uninstall=''
 upgrade=''
+upgrade_crypto=''
 openssl_path='openssl'
 
 # used to bypass certain safety checks
@@ -2039,6 +2060,7 @@ while [[ "${1:-}" != '' ]]; do
 		;;
 	--digest=*)
 		digest=${1#*=}
+		digest_user='true'
 		;;
 	--iterations=*)
 		iterations=${1#*=}
@@ -2068,6 +2090,11 @@ while [[ "${1:-}" != '' ]]; do
 		upgrade='true'
 		requires_existing_config='true'
 		requires_clean_repo=''
+		;;
+	--upgrade-crypto)
+		upgrade_crypto='true'
+		rekey='true'
+		requires_existing_config='true'
 		;;
 	-l | --list)
 		list='true'
@@ -2199,6 +2226,10 @@ elif [[ $gpg_import_file ]]; then
 	import_gpg
 elif [[ $cipher ]]; then
 	validate_cipher
+fi
+
+if [[ $upgrade_crypto ]]; then
+	prepare_upgrade_crypto
 fi
 
 count_dirty_files() {
