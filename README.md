@@ -189,6 +189,32 @@ re-configure transcrypt with the new credentials.
     $ git merge origin/main
     $ transcrypt -c aes-256-cbc -p 'the-new-password'
 
+### Secure Crypto Format
+
+The legacy transcrypt format remains readable for compatibility, but it uses
+OpenSSL's older password-based encryption behavior and does not authenticate
+ciphertext. New or migrated repositories can opt in to an authenticated v3
+format:
+
+    $ transcrypt --secure
+
+Secure mode stores non-secret crypto metadata in _.transcrypt/config_ so clones
+can automatically reuse the same format, cipher, digest, PBKDF2 iteration count,
+and public repository salt. Passwords are not written to this file; they remain
+local or can be shared with `--export-gpg`.
+
+Existing repositories can migrate encrypted files while preserving their current
+cipher and password:
+
+    $ transcrypt --audit
+    $ transcrypt --upgrade-crypto
+    $ git status
+    $ git commit -m 'Upgrade transcrypt crypto format'
+
+The v3 format derives encryption and authentication keys with PBKDF2 and verifies
+an HMAC before decrypting. If authentication fails, transcrypt refuses to emit
+plaintext.
+
 ### Command Line Options
 
 Completion scripts for both Bash and Zsh are included in the _contrib/_
@@ -234,6 +260,22 @@ directory.
        --upgrade
              uninstall and re-install transcrypt configuration in the repository
              to apply the newest scripts and .gitattributes configuration
+
+       --upgrade-crypto
+             re-encrypt tracked encrypted files using authenticated v3 crypto
+             while preserving the existing cipher and password
+
+      --secure
+             configure new writes to use authenticated v3 encryption
+
+      --iterations=COUNT
+             set PBKDF2 iteration count for secure repositories
+
+      --audit
+             summarize security-relevant crypto settings for this repository
+
+      --diagnose-crypto
+             show local OpenSSL and fallback crypto capabilities
 
       -l, --list
              list all of the transparently encrypted files in the repository,
