@@ -269,18 +269,23 @@ openssl_enc_supports() {
 
 # Return the path to the committed, non-secret crypto configuration.
 public_crypto_config_path() {
-	printf '%s/.transcrypt/config' "$REPO"
+	local repo_path=${REPO:-}
+	if [[ ! $repo_path ]]; then
+		repo_path=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+	fi
+	printf '%s/.transcrypt/config' "$repo_path"
 }
 
 # Print a crypto setting from .git/config or the committed .transcrypt/config.
 current_crypto_setting() {
 	local key=$1
 	local default_value=$2
+	local context_group=${3:-${CONTEXT_CONFIG_GROUP:-}}
 	local public_config
 	public_config=$(public_crypto_config_path)
 
-	git config --get --local "transcrypt${CONTEXT_CONFIG_GROUP}.${key}" 2>/dev/null || \
-		git config -f "$public_config" --get "transcrypt${CONTEXT_CONFIG_GROUP}.${key}" 2>/dev/null || \
+	git config --get --local "transcrypt${context_group}.${key}" 2>/dev/null || \
+		git config -f "$public_config" --get "transcrypt${context_group}.${key}" 2>/dev/null || \
 		printf '%s' "$default_value"
 }
 
@@ -370,6 +375,204 @@ audit_security() {
 }
 
 
+is_transcrypt_envelope_file() {
+	local file=$1
+	local first_line
+	first_line=$(head -n 1 "$file" 2>/dev/null || true)
+	[[ $first_line == transcrypt:* ]]
+}
+
+is_v3_payload_file() {
+	local file=$1
+	local first_line
+	first_line=$(head -n 1 "$file" 2>/dev/null || true)
+	[[ $first_line == 'transcrypt:v3' ]]
+}
+
+read_v3_field() {
+	local file=$1
+	local key=$2
+	grep -m 1 "^${key}=" "$file" | cut -d'=' -f 2-
+}
+
+require_v3_dependencies() {
+	command -v python3 >/dev/null || die 1 'secure crypto format requires python3 for PBKDF2 key derivation'
+	command -v base64 >/dev/null || die 1 'secure crypto format requires the base64 command'
+}
+
+derive_v3_key_material() {
+	local digest_name=$1
+	local salt_hex=$2
+	local iteration_count=$3
+
+	ENC_PASS=$password python3 - "$digest_name" "$salt_hex" "$iteration_count" <<'PYV3'
+import binascii
+import hashlib
+import os
+import sys
+
+try:
+    digest_name = sys.argv[1]
+    salt = binascii.unhexlify(sys.argv[2].encode('ascii'))
+    iterations = int(sys.argv[3])
+    password = os.environ['ENC_PASS'].encode('utf-8')
+    material = hashlib.pbkdf2_hmac(digest_name, password, salt, iterations, dklen=80)
+except Exception as ex:
+    sys.stderr.write('transcrypt: unable to derive secure key material: %s\n' % (ex,))
+    sys.exit(1)
+
+sys.stdout.write(material[:32].hex() + '\n')
+sys.stdout.write(material[32:48].hex() + '\n')
+sys.stdout.write(material[48:80].hex() + '\n')
+PYV3
+}
+
+compute_hmac_sha256_hex() {
+	local mac_key_hex=$1
+	local input_file=$2
+	"${openssl_path}" dgst -sha256 -mac HMAC -macopt "hexkey:${mac_key_hex}" "$input_file" | awk '{print $NF}'
+}
+
+make_v3_auth_data() {
+	local envelope_file=$1
+	local output_file=$2
+	awk 'BEGIN { before_sep = 1 } before_sep && /^mac=/ { next } { print } /^--$/ { before_sep = 0 }' "$envelope_file" >"$output_file"
+}
+
+extract_v3_ciphertext() {
+	local envelope_file=$1
+	local output_file=$2
+	sed '1,/^--$/d' "$envelope_file" >"$output_file"
+}
+
+derive_v3_file_salt() {
+	local filename=$1
+	local plaintext_file=$2
+	local project_salt=$3
+	local plaintext_hash
+	plaintext_hash=$("${openssl_path}" dgst -sha256 -r "$plaintext_file" | awk '{print $1}')
+	printf '%s' "${filename}:${plaintext_hash}" | \
+		"${openssl_path}" dgst -sha256 -mac HMAC -macopt "hexkey:${project_salt}" | \
+		awk '{print $NF}' | cut -c 1-32
+}
+
+# Encrypt plaintext from a tempfile into the authenticated v3 envelope format.
+git_clean_v3() {
+	local filename=$1
+	local plaintext_file=$2
+	require_v3_dependencies
+
+	if is_v3_payload_file "$plaintext_file" && decrypt_v3_file "$plaintext_file" >/dev/null 2>&1; then
+		cat "$plaintext_file"
+		return 0
+	fi
+
+	local current_cipher current_digest current_iterations current_auth current_salt
+	current_cipher=$(git config --get --local "transcrypt${context_config_group}.cipher" 2>/dev/null || current_crypto_setting 'cipher' "$DEFAULT_CIPHER" "$context_config_group")
+	current_digest=$(current_crypto_setting 'digest' 'sha256' "$context_config_group")
+	current_iterations=$(current_crypto_setting 'iterations' "$DEFAULT_ITERATIONS" "$context_config_group")
+	current_auth=$(current_crypto_setting 'auth' 'hmac-sha256' "$context_config_group")
+	current_salt=$(current_crypto_setting 'salt' '' "$context_config_group")
+
+	[[ $current_auth == 'hmac-sha256' ]] || die 1 'unsupported secure authentication mode: %s' "$current_auth"
+	[[ $current_salt ]] || die 1 'secure crypto format is missing public repository salt'
+	[[ $current_iterations =~ ^[0-9]+$ ]] || die 1 'invalid PBKDF2 iteration count: %s' "$current_iterations"
+
+	local file_salt key_material enc_key iv mac_key ciphertext_file auth_data_file mac temp_cipher_bin
+	file_salt=$(derive_v3_file_salt "$filename" "$plaintext_file" "$current_salt")
+	key_material=$(derive_v3_key_material "$current_digest" "$file_salt" "$current_iterations")
+	enc_key=$(printf '%s\n' "$key_material" | sed -n '1p')
+	iv=$(printf '%s\n' "$key_material" | sed -n '2p')
+	mac_key=$(printf '%s\n' "$key_material" | sed -n '3p')
+
+	ciphertext_file=$(mktemp 2>/dev/null || mktemp -t tmp)
+	auth_data_file=$(mktemp 2>/dev/null || mktemp -t tmp)
+	temp_cipher_bin=$(mktemp 2>/dev/null || mktemp -t tmp)
+	"${openssl_path}" enc -e "-${current_cipher}" -K "$enc_key" -iv "$iv" -in "$plaintext_file" -out "$temp_cipher_bin"
+	base64 <"$temp_cipher_bin" | tr -d '\n' >"$ciphertext_file"
+
+	{
+		printf 'transcrypt:v3\n'
+		printf 'cipher=%s\n' "$current_cipher"
+		printf 'digest=%s\n' "$current_digest"
+		printf 'kdf=pbkdf2\n'
+		printf 'iterations=%s\n' "$current_iterations"
+		printf 'salt=%s\n' "$file_salt"
+		printf 'auth=hmac-sha256\n'
+		printf -- '--\n'
+		cat "$ciphertext_file"
+		printf '\n'
+	} >"$auth_data_file"
+	mac=$(compute_hmac_sha256_hex "$mac_key" "$auth_data_file")
+
+	printf 'transcrypt:v3\n'
+	printf 'cipher=%s\n' "$current_cipher"
+	printf 'digest=%s\n' "$current_digest"
+	printf 'kdf=pbkdf2\n'
+	printf 'iterations=%s\n' "$current_iterations"
+	printf 'salt=%s\n' "$file_salt"
+	printf 'auth=hmac-sha256\n'
+	printf 'mac=%s\n' "$mac"
+	printf -- '--\n'
+	cat "$ciphertext_file"
+	printf '\n'
+
+	rm -f "$ciphertext_file" "$auth_data_file" "$temp_cipher_bin"
+}
+
+# Decrypt and authenticate a v3 envelope file. This function emits plaintext only
+# after the HMAC verifies successfully.
+decrypt_v3_file() {
+	local envelope_file=$1
+	require_v3_dependencies
+
+	is_v3_payload_file "$envelope_file" || return 1
+
+	local envelope_cipher envelope_digest envelope_kdf envelope_iterations envelope_salt envelope_auth envelope_mac
+	envelope_cipher=$(read_v3_field "$envelope_file" 'cipher')
+	envelope_digest=$(read_v3_field "$envelope_file" 'digest')
+	envelope_kdf=$(read_v3_field "$envelope_file" 'kdf')
+	envelope_iterations=$(read_v3_field "$envelope_file" 'iterations')
+	envelope_salt=$(read_v3_field "$envelope_file" 'salt')
+	envelope_auth=$(read_v3_field "$envelope_file" 'auth')
+	envelope_mac=$(read_v3_field "$envelope_file" 'mac')
+
+	[[ $envelope_cipher ]] || return 1
+	[[ $envelope_digest ]] || return 1
+	[[ $envelope_kdf == 'pbkdf2' ]] || return 1
+	[[ $envelope_iterations =~ ^[0-9]+$ ]] || return 1
+	[[ $envelope_salt =~ ^[0-9A-Fa-f]+$ ]] || return 1
+	[[ $envelope_auth == 'hmac-sha256' ]] || return 1
+	[[ $envelope_mac =~ ^[0-9A-Fa-f]+$ ]] || return 1
+
+	local key_material enc_key iv mac_key ciphertext_file auth_data_file computed_mac cipher_bin_file
+	key_material=$(derive_v3_key_material "$envelope_digest" "$envelope_salt" "$envelope_iterations")
+	enc_key=$(printf '%s\n' "$key_material" | sed -n '1p')
+	iv=$(printf '%s\n' "$key_material" | sed -n '2p')
+	mac_key=$(printf '%s\n' "$key_material" | sed -n '3p')
+
+	ciphertext_file=$(mktemp 2>/dev/null || mktemp -t tmp)
+	auth_data_file=$(mktemp 2>/dev/null || mktemp -t tmp)
+	cipher_bin_file=$(mktemp 2>/dev/null || mktemp -t tmp)
+	extract_v3_ciphertext "$envelope_file" "$ciphertext_file"
+	make_v3_auth_data "$envelope_file" "$auth_data_file"
+	computed_mac=$(compute_hmac_sha256_hex "$mac_key" "$auth_data_file")
+	if [[ $computed_mac != "$envelope_mac" ]]; then
+		rm -f "$ciphertext_file" "$auth_data_file" "$cipher_bin_file"
+		return 1
+	fi
+
+	"${openssl_path}" base64 -d -A -in "$ciphertext_file" -out "$cipher_bin_file" || {
+		rm -f "$ciphertext_file" "$auth_data_file" "$cipher_bin_file"
+		return 1
+	}
+	"${openssl_path}" enc -d "-${envelope_cipher}" -K "$enc_key" -iv "$iv" -in "$cipher_bin_file"
+	local status=$?
+	rm -f "$ciphertext_file" "$auth_data_file" "$cipher_bin_file"
+	return "$status"
+}
+
+
 git_clean() {
 	context=$(extract_context_name_from_name_value_arg "$1")
 	[[ "$context" ]] && shift
@@ -383,16 +586,23 @@ git_clean() {
 	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
 	trap 'rm -f "$tempfile"' EXIT
 	tee "$tempfile" &>/dev/null
+	context_config_group=$(derive_context_config_group "$context")
+	crypto_format=$(current_crypto_setting 'crypto-format' "$DEFAULT_CRYPTO_FORMAT" "$context_config_group")
+	cipher=$(git config --get --local "transcrypt${context_config_group}.cipher" 2>/dev/null || current_crypto_setting 'cipher' "$DEFAULT_CIPHER" "$context_config_group")
+	password=$(load_password "$context_config_group")
+	openssl_path=$(git config --get --local transcrypt.openssl-path)
+
+	if [[ $crypto_format == 'v3' ]]; then
+		git_clean_v3 "$filename" "$tempfile"
+		return
+	fi
+
 	# the first bytes of an encrypted file are always "Salted" in Base64
 	# The `head + LC_ALL=C tr` command handles binary data in old and new Bash (#116)
 	firstbytes=$(head -c8 "$tempfile" | LC_ALL=C tr -d '\0')
 	if [[ $firstbytes == "U2FsdGVk" ]]; then
 		cat "$tempfile"
 	else
-		context_config_group=$(derive_context_config_group "$context")
-		cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
-		password=$(load_password "$context_config_group")
-		openssl_path=$(git config --get --local transcrypt.openssl-path)
 		salt=$("${openssl_path}" dgst -hmac "${filename}:${password}" -sha256 "$tempfile" | tr -d '\r\n' | tail -c16)
 
 		if [ "$(is_salt_prefix_workaround_required)" == "true" ]; then
@@ -418,9 +628,16 @@ git_smudge() {
 	cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
 	password=$(load_password "$context_config_group")
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
-	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a 2>/dev/null || cat "$tempfile"
-}
+	tee "$tempfile" >/dev/null
 
+	if is_v3_payload_file "$tempfile"; then
+		decrypt_v3_file "$tempfile" || die 1 'unable to authenticate or decrypt transcrypt v3 payload'
+	elif is_transcrypt_envelope_file "$tempfile"; then
+		die 1 'unsupported or corrupted transcrypt envelope'
+	else
+		ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$tempfile" 2>/dev/null || cat "$tempfile"
+	fi
+}
 git_textconv() {
 	context=$(extract_context_name_from_name_value_arg "$1")
 	[[ "$context" ]] && shift
@@ -435,9 +652,14 @@ git_textconv() {
 	cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
 	password=$(load_password "$context_config_group")
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
-	ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$filename" 2>/dev/null || cat "$filename"
+	if is_v3_payload_file "$filename"; then
+		decrypt_v3_file "$filename" || die 1 'unable to authenticate or decrypt transcrypt v3 payload'
+	elif is_transcrypt_envelope_file "$filename"; then
+		die 1 'unsupported or corrupted transcrypt envelope'
+	else
+		ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$filename" 2>/dev/null || cat "$filename"
+	fi
 }
-
 # shellcheck disable=SC2005,SC2002,SC2181
 git_merge() {
 	context=$(extract_context_name_from_name_value_arg "$1")
@@ -505,12 +727,14 @@ git_pre_commit() {
 			fi
 
 			# Get prefix of raw file in Git's index using the :FILENAME revision syntax
-			local firstbytes=$(git show :"${secret_file}" | head -c8)
+			local firstbytes firstline
+			firstbytes=$(git show :"${secret_file}" | head -c8)
+			firstline=$(git show :"${secret_file}" | head -n1)
 			# An empty file does not need to be, and is not, encrypted
 			if [[ $firstbytes == "" ]]; then
 				: # Do nothing
-			# The first bytes of an encrypted file must be "Salted" in Base64
-			elif [[ $firstbytes != "U2FsdGVk" ]]; then
+			# Legacy encrypted files start with "Salted" in Base64; v3 files start with a transcrypt envelope header.
+			elif [[ $firstbytes != "U2FsdGVk" && $firstline != "transcrypt:v3" ]]; then
 				printf 'Transcrypt managed file is not encrypted in the Git index: %s\n' "$secret_file" >&2
 				printf '\n' >&2
 				printf 'You probably staged this file using a tool that does not apply' >&2
@@ -535,11 +759,12 @@ git_pre_commit() {
 			return
 		fi
 		# Get prefix of raw file in Git's index using the :FILENAME revision syntax
-		# The first bytes of an encrypted file are always "Salted" in Base64
-		local firstbytes=$(git show :"${secret_file}" | head -c8)
+		local firstbytes firstline
+		firstbytes=$(git show :"${secret_file}" | head -c8)
+		firstline=$(git show :"${secret_file}" | head -n1)
 		if [[ $firstbytes == "" ]]; then
 			: # Do nothing
-		elif [[ $firstbytes != "U2FsdGVk" ]]; then
+		elif [[ $firstbytes != "U2FsdGVk" && $firstline != "transcrypt:v3" ]]; then
 			echo "true" >>"${tmp}"
 		fi
 	}
@@ -711,6 +936,7 @@ confirm_configuration() {
 	printf 'The following configuration will be saved:\n\n'
 	printf '  CONTEXT:  %s\n' "$CONTEXT"
 	printf '  CIPHER:   %s\n' "$cipher"
+	printf '  FORMAT:   %s\n' "${crypto_format:-$DEFAULT_CRYPTO_FORMAT}"
 	printf '  PASSWORD: %s\n\n' "$password"
 	printf 'Does this look correct? [Y/n] '
 	read -r -n 1 -s answer
@@ -735,6 +961,7 @@ confirm_rekey() {
 	printf 'The following configuration will be saved:\n\n'
 	printf '  CONTEXT:  %s\n' "$CONTEXT"
 	printf '  CIPHER:   %s\n' "$cipher"
+	printf '  FORMAT:   %s\n' "${crypto_format:-$DEFAULT_CRYPTO_FORMAT}"
 	printf '  PASSWORD: %s\n\n' "$password"
 	printf 'You are about to re-encrypt all encrypted files using new credentials.\n'
 	printf 'Once you do this, their historical diffs will no longer display in plain text.\n\n'
@@ -850,9 +1077,13 @@ finalize_crypto_policy() {
 		kdf=${kdf:-pbkdf2}
 		iterations=${iterations:-$DEFAULT_ITERATIONS}
 		auth=${auth:-hmac-sha256}
+		[[ $kdf == 'pbkdf2' ]] || die 1 'secure crypto format requires kdf=pbkdf2'
+		[[ $auth == 'hmac-sha256' ]] || die 1 'secure crypto format requires auth=hmac-sha256'
+		[[ $iterations =~ ^[0-9]+$ ]] || die 1 'invalid PBKDF2 iteration count: %s' "$iterations"
 		if [[ ! $repo_salt ]]; then
 			repo_salt=$("${openssl_path}" rand -hex 16)
 		fi
+		require_v3_dependencies
 	fi
 }
 
@@ -1338,9 +1569,9 @@ export_gpg() {
 	current_format=$(current_crypto_setting 'crypto-format' "$DEFAULT_CRYPTO_FORMAT")
 	current_digest=$(current_crypto_setting 'digest' "$DEFAULT_DIGEST")
 	current_kdf=$(current_crypto_setting 'kdf' "$DEFAULT_KDF")
-	current_iterations=$(current_crypto_setting 'iterations' "$DEFAULT_ITERATIONS")
+	current_iterations=$(current_crypto_setting 'iterations' "$DEFAULT_ITERATIONS" "$context_config_group")
 	current_auth=$(current_crypto_setting 'auth' "$DEFAULT_AUTH")
-	current_salt=$(current_crypto_setting 'salt' '')
+	current_salt=$(current_crypto_setting 'salt' '' "$context_config_group")
 	mkdir -p "${CRYPT_DIR}"
 
 	local gpg_encrypt_cmd="gpg --batch --recipient $gpg_recipient --trust-model always --yes --armor --quiet --encrypt -"
@@ -1571,6 +1802,12 @@ help() {
 		     --diagnose-crypto
 		            show local OpenSSL and fallback crypto capabilities
 
+		     --secure
+		            configure new writes to use authenticated v3 encryption
+
+		     --iterations=COUNT
+		            set PBKDF2 iteration count for secure repositories
+
 		     -l, --list
 		            list all of the transparently encrypted files in the repository,
 		            relative to the top-level directory
@@ -1688,6 +1925,7 @@ kdf=''
 iterations=''
 auth=''
 repo_salt=''
+secure=''
 display_config=''
 audit_security_command=''
 diagnose_crypto_command=''
@@ -1788,6 +2026,22 @@ while [[ "${1:-}" != '' ]]; do
 	--diagnose-crypto)
 		diagnose_crypto_command='true'
 		requires_clean_repo=''
+		;;
+	--secure)
+		secure='true'
+		crypto_format='v3'
+		digest=${digest:-sha256}
+		kdf='pbkdf2'
+		auth='hmac-sha256'
+		;;
+	--crypto-format=*)
+		crypto_format=${1#*=}
+		;;
+	--digest=*)
+		digest=${1#*=}
+		;;
+	--iterations=*)
+		iterations=${1#*=}
 		;;
 	-d | --display)
 		display_config='true'
