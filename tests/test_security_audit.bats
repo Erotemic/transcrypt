@@ -101,3 +101,29 @@ PY
   [ "$status" -eq 0 ]
   [ "$output" = "Legacy secret" ]
 }
+
+@test "security: upgrade-crypto stages filenames with spaces" {
+  FILENAME="secret file with spaces.txt"
+  echo "Legacy spaced secret" > "$FILENAME"
+  echo "\"$FILENAME\" filter=crypt diff=crypt merge=crypt" > .gitattributes
+  git add .gitattributes .transcrypt/config "$FILENAME"
+  git commit -m "Encrypt spaced legacy file"
+
+  run "$BATS_TEST_DIRNAME"/../transcrypt --upgrade-crypto --iterations=10000 --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" = *"rekeyed files have been staged"* ]]
+
+  run git diff --cached --name-only
+  [ "$status" -eq 0 ]
+  [[ "$output" = *"$FILENAME"* ]]
+  git commit -m "Upgrade spaced crypto"
+
+  run git show HEAD:"$FILENAME" --no-textconv
+  [ "$status" -eq 0 ]
+  [[ "$output" = *"transcrypt:v3"* ]]
+
+  run git show HEAD:"$FILENAME" --textconv
+  [ "$status" -eq 0 ]
+  [ "$output" = "Legacy spaced secret" ]
+  rm -f "$FILENAME"
+}

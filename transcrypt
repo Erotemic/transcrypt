@@ -983,10 +983,11 @@ stage_rekeyed_files() {
 	if [[ $encrypted_files ]] && [[ $IS_BARE == 'false' ]]; then
 		# touch all encrypted files to prevent stale stat info
 		cd "$REPO" >/dev/null || die 1 'could not change into the "%s" directory' "$REPO"
-		# shellcheck disable=SC2086
-		touch $encrypted_files
-		# shellcheck disable=SC2086
-		git update-index --add -- $encrypted_files
+		while IFS= read -r encrypted_file; do
+			[[ $encrypted_file ]] || continue
+			touch -- "$encrypted_file"
+			git update-index --add -- "$encrypted_file"
+		done <<<"$encrypted_files"
 
 		printf '***  rekeyed files have been staged  ***\n'
 		printf '*** COMMIT THESE CHANGES RIGHT AWAY! ***\n\n'
@@ -1347,8 +1348,10 @@ uninstall_transcrypt() {
 		encrypted_files=$(git ls-crypt)
 		if [[ $encrypted_files ]] && [[ $IS_BARE == 'false' ]]; then
 			cd "$REPO" >/dev/null || die 1 'could not change into the "%s" directory' "$REPO"
-			# shellcheck disable=SC2086
-			touch $encrypted_files
+			while IFS= read -r encrypted_file; do
+				[[ $encrypted_file ]] || continue
+				touch -- "$encrypted_file"
+			done <<<"$encrypted_files"
 		fi
 
 		# remove helper scripts
@@ -1566,6 +1569,13 @@ show_raw_file() {
 	unset IFS
 }
 
+gpg_export_output_path() {
+	local recipient=$1
+	local recipient_hash
+	recipient_hash=$(printf '%s' "$recipient" | "${openssl_path}" dgst -sha256 | awk '{print $NF}')
+	printf '%s/%s.asc' "$CRYPT_DIR" "$recipient_hash"
+}
+
 # export password and cipher to a gpg encrypted file
 export_gpg() {
 	# check for dependencies
@@ -1584,14 +1594,16 @@ export_gpg() {
 	current_format=$(current_crypto_setting 'crypto-format' "$DEFAULT_CRYPTO_FORMAT")
 	current_digest=$(current_crypto_setting 'digest' "$DEFAULT_DIGEST")
 	current_kdf=$(current_crypto_setting 'kdf' "$DEFAULT_KDF")
-	current_iterations=$(current_crypto_setting 'iterations' "$DEFAULT_ITERATIONS" "$context_config_group")
+	current_iterations=$(current_crypto_setting 'iterations' "$DEFAULT_ITERATIONS")
 	current_auth=$(current_crypto_setting 'auth' "$DEFAULT_AUTH")
-	current_salt=$(current_crypto_setting 'salt' '' "$context_config_group")
+	current_salt=$(current_crypto_setting 'salt' '')
 	mkdir -p "${CRYPT_DIR}"
 
-	local gpg_encrypt_cmd="gpg --batch --recipient $gpg_recipient --trust-model always --yes --armor --quiet --encrypt -"
-	printf 'password=%s\ncipher=%s\ncrypto-format=%s\ndigest=%s\nkdf=%s\niterations=%s\nauth=%s\nsalt=%s\n' "$current_password" "$current_cipher" "$current_format" "$current_digest" "$current_kdf" "$current_iterations" "$current_auth" "$current_salt" | $gpg_encrypt_cmd >"${CRYPT_DIR}/${gpg_recipient}.asc"
-	printf "The transcrypt configuration has been encrypted and exported to:\n%s/crypt/%s.asc\n" "$GIT_DIR" "$gpg_recipient"
+	local export_path
+	export_path=$(gpg_export_output_path "$gpg_recipient")
+	printf 'password=%s\ncipher=%s\ncrypto-format=%s\ndigest=%s\nkdf=%s\niterations=%s\nauth=%s\nsalt=%s\n' "$current_password" "$current_cipher" "$current_format" "$current_digest" "$current_kdf" "$current_iterations" "$current_auth" "$current_salt" |
+		gpg --batch --recipient "$gpg_recipient" --trust-model always --yes --armor --quiet --encrypt - >"$export_path"
+	printf "The transcrypt configuration has been encrypted and exported to:\n%s\n" "$export_path"
 }
 
 # import password and cipher from a gpg encrypted file
