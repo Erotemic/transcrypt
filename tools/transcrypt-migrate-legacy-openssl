@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Migrate a repository that uses configurable legacy OpenSSL `enc` settings
+# into the modern authenticated transcrypt v3 format.
+#
+# Historical deployments may have encrypted files with OpenSSL enc using configurable
+# digest / KDF settings, especially:
+#   transcrypt.digest    = md5 | sha256 | ...
+#   transcrypt.kdf       = none | pbkdf2
+#   transcrypt.base-salt = <public deterministic-salt input>
+#
+# The salt needed for decryption is embedded in each OpenSSL "Salted__" blob, so
+# this script does not need to recompute the legacy deterministic salt. It reads
+# the legacy settings, decrypts tracked filter=crypt files to the working tree,
+# initializes this checkout's transcrypt in secure rekey mode, and stages
+# the migrated v3 ciphertexts.
+
+usage() {
+	cat <<'USAGE'
+Usage: tools/transcrypt-migrate-legacy-openssl [options]
+
+Options:
+  -p, --password PASSWORD      Password for the existing legacy encrypted files.
+                              Defaults to TRANSCRYPT_PASSWORD or local git config.
+      --openssl PATH           OpenSSL binary to use for legacy decryption.
+      --cipher CIPHER          Existing legacy cipher. Defaults to config or aes-256-cbc.
+      --digest DIGEST          Existing legacy digest. Defaults to config or md5.
+      --kdf KDF                Existing legacy KDF: none or pbkdf2. Defaults to config.
+      --target-cipher CIPHER   Cipher for the migrated v3 repo. Defaults to old cipher.
+      --target-digest DIGEST   Digest for migrated v3 PBKDF2. Defaults to sha256.
+      --iterations N           PBKDF2 iterations for migrated v3. Defaults to 256000.
+      --transcrypt PATH        Path to the modern transcrypt script. Defaults to ../transcrypt.
+      --allow-dirty            Allow migration with a dirty worktree / index.
+  -y, --yes                    Do not prompt for confirmation.
+  -h, --help                   Show this help.
+
+The script stages migrated files and .transcrypt/config, but does not commit.
+Review with `git diff --cached --textconv` and then commit.
+USAGE
+}
+
+warn() {
+	printf 'transcrypt-migrate-legacy-openssl: warning: %s\n' "$*" >&2
+}
+
+die() {
+	printf 'transcrypt-migrate-legacy-openssl: error: %s\n' "$*" >&2
+	exit 1
+}
+
+config_get() {
+	local key=$1 default=${2:-}
+	git config --get --local "transcrypt.${key}" 2>/dev/null || \
+		git config -f .transcrypt/config --get "transcrypt.${key}" 2>/dev/null || \
+		printf '%s' "$default"
+}
+
+have_dirty_repo() {
+	! git diff-index --quiet HEAD -- 2>/dev/null || ! git diff --cached --quiet -- 2>/dev/null
+}
+
+list_crypt_files() {
+	git ls-files -z | git check-attr --stdin -z filter |
+		while IFS= read -r -d '' path && IFS= read -r -d '' _attr && IFS= read -r -d '' value; do
+			case $value in
+			crypt|crypt-*) printf '%s\0' "$path" ;;
+			esac
+		done
+}
+
+remove_old_filter_config() {
+	git config --remove-section transcrypt 2>/dev/null || true
+	git config --remove-section filter.crypt 2>/dev/null || true
+	git config --remove-section diff.crypt 2>/dev/null || true
+	git config --remove-section merge.crypt 2>/dev/null || true
+	git config --unset merge.renormalize 2>/dev/null || true
+	git config --unset alias.ls-crypt 2>/dev/null || true
+	git config --unset alias.add-crypt 2>/dev/null || true
+}
+
+decrypt_legacy_file() {
+	local file=$1 raw_file=$2 plain_file=$3
+	local -a enc_args
+	enc_args=(enc -d "-${legacy_cipher}" -md "$legacy_digest" -pass env:ENC_PASS -a -in "$raw_file" -out "$plain_file")
+	case $legacy_kdf in
+	pbkdf2)
+		enc_args+=(-pbkdf2)
+		;;
+	none|legacy|'')
+		;;
+	*)
+		die "unsupported legacy KDF '${legacy_kdf}' for ${file}; expected 'none' or 'pbkdf2'"
+		;;
+	esac
+	ENC_PASS=$password "$openssl_path" "${enc_args[@]}"
+}
+
+password=''
+openssl_path=''
+legacy_cipher=''
+legacy_digest=''
+legacy_kdf=''
+target_cipher=''
+target_digest='sha256'
+iterations='256000'
+transcrypt_path=''
+allow_dirty=''
+yes=''
+
+while [[ ${1:-} ]]; do
+	case $1 in
+	-p|--password)
+		password=${2:-}
+		[[ $password ]] || die 'empty password'
+		shift
+		;;
+	--password=*)
+		password=${1#*=}
+		[[ $password ]] || die 'empty password'
+		;;
+	--openssl)
+		openssl_path=${2:-}
+		[[ $openssl_path ]] || die 'empty openssl path'
+		shift
+		;;
+	--openssl=*)
+		openssl_path=${1#*=}
+		;;
+	--cipher)
+		legacy_cipher=${2:-}
+		[[ $legacy_cipher ]] || die 'empty cipher'
+		shift
+		;;
+	--cipher=*)
+		legacy_cipher=${1#*=}
+		;;
+	--digest)
+		legacy_digest=${2:-}
+		[[ $legacy_digest ]] || die 'empty digest'
+		shift
+		;;
+	--digest=*)
+		legacy_digest=${1#*=}
+		;;
+	--kdf)
+		legacy_kdf=${2:-}
+		[[ $legacy_kdf ]] || die 'empty KDF'
+		shift
+		;;
+	--kdf=*)
+		legacy_kdf=${1#*=}
+		;;
+	--target-cipher)
+		target_cipher=${2:-}
+		[[ $target_cipher ]] || die 'empty target cipher'
+		shift
+		;;
+	--target-cipher=*)
+		target_cipher=${1#*=}
+		;;
+	--target-digest)
+		target_digest=${2:-}
+		[[ $target_digest ]] || die 'empty target digest'
+		shift
+		;;
+	--target-digest=*)
+		target_digest=${1#*=}
+		;;
+	--iterations)
+		iterations=${2:-}
+		[[ $iterations ]] || die 'empty iterations'
+		shift
+		;;
+	--iterations=*)
+		iterations=${1#*=}
+		;;
+	--transcrypt)
+		transcrypt_path=${2:-}
+		[[ $transcrypt_path ]] || die 'empty transcrypt path'
+		shift
+		;;
+	--transcrypt=*)
+		transcrypt_path=${1#*=}
+		;;
+	--allow-dirty)
+		allow_dirty='true'
+		;;
+	-y|--yes)
+		yes='true'
+		;;
+	-h|--help)
+		usage
+		exit 0
+		;;
+	*)
+		die "unknown option: $1"
+		;;
+	esac
+	shift
+done
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || die 'not inside a git repository'
+cd "$repo_root"
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)
+transcrypt_path=${transcrypt_path:-${script_dir}/../transcrypt}
+[[ -x $transcrypt_path ]] || die "modern transcrypt script is not executable: ${transcrypt_path}"
+
+openssl_path=${openssl_path:-$(config_get openssl-path '')}
+openssl_path=${openssl_path:-openssl}
+command -v "$openssl_path" >/dev/null 2>&1 || die "openssl command not found: ${openssl_path}"
+
+legacy_cipher=${legacy_cipher:-$(config_get cipher 'aes-256-cbc')}
+legacy_digest=${legacy_digest:-$(config_get digest 'md5')}
+legacy_kdf=${legacy_kdf:-$(config_get kdf 'none')}
+target_cipher=${target_cipher:-$legacy_cipher}
+
+password=${password:-${TRANSCRYPT_PASSWORD:-}}
+password=${password:-$(git config --get --local transcrypt.password 2>/dev/null || true)}
+if [[ ! $password ]]; then
+	printf 'Password for existing legacy transcrypt files: ' >&2
+	IFS= read -r -s password
+	printf '\n' >&2
+fi
+[[ $password ]] || die 'password is required'
+
+[[ $iterations =~ ^[0-9]+$ ]] || die "invalid iteration count: ${iterations}"
+case $legacy_kdf in
+none|legacy|pbkdf2|'') ;;
+*) die "unsupported legacy KDF '${legacy_kdf}'; expected 'none' or 'pbkdf2'" ;;
+esac
+
+if [[ ! $allow_dirty ]] && have_dirty_repo; then
+	die 'worktree or index is dirty; commit/stash changes or pass --allow-dirty'
+fi
+
+mapfile -d '' crypt_files < <(list_crypt_files)
+if [[ ${#crypt_files[@]} -eq 0 ]]; then
+	die 'no tracked files with filter=crypt attributes were found'
+fi
+
+printf 'Preparing to migrate %s legacy encrypted file(s) to authenticated transcrypt v3.\n' "${#crypt_files[@]}"
+printf '  existing cipher: %s\n' "$legacy_cipher"
+printf '  existing digest: %s\n' "$legacy_digest"
+printf '  existing kdf:    %s\n' "${legacy_kdf:-none}"
+printf '  target cipher:   %s\n' "$target_cipher"
+printf '  target digest:   %s\n' "$target_digest"
+printf '  iterations:      %s\n' "$iterations"
+
+if [[ ! $yes ]]; then
+	printf 'Continue? [y/N] ' >&2
+	IFS= read -r answer
+	case $answer in
+	[Yy]) ;;
+	*) die 'migration aborted' ;;
+	esac
+fi
+
+backup_config=''
+if [[ -f .transcrypt/config ]]; then
+	backup_config=.transcrypt/config.legacy-openssl-backup
+	cp .transcrypt/config "$backup_config"
+	warn "copied existing .transcrypt/config to ${backup_config}"
+fi
+
+workdir=$(mktemp -d 2>/dev/null || mktemp -d -t transcrypt-legacy-openssl-migrate)
+cleanup() {
+	rm -rf "$workdir"
+}
+trap cleanup EXIT HUP INT TERM
+
+for file in "${crypt_files[@]}"; do
+	raw_file=${workdir}/raw
+	plain_file=${workdir}/plain
+	git show "HEAD:${file}" >"$raw_file"
+	decrypt_legacy_file "$file" "$raw_file" "$plain_file" || die "failed to decrypt ${file}; check password/digest/KDF settings"
+	mkdir -p "$(dirname "$file")"
+	mv "$plain_file" "$file"
+	rm -f "$raw_file"
+done
+
+"$transcrypt_path" --secure --rekey --force --cipher="$target_cipher" --digest="$target_digest" --iterations="$iterations" --password="$password" --yes
+
+git add -- .transcrypt/config .gitattributes
+for file in "${crypt_files[@]}"; do
+	git add -- "$file"
+done
+
+printf '\nMigration staged successfully. Review and commit with:\n\n'
+printf '  git diff --cached --textconv\n'
+printf '  git commit -m "Migrate legacy OpenSSL encryption to authenticated v3"\n'
+if [[ $backup_config ]]; then
+	printf '\nNote: %s was left untracked as a local backup; add it only if you intentionally want to preserve it.\n' "$backup_config"
+fi
