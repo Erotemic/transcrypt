@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: tools/test-branch-stack [--commits | --branches] [--test-cmd CMD]
+
+Run the test suite across the transcrypt stacked security series.
+
+Defaults:
+  mode:     --branches
+  test-cmd: bats tests/
+
+Examples:
+  tools/test-branch-stack
+  tools/test-branch-stack --commits
+  tools/test-branch-stack --branches --test-cmd 'bash -n transcrypt && bats tests/'
+USAGE
+}
+
+mode=branches
+test_cmd='bats tests/'
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --branches)
+      mode=branches
+      shift
+      ;;
+    --commits)
+      mode=commits
+      shift
+      ;;
+    --test-cmd)
+      [[ $# -ge 2 ]] || { echo 'missing value for --test-cmd' >&2; exit 2; }
+      test_cmd=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+original_ref=$(git symbolic-ref --quiet --short HEAD || git rev-parse --verify HEAD)
+restore_original_ref() {
+  git checkout -q "$original_ref" >/dev/null 2>&1 || true
+}
+trap restore_original_ref EXIT
+
+branches=(
+  security/00-legacy-merge-stability
+  security/01-filter-legacy-openssl-warning
+  security/02-audit-and-diagnostics
+  security/03-versioned-crypto-config
+  security/04-authenticated-v3-crypto
+  security/05-upgrade-crypto-migration
+  security/06-hardening-cleanups
+  security/07-secure-mode-docs
+  security/08-legacy-openssl-migration-tool
+  security/09-stack-test-runner
+)
+
+refs=()
+if [[ "$mode" = branches ]]; then
+  refs=("${branches[@]}")
+else
+  mapfile -t refs < <(git rev-list --reverse main..HEAD)
+fi
+
+if ! command -v bats >/dev/null 2>&1 && [[ "$test_cmd" = *bats* ]]; then
+  echo "bats is not available in PATH" >&2
+  exit 127
+fi
+
+for ref in "${refs[@]}"; do
+  git rev-parse --verify --quiet "$ref" >/dev/null || {
+    echo "missing ref: $ref" >&2
+    exit 1
+  }
+  echo "==> testing $ref"
+  git checkout -q "$ref"
+  git status --short --untracked-files=no | grep . && {
+    echo "working tree is dirty at $ref" >&2
+    exit 1
+  }
+  bash -lc "$test_cmd"
+done
+
+echo "All requested stack test points passed."
