@@ -329,12 +329,23 @@ git_merge() {
 	if [[ ! "${THEIRS_LABEL:-}" ]]; then
 		THEIRS_LABEL="theirs"
 	fi
-	# Decrypt BASE $1, LOCAL $2, and REMOTE $3 versions of file being merged
-	echo "$(cat "$1" | "${TRANSCRYPT_PATH}" smudge context="$context")" >"$1"
-	echo "$(cat "$2" | "${TRANSCRYPT_PATH}" smudge context="$context")" >"$2"
-	echo "$(cat "$3" | "${TRANSCRYPT_PATH}" smudge context="$context")" >"$3"
-	# Merge the decrypted files to the temp file named by $2
-	git merge-file --marker-size="$4" -L "$OURS_LABEL" -L base -L "$THEIRS_LABEL" "$2" "$1" "$3"
+	# Decrypt BASE $1, LOCAL $2, and REMOTE $3 versions of file being merged.
+	# Use temporary files instead of command substitution so decrypted content is
+	# preserved byte-for-byte, including trailing newlines.
+	decrypt_merge_side() {
+		local side_file=$1
+		local decrypted_file
+		decrypted_file=$(mktemp 2>/dev/null || mktemp -t tmp)
+		"${TRANSCRYPT_PATH}" smudge context="$context" <"$side_file" >"$decrypted_file"
+		mv "$decrypted_file" "$side_file"
+	}
+	decrypt_merge_side "$1"
+	decrypt_merge_side "$2"
+	decrypt_merge_side "$3"
+	# Merge the decrypted files to the temp file named by $2. Force the historical
+	# two-sided marker format so user-level merge.conflictStyle settings do not
+	# change transcrypt merge-driver output or tests.
+	git -c merge.conflictStyle=merge merge-file --marker-size="$4" -L "$OURS_LABEL" -L base -L "$THEIRS_LABEL" "$2" "$1" "$3"
 	# If the merge was not successful (has conflicts) exit with an error code to
 	# leave the partially-merged file in place for a manual merge.
 	if [[ "$?" != "0" ]]; then
