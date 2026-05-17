@@ -357,3 +357,25 @@ SECRET_CONTENT_ENC="U2FsdGVkX1/6ilR0PmJpAyCF7iG3+k4aBwbgVd48WaQXznsg42nXbQrlWsf/
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "$SECRET_CONTENT" ]
 }
+
+@test "crypt: legacy OpenSSL KDF warning is filtered from clean output" {
+  real_openssl=$(command -v openssl)
+  cat > openssl-warning-wrapper <<EOF_WRAPPER
+#!/usr/bin/env bash
+if [[ "\$1" = "enc" && " \$* " = *" -e "* ]]; then
+  echo '*** WARNING : deprecated key derivation used.' >&2
+  echo 'Using -iter or -pbkdf2 would be better.' >&2
+fi
+exec "$real_openssl" "\$@"
+EOF_WRAPPER
+  chmod +x openssl-warning-wrapper
+  git config --local transcrypt.openssl-path "$PWD/openssl-warning-wrapper"
+
+  echo "My secret content" > warning_file
+  echo "warning_file filter=crypt diff=crypt merge=crypt" >> .gitattributes
+
+  run git add .gitattributes warning_file
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"deprecated key derivation"* ]]
+  [[ "$output" != *"Using -iter or -pbkdf2"* ]]
+}

@@ -243,6 +243,16 @@ hex_to_bin() {
 	fi
 }
 
+filter_openssl_legacy_kdf_warning() {
+	# OpenSSL 3 emits this warning for the legacy EVP_BytesToKey mode used by
+	# existing transcrypt repositories. The warning is useful in explicit audit
+	# output, but it is noisy during Git clean-filter plumbing. Preserve every
+	# other OpenSSL diagnostic.
+	sed \
+		-e '/^\*\*\* WARNING : deprecated key derivation used\.$/d' \
+		-e '/^Using -iter or -pbkdf2 would be better\.$/d' >&2
+}
+
 git_clean() {
 	context=$(extract_context_name_from_name_value_arg "$1")
 	[[ "$context" ]] && shift
@@ -273,12 +283,12 @@ git_clean() {
 			(
 				echo -n "Salted__" && echo -n "$salt" | hex_to_bin &&
 					# Encrypt file to binary ciphertext
-					ENC_PASS=$password "$openssl_path" enc -e "-${cipher}" -md MD5 -pass env:ENC_PASS -S "$salt" -in "$tempfile"
+					ENC_PASS=$password "$openssl_path" enc -e "-${cipher}" -md MD5 -pass env:ENC_PASS -S "$salt" -in "$tempfile" 2> >(filter_openssl_legacy_kdf_warning)
 			) |
 				openssl base64
 		else
 			# Encrypt file to base64 ciphertext
-			ENC_PASS=$password "$openssl_path" enc -e -a "-${cipher}" -md MD5 -pass env:ENC_PASS -S "$salt" -in "$tempfile"
+			ENC_PASS=$password "$openssl_path" enc -e -a "-${cipher}" -md MD5 -pass env:ENC_PASS -S "$salt" -in "$tempfile" 2> >(filter_openssl_legacy_kdf_warning)
 		fi
 	fi
 }
