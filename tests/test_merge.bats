@@ -70,6 +70,10 @@ load "$BATS_TEST_DIRNAME/_test_helper.bash"
 }
 
 @test "merge: branches with encrypted file - line changes both branches, with conflicts" {
+  # The merge driver should keep the historical conflict-marker format even
+  # when users configure diff3/zdiff3 globally or locally.
+  git config merge.conflictStyle diff3
+
   echo "1. First step" > sensitive_file
   encrypt_named_file sensitive_file
 
