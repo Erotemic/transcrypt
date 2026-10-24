@@ -1,11 +1,12 @@
 # Transcrypt: interoperable Bash/Rust protocol and verification plan
 
-**Status: secure-v3 planning proposal with partial implementation, 2026-10-24.**
-The secure v3 protocol is not frozen or implemented in Bash or Rust, and
-no Lean theorem has been compiled. There is now a separate released-v2
-Rust envelope parser/serializer and legacy Bash hardening. Consult
-[implementation progress](implementation-progress.md) for exact evidence
-and limitations; this document does not promote a legacy result to a v3 proof.
+**Status: secure-first Rust v3 lifecycle implemented; source-derived Lean
+extraction tracked and compiling; complete codec and security-decision
+refinement open (2026-10-24).** The active plan is [V3-ROADMAP](V3-ROADMAP.md),
+with an obligation-by-obligation [proof ledger](V3-PROOF-COVERAGE.md) and a
+short [handoff](V3-HANDOFF.md). The original numbered documents remain as
+historical requirements and the larger Bash/interoperability roadmap; they
+are **not** the current Rust-first completion checklist.
 
 ## Secure-first v3 implementation (experimental)
 
@@ -14,15 +15,20 @@ specification](specs/V3-AUTHENTICATED-P0.md) and its two Rust crates,
 `transcrypt-v3-core` and `transcrypt-v3`. This is a deliberately small
 full-lifecycle proof of concept, **not an approved cryptographic protocol
 or a formally verified executable**. Independent Python test vectors and
-Rust Git integration tests are supplied. The Bash v3 implementation and
-Charon/Aeneas-to-Lean refinement remain separate follow-up work. Legacy v2
-parity work is no longer the immediate development priority.
+Rust Git integration tests are supplied. The production Rust core has already
+been translated with pinned Charon/Aeneas and has compiled magic/version
+correspondence theorems; **full generated encoder/decoder refinement remains
+open**. The Bash v3 implementation is deferred. Legacy v2 parity work is not
+the immediate development priority.
 
 ## The intended result
 
-One public, byte-exact, implementation-independent protocol specification;
-two independently maintained and interoperable implementations; and one
-machine-checked proof development about the Rust implementation's translated
+The *active* target is one Rust-first, byte-exact protocol and a scoped
+machine-checked proof development; the *long-term* target additionally has
+two independently maintained interoperable implementations. The current
+formalization is not blocked on writing the Bash v3 implementation. It uses a
+public, implementation-independent specification and one machine-checked proof
+development about the Rust implementation's translated
 security-critical logic. The Bash implementation remains a standalone Bash +
 OpenSSL product, with **no Rust or Python runtime dependency**. Correspondence
 between Bash and the specification is established by human review and testing,
@@ -47,8 +53,15 @@ Rust design is not promoted into the protocol simply to make proofs easy.
 
 ## Read in this order
 
+For the current Rust-first work, start with the first three rows. Consult the
+original numbered plans for longer-term Bash interoperability, historical
+audit findings, and source decisions.
+
 | Document | Purpose | Type |
 |---|---|---|
+| [Active v3 roadmap](V3-ROADMAP.md) | Clear stages, dependencies, proof stopping point, and next exact action | **Current plan** |
+| [V3 proof coverage](V3-PROOF-COVERAGE.md) | Source-derived Lean theorems vs tests vs trusted assumptions | **Current status** |
+| [V3 handoff](V3-HANDOFF.md) | Working branch, file map, commands, continuity rules | **Current handoff** |
 | [01 - Scope and adversary](01-requirements-and-threat-model.md) | Assets, attackers, required security properties, non-goals | Normative target |
 | [02 - Protocol decisions](02-protocol-and-wire-format.md) | Inputs, public metadata, wire versioning, cryptographic design gate, byte-level spec checklist | Draft for approval |
 | [03 - Git operation semantics](03-git-state-machine.md) | Clean/smudge, staged tree, init, unlock, rekey, migration, rollback, cache, worktrees | Normative target |
@@ -56,7 +69,7 @@ Rust design is not promoted into the protocol simply to make proofs easy.
 | [05 - Verification](05-formal-verification.md) | Independent Lean spec, Aeneas extraction, theorem plan, trusted interfaces | Proof plan |
 | [06 - Interoperability and CI](06-conformance-and-ci.md) | Exact acceptance matrices and required automation | Test plan |
 | [07 - Audit closeout](07-audit-remediation.md) | Traceable disposition for every October 2026 audit finding | Remediation plan |
-| [08 - Execution and PRs](08-roadmap-and-pr-plan.md) | Small incremental deliverables, dependencies, gates | Roadmap |
+| [08 - Execution and PRs](08-roadmap-and-pr-plan.md) | Historical full Bash/Rust/upstream program, dependencies and gates | Long-range plan (superseded for active Rust v3) |
 | [09 - Hand review](09-bash-traceability-and-review.md) | Hand-auditable mapping and change-review checklist | Review procedure |
 | [10 - Decisions](10-decisions-and-blockers.md) | Accepted requirements vs proposed choices vs mandatory unresolved design decisions | Decision register |
 | [Reference: current candidate](reference/current-candidate.md) | Descriptive account of the **unreleased** October 2026 `TCRYPT3` prototype | Non-normative evidence |
@@ -123,9 +136,9 @@ Rust v2 envelope crate. Those implementation changes are distinct from the
   externally reviewed construction and stated computational assumptions;
   an Aeneas functional-refinement proof does not establish those claims.
 
-## First implementation gate
+## Historical first implementation gate (superseded for active Rust v3)
 
-Close the **blocking** design decisions in
+For the original Bash-inclusive integration campaign, close the **blocking** design decisions in
 [10](10-decisions-and-blockers.md), publish a complete canonical format
 specification and independent vectors, and have both the protocol reviewer
 and the Bash-portability reviewer sign off. **Only then implement or revise
@@ -144,6 +157,7 @@ v2 format**, specified in [the byte-exact v2 contract](specs/LEGACY-V2-INTEROPER
 `rust/crates/transcrypt-legacy` is an actual Rust `clean` / `smudge` /
 `textconv` implementation for Bash-initialized repos, while
 `rust/crates/transcrypt-legacy-core` contains its pure Aeneas-targeted
-functions. This is *not* the final authenticated v3 suite. The remaining
-north-star work is in `08-roadmap-and-pr-plan.md`; independent protocol review
-and compiled generated-code Lean refinement have not been completed.
+functions. This is *not* the final authenticated v3 suite. The current Rust-first remaining work is in `V3-ROADMAP.md`; the full
+Bash/upstream roadmap remains in `08-roadmap-and-pr-plan.md`. Generated Lean
+source and three narrow correspondence theorems have compiled; full codec
+functional refinement remains open.

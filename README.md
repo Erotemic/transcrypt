@@ -14,6 +14,14 @@ them with your entire team or complicate your workflow.
 
 ![Tests](https://github.com/elasticdog/transcrypt/workflows/Tests/badge.svg)
 
+> **Experimental secure-first Rust v3:** a separate authenticated Rust
+> implementation and Lean/Aeneas verification project are under active
+> development. They do **not** change the released Bash format or imply a
+> production security review. Start with the
+> [active v3 roadmap](docs/verification/V3-ROADMAP.md), the
+> [proof coverage ledger](docs/verification/V3-PROOF-COVERAGE.md), and the
+> [continuation handoff](docs/verification/V3-HANDOFF.md).
+
 ## Overview
 
 transcrypt is in the same vein as existing projects like

@@ -1,5 +1,13 @@
 # 08. Phased delivery, dependencies, and upstream PR strategy
 
+> **Scope note (2026-10-24):** This document remains the historical,
+> Bash-inclusive upstream/legacy roadmap. It does **not** represent the
+> current Rust-first v3 execution state. The active v3 milestone gates and
+> documented proof stopping point are in [V3-ROADMAP](V3-ROADMAP.md), with
+> evidence in [V3-PROOF-COVERAGE](V3-PROOF-COVERAGE.md). In particular,
+> experimental Rust Argon2id/AES-SIV and tracked Aeneas extraction exist;
+> Bash-only OpenSSL feasibility no longer blocks the Rust proof of concept.
+
 **Upstream workflow:** small reviewable PRs against `transcrypt-v3`, as
 requested by the maintainer in [issue #134](https://github.com/elasticdog/transcrypt/issues/134#issuecomment-4478657672).
 PR #219 remains the existing draft integration container, not a request to

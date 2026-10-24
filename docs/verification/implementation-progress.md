@@ -1,12 +1,19 @@
 # Implementation progress
 
-**Maintained per the execution procedure in 08-roadmap-and-pr-plan.md. Short
-and factual: current milestone, completed changes with evidence, blockers,
-next task.**
+**Chronological evidence log — not the current roadmap.** Read
+[V3-ROADMAP](V3-ROADMAP.md) for milestones,
+[V3-PROOF-COVERAGE](V3-PROOF-COVERAGE.md) for precise verified/tested/open
+claims, and [V3-HANDOFF](V3-HANDOFF.md) for continuation.
 
-Baseline: `elasticdog/transcrypt-v3` @ `fcf94da` + planning-docs commit
-(`docs/transcrypt-verification-plan`). Active branch:
-`work/m2-nul-safe-path-enumeration` (stacks on the docs commit).
+**Latest reconciliation (2026-10-24):** The user reported the tracked
+Charon/Aeneas snapshot successfully compiled and pushed to
+`work/m2-nul-safe-path-enumeration`, followed by a working fix for the
+path-bound Rust adapter's borrowing mismatch and an unused import. The
+actual generated constants have compiled correspondence theorems; generated
+`RustM` codec encoder/decoder *functional refinement remains open*.
+Rust Git lifecycle and crypto interoperability tests are working, but the
+v3 profile is still experimental and unaudited. The subsequent dated entries
+below preserve how we arrived here; some earlier "next tasks" are obsolete.
 
 ## Completed
 

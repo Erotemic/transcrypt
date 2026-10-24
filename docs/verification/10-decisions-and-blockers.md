@@ -1,5 +1,13 @@
 # 10. Decision register: what is agreed and what must be decided
 
+> **Historical decision register:** These proposed choices were written
+> before the narrow Rust-first Argon2id/AES-SIV v3 prototype. Some conflict
+> with the current experimental v3 candidate (especially D-03 Argon2id,
+> D-08 pathname binding, and the out-of-scope list). Do not use this file
+> to block active Rust v3 formalization or to claim its profile is already
+> reviewed. See [V3-ROADMAP](V3-ROADMAP.md) for active decisions; keep this
+> register for future Bash-portability and upstream-governance work.
+
 **This table distinguishes prior maintainer decisions from new proposals.**
 Do not label a design "agreed" merely because this planning document proposes
 it. All blocking entries need a recorded decision before the final wire
