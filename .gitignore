@@ -1,6 +1,4 @@
-# Rust build artifacts (rust/ workspace)
+# Rust build artifacts (rust/ workspace). The Cargo.lock is committed on
+# purpose: the CI acceptance plan (docs/verification/06, section 5)
+# requires a pinned lockfile for the verification core.
 rust/target/
-
-# The workspace has no external dependencies, so the lockfile pins
-# nothing worth versioning.
-rust/Cargo.lock

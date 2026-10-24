@@ -78,6 +78,27 @@ jobs:
       - name: Run tests
         run: /tmp/bats-core/bin/bats --jobs 4 tests/v2/ tests/v3/
 
+  rust:
+    # Independent Rust test job (docs/verification/04): the core crates
+    # are zero-dependency, so this needs no registry access. The v2
+    # differential test requires openssl, present on every matrix OS.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Print rustc version
+        run: rustc --version
+
+      - name: Run Rust tests (offline)
+        working-directory: rust
+        run: cargo test --offline
+
   feasibility-probe:
     # D-01/D-02 evidence (docs/verification/reference/d01-d02-feasibility.md):
     # record which cryptographic primitives the allowed Bash/OpenSSL runtime
