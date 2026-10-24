@@ -119,13 +119,31 @@ as command-line arguments. New clones need:
 /path/to/transcrypt/rust/target/release/transcrypt-v3 hydrate
 ```
 
+`hydrate` reads the authenticated **Git index** rather than HEAD, verifies
+all protected worktree files before writing, and publishes plaintext without
+running Git checkout/restore (whose clean filter can reject ciphertext).
+It is safe to repeat after a partial hydration as long as existing protected
+files still match staged ciphertext or its authenticated plaintext. Once
+plaintext is present, it runs the clean filter to refresh Git's worktree stat
+cache and verifies that the staged object IDs and modes did not change.
+File replacement is atomic per file, not across the entire checkout.
+
 Run `transcrypt-v3 lock` only after protected working files are committed.
 It flushes tracked `*.secret` files to encrypted index bytes and removes
-the local derived-key file. Unlock again and hydrate to resume.
+the credential agent. Unlock again and hydrate to resume.
 
-**Security limitations:** a 64-byte derived key currently persists in
-`.git/transcrypt-v3/key` mode 0600 while unlocked. This is a deliberately
-scoped POC, not a memory-only credential agent. Equality leakage under
+**Key isolation:** a background process retains the 64-byte derived key in
+memory. Git operations use `.git/transcrypt-v3/session.sock` (Unix socket
+mode 0600, parent directory 0700) and **never receive the key itself**.
+The key is never written to a local file by this version. If you previously
+used the v3 prototype that wrote `.git/transcrypt-v3/key`, lock with that
+version or remove that old on-disk key before running the new binary.
+`lock` flushes protected files and stops the background process. Abruptly
+killing the agent requires a new unlock; a stale socket is cleared safely
+at next unlock. The agent trusts other processes under your Unix UID and
+does not claim protection against swap or memory dumps.
+
+**Remaining security limitations:** equality leakage under
 AES-SIV, no path binding, no rollback resistance, no atomic multi-file lock,
 no formally verified Git/OS adapter, and incomplete adversarial review remain.
 The RustCrypto AES-SIV crate itself warns that it has not been independently

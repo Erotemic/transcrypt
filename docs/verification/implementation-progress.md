@@ -290,3 +290,43 @@ failures, run Charon/Aeneas on `transcrypt-v3-core`, and prove refinement of
 its generated encoders/decoders against the independent Lean wire spec. Then
 replace the persistent local key with a memory-only credential agent and
 harden crash/rollback and filesystem races.
+
+### Secure v3 endpoint step: no disk-resident derived key
+
+- Added a dedicated Unix credential agent (`rust/crates/transcrypt-v3/src/session.rs`).
+  The key is sent once over a private pipe, kept in the agent, and never
+  returned over Git-filter IPC or written to `.git`.
+- Switched `clean`, `smudge`, pre-commit index validation, hydrate, and lock
+  to the same authenticated in-process crypto service. Per-request public
+  config binding prevents a stale session from silently accepting changed
+  metadata. `lock` terminates the agent after a successful ciphertext flush.
+- Corrected `hydrate` to restore from the staged index rather than `HEAD`.
+  Added refusal of symlinked parents of protected worktree files, plus test
+  cases for key absence, session lifetime and staged-index hydration.
+- Verification gate on the user's Rust toolchain: `cargo test --workspace`
+  followed by `cargo build --release -p transcrypt-v3`. No Rust compiler or
+  Lean/Aeneas runner is present in the artifact environment; do not claim
+  compilation until the user runs those commands.
+- Open security limitations: same-UID code can use the socket, OS swap/core
+  dumps are outside the guarantee, metadata/Git transitions are not atomic,
+  and dirfd-based race-hardening plus independent crypto review remain.
+
+### Correct encrypted-checkout hydration after live-agent integration
+
+- The first live-agent integration test exposed a Git behavior: `git restore
+  --worktree` calls `clean` while refreshing a ciphertext worktree in some
+  configurations. The clean filter correctly rejects raw ciphertext; therefore
+  hydration cannot delegate to `git restore` or relax filter strictness.
+- Updated `hydrate` to preflight authenticated index objects and worktree
+  contents, then write authenticated plaintext via private temporary files
+  and atomic per-file rename. A second run accepts unchanged already-hydrated
+  plaintext and can continue an interrupted multi-file operation. Git's cached
+  worktree stat entries are refreshed using the normal clean filter only
+  **after** plaintext is present, followed by a strict index identity check.
+- Expanded the Git integration test to exercise multi-file preflight failure,
+  idempotent hydration, and the staged-index-versus-HEAD divergence case.
+- **Validation gate:** run `cargo test --workspace` and
+  `cargo test -p transcrypt-v3 --test git_lifecycle` on a Rust-enabled machine.
+  The artifact environment did not compile Rust. Filesystem operations still
+  lack full crash transactions and dirfd-based protection against concurrent
+  same-UID path replacement.

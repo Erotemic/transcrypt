@@ -74,12 +74,18 @@ trusted state and is outside this POC.
   `.gitattributes`, and no conflicting pre-commit hook. Generate metadata,
   install Git filters, install a local hook, and stage the public config and
   `*.secret` attributes with `-diff` (no textconv cache). Explicitly committing those files is required.
-- `unlock`: derive from a terminal passphrase or opt-in stdin, verify the
-  config **first**, then provision a process-local key file under
-  `.git/transcrypt-v3/key` with mode `0600` and directory mode `0700`.
-  This is the **prototype's explicit local-key-at-rest compromise**; it is not
-  an OS keyring or memory-only agent and needs replacement for strong
-  endpoint-at-rest protection.
+- `unlock`: derive from a terminal passphrase or opt-in stdin, authenticate
+  the config **first**, and send the derived key over a private one-way stdin
+  pipe to a dedicated credential process. The process keeps it in memory.
+  The only persistent endpoint is a mode-`0600` Unix-domain socket at
+  `.git/transcrypt-v3/session.sock`, beneath a mode-`0700` directory.
+  Git filters send operation, exact public config, and plaintext/ciphertext
+  bytes over the socket; the raw key is **never returned to clients**.
+  The agent authenticates the supplied public config on every operation.
+  Stale sockets left by dead processes may be reclaimed only after verifying
+  the socket type and that it has no listening peer. Missing/dead agents fail
+  closed. Earlier prototype on-disk keys must be removed or locked using the
+  previous binary before starting this agent.
 - `clean`: accept plaintext only, emit a complete authenticated record only
   after successful encryption. Do not double-encrypt recognizable records.
 - `smudge`: authenticate and then release plaintext; reject all other bytes.
@@ -89,19 +95,36 @@ trusted state and is outside this POC.
   `*.secret` is a regular Git blob decryptable using the active config/key.
   A Git hook only guards cooperating local commits; it is bypassable and does
   not enforce remote policy.
-- `hydrate`: only for fresh clones containing raw ciphertext in worktree.
-  Preflight all protected paths against the Git index before `git restore`.
-  Never discard locally modified protected files.
+- `hydrate`: authenticate **every staged protected object** and confirm the
+  staged metadata matches the worktree before exposing plaintext. Each
+  protected worktree file must equal either its staged ciphertext or the
+  authenticated plaintext of that ciphertext. Unexpected bytes or symlinks
+  are rejected without modifying any file. For ciphertext-backed files,
+  decrypt the staged object and publish plaintext through mode-0600 exclusive
+  temporary files and rename. Do **not** invoke `git restore` or `git checkout`
+  on ciphertext worktrees: those Git operations may invoke `clean` on the
+  ciphertext, which correctly refuses double encryption. Already-hydrated
+  paths are left untouched, allowing retries after interrupted hydration.
+  Compare the staged index snapshot before publication. Afterwards run the
+  installed clean filter on authenticated plaintext using `git add` to refresh
+  the worktree stat cache, and verify that the staged blob IDs and modes have
+  not changed. Without that refresh, Git can report hydrated files as dirty
+  because cached size and mtime still describe ciphertext. The adapter remains
+  vulnerable to concurrent same-UID path/index races and does not claim
+  atomicity across multiple files.
 - `lock`: preflight no dirty or untracked protected files; overwrite tracked
   plaintext working files with the exact ciphertext in the index and then
-  remove the local key. This is NOT certified secure deletion, atomic across
-  multiple files, or protection against plaintext in Git textconv notes,
-  caches, snapshots, swap, or backups.
+  terminate the credential agent. No derived-key file is written. This is NOT
+  certified secure deletion, atomic across multiple files, or protection
+  against plaintext in Git textconv notes, caches, process memory dumps,
+  swap, snapshots, or backups.
 
 For production hardening, the trusted OS/Git adapter should also eliminate
-local-key persistence, make unlock/lock crash-transactional, close path
-races, address very large files, and add explicit rollback protection if
-required by the threat model. These obligations are **not** discharged by
+agent memory hardening (swap and core dumps), make unlock/lock
+crash-transactional, close path races with dirfd-based operations, address
+very large files, and add explicit rollback protection if required by the
+threat model. The socket is accessible to programs with the same Unix UID;
+that UID is inside the prototype's trust boundary. These obligations are **not** discharged by
 correctness proofs for the pure Rust format parser.
 
 ## Machine checkability and implementation correspondence
@@ -127,3 +150,19 @@ ordered AAD and record grammar to become interoperable. Existing Bash
 legacy behavior is not a requirement on this secure-first Rust implementation.
 
 Correspondence and proof obligation map: [`v3-core-traceability.md`](../reference/v3-core-traceability.md).
+
+## Local agent framing (adapter-only, not part of the committed wire protocol)
+
+This is an internal IPC format and may change independently of ciphertext
+format v3. Request: one ASCII opcode (`P` ping, `E` encrypt, `D` decrypt,
+`X` shutdown), 55-byte exact public config, four-byte big-endian body length,
+then that many payload bytes. Response: one-byte status (0 success, 1 error),
+four-byte big-endian output length, then bytes. Both directions enforce a
+16-MiB-plus-envelope bound. The agent verifies the supplied config bytes
+match those authenticated on startup before processing any payload. The
+credential is transferred solely via a 64-byte pipe during process startup.
+
+Only the live credential agent performs encryption/decryption. It should not
+be confused with a verified enclave: same-UID processes can use the socket,
+OS process inspection and swap are outside the core proof boundary, and
+start/stop plus Git file operations are not yet modeled transactionally.

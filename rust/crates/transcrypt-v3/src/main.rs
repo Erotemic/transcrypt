@@ -12,14 +12,14 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::{ffi::OsStringExt, fs::OpenOptionsExt};
 use zeroize::Zeroizing;
+mod session;
+use session::Operation;
 use transcrypt_v3::{
-    authenticate_config, decrypt_file, encrypt_file, initialize_config, unlock_config, SecretKey,
-    KEY_SIZE, MAX_FILE,
+    initialize_config, unlock_config, MAX_FILE,
 };
 use transcrypt_v3_core::{parse_file_header, FILE_MIN_LEN, SALT_LEN};
 
 const ATTRS: &[u8] = b"*.secret filter=transcrypt-v3 -diff\n";
-const KEY_FILE_NAME: &str = "key";
 
 fn main() -> ExitCode {
     match run() {
@@ -49,6 +49,7 @@ fn run() -> Result<(), String> {
         "smudge" => filter(&root, false),
         "verify-index" => verify_index(&root),
         "hydrate" => hydrate(&root),
+        "serve" => session::serve(&root, &load_config(&root)?),
         _ => Err("unknown operation; v3 supports only init/unlock/lock/clean/smudge/verify-index/hydrate".into()),
     }
 }
@@ -102,74 +103,6 @@ fn load_config(root: &Path) -> Result<Vec<u8>, String> {
     let bytes = fs::read(config_path(root)?).map_err(|e| format!("cannot read v3 config: {e}"))?;
     transcrypt_v3_core::parse_config(&bytes).map_err(|_| "invalid v3 config grammar")?;
     Ok(bytes)
-}
-
-fn key_dir(root: &Path) -> Result<PathBuf, String> {
-    let path = root.join(".git/transcrypt-v3");
-    if let Ok(meta) = fs::symlink_metadata(&path) {
-        if !meta.is_dir() || meta.file_type().is_symlink() {
-            return Err("unsafe local key directory".into());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if meta.permissions().mode() & 0o077 != 0 {
-                return Err("local key directory permissions must be 0700".into());
-            }
-        }
-    }
-    Ok(path)
-}
-
-fn key_file(root: &Path) -> Result<PathBuf, String> {
-    Ok(key_dir(root)?.join(KEY_FILE_NAME))
-}
-
-fn read_key(root: &Path, config: &[u8]) -> Result<SecretKey, String> {
-    let file = key_file(root)?;
-    let meta = fs::symlink_metadata(&file).map_err(|_| "repository locked: run transcrypt-v3 unlock")?;
-    if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err("unsafe local key file".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o077 != 0 {
-            return Err("key file permissions must be 0600".into());
-        }
-    }
-    let bytes = Zeroizing::new(fs::read(&file).map_err(|_| "cannot read local key file")?);
-    if bytes.len() != KEY_SIZE {
-        return Err("incorrect local key length".into());
-    }
-    let mut key = Zeroizing::new([0u8; KEY_SIZE]);
-    key.copy_from_slice(&bytes);
-    authenticate_config(config, &key)?;
-    Ok(key)
-}
-
-fn write_key(root: &Path, key: &SecretKey) -> Result<(), String> {
-    let dir = key_dir(root)?;
-    if !dir.exists() {
-        fs::create_dir(&dir).map_err(|e| format!("cannot create local key directory: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("cannot protect local key directory: {e}"))?;
-        }
-    }
-    let path = dir.join(KEY_FILE_NAME);
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut out = options.open(&path).map_err(|e| format!("key already unlocked or unsafe key path: {e}"))?;
-    if let Err(e) = out.write_all(&key[..]).and_then(|_| out.sync_all()) {
-        let _ = fs::remove_file(&path);
-        return Err(format!("cannot persist local key: {e}"));
-    }
-    Ok(())
 }
 
 fn passphrase(from_stdin: bool) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -243,6 +176,21 @@ fn install_hook(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// An installation error must not leave a live key agent behind. The
+/// file/index changes of initialization still require explicit recovery on
+/// failure; this is not a filesystem-wide atomic transaction.
+fn activate_session(root: &Path, config: &[u8], key: &transcrypt_v3::SecretKey, stage: bool) -> Result<(), String> {
+    session::start(root, config, key)?;
+    let result: Result<(), String> = (|| {
+        install_filters(root)?;
+        install_hook(root)?;
+        if stage { git(root, &["add", "--", ".transcrypt/config", ".gitattributes"])?; }
+        Ok(())
+    })();
+    if result.is_err() { let _ = session::stop(root, config); }
+    result
+}
+
 fn init(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
     let dir = root.join(".transcrypt");
     if fs::symlink_metadata(&dir).is_ok() {
@@ -252,7 +200,6 @@ fn init(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
         return Err(".gitattributes already exists; this POC requires a new attributes policy".into());
     }
     check_hook_available(root)?;
-    if key_file(root)?.exists() { return Err("already unlocked".into()); }
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
     let (config, key) = initialize_config(&password, &salt)?;
@@ -264,23 +211,17 @@ fn init(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
         .write_all(&config).map_err(|e| format!("cannot write config: {e}"))?;
     fs::write(root.join(".gitattributes"), ATTRS)
         .map_err(|e| format!("cannot write attributes: {e}"))?;
-    write_key(root, &key)?;
-    install_filters(root)?;
-    install_hook(root)?;
-    git(root, &["add", "--", ".transcrypt/config", ".gitattributes"])?;
-    eprintln!("Initialized v3; committed public metadata is required. Local key is stored in .git/transcrypt-v3/key until lock.");
+    activate_session(root, &config, &key, true)?;
+    eprintln!("Initialized v3; commit public metadata. Key lives only in the private credential agent until lock.");
     Ok(())
 }
 
 fn unlock(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
     let config = load_config(root)?;
-    if key_file(root)?.exists() { return Err("already unlocked; run lock before unlocking again".into()); }
     let key = unlock_config(&password, &config)?; // Authenticate BEFORE any persistent writes.
     check_hook_available(root)?;
-    write_key(root, &key)?;
-    install_filters(root)?;
-    install_hook(root)?;
-    eprintln!("Unlocked v3 locally. For fresh clones run `transcrypt-v3 hydrate` to materialize protected worktree files.");
+    activate_session(root, &config, &key, false)?;
+    eprintln!("Unlocked v3 via a private in-memory credential agent. For fresh clones run `transcrypt-v3 hydrate`.");
     Ok(())
 }
 
@@ -293,7 +234,7 @@ fn lock(root: &Path) -> Result<(), String> {
         return Err("untracked *.secret files exist; refusing to leave unprotected plaintext behind".into());
     }
     let config = load_config(root)?;
-    let key = read_key(root, &config)?;
+    session::request(root, &config, Operation::Ping, &[])?;
     let mut to_flush = Vec::new();
     for (mode, path) in indexed_files(root)? {
         if !protected_path(&path) { continue; }
@@ -301,13 +242,12 @@ fn lock(root: &Path) -> Result<(), String> {
             return Err("protected staged object is not a regular file".into());
         }
         let relative = indexed_path(&path)?;
-        let dest = root.join(relative);
-        require_regular_file(&dest)?;
+        let dest = require_regular_under(root, &relative)?;
         let source = read_limited(fs::File::open(&dest)
             .map_err(|_| "cannot read protected worktree file")?, MAX_FILE + FILE_MIN_LEN)?;
         let object = git_show(root, &path)?;
         if source == object { continue; }
-        let derived = encrypt_file(&config, &key, &source)?;
+        let derived = session::request(root, &config, Operation::Encrypt, &source)?;
         if derived != object {
             return Err("protected worktree has uncommitted plaintext changes; refusing lock".into());
         }
@@ -329,8 +269,8 @@ fn lock(root: &Path) -> Result<(), String> {
         }
         fs::rename(&temp, dest).map_err(|e| format!("cannot replace protected file: {e}"))?;
     }
-    fs::remove_file(key_file(root)?).map_err(|e| format!("cannot remove local key: {e}"))?;
-    eprintln!("Locked: tracked *.secret files flushed to ciphertext and local key removed. This does not securely erase historical plaintext backups.");
+    session::stop(root, &config)?;
+    eprintln!("Locked: tracked *.secret files flushed and the in-memory credential agent stopped. This does not securely erase historical plaintext backups.");
     Ok(())
 }
 
@@ -343,15 +283,14 @@ fn read_limited<R: Read>(read: R, limit: usize) -> Result<Vec<u8>, String> {
 
 fn filter(root: &Path, clean: bool) -> Result<(), String> {
     let config = load_config(root)?;
-    let key = read_key(root, &config)?;
     let input = read_limited(io::stdin(), MAX_FILE + FILE_MIN_LEN)?;
     let result = if clean {
         if parse_file_header(&input).is_ok() {
             return Err("worktree contains v3 ciphertext instead of plaintext; refusing double encryption".into());
         }
-        encrypt_file(&config, &key, &input)?
+        session::request(root, &config, Operation::Encrypt, &input)?
     } else {
-        decrypt_file(&config, &key, &input)?
+        session::request(root, &config, Operation::Decrypt, &input)?
     };
     io::stdout().write_all(&result).map_err(|_| "cannot write output")?;
     Ok(())
@@ -381,12 +320,30 @@ fn indexed_path(path: &[u8]) -> Result<PathBuf, String> {
     Ok(relative)
 }
 
-fn require_regular_file(path: &Path) -> Result<(), String> {
-    let meta = fs::symlink_metadata(path).map_err(|_| "protected worktree file missing")?;
-    if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err("protected worktree path must be a regular file, not a symlink".into());
+/// Reject a symlink in *any* worktree path component, not only the leaf.
+/// This is a preflight check; it is not a substitute for race-free dirfd
+/// operations against a concurrently hostile process running as this UID.
+fn require_regular_under(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let mut current = root.to_path_buf();
+    let parts: Vec<_> = relative.components().collect();
+    if parts.is_empty() { return Err("empty protected worktree path".into()); }
+    for (i, part) in parts.iter().copied().enumerate() {
+        match part {
+            std::path::Component::Normal(name) => current.push(name),
+            _ => return Err("unsafe protected path component".into()),
+        }
+        let meta = fs::symlink_metadata(&current)
+            .map_err(|_| "protected worktree path missing")?;
+        if meta.file_type().is_symlink() {
+            return Err("symlink in protected path rejected".into());
+        }
+        if i + 1 == parts.len() {
+            if !meta.is_file() { return Err("protected worktree entry is not a regular file".into()); }
+        } else if !meta.is_dir() {
+            return Err("protected worktree parent is not a directory".into());
+        }
     }
-    Ok(())
+    Ok(current)
 }
 
 /// Stage-0 files with paths represented as raw bytes (no newline splitting).
@@ -416,42 +373,159 @@ fn verify_index(root: &Path) -> Result<(), String> {
     if git_show(root, b".gitattributes")? != ATTRS {
         return Err("staged .gitattributes differs from required v3 policy".into());
     }
-    let key = read_key(root, &config)?;
+    session::request(root, &config, Operation::Ping, &[])?;
     for (mode, path) in indexed_files(root)? {
         if !protected_path(&path) { continue; }
         if mode != b"100644" {
             return Err("protected path is not a regular file in staged index".into());
         }
         let encrypted = git_show(root, &path)?;
-        decrypt_file(&config, &key, &encrypted)?;
+        session::request(root, &config, Operation::Decrypt, &encrypted)?;
+    }
+    Ok(())
+}
+
+/// Write a decoded protected file without routing its encrypted worktree
+/// contents through Git's clean filter. Git checkout/restore may invoke
+/// `clean` while refreshing the index; raw ciphertext in a locked clone is
+/// deliberately rejected by that filter.
+///
+/// An exclusive temporary file avoids publishing partially written plaintext.
+/// This is not a race-free or multi-file transactional filesystem operation:
+/// the public spec documents that stronger dirfd/fsync guarantees are pending.
+fn publish_plaintext(dest: &Path, plaintext: &[u8], slot: usize) -> Result<(), String> {
+    let temp = dest.with_file_name(format!(
+        ".transcrypt-v3-hydrate-{}-{slot}.tmp", std::process::id()
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&temp)
+        .map_err(|e| format!("cannot create private hydration file: {e}"))?;
+    let result = file.write_all(plaintext).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(e) = result {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("cannot write private hydration file: {e}"));
+    }
+    if let Err(e) = fs::rename(&temp, dest) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("cannot publish hydrated plaintext: {e}"));
     }
     Ok(())
 }
 
 fn hydrate(root: &Path) -> Result<(), String> {
     let config = load_config(root)?;
-    let key = read_key(root, &config)?;
-    let entries: Vec<_> = indexed_files(root)?.into_iter().filter(|(_, path)| protected_path(path)).collect();
-    // Preflight ALL paths before changing any working files.
+    // Authenticate ALL staged protected objects and the staged metadata
+    // before exposing any plaintext in the checkout.
+    verify_index(root)?;
+    let index_before = git(root, &["ls-files", "--stage", "-z"])?;
+    let entries: Vec<_> = indexed_files(root)?.into_iter()
+        .filter(|(_, path)| protected_path(path)).collect();
+    let mut pending = Vec::new();
+
+    // Validate the complete worktree first. A checkout may contain a mixture
+    // of ciphertext and already-hydrated plaintext after an interrupted run.
+    // Neither an unexpected third value nor a protected symlink is replaced.
     for (mode, path) in &entries {
         if mode != b"100644" { return Err("protected path is not regular".into()); }
         let object = git_show(root, path)?;
-        decrypt_file(&config, &key, &object)?;
+        let plaintext = session::request(root, &config, Operation::Decrypt, &object)?;
         let relative = indexed_path(path)?;
-        require_regular_file(&root.join(&relative))?;
-        if fs::read(root.join(relative)).map_err(|_| "missing worktree ciphertext; refusing overwrite")? != object {
-            return Err("protected worktree changed; refusing destructive hydrate".into());
+        let dest = require_regular_under(root, &relative)?;
+        let worktree = read_limited(fs::File::open(&dest)
+            .map_err(|_| "cannot read protected worktree file")?, MAX_FILE + FILE_MIN_LEN)?;
+        if worktree == object {
+            pending.push((path.clone(), relative));
+        } else if worktree != plaintext {
+            return Err("protected worktree differs from staged ciphertext and authenticated plaintext; refusing overwrite".into());
         }
     }
-    for (_, path) in entries {
+    // Detect a changed index or public configuration between validation and
+    // publication. Concurrent changes during publication still require OS
+    // isolation; they are explicitly outside this prototype's guarantees.
+    if git(root, &["ls-files", "--stage", "-z"])? != index_before || load_config(root)? != config {
+        return Err("index or public configuration changed during hydration".into());
+    }
+
+    for (i, (path, relative)) in pending.into_iter().enumerate() {
+        let object = git_show(root, &path)?;
+        let plaintext = session::request(root, &config, Operation::Decrypt, &object)?;
+        let dest = require_regular_under(root, &relative)?;
+        let worktree = read_limited(fs::File::open(&dest)
+            .map_err(|_| "cannot re-read protected worktree file")?, MAX_FILE + FILE_MIN_LEN)?;
+        if worktree != object {
+            return Err("protected worktree changed during hydration; refusing overwrite".into());
+        }
+        publish_plaintext(&dest, &plaintext, i)?;
+    }
+    // Git's index still caches the size/mtime of the encrypted checkout.
+    // `git add` is needed to refresh the worktree stat cache: merely having
+    // equal clean-filter output may still report a modified working file.
+    // The filter now receives only authenticated plaintext, never the raw
+    // ciphertext that caused the original `git restore` failure. Verify that
+    // re-staging changes NO staged blob or mode, even when index != HEAD.
+    for (_, path) in &entries {
         let mut command = Command::new("git");
-        command.current_dir(root).args(["restore", "--source=HEAD", "--worktree", "--"]);
+        command.current_dir(root).args(["add", "--"]);
         #[cfg(unix)]
-        command.arg(std::ffi::OsString::from_vec(path));
+        command.arg(std::ffi::OsString::from_vec(path.clone()));
         #[cfg(not(unix))]
-        command.arg(String::from_utf8(path).map_err(|_| "non-UTF8 path unsupported")?);
+        command.arg(String::from_utf8(path.clone()).map_err(|_| "non-UTF8 path unsupported")?);
         output(command)?;
+    }
+    if git(root, &["ls-files", "--stage", "-z"])? != index_before {
+        return Err("hydration changed staged Git objects; refusing to report success".into());
     }
     eprintln!("Hydration complete.");
     Ok(())
+}
+
+#[cfg(test)]
+mod local_path_tests {
+    use super::*;
+
+    #[test]
+    fn hydration_replacement_is_private_and_complete() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!(
+            "transcrypt-v3-hydration-publish-{}", std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir(&tmp).unwrap();
+        let path = tmp.join("item.secret");
+        fs::write(&path, b"ciphertext placeholder").unwrap();
+        publish_plaintext(&path, b"authenticated plaintext", 0).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"authenticated plaintext");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 1);
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn protected_parent_symlinks_cannot_redirect_lock_or_hydrate() {
+        use std::os::unix::fs::symlink;
+        let tmp = std::env::temp_dir().join(format!(
+            "transcrypt-v3-parent-symlink-{}", std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir(&tmp).unwrap();
+        let external = tmp.join("external");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("item.secret"), b"test").unwrap();
+        let checkout = tmp.join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        symlink(&external, checkout.join("linked")).unwrap();
+        let path = Path::new("linked/item.secret");
+        assert!(require_regular_under(&checkout, path).is_err());
+        fs::create_dir(checkout.join("regular")).unwrap();
+        fs::write(checkout.join("regular/item.secret"), b"test").unwrap();
+        assert_eq!(
+            require_regular_under(&checkout, Path::new("regular/item.secret")).unwrap(),
+            checkout.join("regular/item.secret")
+        );
+        let _ = fs::remove_dir_all(tmp);
+    }
 }
