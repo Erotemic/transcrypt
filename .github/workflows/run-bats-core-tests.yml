@@ -79,9 +79,9 @@ jobs:
         run: /tmp/bats-core/bin/bats --jobs 4 tests/v2/ tests/v3/
 
   rust:
-    # Independent Rust test job (docs/verification/04): the core crates
-    # are zero-dependency, so this needs no registry access. The v2
-    # differential test requires openssl, present on every matrix OS.
+    # v2 cores have no external dependencies; the secure-first v3 executable
+    # uses pinned RustCrypto crates and requires an initial Cargo fetch.
+    # Golden v3 test vectors are independently calculated, not copied from Rust.
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -98,9 +98,21 @@ jobs:
       - name: Check Bash v2 byte contract
         run: bash tests/interop/check-bash-legacy-contract.sh
 
-      - name: Test Rust/Bash/Git interoperability (offline)
+      - name: Test legacy parity and v3 end-to-end Git lifecycle
         working-directory: rust
-        run: cargo test --offline --workspace
+        run: cargo test --workspace
+
+  v3-reference:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install independent reference crypto libraries (test only)
+        run: python -m pip install cryptography==46.0.4 argon2-cffi==25.1.0
+      - name: Verify independent AES-SIV / Argon2id vectors
+        run: python tests/v3/reference/check_vectors.py -v
 
   feasibility-probe:
     # D-01/D-02 evidence (docs/verification/reference/d01-d02-feasibility.md):

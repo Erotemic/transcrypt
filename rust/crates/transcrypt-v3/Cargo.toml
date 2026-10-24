@@ -1,0 +1,20 @@
+[package]
+name = "transcrypt-v3"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Authenticated deterministic Rust Transcrypt v3 proof of concept"
+
+[dependencies]
+transcrypt-v3-core = { path = "../transcrypt-v3-core" }
+aes-siv = "=0.8.0"
+argon2 = "=0.6.0"
+sha2 = "=0.10.9"
+getrandom = "=0.3.4"
+rpassword = "=7.4.0"
+zeroize = "=1.8.2"
+subtle = "=2.6.1"
+
+[[bin]]
+name = "transcrypt-v3"
+path = "src/main.rs"

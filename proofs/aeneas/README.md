@@ -39,3 +39,19 @@ works with pinned compatible tools, write a Lean refinement theorem for the
 **generated** functions, stating the byte-level semantics and all external
 crypto/Git/OS assumptions. Generating a `.lean` file is not a proof; adapter
 functions and crypto primitives require separate contracts.
+
+## Secure-first v3 target (now primary)
+
+`translate-v3-core.sh` is the extraction entrypoint for the actual pure Rust
+`transcrypt-v3-core` crate; it does not translate the v2 compatibility module
+or a handwritten stand-in. `proofs/lean/Transcrypt/V3Wire.lean` defines an
+independent record grammar and verifies structural length/magic properties.
+Those theorems do **not** yet establish Rust-source refinement.
+
+Required next deliverable: run the pinned Charon/Aeneas translation, retain
+source/LLBC provenance, import the generated Lean functions into the proof
+project, and prove encoder/decoder refinement against the independent Lean
+specification (with no `sorry`/`admit`). AES-SIV and Argon2id are delegated
+to external cryptographic libraries; their correctness/security remain
+explicit assumptions. Do not claim the complete Rust/Git executable is
+formally verified on the strength of only this parser proof.

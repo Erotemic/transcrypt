@@ -7,6 +7,17 @@ Rust envelope parser/serializer and legacy Bash hardening. Consult
 [implementation progress](implementation-progress.md) for exact evidence
 and limitations; this document does not promote a legacy result to a v3 proof.
 
+## Secure-first v3 implementation (experimental)
+
+The primary current target is the new [byte-exact v3 AES-SIV / Argon2id
+specification](specs/V3-AUTHENTICATED-P0.md) and its two Rust crates,
+`transcrypt-v3-core` and `transcrypt-v3`. This is a deliberately small
+full-lifecycle proof of concept, **not an approved cryptographic protocol
+or a formally verified executable**. Independent Python test vectors and
+Rust Git integration tests are supplied. The Bash v3 implementation and
+Charon/Aeneas-to-Lean refinement remain separate follow-up work. Legacy v2
+parity work is no longer the immediate development priority.
+
 ## The intended result
 
 One public, byte-exact, implementation-independent protocol specification;

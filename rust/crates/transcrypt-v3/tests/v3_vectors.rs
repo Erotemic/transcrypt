@@ -1,0 +1,34 @@
+//! Independent reference vectors from OpenSSL-backed Python AESSIV + argon2-cffi.
+//! No Python is needed to run these Rust tests.
+use transcrypt_v3::{decrypt_file, encrypt_file, unlock_config};
+use transcrypt_v3_core::{parse_config, parse_file_header};
+
+fn hex_value(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() % 2, 0);
+    value.as_bytes().chunks_exact(2).map(|pair| {
+        let s = std::str::from_utf8(pair).unwrap();
+        u8::from_str_radix(s, 16).unwrap()
+    }).collect()
+}
+
+#[test]
+fn authenticated_vectors_and_strict_parsing() {
+    let fixture = include_str!("../../../../tests/v3/reference/vectors.tsv");
+    for line in fixture.lines() {
+        let columns: Vec<&str> = line.split('\t').collect();
+        assert_eq!(columns.len(), 4);
+        let plaintext = hex_value(columns[1]);
+        let config = hex_value(columns[2]);
+        let record = hex_value(columns[3]);
+        assert!(parse_config(&config).is_ok());
+        assert!(parse_file_header(&record).is_ok());
+        let key = unlock_config(b"correct horse battery staple long secret", &config).unwrap();
+        assert_eq!(encrypt_file(&config, &key, &plaintext).unwrap(), record, "{}", columns[0]);
+        assert_eq!(decrypt_file(&config, &key, &record).unwrap(), plaintext, "{}", columns[0]);
+        let mut forged = record.clone();
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        assert!(decrypt_file(&config, &key, &forged).is_err());
+        assert!(unlock_config(b"not the right passphrase", &config).is_err());
+    }
+}

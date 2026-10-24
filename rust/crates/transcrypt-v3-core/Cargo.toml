@@ -1,0 +1,6 @@
+[package]
+name = "transcrypt-v3-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure, no_std v3 wire-format parser intended for Aeneas verification"

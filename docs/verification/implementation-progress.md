@@ -260,3 +260,33 @@ Next work: run the Rust integration suite, address any real compiler or
 OpenSSL/LibreSSL disagreements, then expand the Rust Git planning/transaction
 layer against `03-git-state-machine.md`. Do not add another manually
 transcribed solver proof instead of implementing runtime behavior.
+
+## October 24 — Secure-first Rust v3 lifecycle POC (this overlay)
+
+- Added `transcrypt-v3-core`: pure, `no_std`, fixed-length, strictly versioned
+  config and file header encoding/parsing; new Aeneas translation target.
+- Added `transcrypt-v3`: Argon2id v19 64 MiB/3 passes and AES-256-CMAC-SIV,
+  deterministic authenticated file records, authenticated public config,
+  separate Unix-only Git init/unlock, required clean/smudge, staged-object
+  verification hook, clone hydrate, and lock that flushes tracked plaintext.
+- Added independent OpenSSL-backed Python AES-SIV and argon2-cffi vectors,
+  Rust vector tests and full Git lifecycle test including negative cases.
+- Added independent Lean abstract wire model (`V3Wire.lean`) with structural
+  theorem statements; **not a proof of Aeneas-generated Rust**.
+- Local evidence: `python3 tests/v3/reference/check_vectors.py -v` passes
+  (2 tests); shell syntax and Cargo TOML were checked.
+- **Not validated here:** Cargo compilation/integration and Lean builds: this
+  model container has neither Rust nor Lean and cannot download toolchains.
+  RustCrypto AES-SIV explicitly warns it has not been independently audited.
+- **Known prototype limitations:** derived key stored in local `.git` while
+  unlocked, incomplete atomic recovery, no full lifecycle proof, unbounded
+  Git index object collection in the adapter, no Bash v3 implementation,
+  no cross-platform validation, no rekey/migration or rollback protection.
+  Formal release claims are blocked until these are addressed or clearly
+  scoped and reviewed.
+
+**Next task:** obtain Cargo compilation results, correct compiler/integration
+failures, run Charon/Aeneas on `transcrypt-v3-core`, and prove refinement of
+its generated encoders/decoders against the independent Lean wire spec. Then
+replace the persistent local key with a memory-only credential agent and
+harden crash/rollback and filesystem races.
