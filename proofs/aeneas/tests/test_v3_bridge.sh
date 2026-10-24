@@ -80,7 +80,7 @@ MOCK
 cat > "$mockbin/lake" <<'MOCK'
 #!/usr/bin/env bash
 printf 'lake %s\n' "$*" >> "$TEST_LOG"
-[ "$*" = 'build V3Wire' ]
+[ "$*" = 'build Transcrypt V3Wire' ]
 MOCK
 chmod +x "$mockbin/cargo" "$mockbin/lake"
 export PATH="$mockbin:$PATH"
@@ -93,8 +93,15 @@ AENEAS_ROOT=/no/aeneas bash "$root/proofs/aeneas/build-v3-generated.sh" > "$work
 grep -Fxq 'cargo hax extract --dry-run v3-wire' "$TEST_LOG"
 grep -Fxq 'cargo hax tools install' "$TEST_LOG"
 grep -Fxq 'cargo hax extract v3-wire' "$TEST_LOG"
-grep -Fxq 'lake build V3Wire' "$TEST_LOG"
+grep -Fxq 'lake build Transcrypt V3Wire' "$TEST_LOG"
 [ -s "$generated/PROVENANCE.txt" ]
+# Import the real production extraction and exact independent v3 spec in the
+# same generated root, with no duplicate imports after repeated preparation.
+grep -Fxq 'import V3Wire.Verification.IndependentSpec' "$TEST_PROJECT/V3Wire.lean"
+cmp "$root/proofs/lean/Transcrypt/V3WireCodec.lean" "$TEST_PROJECT/Transcrypt/V3WireCodec.lean"
+bash "$root/proofs/aeneas/prepare-v3-refinement.sh" > "$work/prepare-again.log"
+[ "$(grep -Fxc 'import V3Wire.Verification.IndependentSpec' "$TEST_PROJECT/V3Wire.lean")" = 1 ]
+[ "$(grep -Fxc 'name = "Transcrypt"' "$TEST_PROJECT/lakefile.toml")" = 1 ]
 # The dry run must occur before tool installation, which must precede extraction.
 first_dry=$(grep -nFx 'cargo hax extract --dry-run v3-wire' "$TEST_LOG" | head -1 | cut -d: -f1)
 first_install=$(grep -nFx 'cargo hax tools install' "$TEST_LOG" | head -1 | cut -d: -f1)
@@ -108,7 +115,7 @@ LEAN
 if bash "$root/proofs/aeneas/build-v3-generated.sh" > "$work/admitted.log" 2>&1; then
   echo 'Build accepted admitted Lean declaration.' >&2; exit 1
 fi
-grep -Fq 'Unproved generated or external-model' "$work/admitted.log"
+grep -Fq 'Admitted code in imported module' "$work/admitted.log"
 
 # A dry-run failure aborts before attempting the costly managed install.
 rm -rf "$generated"

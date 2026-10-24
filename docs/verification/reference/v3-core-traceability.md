@@ -73,3 +73,28 @@ contracts while handling `Result`, fixed-width `U8` arrays, conversion of
 bytes to list elements, and bounds checks. AES-SIV authentication and
 Argon2id are independent external assumptions; successful header parsing
 must never be treated as authentication.
+
+## Aeneas refinement bridge and concrete proof targets
+
+`proofs/aeneas/prepare-v3-refinement.sh` imports production Aeneas output and
+the independently maintained `Transcrypt.V3WireCodec` into the same Lake
+project. This is a shared elaboration boundary, not a proof of equivalence.
+All proof inputs can be exported with `export_v3_proof_inputs.py` after an
+actual extraction. Proof theorems must use the generated Lean functions, not
+handwritten stand-ins, and establish at least:
+
+1. `encode_config` yields the 7-byte magic, 32-byte salt, and 16-byte tag
+   exactly as the independent `encodeConfig` specifies.
+2. `decode_config_exact` succeeds exactly when the fixed 55-byte header has
+   the correct 7-byte prefix, returns the original salt/tag, and rejects all
+   incorrect prefix bytes.
+3. `encode_file_header` produces the exact 6-byte version marker followed by
+   the 16-byte public configuration identifier.
+4. `decode_file_header_exact` accepts precisely the correct 22-byte versioned
+   header, returns its identifier, and rejects wrong magic/version bytes.
+5. The slice-based production public parsers correctly enforce the additional
+   full-length/truncation requirements. These are **not** covered merely by
+   proving the four fixed-width codecs.
+
+Crypto correctness (Argon2id/AES-SIV external dependency) and end-to-end
+Git/OS state transitions remain distinct refinement/security obligations.

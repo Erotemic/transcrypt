@@ -98,6 +98,9 @@ jobs:
       - name: Check Bash v2 byte contract
         run: bash tests/interop/check-bash-legacy-contract.sh
 
+      - name: Check v3 proof input tooling (no mock proof claims)
+        run: python3 proofs/aeneas/tests/test_v3_proof_inputs.py -v
+
       - name: Test legacy parity and v3 end-to-end Git lifecycle
         working-directory: rust
         run: cargo test --workspace

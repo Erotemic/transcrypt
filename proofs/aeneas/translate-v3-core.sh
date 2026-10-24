@@ -76,6 +76,9 @@ mkdir -p "$(dirname "$project")"
   printf '# Managed translator versions\n'
   (cd "$crate" && cargo hax --version && cargo hax tools show)
   printf '# Generated Lean source files\n'
+  # The aggregate import module is also hax-owned and must be protected
+  # against post-extraction edits, not just individual generated function files.
+  sha256sum "$project/V3Wire/Extraction.lean"
   find "$extraction" -type f -name '*.lean' -print | LC_ALL=C sort | while IFS= read -r file; do
     sha256sum "$file"
   done

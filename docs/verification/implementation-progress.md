@@ -352,3 +352,17 @@ harden crash/rollback and filesystem races.
 project, `translate-v3-core.sh`, `build-v3-generated.sh`, then *actual*
 Aeneas-generated refinement theorems. Do not return to standalone SMT model
 work as a substitute for this chain.
+
+### V3 refinement workspace integration (post-extraction)
+
+The Aeneas extraction and independent `Transcrypt.V3WireCodec` are now staged
+in one generated Lake project, using the hax-pinned Lean version. The build
+rejects stale Rust source/scenario provenance, independently modified spec
+copies, and reachable imported Lean declarations using `sorry`, `admit`, or
+`axiom`. A deterministic allowlisted ZIP export captures the actual generated
+function definitions and type signatures for refinement theorem development;
+this requires an actual local hax extraction and does not include secret key
+material or working-tree secret files. The proof environment and export
+pipeline have offline regression tests. **A theorem connecting the generated
+Rust decoder/encoder definitions to `Transcrypt.V3WireCodec` is still required;
+there is no claim of such a proof yet.**
