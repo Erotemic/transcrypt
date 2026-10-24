@@ -8,6 +8,7 @@ target/
 
 # Reproducible Charon/Aeneas output is regenerated from pinned Rust source.
 /proofs/aeneas/generated/
+/rust/proofs/aeneas/generated/
 
 # Local Python test/proof-tool state (not Python runtime requirements).
 __pycache__/

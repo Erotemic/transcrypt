@@ -1,57 +1,75 @@
-# Charon/Aeneas extraction (not yet executed)
+# Production v3 Rust extraction through Charon/Aeneas
 
-`translate-policy.sh` takes the **real** `transcrypt-policy` Rust crate and
-asks Charon to emit LLBC, then Aeneas to generate Lean definitions. It refuses
-to generate output if the tools are missing. Do not use source-style retyped
-Lean implementations as substitutes for generated functions.
+The formal-verification target is the actual `transcrypt-v3-core` crate used
+by the Rust executable. Its four fixed-width codec functions implement the
+byte-level decisions modeled independently in `proofs/lean/Transcrypt/V3WireCodec.lean`.
+The first obligation is to *extract* those four functions and compile their
+Aeneas-generated Lean definitions. A later obligation is to prove that those
+definitions refine the independent specification. Compilation alone does **not**
+discharge the latter obligation.
 
-Install a compatible pinned toolchain first, including the Aeneas Lean
-library and the Lean release required by that Aeneas backend. Official
-references: [Aeneas README](https://github.com/AeneasVerif/aeneas) and
-[getting started](https://github.com/AeneasVerif/aeneas/blob/main/documentation/getting-started.md).
+## Tooling (Ubuntu/Linux)
 
-Then from the repository root:
+Use the supported [hax 0.4 Lean backend](https://pereq.dev/hax/manual/lean/quick_start/)
+instead of cloning or separately building Charon and Aeneas. `cargo-hax`
+selects a matching Charon/Aeneas pair, downloads their prebuilt binaries,
+checks their release-manifest hashes, and manages a compatible Lean package.
+This has **no effect on the Bash or Rust runtime dependencies**; it is only
+needed by developers verifying the Rust implementation.
+
+With `rustup`, Cargo, and Lean (`elan`) installed:
 
 ```bash
-bash proofs/aeneas/translate-policy.sh
+cargo install --locked --version 0.4.2 cargo-hax
+cd ~/code/transcrypt
+bash proofs/aeneas/translate-v3-core.sh
+bash proofs/aeneas/build-v3-generated.sh
 ```
 
-The resulting `generated/PROVENANCE.txt` records the Rust source and LLBC
-hashes and installed tool versions. This file and the LLBC are **not**
-checked into the initial overlay: extraction was not possible in this
-container, which lacks Rust, Lean, Charon and Aeneas toolchains. Do not claim
-T-07/T-08/T-09 as *proved of actual Rust* until the generated functions are
-compiled and refinement theorems target them explicitly. See the independent
-`proofs/lean/Transcrypt/PolicyGates.lean` model and the currently checked Z3
-Boolean obligations.
+The first command may download and compile `cargo-hax`. Its 0.4.2 version
+output uses separate `version=0.4.2` and `commit=...` lines; the driver
+script checks the exact version field rather than assuming a single line. The translation script
+then validates the scenario with `cargo hax extract --dry-run v3-wire`,
+installs matching tools via `cargo hax tools install`, and runs
+`cargo hax extract v3-wire` from the actual crate directory. No `AENEAS_ROOT` environment variable or separate
+`~/code/aeneas` repository is needed. Avoid independently pinning Aeneas and
+Charon to arbitrary commits: use the pairing tested with cargo-hax 0.4.2.
 
-## Current long-term target: actual legacy v2 core
+The declarative selection lives at
+`rust/crates/transcrypt-v3-core/hax.toml`. Hax generates the Lean project at
+`rust/proofs/aeneas/generated/V3Core/lean/`, inside the Rust workspace
+(as required by hax 0.4.2), and excluded from Git. The accompanying
+`PROVENANCE.txt` records the Rust source hash, scenario hash, managed tool
+versions, and generated sources. The ordinary `proofs/lean` project remains
+independent of Aeneas, with its own toolchain.
 
-`bash proofs/aeneas/translate-legacy-core.sh` translates the independent
-`no_std` `transcrypt-legacy-core` crate **used by the shipped Rust filter**.
-It contains the byte-level `legacy_hmac_key`, `legacy_salt_from_digest`,
-`valid_context_name`, and legacy discrimination functions. This is preferred
-over further manually maintained SMT correspondence layers.
+## Strict proof boundary
 
-The independent protocol is
-`docs/verification/specs/LEGACY-V2-INTEROPERABILITY.md`. Once translation
-works with pinned compatible tools, write a Lean refinement theorem for the
-**generated** functions, stating the byte-level semantics and all external
-crypto/Git/OS assumptions. Generating a `.lean` file is not a proof; adapter
-functions and crypto primitives require separate contracts.
+`build-v3-generated.sh` refuses missing/empty extraction modules and admitted
+(`sorry`, `admit`, `axiom`) generated or external-model Lean declarations. It
+requires the generated root to import `V3Wire.Extraction`, then runs Lake on
+that module. If the toolchain produces external model templates containing
+holes, the build stops: those models need explicit, reviewed contracts.
 
-## Secure-first v3 target (now primary)
+The independent Lean proofs (`V3WireCodec`) and generated Lean functions must
+still be connected by real refinement theorems. Cryptographic library
+correctness, Argon2id and AES-SIV security, runtime filesystem effects, and
+Git index transitions are **separate** obligations. Do not treat translation
+or a successful Lake build as a formally verified end-to-end product.
 
-`translate-v3-core.sh` is the extraction entrypoint for the actual pure Rust
-`transcrypt-v3-core` crate; it does not translate the v2 compatibility module
-or a handwritten stand-in. `proofs/lean/Transcrypt/V3Wire.lean` defines an
-independent record grammar and verifies structural length/magic properties.
-Those theorems do **not** yet establish Rust-source refinement.
+## Script regression tests
 
-Required next deliverable: run the pinned Charon/Aeneas translation, retain
-source/LLBC provenance, import the generated Lean functions into the proof
-project, and prove encoder/decoder refinement against the independent Lean
-specification (with no `sorry`/`admit`). AES-SIV and Argon2id are delegated
-to external cryptographic libraries; their correctness/security remain
-explicit assumptions. Do not claim the complete Rust/Git executable is
-formally verified on the strength of only this parser proof.
+```bash
+bash proofs/aeneas/tests/test_v3_bridge.sh
+```
+
+This validates extraction/build script behavior using a stub cargo-hax + Lake
+binary, **not** the real translator. The actual acceptance commands are the
+two scripts above on a machine with Rust and Lean.
+
+Previous `translate-policy.sh` and `translate-legacy-core.sh` entrypoints are
+historical and not part of the secure-first v3 acceptance gate.
+
+References: [hax Lean quickstart](https://pereq.dev/hax/manual/lean/quick_start/),
+[hax tool management](https://pereq.dev/hax/manual/tools/), and
+[Aeneas upstream](https://github.com/AeneasVerif/aeneas).

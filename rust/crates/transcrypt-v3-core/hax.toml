@@ -1,0 +1,18 @@
+# A narrow, reproducible Lean extraction of the *production* Rust v3 wire
+# codec, via the Charon + Aeneas versions managed by cargo-hax 0.4.2.
+#
+# Do not pin Charon and Aeneas independently: cargo-hax's tested pair is the
+# default, and the command-line driver itself is pinned by our setup docs.
+# The proof project is generated outside the Rust crate in an ignored folder.
+
+[scenario.v3-wire]
+backend = "lean"
+include = [
+  "transcrypt_v3_core::decode_config_exact",
+  "transcrypt_v3_core::encode_config",
+  "transcrypt_v3_core::decode_file_header_exact",
+  "transcrypt_v3_core::encode_file_header",
+]
+# hax 0.4.2 requires scenario outputs to remain *inside* the Rust workspace.
+# Two levels above this crate is rust/, the workspace root.
+output-dir = "../../proofs/aeneas/generated/V3Core/lean"
