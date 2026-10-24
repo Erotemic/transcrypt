@@ -1,3 +1,31 @@
+## October 24 follow-up: checked correspondence to source expressions
+
+The SMT runners now generate each modeled Rust expression from the **current
+Rust source** using a deliberately restricted parser under
+`proofs/sourcecheck/`. Any unrecognized Rust syntax fails the proof run
+instead of falling back to a manual model. The independent bit-slice and
+Boolean policy specifications remain in the original SMT C drivers.
+
+- **15/15 universal Base64 obligations passed locally**, including direct
+  composition of the source-derived Rust splitter/joiner for all `2^24`
+  byte triples and all `2^24` sextet quartets, plus canonical tail laws.
+- **22/22 universal policy obligations passed locally**, including
+  bidirectional source/spec equivalence of all three Boolean gates.
+- **6/6 bridge regression tests passed locally**, including negative
+  mutation tests which force Z3 to produce SAT counterexamples and an
+  independent exhaustive evaluation of all 144 Boolean input combinations.
+
+Commands: `python3 -m unittest discover -s proofs/sourcecheck -p 'test_*.py' -v`,
+`bash proofs/smt/run-base64-proof.sh`, `bash proofs/smt/run-policy-proof.sh`.
+A versioned libz3 installation requires the `LIBZ3` override documented in
+`proofs/sourcecheck/README.md`.
+
+This improves the **correspondence evidence** beyond a pinned SHA plus human
+transcription, but it still trusts the small source-subset translator.
+It is neither a Charon/Aeneas translation nor a proof of the complete Rust
+parser or of authenticated v3 encryption. Compilation of Rust/Lean and
+Aeneas-generated refinement remain distinct milestones.
+
 # First checked proof slice: legacy Base64 and pure security gates
 
 Date: 2026-10-24. Baseline: `36f7c5e` plus the preceding staged-index

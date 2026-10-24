@@ -198,3 +198,30 @@ security obligations separately from legacy interoperability.
   `proofs/aeneas/translate-policy.sh` entrypoint, and establish generated-code
   refinement rather than relying on the manual source-model correspondence. Do not claim T-01, T-07, T-08, T-09 or T-12 complete for
   the whole application based on these smaller obligations alone.
+
+
+## Update — October 24: source-derived SMT proofs and build hygiene
+
+- `.gitignore` now excludes Lake's `.lake/` at any depth, Lean object files,
+  Rust `target/` outputs, local proof-generation files, Python test caches,
+  virtual environments, and editor scratch files. The Rust `Cargo.lock` stays
+  tracked as a reproducibility input.
+- Replaced the manually transcribed Rust-to-SMT expressions with a strict
+  source reader (`proofs/sourcecheck/`) that generates Z3 AST declarations
+  from the *real* Rust bitcore and policy functions. Unsupported syntax fails
+  closed. This is a **trusted subset translation**, not Charon/Aeneas.
+- Added direct source-derived full-block and padded-tail identities and
+  bidirectional Boolean source/spec equivalence. Locally Z3 discharged
+  **15 Base64 + 22 policy = 37 universal SMT obligations**.
+- Bridge regression tests **6/6 passed**, including mutations that produced
+  SAT counterexamples and an independent exhaustive check over all 144 policy
+  Boolean input combinations. CI now runs these tests before the SMT checks.
+- No Bash ciphertext functionality changed. The earlier user's Lean header
+  correction is included as part of the cumulative working baseline but
+  the Lean toolchain, Rust toolchain and Aeneas are unavailable in the
+  current container. The user's prior Lean build success is preserved.
+- **Next unblocked task:** compile/test Rust and Lean with installed tools,
+  then extract actual `transcrypt-policy` functions through compatible,
+  revision-pinned Charon/Aeneas and prove refinement against
+  `Transcrypt.PolicyGates`. Do not claim SMT subset proofs establish that
+  refinement.

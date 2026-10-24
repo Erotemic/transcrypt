@@ -1,7 +1,9 @@
 /*
- * Universal Boolean-model checks of the pure prospective policy kernel
- * in rust/crates/transcrypt-policy/src/lib.rs. This is an independent
- * mathematical model of the source expressions, not Aeneas translation.
+ * Universal Boolean-model checks of the prospective Rust policy kernel.
+ * The expressions under test are extracted from production Rust functions
+ * into rust_source_model.h by a strict subset translator. Independent
+ * Boolean postconditions remain specified in this file.
+ * This is NOT an Aeneas or compiler-semantics refinement proof.
  * Trusted adapter obligations are explicitly *outside* this model.
  */
 #include <stdio.h>
@@ -59,6 +61,8 @@ static void prove_implication(const char *name, Z3_ast antecedent,
     Z3_solver_reset(c, sol);
 }
 
+#include "rust_source_model.h"
+
 int main(void) {
     Z3_config cfg = Z3_mk_config();
     c = Z3_mk_context(cfg);
@@ -75,7 +79,13 @@ int main(void) {
     Z3_ast protected[2] = { portable, local };
     Z3_ast p = lor(2, protected);
     Z3_ast requirements[5] = { p, regular, complete, bound, auth };
-    Z3_ast stage = land(5, requirements);
+    Z3_ast stage = rust_secure_stage_allowed(
+        portable, local, regular, complete, bound, auth);
+    Z3_ast expected_stage = land(5, requirements);
+    prove_implication("source-derived stage policy implies independent spec",
+                      stage, expected_stage);
+    prove_implication("independent stage spec implies source-derived policy",
+                      expected_stage, stage);
 
     prove_implication("secure stage acceptance => staged OR local protection", stage, p);
     prove_implication("secure stage acceptance => staged regular file", stage, regular);
@@ -93,7 +103,12 @@ int main(void) {
     Z3_ast u_dest = val("destination_safe");
     Z3_ast u_stable = val("snapshot_stable");
     Z3_ast u_reqs[4] = { u_auth, u_valid, u_dest, u_stable };
-    Z3_ast unlock = land(4, u_reqs);
+    Z3_ast unlock = rust_unlock_writes_allowed(u_auth, u_valid, u_dest, u_stable);
+    Z3_ast expected_unlock = land(4, u_reqs);
+    prove_implication("source-derived unlock policy implies independent spec",
+                      unlock, expected_unlock);
+    prove_implication("independent unlock spec implies source-derived policy",
+                      expected_unlock, unlock);
     prove_implication("unlock may persist only after authentication", unlock, u_auth);
     prove_implication("unlock may persist only after config check", unlock, u_valid);
     prove_implication("unlock may persist only to safe destination", unlock, u_dest);
@@ -105,7 +120,13 @@ int main(void) {
                     val("new_metadata_complete"),
                     val("source_unchanged"),
                     val("rollback_available") };
-    Z3_ast publish = land(6, m);
+    Z3_ast publish = rust_migration_publish_allowed(
+        m[0], m[1], m[2], m[3], m[4], m[5]);
+    Z3_ast expected_publish = land(6, m);
+    prove_implication("source-derived migration policy implies independent spec",
+                      publish, expected_publish);
+    prove_implication("independent migration spec implies source-derived policy",
+                      expected_publish, publish);
     const char *names[6] = {
         "migration publication => all source ciphertexts authenticated",
         "migration publication => all contexts covered",

@@ -133,9 +133,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Z3 development linker
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libz3-dev
-      - name: Prove universal Base64 bit-vector obligations
+      - name: Test closed-subset Rust source translation and mutation detection
+        run: python3 -m unittest discover -s proofs/sourcecheck -p 'test_*.py' -v
+      - name: Prove source-derived Base64 bit-vector obligations
         run: bash proofs/smt/run-base64-proof.sh
-      - name: Prove universal preflight-policy obligations
+      - name: Prove source-derived preflight-policy obligations
         run: bash proofs/smt/run-policy-proof.sh
 
   proof-base64-lean:

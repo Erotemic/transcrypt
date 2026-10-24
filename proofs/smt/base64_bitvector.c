@@ -1,9 +1,11 @@
 /*
  * A fixed-width symbolic proof of the RFC 4648 Base64 byte/sextet core.
  *
- * The unaltered bit expressions correspond to production Rust functions
- * split_triple and join_quartet in rust/.../src/base64_bits.rs.
- * This harness uses Z3's QF_BV solver to establish UNSAT of each negated
+ * Production bit expressions are read directly from Rust by the strict
+ * proofs/sourcecheck/rust_expr.py subset parser, then generated into
+ * rust_source_model.h before compiling this C harness. Any unrecognized
+ * Rust construct stops verification. This uses Z3's QF_BV logic to
+ * establish UNSAT of each negated
  * theorem for ALL bytes / valid sextets, not random test inputs.
  *
  * This proves the mathematical core under Z3's bit-vector semantics.
@@ -124,6 +126,8 @@ static Z3_ast join(Z3_ast s0, Z3_ast s1, Z3_ast s2, Z3_ast s3) {
     return triple(a, b, c);
 }
 
+#include "rust_source_model.h"
+
 int main(void) {
     unsigned maj, min, patch, rev;
     Z3_get_version(&maj, &min, &patch, &rev);
@@ -145,16 +149,15 @@ int main(void) {
     not_equal(join(s0, s1, s2, s3), packed);
     finish("all 3-byte triples decode(encode(bytes)) = bytes");
 
-    /* These 8-bit BV expressions are transliterations of actual Rust
-     * source in split_triple. Establish that bit slicing is a faithful
-     * model, including the left shifts and ORs in Rust's u8 domain. */
-    Z3_ast r0 = shr(a, 2);
-    Z3_ast r1 = bor(shl(band(a, constant(8, 3)), 4), shr(b, 4));
-    Z3_ast r2 = bor(shl(band(b, constant(8, 15)), 2), shr(c, 6));
-    Z3_ast r3 = band(c, constant(8, 63));
-    Z3_ast rust_split = quartet(take(r0, 5, 0), take(r1, 5, 0),
+    /* 8-bit expressions automatically extracted from Rust split_triple.
+     * Compare against an independent bit-slice specification. */
+    Z3_ast r0 = rust_split(0, a, b, c);
+    Z3_ast r1 = rust_split(1, a, b, c);
+    Z3_ast r2 = rust_split(2, a, b, c);
+    Z3_ast r3 = rust_split(3, a, b, c);
+    Z3_ast rust_split_symbols = quartet(take(r0, 5, 0), take(r1, 5, 0),
                                 take(r2, 5, 0), take(r3, 5, 0));
-    not_equal(rust_split, split(a, b, c));
+    not_equal(rust_split_symbols, split(a, b, c));
     finish("Rust split_triple bit expressions = independent bit-slice spec");
 
     /* The high two bits of every stored Rust sextet are always zero. */
@@ -162,6 +165,14 @@ int main(void) {
                               cat(take(r2, 7, 6), take(r3, 7, 6))));
     not_equal(high_zero, zero(8));
     finish("Rust split_triple sextets have range [0, 63]");
+
+    /* Direct composition of both source-derived Rust functions, rather
+     * than only their independent bit-slice specifications. */
+    Z3_ast rs0 = rust_join(0, r0, r1, r2, r3);
+    Z3_ast rs1 = rust_join(1, r0, r1, r2, r3);
+    Z3_ast rs2 = rust_join(2, r0, r1, r2, r3);
+    not_equal(triple(rs0, rs1, rs2), packed);
+    finish("source-derived Rust join(split(a,b,c)) roundtrips all 2^24 triples");
 
     /* All 2^24 four-sextet tuples are canonical (un-padded). */
     Z3_ast t0 = bits("t0", 6), t1 = bits("t1", 6);
@@ -171,17 +182,26 @@ int main(void) {
                     take(decoded, 7, 0)), quartet(t0, t1, t2, t3));
     finish("all full quartets encode(decode(sextets)) = sextets");
 
-    /* As above, compare the literal Rust join_quartet u8 shifts/ORs
-     * against the byte-concatenation specification. */
+    /* Compare source-derived Rust join_quartet against independent
+     * byte-concatenation specifications. */
     Z3_ast q0 = Z3_mk_zero_ext(ctx, 2, t0);
     Z3_ast q1 = Z3_mk_zero_ext(ctx, 2, t1);
     Z3_ast q2 = Z3_mk_zero_ext(ctx, 2, t2);
     Z3_ast q3 = Z3_mk_zero_ext(ctx, 2, t3);
-    Z3_ast d0 = bor(shl(q0, 2), shr(q1, 4));
-    Z3_ast d1 = bor(shl(q1, 4), shr(q2, 2));
-    Z3_ast d2 = bor(shl(q2, 6), q3);
+    Z3_ast d0 = rust_join(0, q0, q1, q2, q3);
+    Z3_ast d1 = rust_join(1, q0, q1, q2, q3);
+    Z3_ast d2 = rust_join(2, q0, q1, q2, q3);
     not_equal(triple(d0, d1, d2), decoded);
     finish("Rust join_quartet bit expressions = independent bit-slice spec");
+
+    Z3_ast dj0 = rust_split(0, d0, d1, d2);
+    Z3_ast dj1 = rust_split(1, d0, d1, d2);
+    Z3_ast dj2 = rust_split(2, d0, d1, d2);
+    Z3_ast dj3 = rust_split(3, d0, d1, d2);
+    not_equal(quartet(take(dj0, 5, 0), take(dj1, 5, 0),
+                      take(dj2, 5, 0), take(dj3, 5, 0)),
+              quartet(t0, t1, t2, t3));
+    finish("source-derived Rust split(join(sextets)) roundtrips all 2^24 quartets");
 
     /* For 1 byte only the first two sextets are data; lower 4 bits of
      * s1 MUST be zero. Show no two canonical encodings share a byte. */
@@ -216,6 +236,29 @@ int main(void) {
                              take(two, 11, 6), take(two, 5, 0));
     not_equal(take(twoDecoded, 23, 8), cat(a, b));
     finish("all 2-byte tails roundtrip");
+
+    /* The actual production transformations also satisfy both tail
+     * laws, including the unused residual bits of the final sextet. */
+    Z3_ast x0 = rust_split(0, a, zero(8), zero(8));
+    Z3_ast x1 = rust_split(1, a, zero(8), zero(8));
+    Z3_ast x2 = rust_split(2, a, zero(8), zero(8));
+    Z3_ast x3 = rust_split(3, a, zero(8), zero(8));
+    Z3_ast xx = rust_join(0, x0, x1, x2, x3);
+    not_equal(xx, a);
+    finish("source-derived Rust 1-byte tail roundtrip");
+    not_equal(band(x1, constant(8, 15)), zero(8));
+    finish("source-derived Rust 1-byte tail has canonical zero residual bits");
+
+    Z3_ast y0 = rust_split(0, a, b, zero(8));
+    Z3_ast y1 = rust_split(1, a, b, zero(8));
+    Z3_ast y2 = rust_split(2, a, b, zero(8));
+    Z3_ast y3 = rust_split(3, a, b, zero(8));
+    Z3_ast yy0 = rust_join(0, y0, y1, y2, y3);
+    Z3_ast yy1 = rust_join(1, y0, y1, y2, y3);
+    not_equal(cat(yy0, yy1), cat(a, b));
+    finish("source-derived Rust 2-byte tail roundtrip");
+    not_equal(band(y2, constant(8, 3)), zero(8));
+    finish("source-derived Rust 2-byte tail has canonical zero residual bits");
 
     Z3_solver_dec_ref(ctx, solver);
     Z3_del_context(ctx);
