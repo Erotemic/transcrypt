@@ -44,7 +44,7 @@ note '1. AEAD ciphers exposed by the enc app'
 cipher_list=$("$O" enc -list 2>/dev/null)
 for c in -aes-256-siv -aes-128-siv -aes-256-gcm -aes-256-ccm; do
 	if printf '%s\n' "$cipher_list" | grep -qx -- "$c"; then
-		ok "enc exposes $c (unexpected for 3.0)"
+		ok "enc exposes $c (unexpected on 3.0/3.5)"
 	else
 		ok "enc does not expose $c"
 	fi
@@ -179,7 +179,7 @@ if [ "$(uname)" = 'Linux' ] && [ -d /proc ]; then
 	found=2
 	for _ in $(seq 1 100); do
 		if [ -r "/proc/$pid/cmdline" ]; then
-			tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF 'hexkey:0102030405' && found=1
+			tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF 'hexkey:0102030405' && found=1
 		fi
 		kill -0 "$pid" 2>/dev/null || break
 		sleep 0.01
@@ -211,7 +211,8 @@ if [ "$mac_rc" = 0 ]; then
 else
 	note 'mac app HMAC unavailable on this build (n/a)'
 fi
-# CMAC: available on some OpenSSL 3.x builds; on 3.0.13 the cipher fetch fails
+# CMAC: available on some OpenSSL 3.x builds; on 3.0.13 and 3.5.9 the
+# cipher fetch in the mac app fails (documented there)
 cmac_rc=0
 cmac_out=$("$O" mac -macopt hexkey:2b7e151628aed2a6abf7158809cf4f3c -cipher AES-256 -in /dev/null CMAC 2>/dev/null) || cmac_rc=$?
 cmac_out=$(printf '%s' "$cmac_out" | tr 'A-F' 'a-f')
@@ -220,7 +221,52 @@ if [ "$cmac_rc" = 0 ]; then
 		ok "CMAC via mac app matches SP 800-38B example 1" ||
 		bad "CMAC via mac app mismatch (got ${cmac_out:-<empty>})"
 else
-	note 'CMAC via mac app unavailable/broken on this build (recorded, e.g. 3.0.13)'
+	note 'CMAC via mac app unavailable/broken on this build (recorded: 3.0.13, 3.5.9)'
+fi
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+note '7. kdf parameter value semantics (informational; classifies behavior)'
+# Whether the kdf app treats pass/salt values as literal text or expands
+# value prefixes (hex:/file:/env:). On 3.0.13 and 3.5.9 only *key-name*
+# prefixes (hexpass:, hexsalt: ...) decode; value prefixes are literal.
+# These checks record which regime this build is in; they never fail, so
+# a future OpenSSL that adds file-based kdf secrets changes the recorded
+# classification (and therefore the D-02 evidence), not the exit status.
+if "$O" kdf -keylen 4 -digest SHA256 -kdfopt pass:x -kdfopt salt:x -kdfopt iter:1 PBKDF2 >/dev/null 2>&1; then
+	# (a) salt:hex: vs hexsalt: — equal iff the value is hex-decoded
+	shex=$("$O" kdf -keylen 4 -digest SHA256 -kdfopt pass:x -kdfopt salt:hex:0011223344556677 -kdfopt iter:1 PBKDF2 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f')
+	hesalt=$("$O" kdf -keylen 4 -digest SHA256 -kdfopt pass:x -kdfopt hexsalt:0011223344556677 -kdfopt iter:1 PBKDF2 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f')
+	if [ -n "$shex" ] && [ -n "$hesalt" ]; then
+		if [ "$shex" = "$hesalt" ]; then
+			note 'kdf salt: value prefix IS hex-decoded on this build'
+		else
+			note 'kdf salt: value prefix is LITERAL text (hexsalt: key-name prefix decodes)'
+		fi
+	else
+		note 'kdf hexsalt: not supported on this build; classification n/a'
+	fi
+	# (b) pass:file: vs hexpass:<hex of the literal string> — equal iff literal
+	printf '%s' 'd02-kdf-probe-text' >"$TMPDIR_LOCAL/ktxt"
+	litstr="file:$TMPDIR_LOCAL/ktxt"
+	lithex=$(printf '%s' "$litstr" | hex)
+	if [ -n "$lithex" ]; then
+		pfile=$("$O" kdf -keylen 4 -digest SHA256 -kdfopt "pass:$litstr" -kdfopt salt:x -kdfopt iter:1 PBKDF2 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f')
+		pexp=$("$O" kdf -keylen 4 -digest SHA256 -kdfopt "hexpass:$lithex" -kdfopt salt:x -kdfopt iter:1 PBKDF2 2>/dev/null | tr -d ':' | tr 'A-F' 'a-f')
+		if [ -n "$pfile" ] && [ -n "$pexp" ]; then
+			if [ "$pfile" = "$pexp" ]; then
+				note 'kdf pass:file: is NOT expanded (literal string) on this build'
+			else
+				note 'kdf pass:file: IS file-expanded on this build (secret channel!)'
+			fi
+		else
+			note 'kdf file/hexpass comparison n/a on this build'
+		fi
+	else
+		note 'kdf hexpass: not supported on this build; classification n/a'
+	fi
+else
+	note 'openssl kdf not available on this build; section 7 n/a'
 fi
 # ---------------------------------------------------------------------------
 

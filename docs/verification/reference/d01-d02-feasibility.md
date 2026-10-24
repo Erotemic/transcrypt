@@ -12,26 +12,33 @@ only; writes to $TMPDIR only; safe anywhere).
 
 ## Environment where collected
 
-- OpenSSL 3.0.13 (Ubuntu 24.04), GNU bash 5.2.21, git 2.43.0, Linux x86-64.
-- Collected 2026-10-24. The probe reports n/a or fails gracefully on
-  OpenSSL 1.1 / LibreSSL (no `kdf` app there) — those results are pending.
+- OpenSSL 3.0.13 (Ubuntu 24.04 system), GNU bash 5.2.21, git 2.43.0,
+  Linux x86-64. Collected 2026-10-24.
+- OpenSSL 3.5.9 (LTS) built from source (`no-asm`, `/tmp/openssl35`) and
+  probed the same day. (Build note: the stock x86-64 assembly build in 3.5
+  emits huge loop-expansion intermediates; `no-asm` is sufficient for CLI
+  behavior.)
+- The probe reports n/a or fails gracefully on OpenSSL 1.1 / LibreSSL
+  (no `kdf` app there) — those results are pending (CI job).
 
 ## Findings
 
 ### F-1. AEAD ciphers are not exposed by `openssl enc`
 
-`openssl enc -list` contains no SIV, GCM, or CCM cipher (3.0.13). `enc`
-cannot accept an authentication tag, so no standard AEAD (GCM/CCM/SIV) can
-be driven through it. This confirms the B2 concern in
+`openssl enc -list` (3.0.13 and 3.5.9) contains no SIV, GCM, or CCM cipher.
+GCM/CCM exist as library algorithms in 3.5.9 (`list -cipher-algorithms`) but
+the `enc` app does not take an authentication tag, so no standard AEAD
+(GCM/CCM/SIV) can be driven through it. This confirms the B2 concern in
 [07-audit-remediation.md](../07-audit-remediation.md).
 
 ### F-2. AES-SIV (RFC 5297) is not implementable through this CLI surface
 
 - SIV mode is absent from `enc` (F-1).
 - The S2V primitive requires AES-CMAC. `openssl mac ... CMAC` fails on
-  3.0.13 ("unsupported: Algorithm (AES-256 : 0)" — the `mac` app cannot
-  fetch a cipher for CMAC). CMAC availability on other 3.x minors/LibreSSL
-  is unverified.
+  **both 3.0.13 and 3.5.9** (`unsupported: Algorithm (AES-256 : 0)` — the
+  `mac` app cannot fetch a cipher for CMAC; the CMAC algorithm is registered
+  but unreachable through the CLI). This rules out CLI-side SIV on the
+  current 3.x line.
 - Even where CMAC works, its only key channel in the CLI is
   `-macopt hexkey:<hex>` — the key is in **argv** (F-5).
 
@@ -60,9 +67,15 @@ Constraints:
   (D-09): a v3 Bash format built on `-pbkdf2` drops the older backends
   currently supported by v2.
 - The `openssl kdf` app (3.0+) computes PBKDF2 correctly (both RFC 7914
-  vectors pass) but its 3.0.13 `pass`/`salt` parameters are inline only —
-  i.e. argv — so it cannot be the product's secret channel on 3.0.0-3.0.x.
-  (3.1+ adds `pass:file:`/`pass:env:`-style sources; unverified here.)
+  vectors pass on 3.0.13 and 3.5.9), but **its `pass`/`salt` (and other
+  text) parameter values are literal strings in both versions**: the value
+  prefixes `hex:`, `file:`, `env:` are *not* expanded (verified against
+  independent computations and against the 3.5.9 parameter-parsing source;
+  a 3.5.9 `pass:file:<path>` does not even open the file). Only *key-name*
+  prefixes (`hexpass:`, `hexsalt:`, …) decode. The probe's section 7
+  records this classification per build. Therefore **the `kdf` app is not
+  a secret channel on 3.0.13 or 3.5.9** — the `enc` app's `-pass` remains
+  the only file/fd secret channel.
 
 ### F-4. Raw-key AES-CTR/ECB without secret in argv: feasible on 3.0+
 
@@ -96,7 +109,7 @@ the KDF step on 3.0+ backends.
 | ID | State after this evidence |
 |---|---|
 | D-01 | AES-SIV remains the preferred *reviewed* construction for the protocol, but **cannot be implemented in the plain 3.0.13 CLI** (F-1, F-2). Options: accept an argv-exposed derived MAC key in Bash (with a written threat-model assessment), negotiate the D-00 platform policy, or pick an alternative construction whose MAC step is expressible via the F-3/F-4 channels — each is an external decision. |
-| D-02 | KDF and encryption steps are feasible with zero secret in argv on OpenSSL 3.0+ (F-3, F-4, F-6). The authentication step is **not** (F-5). |
+| D-02 | KDF and encryption steps are feasible with zero secret in argv on OpenSSL 3.0+ via `enc -pass` (F-3, F-4, F-6). The `kdf` app adds **no** secret channel on 3.0.13 or 3.5.9 (literal parameter values). The authentication step is **not** CLI-feasable without argv key exposure (F-2, F-5). |
 | D-03 | PBKDF2-HMAC-SHA256 is computable; the 8-byte `-S` limit means the full public salt must be carried inside the KDF input (exact transcript to be specified). |
 | D-09 | The v3 Bash format as sketched requires OpenSSL ≥ 3.0 (F-3). v2's 1.1.x/LibreSSL support is preserved only for legacy format handling. Needs a maintainer decision. |
 | D-06 | `-pass fd:` gives the needed non-interactive secret channel on 3.0+ (F-6). |
@@ -106,7 +119,10 @@ the KDF step on 3.0+ backends.
 - No cryptographic security property of any candidate construction is
   claimed. F-3/F-4 verify byte-level computation, not confidentiality or
   authenticity.
-- Older-backend (OpenSSL 1.1, LibreSSL) behavior is not covered by this
-  run; the probe must be executed in CI on each supported matrix entry.
-- `openssl kdf`/`mac` behavior on 3.1/3.2/3.3+ (file-based kdf pass
-  sources; working CMAC) is untested here.
+- OpenSSL 1.1.x / LibreSSL behavior is not covered by these runs; the CI
+  `feasibility-probe` job collects it on the hosted matrix. (Expected:
+  no `kdf` app; no `enc -pbkdf2`; `-pass file:/fd:` and `enc` core ciphers
+  still work — to be confirmed, not assumed.)
+- Behavior on OpenSSL 4.x (3.6/4.0 exist in this era) is untested; the
+  probe's section 7 is designed to detect any future file/env key-channel
+  changes.

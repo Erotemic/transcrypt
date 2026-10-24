@@ -29,22 +29,30 @@ Planning overlay applied (11 docs + 2 reference docs).
   names is inherently ambiguous; `--rekey`/`--uninstall`/`force_checkout`
   still consume line-based `git ls-crypt` (M5 follow-up).
 
-### M1 (partial) — D-01/D-02 feasibility evidence (OpenSSL 3.0.13)
+### M1 (partial) — D-01/D-02 feasibility evidence (OpenSSL 3.0.13 + 3.5.9)
 - **Probe:** `contrib/verification/d02-openssl-cli-probe.sh` (bash+openssl
   only; RFC 7914/RFC 4231/SP 800-38B vectors + pycryptodome-computed
-  constants + /proc argv/environ inspection). All checks pass on 3.0.13.
+  constants + /proc argv/environ inspection + a section-7 kdf value-
+  semantics classifier). All checks pass on 3.0.13 and 3.5.9.
 - **Evidence doc:** `docs/verification/reference/d01-d02-feasibility.md`.
-  Key results:
-  - `enc` exposes no SIV/GCM/CCM; `mac` CMAC is broken on 3.0.13 ⇒
-    **RFC 5297 AES-SIV is not implementable in the plain 3.0.13 CLI**
-    (D-01: evidence-backed, not decided).
+  Key results (3.0.13 and 3.5.9):
+  - `enc` exposes no SIV/GCM/CCM; `mac` CMAC is broken on both ⇒
+    **RFC 5297 AES-SIV is not implementable in the plain 3.0/3.5 CLI**
+    (D-01: evidence-backed, not decided). 3.5.9 also disproves the
+    "3.1+ adds file-keyed kdf" hypothesis: kdf `pass`/`salt`/`secret`
+    values are literal text (only `hexpass:`-style key-name prefixes
+    decode).
   - `enc -pbkdf2 -iter N -S <8B> -pass file:|fd:` = PBKDF2-HMAC-SHA256
     with **no secret in argv** (verified byte-exact) — but 3.0+ only
     (D-03/D-09 implications; 8-byte `-S` limit).
-  - Raw-key AES-CTR/ECB via `-pass file:|fd:` = EVP_BytesToKey(SHA-256)
-    expansion, verified byte-exact (D-02).
-  - Every CLI keyed-MAC channel (HMAC/CMAC) requires the key in argv
-    (D-02; A6 class).
+  - Raw-key AES-CTR/ECB via `-pass file:|fd:` = documented
+    EVP_BytesToKey(SHA-256) expansion, verified byte-exact (D-02).
+  - Every CLI keyed-MAC channel (mac/dgst `-macopt hexkey`) puts the key
+    in argv (D-02; A6 class).
+- **Options paper:** `docs/verification/11-crypto-options-paper.md`
+  (A: SIV — recommended, with Bash sub-options A1/A2/A3; B: PRF-as-MAC —
+  currently not CLI-feasible; C: October prototype — excluded). Unapproved
+  by design; the frozen spec follows the external decision.
 - **CI:** `feasibility-probe` job added to
   `.github/workflows/run-bats-core-tests.yml` (same OS matrix) so the
   capability table is collected per supported platform (Gate B).
@@ -68,21 +76,21 @@ fix (compatibility impact on shared-gitdir workflows).
 ## Blockers
 
 - M1 freeze: D-01..D-06 are external decisions (crypto review,
-  maintainer platform policy). The D-01/D-02 evidence they need is now
-  available for OpenSSL 3.0.13; **other backends (OpenSSL 1.1.x,
-  LibreSSL, 3.1+) are still unprobed** — run the probe in the CI matrix
-  and where local access exists; do not assume results.
+  maintainer platform policy). Evidence for D-01/D-02 now covers OpenSSL
+  3.0.13 and 3.5.9; **OpenSSL 1.1.x and LibreSSL remain unprobed**
+  (the CI `feasibility-probe` job will produce those; record verbatim
+  output when it runs). LibreSSL expectations: no `kdf`, no `mac` app,
+  no `-pbkdf2`; `enc -pass file:/fd:` + legacy ciphers available —
+  confirm, don't assume.
 - M3+ (Bash v3 implementation) waits for a D-01 direction decision.
 - M6 (Rust) waits on M1; see 04 for the crate layout.
 
 ## Next unblocked task
 
-1. Capture probe results on the remaining matrix backends (OpenSSL 1.1.x,
-   LibreSSL, OpenSSL 3.1+) and append them to
-   `docs/verification/reference/d01-d02-feasibility.md` (CI job will
-   produce them; record verbatim output, do not summarize from memory).
-2. Draft the M1 protocol document skeleton
-   (`docs/verification/PROTOCOL-DRAFT-*.md`) as an **options paper**
-   (SIV wire format for the Rust implementation + the two feasible Bash
-   authentication options from the evidence), explicitly marked
-   unapproved until D-01 is decided — do not present it as a frozen spec.
+1. Once CI (or any 1.1.x/LibreSSL host) produces probe output, append it
+   to `docs/verification/reference/d01-d02-feasibility.md` verbatim.
+2. The options paper (11) is ready for the external D-01 decision; when a
+   direction is chosen, write the frozen `PROTOCOL-<id>.md` from it.
+3. No further Bash v2 hardening is known in this tree beyond the A7 fix
+   (see audit cross-check above); the `crypt-dir`/symlink-redirect
+   observations are queued for a maintainer decision before any fix.
