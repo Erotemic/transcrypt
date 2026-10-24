@@ -152,3 +152,17 @@ audited. Do not yet deploy for valuable secrets.
 Reference vectors: `python3 tests/v3/reference/check_vectors.py -v`
 (from repository root, with `cryptography` and `argon2-cffi` installed for
 independent **development tests only**). Rust tests require no Python.
+
+
+### V3 pure-core verification seam
+
+`transcrypt-v3-core` now provides `decode_config_exact` (55 bytes) and
+`decode_file_header_exact` (22 bytes) as the fixed-size content decoders
+called by the public slice parsers. The input-size gate for a complete file
+record remains `FILE_MIN_LEN = 38`, including the 16-byte authentication tag.
+Neither decoder authenticates ciphertext: that is the RustCrypto adapter's
+responsibility. With compatible Charon/Aeneas tools installed, use
+`proofs/aeneas/translate-v3-core.sh` and `build-v3-generated.sh` to create
+and type-check actual Rust-generated Lean definitions. The independent
+`proofs/lean/Transcrypt/V3WireCodec.lean` supplies the target mathematical
+contract, not a purported proof about those generated definitions.

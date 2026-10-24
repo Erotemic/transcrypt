@@ -330,3 +330,25 @@ harden crash/rollback and filesystem races.
   The artifact environment did not compile Rust. Filesystem operations still
   lack full crash transactions and dirfd-based protection against concurrent
   same-UID path replacement.
+
+
+### 2026-10-24: V3 wire-codec refinement preparation (incremental)
+
+- Factored `decode_config_exact` and `decode_file_header_exact` into the real
+  Rust `no_std` v3 codec. Existing public parsers delegate after checking
+  total lengths. No byte-format or cryptographic mode changes.
+- Extended Rust parser tests to exercise both routes and corrupt every
+  version/magic byte; the full Rust workspace still requires local Cargo.
+- Added the independent Lean *shape* decoders and theorem obligations for
+  successful encode/decode, wrong length, wrong magic, and truncated body.
+- Updated Charon/Aeneas translation to target these actual Rust functions;
+  added a separate Lake build against the matching Aeneas Lean backend that
+  refuses missing admitted external models.
+- In this artifact runtime: Bash syntax checks and independent v3 Python
+  cryptographic vectors passed. No Rust, Lean, Charon, or Aeneas compiler is
+  installed; do not record those builds as passed until run locally.
+
+**Next gate:** `cargo test --workspace`, `lake build` in the independent Lean
+project, `translate-v3-core.sh`, `build-v3-generated.sh`, then *actual*
+Aeneas-generated refinement theorems. Do not return to standalone SMT model
+work as a substitute for this chain.

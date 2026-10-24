@@ -54,3 +54,22 @@ permissions, staged-index hydration, rejection of a divergent second file
 without changing the first, repeatable hydration, failure-to-lock on untracked
 secrets, agent termination and re-unlock. The Unix/IPC implementation has no Charon
 or Aeneas refinement claim; only the pure v3 core is targeted for extraction.
+
+## Fixed-width production decoder boundary
+
+As of this implementation increment, the actual `transcrypt-v3-core`
+parsers call these fixed-array content decoders after length checking:
+
+| Public API (called by crypto adapter) | Production content decision | Independent Lean contract |
+|---|---|---|
+| `parse_config(&[u8])` | `decode_config_exact(&[u8; 55])` | `V3Wire.decodeConfigShape` |
+| `parse_file_header(&[u8])` | `decode_file_header_exact(&[u8; 22])` | `V3Wire.decodeFileHeaderShape`, with the public ≥38-byte precondition |
+| `encode_config(&Config)` | Production fixed array encoder | `V3Wire.encodeConfig` |
+| `encode_file_header(&[u8; 16])` | Production fixed array encoder | First 22 bytes of `V3Wire.encodeFile` |
+
+This is source-level factoring, **not yet an Aeneas-to-Lean refinement
+proof**. The proof must tie generated functions to these independent
+contracts while handling `Result`, fixed-width `U8` arrays, conversion of
+bytes to list elements, and bounds checks. AES-SIV authentication and
+Argon2id are independent external assumptions; successful header parsing
+must never be treated as authentication.

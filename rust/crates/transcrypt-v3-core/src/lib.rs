@@ -56,11 +56,12 @@ pub fn encode_config(config: &Config) -> [u8; CONFIG_LEN] {
     out
 }
 
-/// Reject unknown versions, truncated/extended metadata and malformed magic.
-pub fn parse_config(input: &[u8]) -> Result<Config, FormatError> {
-    if input.len() != CONFIG_LEN {
-        return Err(FormatError::Length);
-    }
+/// Decode the fixed-size committed config record. This is the primary pure
+/// codec entrypoint for Charon/Aeneas: no dynamically-sized slice operations,
+/// filesystem state, allocation, or external cryptographic library calls.
+/// Authentication is a separate operation performed by the cryptographic
+/// adapter *after* this structural parse.
+pub fn decode_config_exact(input: &[u8; CONFIG_LEN]) -> Result<Config, FormatError> {
     let mut i = 0;
     while i < CONFIG_MAGIC.len() {
         if input[i] != CONFIG_MAGIC[i] {
@@ -83,6 +84,22 @@ pub fn parse_config(input: &[u8]) -> Result<Config, FormatError> {
     Ok(Config { salt, tag })
 }
 
+/// Reject unknown versions, truncated/extended metadata and malformed magic.
+/// This public slice boundary delegates the content decision to the *same*
+/// fixed-size decoder targeted by formal refinement.
+pub fn parse_config(input: &[u8]) -> Result<Config, FormatError> {
+    if input.len() != CONFIG_LEN {
+        return Err(FormatError::Length);
+    }
+    let mut record = [0u8; CONFIG_LEN];
+    let mut i = 0;
+    while i < CONFIG_LEN {
+        record[i] = input[i];
+        i += 1;
+    }
+    decode_config_exact(&record)
+}
+
 pub fn encode_file_header(id: &[u8; ID_LEN]) -> [u8; FILE_HEADER_LEN] {
     let mut out = [0u8; FILE_HEADER_LEN];
     let mut i = 0;
@@ -98,12 +115,11 @@ pub fn encode_file_header(id: &[u8; ID_LEN]) -> [u8; FILE_HEADER_LEN] {
     out
 }
 
-/// Parses only the public envelope header; authenticity is *not* established here.
-/// Callers must authenticate the complete message before releasing plaintext.
-pub fn parse_file_header(input: &[u8]) -> Result<[u8; ID_LEN], FormatError> {
-    if input.len() < FILE_MIN_LEN {
-        return Err(FormatError::Length);
-    }
+/// Decode a fixed-width file header. This is the second pure refinement
+/// target; it is also used by the production slice-based parser below.
+/// The caller is responsible for checking that at least TAG_LEN body bytes
+/// follow the header and for authenticating the complete file record.
+pub fn decode_file_header_exact(input: &[u8; FILE_HEADER_LEN]) -> Result<[u8; ID_LEN], FormatError> {
     let mut i = 0;
     while i < FILE_MAGIC.len() {
         if input[i] != FILE_MAGIC[i] {
@@ -120,6 +136,21 @@ pub fn parse_file_header(input: &[u8]) -> Result<[u8; ID_LEN], FormatError> {
     Ok(id)
 }
 
+/// Parses only the public envelope header; authenticity is *not* established here.
+/// Callers must authenticate the complete message before releasing plaintext.
+pub fn parse_file_header(input: &[u8]) -> Result<[u8; ID_LEN], FormatError> {
+    if input.len() < FILE_MIN_LEN {
+        return Err(FormatError::Length);
+    }
+    let mut header = [0u8; FILE_HEADER_LEN];
+    let mut i = 0;
+    while i < FILE_HEADER_LEN {
+        header[i] = input[i];
+        i += 1;
+    }
+    decode_file_header_exact(&header)
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -127,6 +158,40 @@ extern crate std;
 mod tests {
     use std::vec::Vec;
     use super::*;
+
+    #[test]
+    fn fixed_decoders_are_the_actual_public_parser_path() {
+        let salt = core::array::from_fn(|i| i as u8);
+        let tag = core::array::from_fn(|i| (255 - i) as u8);
+        let config = Config { salt, tag };
+        let bytes = encode_config(&config);
+        assert_eq!(decode_config_exact(&bytes), Ok(config));
+        assert_eq!(parse_config(&bytes), decode_config_exact(&bytes));
+        // Each byte of either version marker must be enforced, with no
+        // exceptions for offsets 5 or 6 and no fallback to older formats.
+        for pos in 0..CONFIG_MAGIC.len() {
+            let mut modified = bytes;
+            modified[pos] ^= 1;
+            assert_eq!(decode_config_exact(&modified), Err(FormatError::Magic));
+            assert_eq!(parse_config(&modified), Err(FormatError::Magic));
+        }
+        let id = core::array::from_fn(|i| (i * 11) as u8);
+        let header = encode_file_header(&id);
+        assert_eq!(decode_file_header_exact(&header), Ok(id));
+        for n in [FILE_MIN_LEN, FILE_MIN_LEN + 1, FILE_MIN_LEN + 255] {
+            let mut blob = header.to_vec();
+            blob.resize(n, 0x7f);
+            assert_eq!(parse_file_header(&blob), decode_file_header_exact(&header));
+        }
+        for pos in 0..FILE_MAGIC.len() {
+            let mut modified = header;
+            modified[pos] ^= 1;
+            assert_eq!(decode_file_header_exact(&modified), Err(FormatError::Magic));
+            let mut blob = modified.to_vec();
+            blob.extend_from_slice(&[0u8; TAG_LEN]);
+            assert_eq!(parse_file_header(&blob), Err(FormatError::Magic));
+        }
+    }
 
     #[test]
     fn config_roundtrip_and_strict_length() {
