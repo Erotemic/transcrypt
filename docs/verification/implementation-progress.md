@@ -120,3 +120,51 @@ fix (compatibility impact on shared-gitdir workflows).
 3. No further Bash v2 hardening is known in this tree beyond the A7 fix
    (see audit cross-check above); the `crypt-dir`/symlink-redirect
    observations are queued for a maintainer decision before any fix.
+
+## October 24 2026 independent follow-up — staged-index security and Rust interoperability
+
+- **Confirmed bypass 1:** staged `.gitattributes` required encryption but
+  the working-tree `.gitattributes` had been edited to omit it; plaintext was
+  committed with the original hook. The hook now uses `check-attr --cached`.
+- **Confirmed bypass 2:** staged regular plaintext while the worktree path
+  was a symlink; the original hook skipped it. Stage-0 index mode is now
+  authoritative (`_staged_path_mode`), using literal-path lookup.
+- **Failure handling:** index-path enumeration now propagates Git errors
+  rather than treating a failed pipe/substitution as an empty list;
+  error-path temp files are cleaned even after Bash function locals expire.
+- **Portable policy:** local `.git/info/attributes` can override even
+  `git check-attr --cached`. The hook now unions the effective local policy
+  with an isolated Git-dir view of the staged portable attributes. An
+  explicit reproduction committing plaintext with `secret -filter` in
+  `.git/info/attributes` is rejected after the fix.
+- **Legacy compatibility:** staged symlinks remain allowed; ordinary
+  encrypted commits succeed; missing `nproc` uses a single-worker fallback.
+  A linked Git worktree also passed a direct staged-hook smoke check.
+- **Tests:** 10 new staged-index cases duplicated in the v2/v3 Bats suites
+  (20 new test cases). A local Bats-compatible harness exercised the full
+  collection; a native `bats` binary was not available in this container.
+  The authoritative native Bats CI job must still run.
+- **Rust integration test hardening:** removed a predictable /tmp/password-file
+  fixture that could follow an attacker-created symlink and overwrite a
+  writable file; the test now passes a **public dummy** password through
+  `ENC_PASS`, matching the released Bash legacy filter. This is test code,
+  not a recommended secure-v3 credential transport.
+- **Rust parser correction:** v2 permits OpenSSL cipher modes with arbitrary
+  positive ciphertext length, not just AES-CBC block lengths. The Rust crate
+  now splits/serializes opaque v2 envelope bytes, rejects trailing Base64
+  after padding, and tests CBC/CTR compatibility. This is **not a compiled
+  Rust validation in this container** (`cargo`/`rustc` absent); CI remains
+  the compilation/test gate. See
+  [v2 wire structure](reference/v2-wire-structure.md).
+- **Formal status:** no Lean/Aeneas translation or theorem compiled in this
+  follow-up. Candidate future proof target is
+  `parse_v2(encode_v2(record)) = Ok(record)` for nonempty opaque ciphertext.
+- **Still open:** marker-only v2 hook (no authentication), local bypassable
+  Git hooks, index-writer concurrency, v3 crypto and format D-01..D-06,
+  and all required v3 operational + formal verification milestones.
+
+**Next independently unblocked task:** compile/test the corrected Rust crate
+using `cd rust && cargo test --offline`, then translate the pure Base64 and v2
+record functions through pinned Charon/Aeneas. Keep any authenticated format
+work blocked on the external D-01 decision, and address remaining Git
+security obligations separately from legacy interoperability.

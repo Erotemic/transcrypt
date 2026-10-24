@@ -271,34 +271,110 @@ derive_context_config_group() {
 # avoid quoting of filenames to support names containing double quotes. #173
 _list_encrypted_files() {
 	local strict_context=${1:-}
+	local attributes_source=${2:-worktree}
+	local attributes_flags=()
+	local listing_tmp path attr info portable_repo index_file objects_dir worktree
 
-	# List files with -z to disable quoting of filenames, then filter for
-	# files marked for encryption (git check-attr), keeping the NUL delimiters
-	# end-to-end so that filenames containing newlines (or any other bytes)
-	# cannot fragment into bogus paths and no candidate is silently skipped.
-	# With core.quotePath=false the git -z output is verbatim, so no quoting
-	# or unquoting is needed and the bytes can be consumed safely.
-	# We read the NUL-delimited "<path> NUL <attr> NUL <info> NUL" triples
-	# emitted by check-attr directly in bash rather than using
-	# `awk -v RS='\x00'` because some awk builds (notably the Homebrew "one
-	# true awk", e.g. version 20260426) only read the first record when RS is
-	# a null byte. See #213.
+	# The staged .gitattributes determine the portable policy of the commit.
+	# Normal lists continue to use the working-tree attribute view.
+	case $attributes_source in
+	worktree) ;;
+	cached) attributes_flags=(--cached) ;;
+	*) return 1 ;;
+	esac
+
+	# Process substitution hides producer exit status. A failed Git attribute
+	# query must never be interpreted as an empty list of protected paths.
+	listing_tmp=$(mktemp) || return 1
+	if ! git -c core.quotePath=false ls-files -z |
+		git -c core.quotePath=false check-attr "${attributes_flags[@]}" filter -z --stdin >"$listing_tmp"; then
+		rm -f -- "$listing_tmp"
+		return 1
+	fi
+
+	if [[ $attributes_source == cached ]]; then
+		# Git's --cached option still gives .git/info/attributes (and
+		# core.attributesFile) precedence over staged .gitattributes.
+		# Such LOCAL overrides cannot be allowed to hide a protected file
+		# from the commit. Read the same index and objects through an empty
+		# temporary Git directory, free of local/global attribute overrides.
+		# Union the portable policy with the effective local policy above.
+		portable_repo=$(mktemp -d) || { rm -f -- "$listing_tmp"; return 1; }
+		if ! git init --bare -q "$portable_repo"; then
+			rm -f -- "$listing_tmp"
+			rm -rf -- "$portable_repo"
+			return 1
+		fi
+		index_file=${GIT_INDEX_FILE:-$(git rev-parse --git-path index)}
+		objects_dir=${GIT_OBJECT_DIRECTORY:-$(git rev-parse --git-path objects)}
+		worktree=$(git rev-parse --show-toplevel) || {
+			rm -f -- "$listing_tmp"
+			rm -rf -- "$portable_repo"
+			return 1
+		}
+		[[ $index_file == /* ]] || index_file="$PWD/$index_file"
+		[[ $objects_dir == /* ]] || objects_dir="$PWD/$objects_dir"
+		if ! git -c core.quotePath=false ls-files -z |
+			(
+				unset GIT_COMMON_DIR
+				GIT_DIR="$portable_repo" GIT_WORK_TREE="$worktree" \
+				GIT_INDEX_FILE="$index_file" GIT_OBJECT_DIRECTORY="$objects_dir" \
+				GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+				git -c core.attributesFile=/dev/null -c core.quotePath=false \
+				check-attr --cached filter -z --stdin
+			) >>"$listing_tmp"; then
+			rm -f -- "$listing_tmp"
+			rm -rf -- "$portable_repo"
+			return 1
+		fi
+		rm -rf -- "$portable_repo"
+	fi
+
 	while IFS= read -r -d '' path &&
 		IFS= read -r -d '' attr &&
 		IFS= read -r -d '' info; do
 		[[ $attr == 'filter' ]] || continue
-		# Only keep files with the crypt filter matching the context, either
-		# strictly (if $1 = "true") or loosely (if $1 is false or unset)
-		if [[ "$strict_context" == "true" ]]; then
+		if [[ $strict_context == 'true' ]]; then
 			[[ $info == "crypt${CONTEXT_CRYPT_SUFFIX:-}" ]] || continue
 		else
 			[[ $info == "crypt${CONTEXT_CRYPT_SUFFIX:-}"* ]] || continue
 		fi
 		printf '%s\0' "$path"
-	done < <(
-		git -c core.quotePath=false ls-files -z |
-			git -c core.quotePath=false check-attr filter -z --stdin 2>/dev/null
-	)
+	done <"$listing_tmp"
+	rm -f -- "$listing_tmp"
+}
+
+# Git index modes are authoritative for the commit. The worktree's file
+# type might differ (a symlink there must not suppress validation of a
+# staged regular file). Require one fully resolved stage-0 index entry.
+_staged_path_mode() {
+	local path=$1 record entry mode stage
+	IFS= read -r -d '' record < <(git ls-files --stage -z -- ":(literal)$path") || return 1
+	[[ ${record#*$'\t'} == "$path" ]] || return 1
+	entry=${record%%$'\t'*}
+	mode=${entry%% *}
+	stage=${entry##* }
+	[[ $stage == 0 ]] || return 1
+	case $mode in
+	100644 | 100755 | 120000) printf '%s\n' "$mode" ;;
+	*) return 1 ;;
+	esac
+}
+
+# Verify that the staged object (not the worktree file) has the historical
+# v2 encryption marker. Legacy v2 has no authentication; this check cannot
+# establish that the data decrypts or has not been tampered with.
+_staged_file_looks_encrypted() {
+	local path=$1 mode blob_size firstbytes
+	mode=$(_staged_path_mode "$path") || return 1
+	# Symbolic links intentionally store link targets without encryption.
+	[[ $mode == 120000 ]] && return 0
+	blob_size=$(git cat-file -s ":$path" 2>/dev/null) || return 1
+	[[ $blob_size == 0 ]] && return 0
+	# head may close the pipe before Git finishes for large blobs; the
+	# existence/type of the staged blob was checked above.
+	firstbytes=$(git cat-file blob ":$path" 2>/dev/null | head -c8 || true)
+	[[ $firstbytes == 'U2FsdGVk' ]]
 }
 
 # Detect OpenSSL major version 3 or later which requires a compatibility
@@ -461,78 +537,74 @@ git_merge() {
 
 # shellcheck disable=SC2155
 git_pre_commit() {
-	# Transcrypt pre-commit hook: fail if secret file in staging lacks the magic prefix "Salted" in B64
-	tmp=$(mktemp)
-	slow_mode_if_failed() {
-		# NUL-safe enumeration: no candidate may be silently skipped, even when
-		# a filename contains newlines or other unusual bytes. #173 #213
-		while IFS= read -r -d '' secret_file; do
-			# Skip symlinks, they contain the linked target file path not plaintext
-			if [[ -L $secret_file ]]; then
-				continue
-			fi
+	# Examine the exact staged index tree. Worktree .gitattributes and symlink
+	# states can differ from their staged counterparts and cannot govern a
+	# commit-time confidentiality check. This is a cooperative local hook,
+	# not an authenticated-ciphertext validator or remote server policy.
+	local tmp staged_paths secret_file num_procs num_jobs cleanup_cmd
+	tmp=$(mktemp) || return 1
+	staged_paths=$(mktemp) || { rm -f -- "$tmp"; return 1; }
+	# EXIT traps run after function locals go out of scope if a failed
+	# check terminates the script. Capture the quoted paths *now* so the
+	# trap cannot lose them (or trip set -u) on the error path.
+	printf -v cleanup_cmd 'rm -f -- %q %q' "$tmp" "$staged_paths"
+	trap "$cleanup_cmd" EXIT
+	if ! _list_encrypted_files '' cached >"$staged_paths"; then
+		warn 'cannot enumerate the staged protected paths; refusing to commit'
+		return 1
+	fi
 
-			# Get prefix of raw file in Git's index using the :FILENAME revision syntax
-			local firstbytes=$(git show :"${secret_file}" | head -c8)
-			# An empty file does not need to be, and is not, encrypted
-			if [[ $firstbytes == "" ]]; then
-				: # Do nothing
-			# The first bytes of an encrypted file must be "Salted" in Base64
-			elif [[ $firstbytes != "U2FsdGVk" ]]; then
+	slow_mode_if_failed() {
+		while IFS= read -r -d '' secret_file; do
+			if ! _staged_file_looks_encrypted "$secret_file"; then
 				printf 'Transcrypt managed file is not encrypted in the Git index: %s\n' "$secret_file" >&2
 				printf '\n' >&2
 				printf 'You probably staged this file using a tool that does not apply' >&2
 				printf ' .gitattribute filters as required by Transcrypt.\n' >&2
 				printf '\n' >&2
-				printf 'Fix this by re-staging the file with a compatible tool or with'
+				printf 'Fix this by re-staging the file with a compatible tool or with' >&2
 				printf ' Git on the command line:\n' >&2
 				printf '\n' >&2
 				printf '    git rm --cached -- %s\n' "$secret_file" >&2
 				printf '    git add %s\n' "$secret_file" >&2
 				printf '\n' >&2
-				exit 1
+				return 1
 			fi
-		done < <(_list_encrypted_files)
+		done <"$staged_paths"
 	}
 
-	# validate file to see if it failed or not, We don't care about the filename currently for speed, we only care about pass/fail, slow_mode_if_failed() is for what failed.
 	validate_file() {
-		secret_file=${1}
-		# Skip symlinks, they contain the linked target file path not plaintext
-		if [[ -L $secret_file ]]; then
-			return
-		fi
-		# Get prefix of raw file in Git's index using the :FILENAME revision syntax
-		# The first bytes of an encrypted file are always "Salted" in Base64
-		local firstbytes=$(git show :"${secret_file}" | head -c8)
-		if [[ $firstbytes == "" ]]; then
-			: # Do nothing
-		elif [[ $firstbytes != "U2FsdGVk" ]]; then
-			echo "true" >>"${tmp}"
+		local secret_file=$1
+		if ! _staged_file_looks_encrypted "$secret_file"; then
+			printf 'failed\n' >>"$tmp"
 		fi
 	}
 
-	# if bash version is greater than or equal to 4.4, fork to number of threads otherwise run normally
-	if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] || { [[ "${BASH_VERSINFO[0]}" == 4 ]] && [[ "${BASH_VERSINFO[1]}" -ge 4 ]]; }; then
-		num_procs=$(nproc)
+	# For many files, retain parallel checking on Bash >= 4.4. nproc is not
+	# available on every supported host (notably stock macOS): use one worker
+	# there instead of unexpectedly aborting the hook.
+	if [[ ${BASH_VERSINFO[0]} -gt 4 ]] ||
+		{ [[ ${BASH_VERSINFO[0]} == 4 ]] && [[ ${BASH_VERSINFO[1]} -ge 4 ]]; }; then
+		num_procs=$(nproc 2>/dev/null || printf '1')
+		[[ $num_procs =~ ^[1-9][0-9]*$ ]] || num_procs=1
 		num_jobs="\j"
 		while IFS= read -r -d '' secret_file; do
 			while ((${num_jobs@P} >= num_procs)); do
-				wait -n
+				wait -n || true
 			done
-			validate_file "${secret_file}" &
-		done < <(_list_encrypted_files)
-		wait
-		if [[ -s ${tmp} ]]; then
+			validate_file "$secret_file" &
+		done <"$staged_paths"
+		wait || true
+		if [[ -s $tmp ]]; then
 			slow_mode_if_failed
-			rm -f "${tmp}"
-			exit 1
+			return 1
 		fi
 	else
 		slow_mode_if_failed
 	fi
 
-	rm -f "${tmp}"
+	rm -f -- "$tmp" "$staged_paths"
+	trap - EXIT
 }
 
 # Add file patterns to .gitattributes

@@ -1,9 +1,11 @@
 # Transcrypt: interoperable Bash/Rust protocol and verification plan
 
-**Status: planning proposal, 2026-10-24.** No part of this directory claims
-that a secure v3 protocol is frozen, that Bash implements it, that a Rust
-implementation builds, or that a Lean theorem has been proved. The documents
-specify the work required before making any of those claims.
+**Status: secure-v3 planning proposal with partial implementation, 2026-10-24.**
+The secure v3 protocol is not frozen or implemented in Bash or Rust, and
+no Lean theorem has been compiled. There is now a separate released-v2
+Rust envelope parser/serializer and legacy Bash hardening. Consult
+[implementation progress](implementation-progress.md) for exact evidence
+and limitations; this document does not promote a legacy result to a v3 proof.
 
 ## The intended result
 
@@ -47,6 +49,8 @@ Rust design is not promoted into the protocol simply to make proofs easy.
 | [09 - Hand review](09-bash-traceability-and-review.md) | Hand-auditable mapping and change-review checklist | Review procedure |
 | [10 - Decisions](10-decisions-and-blockers.md) | Accepted requirements vs proposed choices vs mandatory unresolved design decisions | Decision register |
 | [Reference: current candidate](reference/current-candidate.md) | Descriptive account of the **unreleased** October 2026 `TCRYPT3` prototype | Non-normative evidence |
+| [Reference: released v2 bytes](reference/v2-wire-structure.md) | Legacy cipher-independent envelope parser/serializer contract and next proof target | Legacy reference |
+| [Implementation progress](implementation-progress.md) | Implemented slices and build/test evidence, remaining blockers | Execution log |
 | [Reference: sources](reference/sources.md) | Maintainer discussions, standards, tooling, source baselines | Evidence register |
 
 ## Versions and source provenance
@@ -65,9 +69,10 @@ Rust design is not promoted into the protocol simply to make proofs easy.
 - **Earlier prototype:** `alternative-enhancement` at `76f00e1`, useful only
   for design history and regression vectors, not a merge source.
 
-These planning files deliberately introduce **no changes** to executable Bash,
-Rust, Lean, configuration, tests, CI, or release packaging. They can be applied
-to the upstream integration branch independently of the unreleased prototype.
+The initial planning overlay was documentation-only. Subsequent development
+commits added legacy Bash safety fixes, feasibility probes, and a zero-dependency
+Rust v2 envelope crate. Those implementation changes are distinct from the
+**unreleased** `TCRYPT3` prototype and do not finalize a secure v3 format.
 
 ## Project rules
 

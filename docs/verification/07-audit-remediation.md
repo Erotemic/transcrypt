@@ -77,3 +77,27 @@ but it must accurately report what it did and what remains. Do not perform
 unrequested destructive garbage collection that could remove unrelated
 unreachable objects. True key compromise requires credential/key rotation
 and may require remote and backup remediation.
+
+## October 24 2026 additional staged-tree bypasses and partial A7 progress
+
+**Confirmed, fixed in this development overlay (pending upstream review):**
+
+- A7-index-attributes: the hook previously queried worktree attributes,
+  allowing staged plaintext to accompany staged encryption attributes.
+- A7-index-mode: the hook previously trusted worktree symlink state,
+  allowing staged plaintext regular blobs to be skipped.
+- A7-failure-handling: the index file enumerator now reports a failing
+  `git ls-files | git check-attr` pipeline instead of silently returning
+  zero checked paths; the caller rejects commits on enumeration failure.
+
+**Still open:** the legacy v2 hook recognizes only the unauthenticated
+`U2FsdGVk` marker. This cannot establish genuine ciphertext and is not the
+final secure-format validation gate. Native Bats and platform matrix remain
+mandatory before merging these changes.
+
+- A7-local-override: `.git/info/attributes` overrides staged
+  `.gitattributes` even when `git check-attr --cached` is used; the old
+  implementation then allowed plaintext. The updated hook consults a
+  separate, isolated staged portable-attribute view and unions it with
+  the local view. Both exploit and extra-local-protection regressions run
+  in `test_staged_index.bats`.

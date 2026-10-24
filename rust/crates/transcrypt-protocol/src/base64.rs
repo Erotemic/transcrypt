@@ -34,9 +34,8 @@ fn value(c: u8) -> Option<u32> {
 /// Decode standard base64 text (line breaks tolerated) to bytes.
 ///
 /// Errors carry the byte offset at which the problem was found. The
-/// output buffer is allocated once, sized at most `input.len() / 4 + 1`
-/// bytes, so maliciously crafted input cannot cause unbounded allocation
-/// (R-25-style boundedness).
+/// output allocation is linear in the length of the encoded input. The
+/// caller must impose an input-size limit appropriate to its environment.
 pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
     // Pass 1: every byte must be alphabet, padding, or a line break, and
     // the number of content characters must be a multiple of four.
@@ -59,10 +58,16 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
     let mut group = [0u32; 4];
     let mut group_len = 0usize;
     let mut group_start = 0usize;
+    let mut saw_padding = false;
 
     for (i, &c) in input.iter().enumerate() {
         if is_line_break(c) {
             continue;
+        }
+        // RFC 4648 padding terminates the encoded data. The previous
+        // decoder accepted valid-looking data after '=' (e.g. Zg==AAAA).
+        if saw_padding {
+            return Err(Base64Error::padding(i, c));
         }
         if group_len == 0 {
             group_start = i;
@@ -116,11 +121,51 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
                 }
                 _ => unreachable!(),
             }
+            if pad != 0 {
+                saw_padding = true;
+            }
             group_len = 0;
         }
     }
 
     Ok(out)
+}
+
+/// Encode binary data exactly as `openssl base64` does: RFC 4648 alphabet,
+/// padding, 64 columns per line and a final newline for non-empty input.
+/// This is a pure wire-format helper; it does not encrypt or authenticate.
+pub fn base64_encode(input: &[u8]) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = Vec::new();
+    let mut column = 0usize;
+    for chunk in input.chunks(3) {
+        let a = chunk[0] as u32;
+        let b = chunk.get(1).copied().unwrap_or(0) as u32;
+        let c = chunk.get(2).copied().unwrap_or(0) as u32;
+        let value = (a << 16) | (b << 8) | c;
+        encoded.push(ALPHABET[((value >> 18) & 63) as usize]);
+        encoded.push(ALPHABET[((value >> 12) & 63) as usize]);
+        encoded.push(if chunk.len() >= 2 {
+            ALPHABET[((value >> 6) & 63) as usize]
+        } else {
+            b'='
+        });
+        encoded.push(if chunk.len() >= 3 {
+            ALPHABET[(value & 63) as usize]
+        } else {
+            b'='
+        });
+        column += 4;
+        if column == 64 {
+            encoded.push(b'\n');
+            column = 0;
+        }
+    }
+    if column != 0 {
+        encoded.push(b'\n');
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -142,6 +187,12 @@ mod tests {
         for (plain, encoded) in cases {
             let decoded = base64_decode(encoded.as_bytes()).unwrap();
             assert_eq!(&decoded[..], plain.as_bytes(), "vector {plain}");
+            let expected = if encoded.is_empty() {
+                Vec::new()
+            } else {
+                format!("{encoded}\n").into_bytes()
+            };
+            assert_eq!(base64_encode(plain.as_bytes()), expected);
         }
     }
 
@@ -157,6 +208,8 @@ mod tests {
             "====", // only padding
             "foo bar", // space is not a line break
             "fo\0o", // NUL is not a line break
+            "Zg==AAAA", // padding may only occur at the end
+            "Zg==Zg==", // repeated padded groups are not canonical
         ];
         for s in bad {
             assert!(
@@ -198,6 +251,20 @@ mod tests {
             base64_decode(b"QUJDQUJD").unwrap(),
             b"ABCABC"
         );
+    }
+
+    #[test]
+    fn encoder_wraps_at_64_columns() {
+        let input = vec![42u8; 204];
+        let encoded = base64_encode(&input);
+        let lines: Vec<&[u8]> = encoded.split(|&b| b == b'\n').collect();
+        assert_eq!(lines.len(), 6); // 272 symbols -> 4 full lines, one partial, empty
+        for line in &lines[..4] {
+            assert_eq!(line.len(), 64);
+        }
+        assert_eq!(lines[4].len(), 16);
+        assert!(lines[5].is_empty());
+        assert_eq!(base64_decode(&encoded).unwrap(), input);
     }
 
     #[test]

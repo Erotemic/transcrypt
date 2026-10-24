@@ -15,7 +15,7 @@
 //! is reported as `Format::Invalid`, never silently demoted to
 //! plaintext.
 
-use crate::base64::base64_decode;
+use crate::base64::{base64_decode, base64_encode};
 use crate::Base64Error;
 
 /// Structured errors from [`parse_v2`].
@@ -27,8 +27,8 @@ pub enum V2Error {
     Base64(Base64Error),
     /// Decoded bytes do not start with the `Salted__` binary header.
     BadBinaryMagic,
-    /// The ciphertext portion is empty or not a whole number of AES
-    /// blocks.
+    /// The ciphertext portion is empty. Cipher-specific length checks
+    /// belong to the crypto adapter, not to this envelope parser.
     BadCiphertextLength { decoded_len: usize },
 }
 
@@ -44,9 +44,6 @@ pub const V2_HEADER_LEN: usize = 16;
 
 /// Size of the derived salt in a decoded v2 blob.
 pub const V2_SALT_LEN: usize = 8;
-
-/// One AES-CBC block.
-const AES_BLOCK: usize = 16;
 
 /// A classification of an object's leading bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +92,10 @@ pub fn parse_v2(input: &[u8]) -> Result<V2Record, V2Error> {
         return Err(V2Error::BadBinaryMagic);
     }
     let ciphertext_len = decoded.len() - V2_HEADER_LEN;
-    if ciphertext_len < AES_BLOCK || ciphertext_len % AES_BLOCK != 0 {
+    // Legacy Transcrypt accepts user-selected OpenSSL ciphers, including
+    // stream modes such as AES-CTR and ciphers with non-16-byte blocks.
+    // Envelope parsing cannot impose AES-CBC's block-length constraint.
+    if ciphertext_len == 0 {
         return Err(V2Error::BadCiphertextLength {
             decoded_len: decoded.len(),
         });
@@ -105,6 +105,22 @@ pub fn parse_v2(input: &[u8]) -> Result<V2Record, V2Error> {
         .unwrap();
     let ciphertext = decoded[V2_HEADER_LEN..].to_vec();
     Ok(V2Record { salt, ciphertext })
+}
+
+/// Serialize a v2 envelope without doing any cryptography. OpenSSL's
+/// cipher-specific padding and the caller's salt/key derivation are outside
+/// this function. A stream-cipher ciphertext may have any positive length.
+pub fn encode_v2(record: &V2Record) -> Result<Vec<u8>, V2Error> {
+    if record.ciphertext.is_empty() {
+        return Err(V2Error::BadCiphertextLength {
+            decoded_len: V2_HEADER_LEN,
+        });
+    }
+    let mut binary = Vec::with_capacity(V2_HEADER_LEN + record.ciphertext.len());
+    binary.extend_from_slice(V2_BINARY_MAGIC);
+    binary.extend_from_slice(&record.salt);
+    binary.extend_from_slice(&record.ciphertext);
+    Ok(base64_encode(&binary))
 }
 
 /// Classify an object without a full parse.
@@ -173,11 +189,12 @@ mod tests {
         let rec = parse_v2(&text).unwrap();
         assert_eq!(rec.salt, salt);
         assert_eq!(rec.ciphertext.len(), 48);
+        assert_eq!(encode_v2(&rec).unwrap(), text);
         assert_eq!(detect_format(&text), Format::V2);
     }
 
     #[test]
-    fn rejects_short_ciphertext() {
+    fn rejects_missing_ciphertext_but_accepts_stream_lengths() {
         let salt = [0u8; 8];
         // header only, no ciphertext
         let text = wrap_b64(&blob(&salt, 0));
@@ -188,13 +205,43 @@ mod tests {
             })
         ));
         assert_eq!(detect_format(&text), Format::Invalid);
-        // 15-byte ciphertext is not block-aligned
-        let text = wrap_b64(&blob(&salt, 15));
+        // The released Bash tool permits e.g. AES-CTR, with arbitrary
+        // ciphertext byte lengths. This was wrongly rejected before.
+        for len in [1usize, 7, 15, 17, 31, 32] {
+            let text = wrap_b64(&blob(&salt, len));
+            let record = parse_v2(&text).unwrap();
+            assert_eq!(record.ciphertext.len(), len);
+            assert_eq!(encode_v2(&record).unwrap(), text);
+            assert_eq!(detect_format(&text), Format::V2);
+        }
+    }
+
+    #[test]
+    fn roundtrip_opaque_ciphertext_many_lengths() {
+        let mut seed: u32 = 0xC0DE_2026;
+        for len in 1..=512usize {
+            let mut ciphertext = Vec::with_capacity(len);
+            for _ in 0..len {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                ciphertext.push((seed >> 24) as u8);
+            }
+            let record = V2Record { salt: [0x5A; 8], ciphertext };
+            let canonical = encode_v2(&record).unwrap();
+            assert_eq!(parse_v2(&canonical).unwrap(), record, "length {len}");
+            assert_eq!(detect_format(&canonical), Format::V2);
+        }
+    }
+
+    #[test]
+    fn encode_rejects_empty_ciphertext() {
+        let record = V2Record {
+            salt: [0; 8],
+            ciphertext: Vec::new(),
+        };
         assert!(matches!(
-            parse_v2(&text),
+            encode_v2(&record),
             Err(V2Error::BadCiphertextLength { .. })
         ));
-        assert_eq!(detect_format(&text), Format::Invalid);
     }
 
     #[test]

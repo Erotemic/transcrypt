@@ -25,9 +25,9 @@
 mod base64;
 mod v2;
 
-pub use base64::base64_decode;
+pub use base64::{base64_decode, base64_encode};
 pub use v2::{
-    detect_format, parse_v2, Format, V2_BASE64_PREFIX, V2Error, V2Record,
+    detect_format, encode_v2, parse_v2, Format, V2_BASE64_PREFIX, V2Error, V2Record,
 };
 
 /// Structured errors from [`base64_decode`].

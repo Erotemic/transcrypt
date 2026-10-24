@@ -115,3 +115,42 @@ config precedence, or spec invalidates its affected review rows.
   assumptions; maintain stronger proof statements only for proven Rust scope.
 - Keep security claims conditional: a review and finite tests do not amount
   to complete formal verification of the Bash interpreter or OpenSSL CLI.
+
+## October 24 2026 staged-index review amendment
+
+The previous path enumerator regression did not establish correct *staged*
+semantics. Two further bypasses were reproduced before this amendment:
+
+- Stage protected `.gitattributes` and a plaintext blob directly in Git's
+  index, then remove the matching filter only from the worktree attributes.
+  The old hook examined worktree attributes and accepted the plaintext commit.
+- Stage a regular plaintext blob and then replace the worktree file with a
+  symlink. The old hook used `[[ -L path ]]` on the worktree and skipped the
+  staged regular blob.
+
+The updated `git_pre_commit` calls `_list_encrypted_files '' cached`, which
+uses `git check-attr --cached` (index `.gitattributes`). It queries staged
+file mode via `_staged_path_mode` and checks staged blob contents via
+`_staged_file_looks_encrypted`. It refuses to treat enumeration errors as an
+empty protected-path set, and uses NUL-delimited path records throughout.
+
+Regressions are in `tests/{v2,v3}/test_staged_index.bats`. The hook is still
+**local and bypassable** (`--no-verify`, disabled filters, alternate tools),
+and v2's marker-only check cannot establish cryptographic authenticity. The
+new implementation is not an atomic transaction across concurrent index
+writers. Local/global/info Git attributes may be uncommitted configuration
+and do not automatically become portable repository policy. These boundaries
+must remain explicit until a reviewed v3 format and server-side enforcement
+mechanism exist.
+
+**Further local-override attack and fix:** `git check-attr --cached` does
+not ignore `.git/info/attributes` or global attribute configuration. A local
+`secret -filter` entry suppressed a staged `secret filter=crypt` rule and
+allowed plaintext to commit. The hook now gathers both the effective local
+view and an independently isolated staged index/object-store view using a
+fresh temporary Git directory with no local/global attributes. It checks
+the union of paths requiring encryption. This remains a cooperative hook:
+local overrides that *add* protection are validated, but the presence of
+locally configured attributes does not make those settings portable to other
+clones. Linked-worktree compatibility is tested in a smoke check; complete
+Git version/platform coverage remains an acceptance gate.
