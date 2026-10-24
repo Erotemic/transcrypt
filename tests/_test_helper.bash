@@ -21,7 +21,7 @@ function init_git_repo {
 }
 
 function init_transcrypt {
-  "$TRANSCRYPT" --cipher=aes-256-cbc --password='abc 123' --yes
+  "$TRANSCRYPT" --format=legacy --cipher=aes-256-cbc --password='abc 123' --yes
 }
 
 function uninstall_transcrypt {

@@ -22,7 +22,7 @@ _transcrypt() {
 	cur="${COMP_WORDS[COMP_CWORD]}"
 	prev="${COMP_WORDS[COMP_CWORD-1]}"
 	opts="-c -p -y -d -r -f -F -u -l -s -e -i -C -v -h \
-	      --cipher --password --set-openssl-path --yes --display --rekey --flush-credentials --force --uninstall --upgrade --list --show-raw --export-gpg --import-gpg --context --list-contexts --version --help"
+	      --cipher --password --format --iterations --base-salt --migrate-v3 --set-openssl-path --yes --display --rekey --flush-credentials --force --uninstall --upgrade --list --show-raw --export-gpg --import-gpg --context --list-contexts --version --help"
 
 	case "${prev}" in
 		-c | --cipher)
@@ -30,6 +30,10 @@ _transcrypt() {
 			COMPREPLY=( $(compgen -W "${ciphers}" -- ${cur}) )
 			return 0
 			;;
+        --format)
+            COMPREPLY=( $(compgen -W 'v3 legacy' -- "$cur") )
+            return 0
+            ;;
 		-p | --password)
 			return 0
 			;;

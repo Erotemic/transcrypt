@@ -23,7 +23,7 @@ GREP_OPTIONS=""
 ##### CONSTANTS
 
 # the release version of this script
-readonly VERSION='2.3.2'
+readonly VERSION='3.0.0-pre'
 
 # the default cipher to utilize
 readonly DEFAULT_CIPHER='aes-256-cbc'
@@ -199,6 +199,7 @@ load_public_crypto_settings() {
 	PUBLIC_KDF='legacy'
 	PUBLIC_ITERATIONS=''
 	PUBLIC_BASE_SALT=''
+	PUBLIC_AUTH=''
 
 	PUBLIC_SETTINGS_FILE=$(public_settings_file 2>/dev/null || printf '')
 	[[ $PUBLIC_SETTINGS_FILE && -f $PUBLIC_SETTINGS_FILE ]] || return 0
@@ -209,41 +210,133 @@ load_public_crypto_settings() {
 	PUBLIC_KDF=$(read_public_setting_or_default kdf legacy)
 	PUBLIC_ITERATIONS=$(read_public_setting_or_default iterations '')
 	PUBLIC_BASE_SALT=$(read_public_setting_or_default base-salt '')
+	PUBLIC_AUTH=$(read_public_setting_or_default auth '')
 }
 
 # ensure public settings use values transcrypt understands before they affect
 # encryption or decryption behavior
+# Public settings affect cryptographic operations, so all filters validate them.
+# An absent settings file is a v2 repository. Secrets never belong in this file.
 validate_public_crypto_settings() {
-	load_public_crypto_settings
-	[[ $PUBLIC_SETTINGS_FILE && -f $PUBLIC_SETTINGS_FILE ]] || return 0
+    load_public_crypto_settings
+    [[ $PUBLIC_SETTINGS_FILE && -f $PUBLIC_SETTINGS_FILE ]] || return 0
 
-	case $PUBLIC_FORMAT in
-	legacy) ;;
-	*) die 1 'unsupported transcrypt format in %s: %s' "$PUBLIC_SETTINGS_FILE" "$PUBLIC_FORMAT" ;;
-	esac
+    local key
+    while IFS= read -r key; do
+        case $key in
+        transcrypt.format | transcrypt.cipher | transcrypt.digest | transcrypt.kdf | \
+            transcrypt.iterations | transcrypt.base-salt | transcrypt.auth) ;;
+        *) die 1 'unknown or forbidden key in .transcrypt/config: %s' "$key" ;;
+        esac
+    done < <(git config --file "$PUBLIC_SETTINGS_FILE" --name-only --list)
 
-	case $PUBLIC_CIPHER in
-	aes-256-cbc) ;;
-	*) die 1 'unsupported transcrypt cipher in %s: %s' "$PUBLIC_SETTINGS_FILE" "$PUBLIC_CIPHER" ;;
-	esac
+    case $PUBLIC_FORMAT in
+    legacy)
+        [[ $PUBLIC_CIPHER == aes-256-cbc ]] || die 1 'unsupported transcrypt cipher in legacy public settings'
+        [[ $PUBLIC_KDF == legacy ]] || die 1 'unsupported transcrypt KDF in legacy public settings'
+        [[ $PUBLIC_DIGEST == MD5 || $PUBLIC_DIGEST == md5 ]] || die 1 'unsupported transcrypt digest in legacy public settings'
+        [[ ! $PUBLIC_ITERATIONS && ! $PUBLIC_BASE_SALT && ! $PUBLIC_AUTH ]] ||
+            die 1 'unsupported transcrypt format parameters in legacy public settings'
+        ;;
+    v3)
+        [[ $PUBLIC_CIPHER == aes-256-cbc && $PUBLIC_KDF == pbkdf2 && \
+            $PUBLIC_DIGEST == sha256 && $PUBLIC_AUTH == hmac-sha256 ]] ||
+            die 1 'unsupported transcrypt format: v3 crypto parameters in %s' "$PUBLIC_SETTINGS_FILE"
+        [[ $PUBLIC_ITERATIONS =~ ^[0-9]+$ ]] || die 1 'invalid PBKDF2 iterations'
+        # Enforce a baseline cost and reject ridiculous values that would hang filters.
+        ((${#PUBLIC_ITERATIONS} <= 8)) && \
+            ((10#$PUBLIC_ITERATIONS >= 100000 && 10#$PUBLIC_ITERATIONS <= 10000000)) ||
+            die 1 'PBKDF2 iterations must be between 100000 and 10000000'
+        [[ $PUBLIC_BASE_SALT =~ ^[a-fA-F0-9]{32}$ ]] ||
+            die 1 'v3 base-salt must be 16 random bytes (32 hex characters)'
+        ;;
+    *) die 1 'unsupported transcrypt format in %s: %s' "$PUBLIC_SETTINGS_FILE" "$PUBLIC_FORMAT" ;;
+    esac
+}
 
-	case $PUBLIC_KDF in
-	legacy) ;;
-	*) die 1 'unsupported transcrypt KDF in %s: %s' "$PUBLIC_SETTINGS_FILE" "$PUBLIC_KDF" ;;
-	esac
+# Encrypted v3 records are one newline-terminated ASCII line:
+# TCRYPT3:<32 hex IV>:<64 hex HMAC-SHA256>:<base64 AES-256-CBC ciphertext>
+# PBKDF2 runs BEFORE any key-dependent deterministic IV computation. This is
+# essential: a salt derived from a password guess would bypass PBKDF2's cost.
+# The separate IV, ENC and MAC keys are HMAC-domain-separated from the PBKDF2
+# output. The entire header and ciphertext are authenticated before decrypting.
+# Identical plaintext under the same context has identical ciphertext; Git
+# requires this property for clean/smudge. Do not claim semantic security.
+v3_hmac_hex() {
+    local key=$1
+    "$openssl_path" dgst -sha256 -mac HMAC -macopt "hexkey:$key" | sed -n 's/^.*= //p' | tr 'A-F' 'a-f'
+}
 
-	case $PUBLIC_DIGEST in
-	MD5 | md5) ;;
-	*) die 1 'unsupported transcrypt digest in %s: %s' "$PUBLIC_SETTINGS_FILE" "$PUBLIC_DIGEST" ;;
-	esac
+v3_load_keys() {
+    local context=$1 password=$2 openssl_output salt
+    # openssl enc -P works on OpenSSL 1.1.1+ and LibreSSL variants that
+    # implement -pbkdf2/-iter, and supports -pass env: (no password in argv).
+    salt=$(printf 'transcrypt/v3/kdf/%s/%s' "$context" "$PUBLIC_BASE_SALT" | \
+        "$openssl_path" dgst -sha256 | sed 's/^.*= //' | cut -c1-16)
+    [[ $salt =~ ^[a-fA-F0-9]{16}$ ]] || die 1 'could not derive public PBKDF2 salt'
+    if ! openssl_output=$(ENC_PASS="$password" "$openssl_path" enc -aes-256-cbc \
+        -pbkdf2 -iter "$PUBLIC_ITERATIONS" -md sha256 -S "$salt" \
+        -pass env:ENC_PASS -P 2>/dev/null); then
+        die 1 'PBKDF2 is unavailable; install OpenSSL/LibreSSL with enc -pbkdf2 -iter support'
+    fi
+    local master
+    master=$(printf '%s\n' "$openssl_output" | sed -n 's/^key=//p' | tr 'A-F' 'a-f')
+    [[ $master =~ ^[a-f0-9]{64}$ ]] || die 1 'PBKDF2 key derivation returned an invalid result'
+    V3_ENC_KEY=$(printf 'transcrypt/v3/encryption' | v3_hmac_hex "$master")
+    V3_MAC_KEY=$(printf 'transcrypt/v3/authentication' | v3_hmac_hex "$master")
+    V3_IV_KEY=$(printf 'transcrypt/v3/synthetic-iv' | v3_hmac_hex "$master")
+    [[ $V3_ENC_KEY =~ ^[a-f0-9]{64}$ && $V3_MAC_KEY =~ ^[a-f0-9]{64}$ && \
+        $V3_IV_KEY =~ ^[a-f0-9]{64}$ ]] || die 1 'key expansion failed'
+}
 
-	if [[ $PUBLIC_ITERATIONS ]]; then
-		die 1 'PBKDF2 iterations are not supported by this transcrypt settings reader'
-	fi
+v3_encrypt_file() {
+    local plaintext=$1 ciphertext iv encoded tag
+    ciphertext=$(mktemp) || return 1
+    # The IV is a keyed digest of the entire plaintext, never the password.
+    iv=$( { printf 'transcrypt/v3/iv\000'; cat "$plaintext"; } | \
+        v3_hmac_hex "$V3_IV_KEY") || { rm -f "$ciphertext"; return 1; }
+    iv=${iv:0:32}
+    if ! "$openssl_path" enc -aes-256-cbc -e -K "$V3_ENC_KEY" -iv "$iv" \
+        -in "$plaintext" -out "$ciphertext"; then
+        rm -f "$ciphertext"; return 1
+    fi
+    encoded=$("$openssl_path" base64 -A -in "$ciphertext") || { rm -f "$ciphertext"; return 1; }
+    rm -f "$ciphertext"
+    tag=$(printf 'TCRYPT3:%s:%s' "$iv" "$encoded" | v3_hmac_hex "$V3_MAC_KEY") || return 1
+    printf 'TCRYPT3:%s:%s:%s\n' "$iv" "$tag" "$encoded"
+}
 
-	if [[ $PUBLIC_BASE_SALT ]]; then
-		die 1 'base-salt is not supported by this transcrypt settings reader'
-	fi
+# Verify first. Never send unauthenticated plaintext (or partial plaintext) to
+# Git. A failed v3 smudge/textconv must return nonzero and an empty stdout.
+v3_decrypt_file() {
+    local source=$1 destination=$2 marker iv tag encoded extra expected
+    IFS=: read -r marker iv tag encoded <"$source" || return 1
+    [[ $marker == TCRYPT3 && $iv =~ ^[a-f0-9]{32}$ && $tag =~ ^[a-f0-9]{64}$ && \
+        $encoded =~ ^[a-zA-Z0-9+/]+={0,2}$ ]] || return 1
+    (( ${#encoded} % 4 == 0 )) || return 1
+    # Reject extra lines, trailing material and non-canonical wire encodings.
+    # Authentication of only the first line would otherwise permit appended data.
+    cmp -s "$source" <(printf 'TCRYPT3:%s:%s:%s\n' "$iv" "$tag" "$encoded") || return 1
+    expected=$(printf 'TCRYPT3:%s:%s' "$iv" "$encoded" | v3_hmac_hex "$V3_MAC_KEY") || return 1
+    [[ $tag == "$expected" ]] || return 1
+    printf '%s' "$encoded" | "$openssl_path" base64 -d -A | \
+        "$openssl_path" enc -aes-256-cbc -d -K "$V3_ENC_KEY" -iv "$iv" >"$destination" 2>/dev/null || return 1
+    # Reject non-canonical or manipulated IVs (MAC-key holders must still use the synthetic IV).
+    local recomputed_iv
+    recomputed_iv=$( { printf 'transcrypt/v3/iv\000'; cat "$destination"; } | \
+        v3_hmac_hex "$V3_IV_KEY") || return 1
+    [[ $iv == "${recomputed_iv:0:32}" ]]
+}
+
+v3_load_context_keys() {
+    local context=${1:-default} group passwd configured_cipher
+    group=$(derive_context_config_group "$context")
+    configured_cipher=$(git config --get --local "transcrypt${group}.cipher" 2>/dev/null || printf '')
+    [[ $configured_cipher == aes-256-cbc ]] || die 1 'v3 context %s must use aes-256-cbc' "$context"
+    passwd=$(load_password "$group") || die 1 'no v3 credentials for context %s' "$context"
+    [[ $passwd ]] || die 1 'empty password for v3 context %s' "$context"
+    openssl_path=$(git config --get --local transcrypt.openssl-path 2>/dev/null || printf 'openssl')
+    v3_load_keys "$context" "$passwd"
 }
 
 # return context name if $1 has format 'context=name-of-context' else empty string
@@ -356,71 +449,103 @@ hex_to_bin() {
 }
 
 git_clean() {
-	context=$(extract_context_name_from_name_value_arg "$1")
-	[[ "$context" ]] && shift
-
-	filename=$1
-	# ignore empty files
-	if [[ ! -s $filename ]]; then
-		return
-	fi
-	# cache STDIN to test if it's already encrypted
-	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
-	trap 'rm -f "$tempfile"' EXIT
-	tee "$tempfile" &>/dev/null
-	# the first bytes of an encrypted file are always "Salted" in Base64
-	# The `head + LC_ALL=C tr` command handles binary data in old and new Bash (#116)
-	firstbytes=$(head -c8 "$tempfile" | LC_ALL=C tr -d '\0')
-	if [[ $firstbytes == "U2FsdGVk" ]]; then
-		cat "$tempfile"
-	else
-		context_config_group=$(derive_context_config_group "$context")
-		cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
-		password=$(load_password "$context_config_group")
-		openssl_path=$(git config --get --local transcrypt.openssl-path)
-		salt=$("${openssl_path}" dgst -hmac "${filename}:${password}" -sha256 "$tempfile" | tr -d '\r\n' | tail -c16)
-
-		if [ "$(is_salt_prefix_workaround_required)" == "true" ]; then
-			# Encrypt the file to base64, ensuring it includes the prefix 'Salted__' with the salt. #133
-			(
-				echo -n "Salted__" && echo -n "$salt" | hex_to_bin &&
-					# Encrypt file to binary ciphertext
-					ENC_PASS=$password "$openssl_path" enc -e "-${cipher}" -md MD5 -pass env:ENC_PASS -S "$salt" -in "$tempfile"
-			) |
-				openssl base64
-		else
-			# Encrypt file to base64 ciphertext
-			ENC_PASS=$password "$openssl_path" enc -e -a "-${cipher}" -md MD5 -pass env:ENC_PASS -S "$salt" -in "$tempfile"
-		fi
-	fi
+    context=$(extract_context_name_from_name_value_arg "${1:-}")
+    [[ $context ]] && shift
+    filename=${1:-}
+    [[ $filename ]] || die 1 'clean requires a filename'
+    validate_public_crypto_settings
+    # Legacy clean depends on the working-tree path. For v3 the supplied stdin
+    # is authoritative (e.g. Git can clean a deleted/renamed path from the
+    # index), so never discard bytes just because the path is missing.
+    if [[ $PUBLIC_FORMAT == legacy && ! -s $filename ]]; then
+        return 0
+    fi
+    tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
+    trap 'rm -f "$tempfile"' EXIT
+    cat >"$tempfile"
+    [[ -s $tempfile ]] || return 0
+    if [[ $PUBLIC_FORMAT == v3 ]]; then
+        v3_load_context_keys "$context"
+        local prefix
+        prefix=$(head -c8 "$tempfile")
+        if [[ $prefix == TCRYPT3: ]]; then
+            local verified
+            verified=$(mktemp) || return 1
+            if ! v3_decrypt_file "$tempfile" "$verified"; then
+                rm -f "$verified"
+                die 1 'v3 clean rejected malformed or unauthenticated ciphertext'
+            fi
+            rm -f "$verified"
+            cat "$tempfile"
+        else
+            v3_encrypt_file "$tempfile" || die 1 'v3 encryption failed'
+        fi
+        return 0
+    fi
+    # V2 behavior: preserve existing ciphertext and its historical salt logic.
+    local firstbytes
+    firstbytes=$(head -c8 "$tempfile" | LC_ALL=C tr -d '\0')
+    if [[ $firstbytes == TCRYPT3: ]]; then
+        die 1 'v3 ciphertext encountered in a legacy repository'
+    fi
+    if [[ $firstbytes == U2FsdGVk ]]; then
+        cat "$tempfile"
+    else
+        local context_config_group salt
+        context_config_group=$(derive_context_config_group "$context")
+        cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
+        password=$(load_password "$context_config_group")
+        openssl_path=$(git config --get --local transcrypt.openssl-path)
+        salt=$("$openssl_path" dgst -hmac "${filename}:${password}" -sha256 "$tempfile" | tr -d '\r\n' | tail -c16)
+        if [ "$(is_salt_prefix_workaround_required)" == true ]; then
+            (printf 'Salted__'; printf '%s' "$salt" | hex_to_bin
+             ENC_PASS=$password "$openssl_path" enc -e "-${cipher}" -md MD5 -pass env:ENC_PASS -S "$salt" -in "$tempfile") | "$openssl_path" base64
+        else
+            ENC_PASS=$password "$openssl_path" enc -e -a "-${cipher}" -md MD5 -pass env:ENC_PASS -S "$salt" -in "$tempfile"
+        fi
+    fi
 }
 
 git_smudge() {
-	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
-	trap 'rm -f "$tempfile"' EXIT
-	context=$(extract_context_name_from_name_value_arg "$1")
-	context_config_group=$(derive_context_config_group "$context")
-	cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
-	password=$(load_password "$context_config_group")
-	openssl_path=$(git config --get --local transcrypt.openssl-path)
-	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a 2>/dev/null || cat "$tempfile"
+    local context context_config_group cipher password prefix
+    tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
+    output=$(mktemp 2>/dev/null || mktemp -t tmp)
+    trap 'rm -f "$tempfile" "$output"' EXIT
+    cat >"$tempfile"
+    # As in v2, zero-byte files remain zero-byte blobs in the Git index.
+    [[ -s $tempfile ]] || return 0
+    context=$(extract_context_name_from_name_value_arg "${1:-}")
+    validate_public_crypto_settings
+    prefix=$(head -c8 "$tempfile")
+    if [[ $PUBLIC_FORMAT == v3 ]]; then
+        [[ $prefix == TCRYPT3: ]] || die 1 'expected authenticated v3 ciphertext'
+        v3_load_context_keys "$context"
+        v3_decrypt_file "$tempfile" "$output" || die 1 'v3 authentication/decryption failed'
+        cat "$output"
+    else
+        [[ $prefix != TCRYPT3: ]] || die 1 'v3 ciphertext requires v3 configuration'
+        context_config_group=$(derive_context_config_group "$context")
+        cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
+        password=$(load_password "$context_config_group")
+        openssl_path=$(git config --get --local transcrypt.openssl-path)
+        ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$tempfile" -out "$output" 2>/dev/null && cat "$output" || cat "$tempfile"
+    fi
 }
 
 git_textconv() {
-	context=$(extract_context_name_from_name_value_arg "$1")
-	[[ "$context" ]] && shift
-
-	filename=$1
-	# ignore empty files
-	if [[ ! -s $filename ]]; then
-		return
-	fi
-
-	context_config_group=$(derive_context_config_group "$context")
-	cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
-	password=$(load_password "$context_config_group")
-	openssl_path=$(git config --get --local transcrypt.openssl-path)
-	ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$filename" 2>/dev/null || cat "$filename"
+    context=$(extract_context_name_from_name_value_arg "${1:-}")
+    [[ $context ]] && shift
+    filename=${1:-}
+    [[ -s $filename ]] || return 0
+    validate_public_crypto_settings
+    if [[ $PUBLIC_FORMAT == v3 && $(head -c8 "$filename") != TCRYPT3: ]]; then
+        # Git textconv also receives scratch copies of *working tree plaintext*.
+        # Preserve those bytes; only v3-marked ciphertext is decrypted.
+        # Strict authentication of encrypted blobs happens in smudge/clean.
+        cat "$filename"
+        return 0
+    fi
+    git_smudge "context=${context:-default}" <"$filename"
 }
 
 # shellcheck disable=SC2005,SC2002,SC2181
@@ -442,9 +567,17 @@ git_merge() {
 		THEIRS_LABEL="theirs"
 	fi
 	# Decrypt BASE $1, LOCAL $2, and REMOTE $3 versions of file being merged
-	echo "$(cat "$1" | "${TRANSCRYPT_PATH}" smudge context="$context")" >"$1"
-	echo "$(cat "$2" | "${TRANSCRYPT_PATH}" smudge context="$context")" >"$2"
-	echo "$(cat "$3" | "${TRANSCRYPT_PATH}" smudge context="$context")" >"$3"
+	# Do not replace merge inputs until ALL three authenticated decryptions succeed.
+	local base_tmp ours_tmp theirs_tmp
+	base_tmp=$(mktemp); ours_tmp=$(mktemp); theirs_tmp=$(mktemp)
+	if ! "${TRANSCRYPT_PATH}" smudge "context=$context" <"$1" >"$base_tmp" ||
+	   ! "${TRANSCRYPT_PATH}" smudge "context=$context" <"$2" >"$ours_tmp" ||
+	   ! "${TRANSCRYPT_PATH}" smudge "context=$context" <"$3" >"$theirs_tmp"; then
+		rm -f "$base_tmp" "$ours_tmp" "$theirs_tmp"
+		die 1 'cannot merge: one or more encrypted inputs failed authentication'
+	fi
+	cp "$base_tmp" "$1"; cp "$ours_tmp" "$2"; cp "$theirs_tmp" "$3"
+	rm -f "$base_tmp" "$ours_tmp" "$theirs_tmp"
 	# Merge the decrypted files to the temp file named by $2
 	git merge-file --marker-size="$4" -L "$OURS_LABEL" -L base -L "$THEIRS_LABEL" "$2" "$1" "$3"
 	# If the merge was not successful (has conflicts) exit with an error code to
@@ -468,7 +601,9 @@ git_merge() {
 
 # shellcheck disable=SC2155
 git_pre_commit() {
-	# Transcrypt pre-commit hook: fail if secret file in staging lacks the magic prefix "Salted" in B64
+	validate_public_crypto_settings
+	local expected_magic=U2FsdGVk
+	[[ $PUBLIC_FORMAT == v3 ]] && expected_magic=TCRYPT3:
 	tmp=$(mktemp)
 	IFS=$'\n'
 	slow_mode_if_failed() {
@@ -484,7 +619,7 @@ git_pre_commit() {
 			if [[ $firstbytes == "" ]]; then
 				: # Do nothing
 			# The first bytes of an encrypted file must be "Salted" in Base64
-			elif [[ $firstbytes != "U2FsdGVk" ]]; then
+			elif [[ $firstbytes != "$expected_magic" ]]; then
 				printf 'Transcrypt managed file is not encrypted in the Git index: %s\n' "$secret_file" >&2
 				printf '\n' >&2
 				printf 'You probably staged this file using a tool that does not apply' >&2
@@ -513,14 +648,14 @@ git_pre_commit() {
 		local firstbytes=$(git show :"${secret_file}" | head -c8)
 		if [[ $firstbytes == "" ]]; then
 			: # Do nothing
-		elif [[ $firstbytes != "U2FsdGVk" ]]; then
+		elif [[ $firstbytes != "$expected_magic" ]]; then
 			echo "true" >>"${tmp}"
 		fi
 	}
 
 	# if bash version is greater than or equal to 4.4, fork to number of threads otherwise run normally
 	if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] || { [[ "${BASH_VERSINFO[0]}" == 4 ]] && [[ "${BASH_VERSINFO[1]}" -ge 4 ]]; }; then
-		num_procs=$(nproc)
+		num_procs=$(nproc 2>/dev/null || printf 1)
 		num_jobs="\j"
 		for secret_file in $(_list_encrypted_files); do
 			while ((${num_jobs@P} >= num_procs)); do
@@ -720,6 +855,18 @@ confirm_rekey() {
 
 # automatically stage rekeyed files in preparation for the user to commit them
 stage_rekeyed_files() {
+    validate_public_crypto_settings
+    if [[ $PUBLIC_FORMAT == v3 ]]; then
+        cd "$REPO" >/dev/null || die 1 'could not change to the repository root'
+        local file attr value
+        while IFS= read -r -d '' file && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
+            [[ $value == "crypt${CONTEXT_CRYPT_SUFFIX}" && ! -L $file ]] || continue
+            touch -- "$file"
+            git add --renormalize -- "$file"
+        done < <(git ls-files -z | git check-attr -z --stdin filter)
+        printf '*** v3 rekeyed files staged; COMMIT THESE CHANGES RIGHT AWAY! ***\n'
+        return 0
+    fi
 	local encrypted_files
 	encrypted_files=$(git ls-crypt)
 	if [[ $encrypted_files ]] && [[ $IS_BARE == 'false' ]]; then
@@ -789,6 +936,7 @@ save_helper_hooks() {
 
 # write the configuration to the repository's git config
 save_configuration() {
+    validate_public_crypto_settings
 	# prevent clobbering existing configuration
 	# shellcheck disable=SC2086
 	if [[ $upgrade ]]; then
@@ -827,11 +975,18 @@ save_configuration() {
 		git config filter.crypt"${CONTEXT_CRYPT_SUFFIX}".clean "$transcrypt_path clean context=$CONTEXT %f"
 		git config filter.crypt"${CONTEXT_CRYPT_SUFFIX}".smudge "$transcrypt_path smudge context=$CONTEXT"
 		git config diff.crypt"${CONTEXT_CRYPT_SUFFIX}".textconv "$transcrypt_path textconv context=$CONTEXT"
+        if [[ $PUBLIC_FORMAT == v3 ]]; then
+            git config "diff.crypt${CONTEXT_CRYPT_SUFFIX}.cachetextconv" false
+        fi
 		git config merge.crypt"${CONTEXT_CRYPT_SUFFIX}".driver "$transcrypt_path merge context=$CONTEXT %O %A %B %L %P"
 	fi
 
 	git config filter.crypt.required 'true'
-	git config diff.crypt.cachetextconv 'true'
+	if [[ $PUBLIC_FORMAT == v3 ]]; then
+		git config diff.crypt.cachetextconv 'false'
+	else
+		git config diff.crypt.cachetextconv 'true'
+	fi
 	git config diff.crypt.binary 'true'
 	git config merge.renormalize 'true'
 	git config merge.crypt.name 'Merge transcrypt secret files'
@@ -874,6 +1029,10 @@ display_configuration() {
 		printf '  FORMAT:   %s\n' "$PUBLIC_FORMAT"
 		printf '  KDF:      %s\n' "$PUBLIC_KDF"
 		printf '  DIGEST:   %s\n' "$PUBLIC_DIGEST"
+		if [[ $PUBLIC_FORMAT == v3 ]]; then
+			printf '  AUTH:     %s\n' "$PUBLIC_AUTH"
+			printf '  BASE_SALT: %s\n' "$PUBLIC_BASE_SALT"
+		fi
 		if [[ $PUBLIC_ITERATIONS ]]; then
 			printf '  ITER:     %s\n' "$PUBLIC_ITERATIONS"
 		fi
@@ -917,20 +1076,34 @@ remove_cached_plaintext() {
 # this will decrypt existing encrypted files if you've just cloned a repository,
 # or it will encrypt locally decrypted files if you've just flushed the credentials
 force_checkout() {
-	# make sure a HEAD revision exists
-	if [[ $HEAD_EXISTS ]] && [[ $IS_BARE == 'false' ]]; then
-		# this would normally delete uncommitted changes in the working directory,
-		# but we already made sure the repo was clean during the safety checks
-		local encrypted_files
-		encrypted_files=$(git "ls-crypt-${CONTEXT}")
-		cd "$REPO" >/dev/null || die 1 'could not change into the "%s" directory' "$REPO"
-		IFS=$'\n'
-		for file in $encrypted_files; do
-			rm -f "$file"
-			git checkout --force HEAD -- "$file" >/dev/null
-		done
-		unset IFS
-	fi
+    [[ $HEAD_EXISTS && $IS_BARE == false ]] || return 0
+    cd "$REPO" >/dev/null || die 1 'could not change into the "%s" directory' "$REPO"
+    local file attr value
+    # A credential check runs BEFORE replacing any existing file. A wrong v3
+    # password or tampered ciphertext must not destroy the local working copy.
+    validate_public_crypto_settings
+    if [[ $PUBLIC_FORMAT == v3 ]] && \
+        git config --get --local "filter.crypt${CONTEXT_CRYPT_SUFFIX}.smudge" >/dev/null; then
+        while IFS= read -r -d '' file && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
+            [[ $value == "crypt${CONTEXT_CRYPT_SUFFIX}" && ! -L $file ]] || continue
+            if ! git show --no-textconv "HEAD:$file" | "$CRYPT_DIR/transcrypt" smudge "context=$CONTEXT" >/dev/null; then
+                die 1 'checkout aborted before replacing %s: invalid v3 ciphertext or password' "$file"
+            fi
+        done < <(git ls-files -z | git check-attr -z --stdin filter)
+    fi
+    # Enumerate NUL-delimited Git filenames: no eval, word splitting or globbing.
+    while IFS= read -r -d '' file && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
+        [[ $value == "crypt${CONTEXT_CRYPT_SUFFIX}" ]] || continue
+        rm -f -- "$file"
+        git checkout --force HEAD -- "$file" >/dev/null ||
+            die 1 'cannot restore encrypted file %s' "$file"
+        if [[ $PUBLIC_FORMAT == legacy && -f $file && \
+            $(head -c8 "$file") == U2FsdGVk && \
+            $(git show --no-textconv "HEAD:$file" | head -c8) == U2FsdGVk ]] && \
+            git config --get --local "filter.crypt${CONTEXT_CRYPT_SUFFIX}.smudge" >/dev/null; then
+            die 1 'Unexpected new dirty files in the repository when configured by transcrypt%s, please check your password.\n' "$CONTEXT_DESCRIPTION"
+        fi
+    done < <(git ls-files -z | git check-attr -z --stdin filter)
 }
 
 # remove the locally cached encryption credentials and
@@ -1078,6 +1251,11 @@ uninstall_transcrypt() {
 
 		# remove any defined crypt patterns in gitattributes
 		sed_inplace "/filter=crypt/d" "$GIT_ATTRIBUTES"
+        # The committed public parameters are not useful after a full uninstall;
+        # --upgrade must preserve them to avoid breaking existing v3 ciphertext.
+        if [[ ! $upgrade && -f "$REPO/.transcrypt/config" ]]; then
+            rm -f -- "$REPO/.transcrypt/config"
+        fi
 
 		if [[ ! $upgrade ]]; then
 			printf 'The transcrypt configuration has been completely removed from the repository.\n'
@@ -1370,7 +1548,7 @@ list_contexts() {
 # print this script's usage message to stderr
 usage() {
 	cat <<-EOF >&2
-		usage: transcrypt [-c CIPHER] [-p PASSWORD] [-h]
+		usage: transcrypt [-c CIPHER] [-p PASSWORD] [--format=v3|legacy] [--migrate-v3] [-h]
 	EOF
 }
 
@@ -1402,6 +1580,20 @@ help() {
 		     -p, --password=PASSWORD
 		            the password to derive the key from;
 		            defaults to 30 random base64 characters
+
+		     --format=v3|legacy
+		            select a new repository's encryption format (new empty repositories
+		            use authenticated v3 by default; existing v2 clones stay legacy)
+
+		     --iterations=COUNT
+		            PBKDF2 iteration count for a newly created v3 config (default 250000)
+
+		     --base-salt=32_HEX_CHARACTERS
+		            optional public 128-bit random salt; generated by default
+
+		     --migrate-v3
+		            safely stage conversion of every tracked legacy ciphertext blob
+		            using an alternate Git index; all contexts must be unlocked
 
 		     --set-openssl-path=PATH_TO_OPENSSL
 		            use OpenSSL at this path; defaults to 'openssl' in \$PATH
@@ -1540,6 +1732,140 @@ help() {
 	EOF
 }
 
+# Write the public v3 configuration; password and private keys stay local.
+write_v3_config() {
+    local salt=$1 iters=$2 tmp
+    tmp=$(mktemp) || return 1
+    cat >"$tmp" <<EOF
+[transcrypt]
+format = v3
+cipher = aes-256-cbc
+digest = sha256
+kdf = pbkdf2
+iterations = $iters
+base-salt = $salt
+auth = hmac-sha256
+EOF
+    mkdir -p "$REPO/.transcrypt"
+    mv "$tmp" "$REPO/.transcrypt/config"
+    validate_public_crypto_settings
+}
+
+select_v3_parameters() {
+    local iterations=${requested_iterations:-250000}
+    local salt=${requested_base_salt:-}
+    [[ $iterations =~ ^[0-9]+$ && ${#iterations} -le 8 ]] || die 1 'invalid iteration count'
+    ((10#$iterations >= 100000 && 10#$iterations <= 10000000)) || die 1 'invalid PBKDF2 iteration count'
+    [[ $salt ]] || salt=$("$openssl_path" rand -hex 16)
+    [[ $salt =~ ^[0-9A-Fa-f]{32}$ ]] || die 1 'base-salt must be 32 hex characters'
+    V3_NEW_ITERATIONS=$iterations
+    V3_NEW_SALT=$salt
+}
+
+# Stage all migrated ciphertext with an alternate index. The real index is
+# replaced only after every file has been re-encrypted and verified. Restore
+# the config/helper on any failure. Requires a clean working tree and all
+# configured context passwords, but neither decrypts nor rewrites history.
+migrate_to_v3() {
+    [[ ! $requires_clean_repo ]] && die 1 '--force is not supported with --migrate-v3'
+    [[ $HEAD_EXISTS && $IS_BARE == false ]] || die 1 'migration requires a non-bare committed repository'
+    [[ ! -e "$REPO/.transcrypt/config" || $PUBLIC_FORMAT == legacy ]] || die 1 'repository is already v3'
+    [[ ! -e "$REPO/.transcrypt/config" || -f "$REPO/.transcrypt/config" ]] || die 1 'public config path is not a file'
+    [[ ! -L "$REPO/.transcrypt/config" ]] || die 1 'refusing symlinked public config'
+    select_v3_parameters
+    local orig_index idx cfgbak helperbak had_cfg='' had_helper='' file attr value context
+    orig_index=$(git rev-parse --git-path index)
+    [[ -f $orig_index ]] || die 1 'no Git index available'
+    # Preflight includes every tracked encrypted context, and catches missing
+    # credentials / incorrectly unlocked working files before any write.
+    while IFS= read -r -d '' file && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
+        case $value in crypt | crypt-*) ;;
+        *) continue ;;
+        esac
+        [[ ! -L "$file" ]] || continue
+        [[ -f "$file" ]] || die 1 'missing encrypted worktree file: %s' "$file"
+        context=${value#crypt-}
+        [[ $value != crypt ]] || context=default
+        [[ $(git config --get --local "transcrypt$(derive_context_config_group "$context").password" 2>/dev/null) ]] ||
+            die 1 'missing credentials for context %s' "$context"
+        # v2 clean MUST reconstruct the original blob byte-for-byte.
+        [[ $(git hash-object --path="$file" "$file") == $(git rev-parse "HEAD:$file") ]] ||
+            die 1 'preflight failed for %s: working file cannot round-trip using v2 settings' "$file"
+        # A wrong legacy password can make smudge return the raw U2FsdGVk blob.
+        # That unchanged blob may still round-trip through clean, so comparing
+        # Git object IDs alone is insufficient to verify a legacy unlock.
+        local raw_copy decoded_copy
+        raw_copy=$(mktemp); decoded_copy=$(mktemp)
+        if ! git show --no-textconv "HEAD:$file" >"$raw_copy" ||
+           ! "$0" smudge "context=$context" <"$raw_copy" >"$decoded_copy" ||
+           ! cmp -s "$file" "$decoded_copy" ||
+           [[ $(head -c8 "$decoded_copy") == U2FsdGVk ]]; then
+            rm -f "$raw_copy" "$decoded_copy"
+            die 1 'preflight failed for %s: legacy credentials do not decrypt tracked ciphertext' "$file"
+        fi
+        rm -f "$raw_copy" "$decoded_copy"
+    done < <(git ls-files -z | git check-attr -z --stdin filter)
+
+    idx=$(mktemp "${orig_index}.transcrypt.XXXXXX") || return 1
+    cfgbak=$(mktemp) || return 1
+    helperbak=$(mktemp) || return 1
+    cp "$orig_index" "$idx"
+    if [[ -f "$REPO/.transcrypt/config" ]]; then
+        had_cfg=true
+        cp "$REPO/.transcrypt/config" "$cfgbak"
+    fi
+    if [[ -f "$CRYPT_DIR/transcrypt" ]]; then
+        had_helper=true
+        cp "$CRYPT_DIR/transcrypt" "$helperbak"
+    fi
+
+    # The temporary index avoids partial staging when encryption fails.
+    # Preserve old config and filter helper until verified migration completes.
+    local ok=true
+    if ! write_v3_config "$V3_NEW_SALT" "$V3_NEW_ITERATIONS"; then ok=''; fi
+    if [[ $ok ]] && ! save_helper_scripts; then ok=''; fi
+    if [[ $ok ]] && ! GIT_INDEX_FILE="$idx" git add -- "$REPO/.transcrypt/config"; then ok=''; fi
+    if [[ $ok ]]; then
+        while IFS= read -r -d '' file && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
+            case $value in crypt | crypt-*) ;;
+            *) continue ;;
+            esac
+            [[ ! -L "$file" ]] || continue
+            context=${value#crypt-}
+            [[ $value != crypt ]] || context=default
+            if ! GIT_INDEX_FILE="$idx" git add --renormalize -- "$file"; then ok=''; break; fi
+            local encrypted_tmp decrypted_tmp
+            encrypted_tmp=$(mktemp); decrypted_tmp=$(mktemp)
+            if ! GIT_INDEX_FILE="$idx" git show --no-textconv ":$file" >"$encrypted_tmp" ||
+                [[ $(head -c8 "$encrypted_tmp") != TCRYPT3: ]] ||
+                ! "$0" smudge "context=$context" <"$encrypted_tmp" >"$decrypted_tmp" ||
+                ! cmp -s "$file" "$decrypted_tmp"; then
+                ok=''
+            fi
+            rm -f "$encrypted_tmp" "$decrypted_tmp"
+            [[ $ok ]] || break
+        done < <(git ls-files -z | git check-attr -z --stdin filter)
+    fi
+    if [[ $ok ]]; then
+        mv "$idx" "$orig_index"
+        local context_name suffix
+        for context_name in $CONFIGURED_CONTEXTS; do
+            suffix=''
+            [[ $context_name == default ]] || suffix="-$context_name"
+            git config "diff.crypt${suffix}.cachetextconv" false
+        done
+        git update-ref -d refs/notes/textconv/crypt 2>/dev/null || true
+        rm -f "$cfgbak" "$helperbak"
+        printf 'Migrated all tracked secrets to authenticated v3 and staged them with .transcrypt/config.\n'
+        printf 'Commit the staged files together; collaborators must upgrade before pulling this commit.\n'
+    else
+        if [[ $had_cfg ]]; then cp "$cfgbak" "$REPO/.transcrypt/config"; else rm -f "$REPO/.transcrypt/config"; fi
+        if [[ $had_helper ]]; then cp "$helperbak" "$CRYPT_DIR/transcrypt"; else rm -f "$CRYPT_DIR/transcrypt"; fi
+        rm -f "$idx" "$cfgbak" "$helperbak"
+        die 1 'migration failed; original index, config and filter helper restored'
+    fi
+}
+
 ##### MAIN
 
 # reset all variables that might be set
@@ -1558,6 +1884,10 @@ rekey=''
 show_file=''
 uninstall=''
 upgrade=''
+migrate_v3=''
+requested_format=''
+requested_iterations=''
+requested_base_salt=''
 openssl_path='openssl'
 
 # used to bypass certain safety checks
@@ -1627,6 +1957,20 @@ while [[ "${1:-}" != '' ]]; do
 		;;
 	--context=*)
 		context=${1#*=}
+		;;
+	--format=*)
+		requested_format=${1#*=}
+		[[ $requested_format == v3 || $requested_format == legacy ]] || die 1 'format must be v3 or legacy'
+		;;
+	--iterations=*)
+		requested_iterations=${1#*=}
+		;;
+	--base-salt=*)
+		requested_base_salt=${1#*=}
+		;;
+	--migrate-v3)
+		migrate_v3='true'
+		requires_existing_config='true'
 		;;
 	--set-openssl-path=*)
 		openssl_path=${1#*=}
@@ -1781,6 +2125,11 @@ elif [[ $gpg_recipient ]]; then
 	exit 0
 elif [[ $gpg_import_file ]]; then
 	import_gpg
+elif [[ $migrate_v3 ]]; then
+	validate_public_crypto_settings
+	[[ $PUBLIC_FORMAT == legacy ]] || die 1 'migration only supports legacy repositories'
+	migrate_to_v3
+	exit 0
 elif [[ $cipher ]]; then
 	validate_cipher
 fi
@@ -1802,6 +2151,42 @@ elif [[ $interactive ]]; then
 	confirm_configuration
 fi
 
+# New empty repositories use v3 by default, while clones with encrypted
+# tracked files remain legacy unless the repo already carries v3 metadata.
+# Existing installed repositories must use --migrate-v3, not --format=v3.
+validate_public_crypto_settings
+if [[ $requested_format && $PUBLIC_FORMAT == v3 && $requested_format == legacy ]]; then
+    die 1 'cannot initialize legacy encryption in a v3 repository'
+fi
+if [[ $requested_format == v3 && $INSTALLED_VERSION && $PUBLIC_FORMAT == legacy && ! $rekey ]]; then
+    die 1 'existing legacy repository: use --migrate-v3'
+fi
+if [[ $requested_format == v3 && $rekey && $PUBLIC_FORMAT == legacy ]]; then
+    die 1 'use --migrate-v3 rather than --rekey to switch formats'
+fi
+if [[ $PUBLIC_FORMAT == v3 ]]; then
+    [[ $cipher == aes-256-cbc ]] || die 1 'v3 requires aes-256-cbc'
+    [[ ! $requested_iterations && ! $requested_base_salt ]] ||
+        die 1 'v3 public parameters already exist; cannot change them during init/rekey'
+elif [[ $requested_format == v3 || ( ! $requested_format && ! $rekey && \
+    $PUBLIC_FORMAT == legacy && ! -e $REPO/.transcrypt/config && ! $HEAD_EXISTS && ! $INSTALLED_VERSION ) ]]; then
+    [[ $cipher == aes-256-cbc ]] || die 1 'v3 requires aes-256-cbc'
+    [[ ! -e $REPO/.transcrypt/config ]] || die 1 'existing config cannot be overwritten during initialization'
+    # Never configure v3 directly against a clone with existing legacy blobs;
+    # that requires the explicit, verified migration procedure instead.
+    if [[ $HEAD_EXISTS ]]; then
+        local_found=''
+        while IFS= read -r -d '' found && IFS= read -r -d '' attr && IFS= read -r -d '' value; do
+            case $value in crypt | crypt-*) local_found=true; break ;; esac
+        done < <(git ls-files -z | git check-attr -z --stdin filter)
+        [[ ! $local_found ]] || die 1 'existing encrypted files require --migrate-v3'
+    fi
+    select_v3_parameters
+    write_v3_config "$V3_NEW_SALT" "$V3_NEW_ITERATIONS"
+elif [[ $requested_iterations || $requested_base_salt ]]; then
+    die 1 '--iterations and --base-salt require --format=v3 or --migrate-v3'
+fi
+
 save_configuration
 
 if [[ $rekey ]]; then
@@ -1821,6 +2206,11 @@ if [[ ! -f $GIT_ATTRIBUTES ]]; then
 	printf '#pattern  filter=crypt diff=crypt merge=crypt\n' >"$GIT_ATTRIBUTES"
 fi
 
+if [[ $PUBLIC_FORMAT == legacy ]]; then
+    warn 'legacy encryption is in use; consider transcrypt --migrate-v3 when all contexts are unlocked'
+else
+    printf 'Public cryptographic parameters: .transcrypt/config (commit this file).\n'
+fi
 printf 'The repository has been successfully configured by transcrypt%s.\n' "$CONTEXT_DESCRIPTION"
 
 exit 0

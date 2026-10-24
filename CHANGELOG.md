@@ -1,3 +1,16 @@
+## Transcrypt v3 development candidate (not yet released)
+
+- Add a committed, non-secret cryptographic configuration for new repositories,
+  with PBKDF2-HMAC-SHA256 and a password-independent repository salt.
+- Add a versioned authenticated deterministic AES-256-CBC/HMAC-SHA256
+  ciphertext envelope, with explicit errors for corrupt blobs or wrong passwords.
+- Add `--migrate-v3` to stage conversion from legacy repositories using a
+  temporary index and verification across all configured encryption contexts.
+- Preserve legacy format compatibility; add v3 Bats regression coverage,
+  configuration validation, CLI options, and completions.
+- **Pre-release:** requires cryptographic and cross-platform review before
+  inclusion in a stable Transcrypt release.
+
 # Changelog for transcrypt
 
 All notable changes to the project will be documented in this file.

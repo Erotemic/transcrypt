@@ -12,6 +12,10 @@ _transcrypt() {
 		'(- 1 *)'{-h,--help}'[view help message]' \
 		'(-c --cipher -d --display -f --flush-credentials -u --uninstall)'{-c=,--cipher=}'[specify encryption cipher]:cipher:->cipher' \
 		'(-p --password -d --display -f --flush-credentials -u --uninstall)'{-p=,--password=}'[specify encryption password]:password:' \
+		'--format=[select v3 or legacy for a new repository]:format:(v3 legacy)' \
+		'--iterations=[PBKDF2 iteration count for new v3 config]:count:' \
+		'--base-salt=[public 16-byte hex salt for new v3 config]:hex:' \
+		'--migrate-v3[stage authenticated migration of tracked legacy secrets]' \
 		'(-y --yes)'{-y,--yes}'[assume yes and accept defaults]' \
 		'(-d --display -p --password -c --cipher -r --rekey -u --uninstall)'{-d,--display}'[display current credentials]' \
 		'(-r --rekey -d --display -f --flush-credentials -u --uninstall)'{-r,--rekey}'[rekey all encrypted files]' \

@@ -1,5 +1,12 @@
 # transcrypt
 
+> **v3 development candidate:** New repositories can use authenticated
+> PBKDF2 encryption with repository-committed public settings. Legacy
+> repositories require an explicit `transcrypt --migrate-v3` conversion.
+> See [the v3 development guide](docs/transcrypt-v3.md). v3 is **not a
+> published stable release** and requires independent crypto review.
+
+
 A script to configure transparent encryption of sensitive files stored in a Git
 repository. Files that you choose will be automatically encrypted when you
 commit them, and automatically decrypted when you check them out. The process
@@ -34,7 +41,11 @@ the areas of usability and safety.
 - transcrypt facilitates setting up additional clones as well as rekeying
 - transcrypt adds an alias `git ls-crypt` to list all encrypted files
 
-### Salt Generation
+### Legacy (v2) Salt Generation
+
+The following describes the legacy format only. v3 derives a public,
+password-independent repository salt and authenticated deterministic ciphertext;
+see [the v3 guide](docs/transcrypt-v3.md).
 
 The _decryption -> encryption_ process on an unchanged file must be
 deterministic for everything to work transparently. To do that, the same salt
