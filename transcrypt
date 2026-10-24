@@ -265,47 +265,40 @@ derive_context_config_group() {
 	fi
 }
 
-# Internal function that returns a list of filenames for encrypted files in the
-# repo, where the filenames are verbatim and not quoted in any way even if they
-# contain unusual characters like double-quotes, backslash and control
-# characters. We must avoid quoting of filenames to support names containing
-# double quotes. #173
+# Internal function that returns the filenames of encrypted files in the
+# repo, NUL-delimited and verbatim, even if they contain unusual characters
+# like double-quotes, backslashes, repeated whitespace, or newlines. We must
+# avoid quoting of filenames to support names containing double quotes. #173
 _list_encrypted_files() {
 	local strict_context=${1:-}
 
-	IFS=$'\n'
-	# List files with -z option to disable quoting of filenames, then filter
-	# for files marked for encryption (git check-attr + grep), then only keep
-	# filenames (sed) then evaluate escaped characters like double-quotes,
-	# backslash and control characters (eval) which are part of the output
-	# regardless of core.quotePath=false as per
-	# https://git-scm.com/docs/git-config#Documentation/git-config.txt-corequotePath
-	git -c core.quotePath=false ls-files -z |
-		git -c core.quotePath=false check-attr filter -z --stdin 2>/dev/null |
-		# Convert the null-delimited "<path> NUL <attr> NUL <info> NUL" triples
-		# emitted by check-attr into one space-delimited line per file. We read
-		# the NUL-delimited fields directly in bash rather than using
-		# `awk -v RS='\x00'` because some awk builds (notably the Homebrew "one
-		# true awk", e.g. version 20260426) only read the first record when RS
-		# is a null byte. See #213.
-		{
-			while IFS= read -r -d '' path &&
-				IFS= read -r -d '' attr &&
-				IFS= read -r -d '' info; do
-				printf '%s %s %s\n' "$path" "$attr" "$info"
-			done
-		} |
-		{
-			# Only output names of encrypted files matching the context, either
-			# strictly (if $1 = "true") or loosely (if $1 is false or unset)
-			if [[ "$strict_context" == "true" ]]; then
-				grep " filter crypt${CONTEXT_CRYPT_SUFFIX:-}$" || true
-			else
-				grep " filter crypt${CONTEXT_CRYPT_SUFFIX:-}.*$" || true
-			fi
-		} |
-		sed "s| filter crypt${CONTEXT_CRYPT_SUFFIX:-}.*||" |
-		while read -r filename; do eval 'echo $filename'; done
+	# List files with -z to disable quoting of filenames, then filter for
+	# files marked for encryption (git check-attr), keeping the NUL delimiters
+	# end-to-end so that filenames containing newlines (or any other bytes)
+	# cannot fragment into bogus paths and no candidate is silently skipped.
+	# With core.quotePath=false the git -z output is verbatim, so no quoting
+	# or unquoting is needed and the bytes can be consumed safely.
+	# We read the NUL-delimited "<path> NUL <attr> NUL <info> NUL" triples
+	# emitted by check-attr directly in bash rather than using
+	# `awk -v RS='\x00'` because some awk builds (notably the Homebrew "one
+	# true awk", e.g. version 20260426) only read the first record when RS is
+	# a null byte. See #213.
+	while IFS= read -r -d '' path &&
+		IFS= read -r -d '' attr &&
+		IFS= read -r -d '' info; do
+		[[ $attr == 'filter' ]] || continue
+		# Only keep files with the crypt filter matching the context, either
+		# strictly (if $1 = "true") or loosely (if $1 is false or unset)
+		if [[ "$strict_context" == "true" ]]; then
+			[[ $info == "crypt${CONTEXT_CRYPT_SUFFIX:-}" ]] || continue
+		else
+			[[ $info == "crypt${CONTEXT_CRYPT_SUFFIX:-}"* ]] || continue
+		fi
+		printf '%s\0' "$path"
+	done < <(
+		git -c core.quotePath=false ls-files -z |
+			git -c core.quotePath=false check-attr filter -z --stdin 2>/dev/null
+	)
 }
 
 # Detect OpenSSL major version 3 or later which requires a compatibility
@@ -470,9 +463,10 @@ git_merge() {
 git_pre_commit() {
 	# Transcrypt pre-commit hook: fail if secret file in staging lacks the magic prefix "Salted" in B64
 	tmp=$(mktemp)
-	IFS=$'\n'
 	slow_mode_if_failed() {
-		for secret_file in $(_list_encrypted_files); do
+		# NUL-safe enumeration: no candidate may be silently skipped, even when
+		# a filename contains newlines or other unusual bytes. #173 #213
+		while IFS= read -r -d '' secret_file; do
 			# Skip symlinks, they contain the linked target file path not plaintext
 			if [[ -L $secret_file ]]; then
 				continue
@@ -498,7 +492,7 @@ git_pre_commit() {
 				printf '\n' >&2
 				exit 1
 			fi
-		done
+		done < <(_list_encrypted_files)
 	}
 
 	# validate file to see if it failed or not, We don't care about the filename currently for speed, we only care about pass/fail, slow_mode_if_failed() is for what failed.
@@ -522,12 +516,12 @@ git_pre_commit() {
 	if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] || { [[ "${BASH_VERSINFO[0]}" == 4 ]] && [[ "${BASH_VERSINFO[1]}" -ge 4 ]]; }; then
 		num_procs=$(nproc)
 		num_jobs="\j"
-		for secret_file in $(_list_encrypted_files); do
+		while IFS= read -r -d '' secret_file; do
 			while ((${num_jobs@P} >= num_procs)); do
 				wait -n
 			done
 			validate_file "${secret_file}" &
-		done
+		done < <(_list_encrypted_files)
 		wait
 		if [[ -s ${tmp} ]]; then
 			slow_mode_if_failed
@@ -539,7 +533,6 @@ git_pre_commit() {
 	fi
 
 	rm -f "${tmp}"
-	unset IFS
 }
 
 # Add file patterns to .gitattributes
@@ -1168,38 +1161,50 @@ list_files() {
 	if [[ $IS_BARE == 'false' ]]; then
 		cd "$REPO" >/dev/null || die 1 'could not change into the "%s" directory' "$REPO"
 
+		# Display one filename per line. (A filename containing a newline is
+		# inherently ambiguous in line-based display; internal consumers use
+		# the NUL-delimited stream directly.)
+		local file
 		if [[ -z "$CONTEXT_CRYPT_SUFFIX" ]]; then
 			# Non-strict listing of files when context is unset / default
-			_list_encrypted_files
+			while IFS= read -r -d '' file; do
+				printf '%s\n' "$file"
+			done < <(_list_encrypted_files)
 		else
 			# Strict listing of files when a specific context is set
-			_list_encrypted_files true
+			while IFS= read -r -d '' file; do
+				printf '%s\n' "$file"
+			done < <(_list_encrypted_files true)
 		fi
 	fi
 }
 
 # show the raw file as stored in the git commit object
 show_raw_file() {
+	local file_paths=()
 	if [[ -f $show_file ]]; then
 		# ensure the file is currently being tracked
-		local escaped_file=${show_file//\//\\\/}
-		file_paths=$(_list_encrypted_files | grep "$escaped_file")
-		if [[ -z "$file_paths" ]]; then
+		while IFS= read -r -d '' file; do
+			if [[ $file == "$show_file" ]]; then
+				file_paths+=("$file")
+			fi
+		done < <(_list_encrypted_files)
+		if [[ ${#file_paths[@]} -eq 0 ]]; then
 			die 1 'the file "%s" is not currently being tracked by git' "$show_file"
 		fi
 	elif [[ $show_file == '*' ]]; then
-		file_paths=$(_list_encrypted_files)
+		while IFS= read -r -d '' file; do
+			file_paths+=("$file")
+		done < <(_list_encrypted_files)
 	else
 		die 1 'the file "%s" does not exist' "$show_file"
 	fi
 
-	IFS=$'\n'
-	for file in $file_paths; do
+	for file in "${file_paths[@]}"; do
 		printf '==> %s <==\n' "$file" >&2
 		git --no-pager show HEAD:"$file" --no-textconv
 		printf '\n' >&2
 	done
-	unset IFS
 }
 
 # export password and cipher to a gpg encrypted file
