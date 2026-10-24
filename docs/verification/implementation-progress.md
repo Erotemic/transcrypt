@@ -225,3 +225,38 @@ security obligations separately from legacy interoperability.
   revision-pinned Charon/Aeneas and prove refinement against
   `Transcrypt.PolicyGates`. Do not claim SMT subset proofs establish that
   refinement.
+
+## Next long-term implementation slice — executable Rust parity with Bash v2
+
+- Stop extending standalone SMT source models. The SMT proof infrastructure
+  remains available for opt-in experiments but is no longer a default CI gate
+  or a roadmap milestone. The target is Rust application parity + actual
+  Charon/Aeneas refinement under a shared specification.
+- Added independent legacy-v2 byte-exact specification at
+  `specs/LEGACY-V2-INTEROPERABILITY.md`: salt derivation, OpenSSL envelope,
+  filter decision/failure behavior, public vectors, and Bash/Rust review map.
+- Added `no_std` Rust `transcrypt-legacy-core` to hold real pure logic that
+  the Rust executable calls. Added `transcrypt-legacy` CLI as a *legacy-only*
+  Git clean/smudge/textconv adapter; uses Git local config and OpenSSL CLI for
+  v2. Defaults/named contexts, filenames as bytes (on Unix), binary content,
+  and OpenSSL 1.1/3 header normalization are covered by new integration tests.
+- Changed Bash clean to honor Git stdin instead of worktree file size; buffered
+  v2 smudge/textconv decryption before emitting plaintext to prevent partial
+  decryption output on error; explicitly reject provisional v3 records rather
+  than downgrading to the v2 filter. Kept existing v2 ciphertext bytes.
+- Added Bats regression cases, a standalone Bash contract runner, and Rust
+  integration tests that compare actual Git-index blobs and Bash ciphertext to
+  Rust output. The Rust workspace still needs native `cargo test --offline`
+  on a Rust-equipped host; this container has no `cargo`/`rustc`/Aeneas.
+- Added Aeneas translation entrypoint for `transcrypt-legacy-core` **without
+  claiming translation or refinement completed**. The external OpenSSL/Git
+  adapters remain trusted until separately analyzed/verified.
+
+**Still missing for the north star:** Rust implementation of the rest of
+Bash's operational CLI, safe v3 crypto + shared approved wire format,
+transactional Git adapters, interoperable secure Bats/Rust tests, compiled
+Charon/Aeneas refinement theorems, and independent cryptographic review.
+Next work: run the Rust integration suite, address any real compiler or
+OpenSSL/LibreSSL disagreements, then expand the Rust Git planning/transaction
+layer against `03-git-state-machine.md`. Do not add another manually
+transcribed solver proof instead of implementing runtime behavior.

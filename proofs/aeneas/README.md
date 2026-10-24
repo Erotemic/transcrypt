@@ -24,3 +24,18 @@ T-07/T-08/T-09 as *proved of actual Rust* until the generated functions are
 compiled and refinement theorems target them explicitly. See the independent
 `proofs/lean/Transcrypt/PolicyGates.lean` model and the currently checked Z3
 Boolean obligations.
+
+## Current long-term target: actual legacy v2 core
+
+`bash proofs/aeneas/translate-legacy-core.sh` translates the independent
+`no_std` `transcrypt-legacy-core` crate **used by the shipped Rust filter**.
+It contains the byte-level `legacy_hmac_key`, `legacy_salt_from_digest`,
+`valid_context_name`, and legacy discrimination functions. This is preferred
+over further manually maintained SMT correspondence layers.
+
+The independent protocol is
+`docs/verification/specs/LEGACY-V2-INTEROPERABILITY.md`. Once translation
+works with pinned compatible tools, write a Lean refinement theorem for the
+**generated** functions, stating the byte-level semantics and all external
+crypto/Git/OS assumptions. Generating a `.lean` file is not a proof; adapter
+functions and crypto primitives require separate contracts.

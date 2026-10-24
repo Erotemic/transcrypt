@@ -1,0 +1,14 @@
+[package]
+name = "transcrypt-legacy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Interoperable legacy Transcrypt v2 Git filters (compatibility only)"
+
+[dependencies]
+transcrypt-protocol = { path = "../transcrypt-protocol" }
+transcrypt-legacy-core = { path = "../transcrypt-legacy-core" }
+
+[[bin]]
+name = "transcrypt-rs"
+path = "src/main.rs"

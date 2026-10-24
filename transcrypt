@@ -429,14 +429,17 @@ git_clean() {
 	[[ "$context" ]] && shift
 
 	filename=$1
-	# ignore empty files
-	if [[ ! -s $filename ]]; then
-		return
-	fi
-	# cache STDIN to test if it's already encrypted
+	# The clean filter's authoritative input is stdin. The worktree path may
+	# not exist, may be a symlink, or may have a different length from the
+	# bytes Git is actually staging. Never infer an empty Git blob from -s.
 	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
 	trap 'rm -f "$tempfile"' EXIT
 	tee "$tempfile" &>/dev/null
+	[[ -s $tempfile ]] || return 0
+	# The unreleased v3 marker must never be silently processed as v2 data.
+	if [[ $(head -c8 "$tempfile") == 'TCRYPT3:' ]]; then
+		die 1 'v3 data cannot be processed by the legacy v2 clean filter'
+	fi
 	# the first bytes of an encrypted file are always "Salted" in Base64
 	# The `head + LC_ALL=C tr` command handles binary data in old and new Bash (#116)
 	firstbytes=$(head -c8 "$tempfile" | LC_ALL=C tr -d '\0')
@@ -466,13 +469,28 @@ git_clean() {
 
 git_smudge() {
 	tempfile=$(mktemp 2>/dev/null || mktemp -t tmp)
-	trap 'rm -f "$tempfile"' EXIT
-	context=$(extract_context_name_from_name_value_arg "$1")
+	decoded_tmp=$(mktemp 2>/dev/null || mktemp -t tmp)
+	trap 'rm -f "$tempfile" "$decoded_tmp"' EXIT
+	# The future-format marker must not fall back to raw v2 ciphertext on a
+	# checkout with the wrong (legacy) filter implementation installed.
+	# Read stdin once; this also gives the decryptor a stable input stream.
+	cat >"$tempfile"
+	if [[ $(head -c8 "$tempfile") == 'TCRYPT3:' ]]; then
+		die 1 'v3 data cannot be processed by the legacy v2 smudge filter'
+	fi
+	context=$(extract_context_name_from_name_value_arg "${1:-}")
 	context_config_group=$(derive_context_config_group "$context")
 	cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
 	password=$(load_password "$context_config_group")
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
-	tee "$tempfile" | ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a 2>/dev/null || cat "$tempfile"
+	# Buffer all plaintext first: a corrupted ciphertext must not print a
+	# partial decrypted prefix followed by the encrypted fallback bytes.
+	# mktemp creates a private 0600 file; it is removed on every exit path.
+	if ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$tempfile" -out "$decoded_tmp" 2>/dev/null; then
+		cat "$decoded_tmp"
+	else
+		cat "$tempfile"
+	fi
 }
 
 git_textconv() {
@@ -489,7 +507,16 @@ git_textconv() {
 	cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
 	password=$(load_password "$context_config_group")
 	openssl_path=$(git config --get --local transcrypt.openssl-path)
-	ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$filename" 2>/dev/null || cat "$filename"
+	local decoded_tmp cleanup_cmd
+	decoded_tmp=$(mktemp 2>/dev/null || mktemp -t tmp)
+	# Expand the temporary path now: function locals vanish before EXIT trap.
+	printf -v cleanup_cmd 'rm -f -- %q' "$decoded_tmp"
+	trap "$cleanup_cmd" EXIT
+	if ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$filename" -out "$decoded_tmp" 2>/dev/null; then
+		cat "$decoded_tmp"
+	else
+		cat "$filename"
+	fi
 }
 
 # shellcheck disable=SC2005,SC2002,SC2181
@@ -1866,6 +1893,49 @@ count_dirty_files() {
 	{ git diff-index --name-status HEAD -- || git diff-index --stat HEAD -- || git diff-index HEAD -- || true; } 2>/dev/null | grep $'\n' -c
 }
 
+# Verify candidate credentials before writing ANY local credentials or Git filter
+# configuration. The previous heuristic only noticed a failed smudge if that
+# failure changed the worktree; a correct fail-closed smudge leaves ciphertext
+# unchanged, so relying on a dirty-file delta silently accepts wrong keys.
+#
+# Existing v2 is not authenticated. When a nonempty stored blob exists,
+# verify both OpenSSL decryption and its deterministic HMAC-derived salt.
+# This protects against wrong-password acceptance (including CBC padding
+# accidents), without claiming modern authenticated-encryption security.
+preflight_existing_legacy_credentials() (
+	[[ $rekey ]] && exit 0
+	[[ $HEAD_EXISTS ]] || exit 0
+	local paths stored decoded raw expected_salt actual_salt filename
+	paths=$(mktemp) || exit 1
+	stored=$(mktemp) || exit 1
+	decoded=$(mktemp) || exit 1
+	raw=$(mktemp) || exit 1
+	trap 'rm -f -- "$paths" "$stored" "$decoded" "$raw"' EXIT
+	if ! _list_encrypted_files true worktree >"$paths"; then
+		die 1 'cannot inspect existing encrypted objects before initialization'
+	fi
+	while IFS= read -r -d '' filename; do
+		# A preexisting normal Git repository may have matching .gitattributes
+		# but no encrypted objects. That is not evidence of a wrong password.
+		if ! git cat-file blob "HEAD:$filename" >"$stored" 2>/dev/null; then
+			continue
+		fi
+		[[ -s $stored ]] || continue
+		[[ $(head -c8 "$stored") == 'U2FsdGVk' ]] || continue
+		if ! ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$stored" -out "$decoded" 2>/dev/null; then
+			die 1 'Unexpected new dirty files in the repository when configured by transcrypt%s, please check your password.\n' "$CONTEXT_DESCRIPTION"
+		fi
+		if ! "$openssl_path" base64 -d -in "$stored" -out "$raw" 2>/dev/null; then
+			die 1 'invalid existing legacy ciphertext in %s' "$filename"
+		fi
+		actual_salt=$(od -An -tx1 -j8 -N8 "$raw" | tr -d '[:space:]')
+		expected_salt=$("$openssl_path" dgst -hmac "${filename}:${password}" -sha256 "$decoded" | tr -d '\r\n' | tail -c16)
+		if [[ $actual_salt != "$expected_salt" ]]; then
+			die 1 'Unexpected new dirty files in the repository when configured by transcrypt%s, please check your password.\n' "$CONTEXT_DESCRIPTION"
+		fi
+	done <"$paths"
+)
+
 # shellcheck disable=SC2155
 readonly GIT_DIRTY_FILES_BEFORE_INIT="$(count_dirty_files)"
 
@@ -1879,6 +1949,8 @@ elif [[ $interactive ]]; then
 	confirm_configuration
 fi
 
+# Preflight is read-only with respect to the repository and credentials.
+preflight_existing_legacy_credentials
 save_configuration
 
 if [[ $rekey ]]; then

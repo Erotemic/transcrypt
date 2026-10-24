@@ -1,79 +1,79 @@
-# Rust distribution of transcrypt
+# Rust distribution of Transcrypt
 
-Status: early. See
-[`docs/verification/04-dual-implementation-architecture.md`](../docs/verification/04-dual-implementation-architecture.md)
-for the intended crate layout and
-[`docs/verification/10-decisions-and-blockers.md`](../docs/verification/10-decisions-and-blockers.md)
-for the decisions this work is waiting on.
+There is now an **executable Rust legacy-v2 filter adapter**, with its pure
+protocol and policy kernels split out for later Charon/Aeneas refinement. This
+is a second implementation of the old released format, not a completed
+modern authenticated encryption implementation or an independent security
+review. The Bash program remains installable and usable on its own.
 
-## Crates
+## Build and test (no Cargo registry dependencies)
 
-- `crates/transcrypt-protocol` — pure, zero-dependency byte parser and
-  serializer for the repository's cryptographic object formats. Currently
-  implements **detection, structural parsing and serialization of released
-  legacy (v2) envelopes** only. The future secure (v3) format is deliberately not implemented here:
-  its byte grammar is not frozen (D-01 pending), and nothing in this crate
-  may define it by example.
-
-Build/test without network access (no dependencies):
-
-```console
-$ cargo test --offline -p transcrypt-protocol
+```bash
+cd ~/code/transcrypt/rust
+cargo test --offline
+cargo build --offline --release -p transcrypt-legacy
 ```
 
-The `v2_vectors` integration test additionally exercises the parser against
-blobs produced by the Bash implementation (requires `openssl` on `PATH`).
+Crates:
 
-## v2 legacy format (as implemented by `transcrypt`)
+- `transcrypt-protocol`: pure v2 byte parser / canonical serializer.
+- `transcrypt-legacy-core`: `no_std` pure v2 HMAC transcript, salt selection,
+  context-name grammar, and legacy discriminator — the next Aeneas target.
+- `transcrypt-legacy`: `transcrypt-rs` CLI, Git config + OpenSSL process
+  adapters for `clean`, `smudge`, and `textconv`. Uses exact legacy bytes.
+- `transcrypt-policy`: small pure decision gates for the future secure
+  protocol; **not yet attached to Git operations**.
 
-A protected file is stored as **base64 text** (64-character lines, standard
-alphabet, trailing newline) of a binary blob:
+`transcrypt-legacy` has no registry dependencies but **does require** the Git
+and OpenSSL command-line tools at runtime, just like Bash. It uses the
+legacy OpenSSL/MD5 scheme, including old credential exposure risks. Do not
+recommend v2 for new secret repositories.
 
-```text
-"Salted__" || salt[8] || opaque OpenSSL ciphertext (non-empty)
+## Use in a previously initialized v2 repository
+
+Bash still owns initialization, GPG import/export, rekeying, uninstall,
+merge drivers, and the pre-commit hook. The Rust binary may replace only
+the default-context Git clean/smudge/textconv filters as follows, after
+building it above:
+
+```bash
+RUST_FILTER="$(cd ~/code/transcrypt/rust && pwd -P)/target/release/transcrypt-rs"
+
+git config --local filter.crypt.clean "'$RUST_FILTER' clean context=default %f"
+git config --local filter.crypt.smudge "'$RUST_FILTER' smudge context=default"
+git config --local filter.crypt.required true
+git config --local diff.crypt.textconv "'$RUST_FILTER' textconv context=default"
+git config --local diff.crypt.cachetextconv false
 ```
 
-- The base64 starts with the ASCII prefix `U2FsdGVk`, which is the only
-  magic the Bash implementation checks.
-- `salt` is the last 8 bytes (16 hex chars) of
-  `HMAC-SHA256(key = "<path>:<password>", msg = plaintext)`; the key/IV are
-  `EVP_BytesToKey(MD5, password, salt, 1)`. This crate does **not**
-  re-derive or verify those values (they require the password and live in
-  the future crypto adapter); it only validates and splits the structure.
-- Legacy Transcrypt accepts ciphers other than AES-CBC, including AES-CTR;
-  ciphertext length and padding are **cipher-specific**. The envelope parser
-  cannot reject arbitrary non-block-aligned lengths without breaking valid
-  v2 repositories.
-- `encode_v2` emits the same canonical line-wrapped Base64 envelope as
-  `openssl base64`. `base64_decode` rejects non-canonical padding and
-  trailing encoded data after `=` while tolerating CR/LF line endings.
-- Empty files are stored empty (the Bash filter passes them through); the
-  parser therefore classifies empty input as plaintext.
-- V2 is **not authenticated**. Structural acceptance does not prove a
-  ciphertext is genuine, decryptable, complete, or untampered. Key/salt
-  checks and legacy decryption belong to a separate crypto adapter.
+Run these Git configuration commands **inside the already initialized
+repository whose filters you are deliberately changing**. Keep Bash's
+existing `merge.crypt.driver` and pre-commit hook until Rust equivalents are
+implemented and reviewed. Named contexts use separate Git `filter.crypt-NAME`
+and `diff.crypt-NAME` keys, with `context=NAME` in each command.
 
-The wire-format reference is
-[`docs/verification/reference/v2-wire-structure.md`](../docs/verification/reference/v2-wire-structure.md).
+The filter CLI also accepts `clean PATH`, `smudge`, and `textconv PATH`
+with the implicit default context. Failed crypto commands do not write
+partial output, and `TCRYPT3:` inputs are rejected rather than silently
+reprocessed under v2. **There is no Rust `--init`, rekey or migration yet.**
+The binary rejects other operations explicitly; it never silently delegates
+to a Bash shell command.
 
-This description is derived from the released Bash implementation (see
-`docs/verification/implementation-progress.md`), not from an approved spec.
+## Shared specification and formal boundary
 
+See [`LEGACY-V2-INTEROPERABILITY.md`](../docs/verification/specs/LEGACY-V2-INTEROPERABILITY.md).
+It defines the exact existing Bash output, pure transcript functions,
+missing authentication, known v2 pass-through hazard, and hand-audit mapping.
 
-## Pure policy kernel and proof progress (2026-10-24)
+`tests/interop/check-bash-legacy-contract.sh` checks the Bash reference
+without Rust or Bats. `crates/transcrypt-legacy/tests/filter_parity.rs`
+checks the **Rust binary versus Bash and real Git index objects** on public
+fixtures, named contexts, binary/large files, and error paths. Existing v2
+`bats` tests remain a separate suite.
 
-`crates/transcrypt-policy` is a second zero-dependency, `no_std` Rust crate
-providing preflight decisions for **future** secure staged files, unlocking,
-and migration publication. It does not perform Git or crypto operations and
-is not yet wired into the current legacy Bash runtime. Inputs like
-`authenticated` are evidence obligations of the caller, not checks the
-policy magically performs.
-
-Both the production Base64 sextet core and the prospective policy gates have
-universal fixed-width checks in `proofs/smt/`. They were locally discharged
-using Z3, with Rust source fingerprints; see
-[`m6-formal-bitcore.md`](../docs/verification/reference/m6-formal-bitcore.md).
-The independent Lean package under `proofs/lean/` is built in a separate CI
-job. Charon/Aeneas source-to-generated-Lean refinement and Rust compilation
-remain distinct, mandatory acceptance gates; the SMT results alone are not
-an Aeneas proof of Rust.
+The next formal step is to translate the actual `transcrypt-legacy-core`
+source with Charon/Aeneas, then prove its result refines an independent Lean
+byte specification; the crypto/OpenSSL and Git/OS adapters remain external
+contracts. Standalone SMT exercises are not milestones for this project.
+The final authenticated v3 suite remains blocked on the reviewed format and
+portable Bash crypto decisions in `10-decisions-and-blockers.md`.

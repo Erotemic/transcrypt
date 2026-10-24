@@ -1,0 +1,8 @@
+[package]
+name = "transcrypt-legacy-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure no_std legacy Transcrypt v2 compatibility kernel; Aeneas target"
+
+[dependencies]

@@ -125,3 +125,14 @@ before the cryptographic format is frozen.
 ### Current formal proof slice
 
 - [Universal Base64 and policy proof evidence](reference/m6-formal-bitcore.md) (Z3 checked; Lean/Aeneas status explicitly tracked).
+
+### Executable Rust/Bash parity milestone
+
+The first implemented cross-language filter boundary is the released **legacy
+v2 format**, specified in [the byte-exact v2 contract](specs/LEGACY-V2-INTEROPERABILITY.md).
+`rust/crates/transcrypt-legacy` is an actual Rust `clean` / `smudge` /
+`textconv` implementation for Bash-initialized repos, while
+`rust/crates/transcrypt-legacy-core` contains its pure Aeneas-targeted
+functions. This is *not* the final authenticated v3 suite. The remaining
+north-star work is in `08-roadmap-and-pr-plan.md`; independent protocol review
+and compiled generated-code Lean refinement have not been completed.
