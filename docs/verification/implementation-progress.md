@@ -57,6 +57,28 @@ Planning overlay applied (11 docs + 2 reference docs).
   `.github/workflows/run-bats-core-tests.yml` (same OS matrix) so the
   capability table is collected per supported platform (Gate B).
 
+### M6 (partial) — Rust `transcrypt-protocol` core: legacy v2 parser
+(roadmap: M6 may partially proceed once the relevant spec slice is
+agreed; the v2 slice is the released format, so this is unblocked)
+- **New zero-dependency crate** `rust/crates/transcrypt-protocol`
+  (builds offline; layout per 04). Implements `detect_format`,
+  `parse_v2`, a strict standard-base64 decoder (RFC 4648 vectors,
+  residual-bit checks, CRLF-tolerant line breaks), and `V2Record`
+  (salt + ciphertext split) with structured errors.
+- **Fail-closed discriminator:** a blob with the v2 base64 prefix that
+  fails structural validation is `Invalid`, never demoted to plaintext
+  (R-03); empty input is `Plaintext` by the released design.
+- **Evidence:** 14 tests — unit (RFC 4648 vectors; strictness; hostile
+  1 MB inputs incl. NUL/0xff/repeated-prefix/1 MB LCG data; decoder
+  vs encoder agreement) plus a **differential test** that builds real
+  v2 blobs with the Bash pipeline's exact openssl commands and checks
+  the Rust parser's split against it (salt equality, ciphertext
+  decrypts via the Bash pipeline, truncation fails closed).
+  `cargo test --offline` and `cargo clippy` clean.
+- **Out of scope until D-01:** any v3 grammar, key derivation, or
+  decryption (those live in the future crypto adapter; this crate must
+  not define the secure format by example).
+
 ## Audit findings vs this working tree (per 07)
 
 A1, A2, A4, A5, A8: not present — artifacts of the unreleased `TCRYPT3`
@@ -83,14 +105,18 @@ fix (compatibility impact on shared-gitdir workflows).
   no `-pbkdf2`; `enc -pass file:/fd:` + legacy ciphers available —
   confirm, don't assume.
 - M3+ (Bash v3 implementation) waits for a D-01 direction decision.
-- M6 (Rust) waits on M1; see 04 for the crate layout.
+- M6 (Rust) is **partially** unblocked: the legacy v2 parser slice is
+  done; the secure-format parser/serializer, policy crate, crypto
+  adapter, and interop suite all wait on the frozen v3 spec (M1).
 
 ## Next unblocked task
 
 1. Once CI (or any 1.1.x/LibreSSL host) produces probe output, append it
    to `docs/verification/reference/d01-d02-feasibility.md` verbatim.
 2. The options paper (11) is ready for the external D-01 decision; when a
-   direction is chosen, write the frozen `PROTOCOL-<id>.md` from it.
+   direction is chosen, write the frozen `PROTOCOL-<id>.md` from it, then
+   continue M6 in `rust/` (v3 parser/serializer, policy crate) and M3 in
+   Bash from that single spec.
 3. No further Bash v2 hardening is known in this tree beyond the A7 fix
    (see audit cross-check above); the `crypt-dir`/symlink-redirect
    observations are queued for a maintainer decision before any fix.

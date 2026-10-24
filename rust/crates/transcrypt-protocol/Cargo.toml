@@ -1,0 +1,9 @@
+[package]
+name = "transcrypt-protocol"
+version = "0.1.0"
+description = "Pure byte parser for transcrypt object formats (legacy v2 detection and structure)"
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+# Deliberately none: the core parser must build offline (see rust/README.md).

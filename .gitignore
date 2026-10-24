@@ -1,0 +1,6 @@
+# Rust build artifacts (rust/ workspace)
+rust/target/
+
+# The workspace has no external dependencies, so the lockfile pins
+# nothing worth versioning.
+rust/Cargo.lock

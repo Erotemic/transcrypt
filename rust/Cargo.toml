@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/transcrypt-protocol"]
+
+# The Rust distribution keeps a zero-dependency core (see
+# docs/verification/04-dual-implementation-architecture.md): the protocol
+# parser must build with no external crates and no network access.
+[workspace.package]
+edition = "2021"
+license = "MIT"
