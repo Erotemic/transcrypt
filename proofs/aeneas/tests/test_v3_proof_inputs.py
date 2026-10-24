@@ -139,6 +139,9 @@ class ProofInputTests(unittest.TestCase):
     def test_proof_input_zip_is_allowlisted_and_deterministic(self):
         (self.project / '.lake/build/lib/lean').mkdir(parents=True)
         (self.project / '.lake/build/lib/lean/not-included.olean').write_text('never')
+        dep = self.project / '.lake/packages/aeneas/Aeneas/Unreviewed.lean'
+        dep.parent.mkdir(parents=True)
+        dep.write_text('theorem should_not_export : False := by sorry\n')
         first = self.root / 'bundle1.zip'
         second = self.root / 'bundle2.zip'
         count1, digest1 = create_bundle(self.root, first)
@@ -149,6 +152,8 @@ class ProofInputTests(unittest.TestCase):
             self.assertIn('PROOF-INPUTS-SHA256.txt', names)
             self.assertIn('rust/proofs/aeneas/generated/V3Core/lean/V3Wire/Extraction/Funs.lean', names)
             self.assertNotIn('.lake/build/lib/lean/not-included.olean', names)
+            self.assertFalse(any('/.lake/' in entry for entry in names))
+            self.assertNotIn('rust/proofs/aeneas/generated/V3Core/lean/.lake/packages/aeneas/Aeneas/Unreviewed.lean', names)
             self.assertEqual(archive.testzip(), None)
             for entry in archive.read('PROOF-INPUTS-SHA256.txt').decode().splitlines():
                 digest, filename = entry.split('  ', 1)

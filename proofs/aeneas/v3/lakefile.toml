@@ -1,0 +1,21 @@
+name = "V3Wire"
+version = "0.1.0"
+defaultTargets = ["V3Wire"]
+
+[[lean_lib]]
+name = "V3Wire"
+
+[[require]]
+name = "aeneas"
+git = "https://github.com/cryspen/aeneas"
+rev = "build-183e4f0"
+subDir = "backends/lean"
+
+[[require]]
+name = "hax"
+git = "https://github.com/cryspen/hax-lean"
+rev = "v0.3.30"
+
+# Independent v3 protocol specification, staged from proofs/lean.
+[[lean_lib]]
+name = "Transcrypt"

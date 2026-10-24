@@ -98,3 +98,19 @@ handwritten stand-ins, and establish at least:
 
 Crypto correctness (Argon2id/AES-SIV external dependency) and end-to-end
 Git/OS state transitions remain distinct refinement/security obligations.
+
+## Reviewed, version-controlled production extraction
+
+The production Rust codec's generated semantics live at
+`proofs/aeneas/v3/V3Wire/Extraction/Funs.lean` and
+`proofs/aeneas/v3/V3Wire/Extraction/Types.lean`, along with explicitly
+tracked external assumptions, toolchain pins, and `SNAPSHOT.json` source
+hashes. The code is Aeneas-generated from the production crate, not an
+alternative manually authored Rust model.
+
+The file `V3Wire/Verification/Refinement.lean` currently states direct
+correspondence of the extracted Rust magic/version byte constants with the
+independent `Transcrypt.V3Wire` specification, plus their disjointness.
+The full extracted Rust encoder/decoder loops, errors, length checks, and
+cryptographic authentication remain separate open obligations. Do not
+interpret the snapshot-integrity test as verification of those obligations.

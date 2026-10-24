@@ -134,3 +134,29 @@ Aeneas or Lean execution:
 ```bash
 python3 proofs/aeneas/tests/test_v3_proof_inputs.py -v
 ```
+
+## Tracked production v3 proof snapshot (current recommended gate)
+
+The real generated Lean codec definitions are now tracked under
+`proofs/aeneas/v3/`, with exactly pinned Charon/Aeneas, Lake dependencies, and
+SHA-256 bindings to the Rust source and hax extraction scenario. Do **not**
+commit anything under `rust/proofs/aeneas/generated/` or `.lake/`.
+
+Ordinary changes no longer need to reinstall or rerun Charon:
+
+```bash
+cd ~/code/transcrypt
+python3 proofs/aeneas/v3_snapshot.py verify
+bash proofs/aeneas/build-v3-tracked.sh
+```
+
+The build stages the one authoritative spec from `proofs/lean/`, imports the
+actual extracted Rust codec definitions, and compiles the **first direct
+source-derived refinement claims** (version-marker correspondence/disjointness).
+Complete encoder/decoder, authentication and Git lifecycle refinement is still
+open. See `proofs/aeneas/v3/PROOF-STATUS.md` for the precise proof boundary.
+
+On verified Rust changes, run `translate-v3-core.sh`, then
+`python3 proofs/aeneas/v3_snapshot.py compare`; update the snapshot only
+with the explicit reviewed `refresh` command. CI both builds the checked-in
+proof package and independently regenerates/compares the extracted Lean.

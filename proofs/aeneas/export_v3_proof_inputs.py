@@ -41,7 +41,14 @@ def create_bundle(root: Path, destination: Path) -> tuple[int, str]:
         selected.add(manifest)
     # Include unimported model templates as evidence for proof authors: they
     # can reveal missing external specifications, but are NOT counted as proofs.
-    selected.update(path for path in project.rglob('*.lean') if path.is_file())
+    # Never recursively walk the project: Aeneas/Lake dependencies live under
+    # .lake/packages and are not proof inputs we own. Prior exporter revisions
+    # accidentally shipped nearly 10,000 dependency sources in this ZIP.
+    selected.update(project / name for name in (
+        'V3Wire/Assumptions/FunsExternal.lean',
+        'V3Wire/Extraction/FunsExternal_Template.lean',
+        'V3Wire/Verification/ProofObligations.lean',
+    ) if (project / name).is_file())
     content = []
     for file in sorted(selected):
         if file.is_symlink() or not file.resolve().is_relative_to(root):

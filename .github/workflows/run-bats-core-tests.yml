@@ -153,3 +153,35 @@ jobs:
           lake-package-directory: proofs/lean
           test: false
           use-mathlib-cache: false
+
+  v3-tracked-aeneas-refinement:
+    # The tracked definitions come from the production Rust v3 codec. Compile
+    # them together with the independent specification and imported theorems.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify code provenance and snapshot regression tests
+        run: |
+          python3 -m unittest discover -s proofs/aeneas/tests -p 'test_v3_snapshot.py' -v
+          python3 proofs/aeneas/v3_snapshot.py verify
+          python3 proofs/aeneas/v3_snapshot.py stage
+      - name: Lean build of actual generated code and refinement theorems
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: proofs/aeneas/v3
+          test: false
+          use-mathlib-cache: true
+
+  v3-aeneas-regeneration:
+    # No synthetic model: rerun the pinned real translator, diff the exact
+    # checked-in Aeneas output, and require toolchain/dependency agreement.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned managed Charon/Aeneas driver
+        run: cargo install --locked --version 0.4.2 cargo-hax
+      - name: Re-extract actual Rust and compare with tracked Lean snapshot
+        run: |
+          bash proofs/aeneas/translate-v3-core.sh
+          python3 proofs/aeneas/v3_snapshot.py compare

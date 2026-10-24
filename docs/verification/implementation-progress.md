@@ -366,3 +366,23 @@ material or working-tree secret files. The proof environment and export
 pipeline have offline regression tests. **A theorem connecting the generated
 Rust decoder/encoder definitions to `Transcrypt.V3WireCodec` is still required;
 there is no claim of such a proof yet.**
+
+### Tracked Aeneas v3 proof snapshot and first generated-code theorems
+
+The checked-in proof project at `proofs/aeneas/v3/` now uses the actual
+production `transcrypt-v3-core` Rust code translated by Charon/Aeneas (not a
+parallel proof model). It preserves the exact output in Git, pins the compiler
+and Lean library versions in a Lake manifest, and records hashes binding
+source, extraction scenario, and all committed generated modules.
+
+It compiles the independent Lean wire specification in the *same* project via
+ignored, verbatim staged copies, and imports direct theorems in
+`V3Wire/Verification/Refinement.lean` concerning the actual Aeneas-extracted
+configuration/file magic bytes. CI checks the snapshot, runs Lean, and
+regenerates the translated output for an exact comparison. The complete
+four-function Rust-to-spec functional refinement remains open; it requires
+invariants for the generated RustM loops. Cryptographic primitives and Git
+side effects are outside this current pure-wire proof.
+
+The old proof-input exporter no longer traverses `.lake/packages/` and the
+tracked project never includes downloaded Aeneas/Mathlib source trees.
