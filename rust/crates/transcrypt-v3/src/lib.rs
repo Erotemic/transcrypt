@@ -13,6 +13,26 @@ use transcrypt_v3_core::{
 use zeroize::Zeroizing;
 
 pub const MAX_FILE: usize = 16 * 1024 * 1024;
+/// Maximum raw Git relative pathname length transported by the credential agent.
+pub const MAX_PATH: usize = 4096;
+
+/// A canonical Git-relative name is part of the authenticated cryptographic
+/// context. In particular, `foo/../bar.secret`, absolute paths, duplicate
+/// separators, NUL and paths without the configured protection suffix are
+/// rejected. Git's `%f` and NUL-delimited index entries use the *same* bytes.
+/// This policy deliberately has no Unicode normalization or filesystem lookup.
+pub fn validate_protected_path(path: &[u8]) -> Result<(), String> {
+    if path.is_empty() || path.len() > MAX_PATH || path.contains(&0) || path.starts_with(b"/") {
+        return Err("invalid protected Git-relative path".into());
+    }
+    if path.split(|b| *b == b'/').any(|part| part.is_empty() || part == b"." || part == b"..") {
+        return Err("noncanonical protected Git-relative path".into());
+    }
+    if !path.rsplit(|b| *b == b'/').next().unwrap_or(path).ends_with(b".secret") {
+        return Err("v3 requires a *.secret Git path".into());
+    }
+    Ok(())
+}
 pub const ARGON_MEMORY_KIB: u32 = 65_536;
 pub const ARGON_PASSES: u32 = 3;
 pub const ARGON_LANES: u32 = 1;
@@ -78,14 +98,15 @@ pub fn config_id(config_bytes: &[u8]) -> [u8; ID_LEN] {
     id
 }
 
-pub fn encrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], plaintext: &[u8])
+pub fn encrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], plaintext: &[u8])
     -> Result<Vec<u8>, String>
 {
     if plaintext.len() > MAX_FILE {
         return Err("input exceeds 16 MiB limit".into());
     }
+    validate_protected_path(path)?;
     authenticate_config(config_bytes, key)?;
-    let headers: [&[u8]; 2] = [FILE_DOMAIN, config_bytes];
+    let headers: [&[u8]; 3] = [FILE_DOMAIN, config_bytes, path];
     let encrypted = siv(key)?.encrypt(headers, plaintext)
         .map_err(|_| "AES-SIV encryption failed")?;
     let mut out = Vec::with_capacity(FILE_HEADER_LEN + encrypted.len());
@@ -94,18 +115,19 @@ pub fn encrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], plaintext: &[u8])
     Ok(out)
 }
 
-pub fn decrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], record: &[u8])
+pub fn decrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], record: &[u8])
     -> Result<Vec<u8>, String>
 {
     if record.len() > MAX_FILE + FILE_MIN_LEN {
         return Err("ciphertext exceeds 16 MiB limit".into());
     }
+    validate_protected_path(path)?;
     authenticate_config(config_bytes, key)?;
     let record_id = parse_file_header(record).map_err(|_| "invalid v3 ciphertext envelope")?;
     if !bool::from(record_id.ct_eq(&config_id(config_bytes))) {
         return Err("v3 ciphertext belongs to different public configuration".into());
     }
-    let headers: [&[u8]; 2] = [FILE_DOMAIN, config_bytes];
+    let headers: [&[u8]; 3] = [FILE_DOMAIN, config_bytes, path];
     let plaintext = siv(key)?.decrypt(headers, &record[FILE_HEADER_LEN..])
         .map_err(|_| "v3 ciphertext authentication failed")?;
     if plaintext.len() > MAX_FILE {
@@ -130,27 +152,55 @@ mod tests {
         assert_eq!(&key[..], &key2[..]);
         assert!(unlock_config(b"bad password", &config).is_err());
         for plaintext in [b"".as_slice(), b"hello".as_slice(), &[0, 1, 255, 0][..]] {
-            let ct1 = encrypt_file(&config, &key, plaintext).unwrap();
-            let ct2 = encrypt_file(&config, &key, plaintext).unwrap();
+            let ct1 = encrypt_file(&config, &key, b"safe/item.secret", plaintext).unwrap();
+            let ct2 = encrypt_file(&config, &key, b"safe/item.secret", plaintext).unwrap();
             assert_eq!(ct1, ct2);
-            assert_eq!(decrypt_file(&config, &key, &ct1).unwrap(), plaintext);
+            assert_eq!(decrypt_file(&config, &key, b"safe/item.secret", &ct1).unwrap(), plaintext);
             let mut corrupt = ct1.clone();
             let last = corrupt.len() - 1;
             corrupt[last] ^= 1;
-            assert!(decrypt_file(&config, &key, &corrupt).is_err());
+            assert!(decrypt_file(&config, &key, b"safe/item.secret", &corrupt).is_err());
         }
     }
 
     #[test]
     fn config_binding_and_fail_closed() {
         let (config, key) = fixture();
-        let ct = encrypt_file(&config, &key, b"private").unwrap();
+        let ct = encrypt_file(&config, &key, b"account.secret", b"private").unwrap();
         let mut altered = config;
         altered[7] ^= 0x40;
-        assert!(decrypt_file(&altered, &key, &ct).is_err());
+        assert!(decrypt_file(&altered, &key, b"account.secret", &ct).is_err());
         let mut altered_ct = ct.clone();
         altered_ct[0] = 0;
-        assert!(decrypt_file(&config, &key, &altered_ct).is_err());
-        assert!(decrypt_file(&config, &key, b"private").is_err());
+        assert!(decrypt_file(&config, &key, b"account.secret", &altered_ct).is_err());
+        assert!(decrypt_file(&config, &key, b"account.secret", b"private").is_err());
     }
+
+    #[test]
+    fn ciphertext_is_bound_to_exact_git_path() {
+        let (config, key) = fixture();
+        let original = encrypt_file(&config, &key, b"vault/a.secret", b"identical").unwrap();
+        let repeated = encrypt_file(&config, &key, b"vault/a.secret", b"identical").unwrap();
+        let different = encrypt_file(&config, &key, b"vault/b.secret", b"identical").unwrap();
+        assert_eq!(original, repeated, "Git determinism must be preserved within a path");
+        assert_ne!(original, different, "distinct Git paths must use distinct SIV AD");
+        assert_eq!(decrypt_file(&config, &key, b"vault/a.secret", &original).unwrap(), b"identical");
+        assert!(decrypt_file(&config, &key, b"vault/b.secret", &original).is_err());
+        assert!(decrypt_file(&config, &key, b"a.secret", &original).is_err());
+        assert!(decrypt_file(&config, &key, b"vault/a.secret", &different).is_err());
+    }
+
+    #[test]
+    fn raw_unix_paths_are_bound_and_noncanonical_inputs_fail_closed() {
+        let (config, key) = fixture();
+        for path in [b"a b.secret".as_slice(), b"a'quote.secret", b"dir/new\nline.secret", b"raw/\xff.secret"] {
+            let record = encrypt_file(&config, &key, path, b"payload").unwrap();
+            assert_eq!(decrypt_file(&config, &key, path, &record).unwrap(), b"payload");
+        }
+        for path in [b"".as_slice(), b"absolute", b"/root.secret", b"../bad.secret", b"x/../bad.secret", b"./x.secret", b"x//y.secret", b"x/./y.secret", b"x.secret/", b"evil\0.secret"] {
+            assert!(validate_protected_path(path).is_err(), "accepted {:?}", path);
+        }
+        assert!(validate_protected_path(&std::vec![b'x'; MAX_PATH + 1]).is_err());
+    }
+
 }

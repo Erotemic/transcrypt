@@ -386,3 +386,27 @@ side effects are outside this current pure-wire proof.
 
 The old proof-input exporter no longer traverses `.lake/packages/` and the
 tracked project never includes downloaded Aeneas/Mathlib source trees.
+
+
+## October 24 v3 authenticated pathname binding (secure-first scope)
+
+The experimental Rust v3 AES-SIV adapter now uses the **raw canonical Git
+relative pathname as a third associated-data element**. The Unix credential
+agent carries bounded pathname bytes separately from file data; all filter,
+staged-index verification, hydration and lock call sites use the same Git
+pathname. An authenticated ciphertext relocated to a different `*.secret`
+path is rejected rather than releasing another file's plaintext.
+
+- Production pure `transcrypt-v3-core` wire source and checked-in
+  Charon/Aeneas snapshot are unchanged. This increment does **not** add a
+  new Lean refinement claim for the crypto or Git adapter.
+- Public 55-byte config and 22-byte file header are unchanged. The **AEAD
+  profile is not compatible** with the earlier experimental two-element-AD
+  v3 ciphertext; no automatic legacy decryption path is provided.
+- Independent Python/OpenSSL-backed golden vectors and their Rust consumer
+  use the new ordered three-element AD. An additional real-Git test confirms
+  `%f` is passed byte-exact for shell-unsafe and non-UTF8 names. Rust end-to-end
+  tests include staged ciphertext swaps and non-UTF8 Git clone/hydration.
+- Remaining substantial proof obligations: extracted Rust wire loops,
+  authenticated crypto-adapter correspondence, and Git/OS lifecycle
+  transactional/ownership properties.

@@ -85,7 +85,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     let mut altered_metadata = authentic_metadata.clone();
     altered_metadata[8] ^= 1;
     fs::write(&metadata_path, altered_metadata).unwrap();
-    run_fails(&clone, bin, &["clean"], Some(b"must not encrypt under changed metadata"));
+    run_fails(&clone, bin, &["clean", "account.secret"], Some(b"must not encrypt under changed metadata"));
     fs::write(&metadata_path, authentic_metadata).unwrap();
     // If any protected path is unexpected, preflight must refuse to touch
     // every path. Previously restoring one at a time risked partial writes.
@@ -107,9 +107,28 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     // passed to Git restore's implicit clean-filter refresh.
     run(&clone, bin, &["hydrate"], None);
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
+    // Both objects are valid AES-SIV ciphertext, but for DIFFERENT paths.
+    // Swapping their staged blobs must be rejected before any plaintext
+    // is produced or the working tree is changed.
+    let account_oid = String::from_utf8(run(
+        &clone, "git", &["rev-parse", ":account.secret"], None,
+    )).unwrap();
+    let ledger_oid = String::from_utf8(run(
+        &clone, "git", &["rev-parse", ":ledger.secret"], None,
+    )).unwrap();
+    run(&clone, "git", &["update-index", "--cacheinfo", "100644", ledger_oid.trim(), "account.secret"], None);
+    run_fails(&clone, bin, &["verify-index"], None);
+    run_fails(&clone, bin, &["hydrate"], None);
+    assert_eq!(fs::read(clone.join("account.secret")).unwrap(), b"private content\n");
+    run(&clone, "git", &["update-index", "--cacheinfo", "100644", account_oid.trim(), "account.secret"], None);
+    run(&clone, bin, &["verify-index"], None);
+    // The lower-level filter must also reject valid ciphertext with a
+    // mismatched Git path, even if an attacker invokes it directly.
+    run_fails(&clone, bin, &["smudge", "ledger.secret"], Some(&object));
+    run_fails(&clone, bin, &["clean"], Some(b"missing path"));
     // Hydration must use the exact staged ciphertext. HEAD deliberately still
     // contains the original secret, while the index contains a newer one.
-    let staged_blob = run(&clone, bin, &["clean"], Some(b"staged snapshot\n"));
+    let staged_blob = run(&clone, bin, &["clean", "account.secret"], Some(b"staged snapshot\n"));
     let staged_id = String::from_utf8(run(
         &clone, "git", &["hash-object", "-w", "--stdin"], Some(&staged_blob),
     )).unwrap();
@@ -153,5 +172,49 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     run(&clone, "git", &["reset", "-q", "HEAD", "--", "account.secret"], None);
     run(&clone, bin, &["lock"], None);
     assert_in_memory_session(&clone, false);
+    let _ = fs::remove_dir_all(&temp);
+}
+
+
+#[test]
+fn git_non_utf8_path_survives_filter_agent_commit_clone_and_hydration() {
+    use std::os::unix::ffi::OsStringExt;
+    let temp = std::env::temp_dir().join(format!(
+        "transcrypt-v3-raw-path-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir(&temp).unwrap();
+    let source = temp.join("source");
+    let clone = temp.join("clone");
+    fs::create_dir(&source).unwrap();
+    let bin = env!("CARGO_BIN_EXE_transcrypt-v3");
+    let pass = b"long correct horse battery staple test passphrase\n";
+    let name = std::ffi::OsString::from_vec(b"odd \xff'\nname.secret".to_vec());
+    let payload = b"secret with a binary Git path\x00\xff";
+    run(&source, "git", &["init", "-q"], None);
+    run(&source, "git", &["config", "user.name", "Example"], None);
+    run(&source, "git", &["config", "user.email", "example@example.test"], None);
+    fs::write(source.join("README"), b"public\n").unwrap();
+    run(&source, "git", &["add", "README"], None);
+    run(&source, "git", &["commit", "-qm", "seed"], None);
+    run(&source, bin, &["init", "--password-stdin"], Some(pass));
+    fs::write(source.join(&name), payload).unwrap();
+    // Git invokes the configured `%f` filter with the exact path byte string,
+    // even though this path is neither UTF-8 nor shell-identifier-safe.
+    run(&source, "git", &["add", "-A"], None);
+    run(&source, "git", &["commit", "-qm", "raw-path encrypted record"], None);
+    let index = run(&source, "git", &["ls-files", "-z"], None);
+    assert!(index.split(|b| *b == 0).any(|part| part == b"odd \xff'\nname.secret"));
+    run(&temp, "git", &["clone", "-q", "source", "clone"], None);
+    let committed_ciphertext = fs::read(clone.join(&name)).unwrap();
+    assert!(committed_ciphertext.starts_with(b"TV3F\0\x01"));
+    assert_ne!(committed_ciphertext, payload);
+    run(&clone, bin, &["unlock", "--password-stdin"], Some(pass));
+    run(&clone, bin, &["hydrate"], None);
+    assert_eq!(fs::read(clone.join(&name)).unwrap(), payload);
+    run(&clone, bin, &["verify-index"], None);
+    run(&clone, bin, &["lock"], None);
+    assert_eq!(fs::read(clone.join(&name)).unwrap(), committed_ciphertext);
+    run(&source, bin, &["lock"], None);
     let _ = fs::remove_dir_all(&temp);
 }

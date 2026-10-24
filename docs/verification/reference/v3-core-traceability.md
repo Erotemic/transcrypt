@@ -9,7 +9,7 @@ must be changed to comply with that contract, not vice versa.
 | Config bytes 0..54, magic, salt, verifier | `transcrypt-v3-core::{encode_config_prefix,encode_config,parse_config}` | core unit tests, `vectors.tsv` | Extracted parser/encoder roundtrip under canonical sizes |
 | File header bytes 0..21, minimum 38 | `transcrypt-v3-core::{encode_file_header,parse_file_header}` | core unit tests, Rust negative tests | Header construction/parse refinement |
 | Argon2id v19 fixed params/64B key | `transcrypt-v3::derive_key` | Python argon2-cffi vector | External Argon2id semantics assumption |
-| Deterministic AES-SIV file authentication | `transcrypt-v3::{encrypt_file,decrypt_file}` | Python OpenSSL-backed AESSIV vectors | External AES-SIV correctness and unforgeability assumptions |
+| Deterministic, pathname-bound AES-SIV authentication | `transcrypt-v3::{validate_protected_path,encrypt_file,decrypt_file}` | Python OpenSSL-backed 3-element-AAD vectors, Rust negative cross-path tests, real-Git index-object swap test | External AES-SIV correctness, canonical-path input and unforgeability assumptions |
 | Metadata binding and fail closed | `authenticate_config`, `config_id`, `decrypt_file` | config tampering and wrong password tests | No successful open with invalid authentication |
 | Credential authorization | `main::unlock` and `session::{start,serve}` | Git wrong-password no-agent test and no-disk-key assertion | Preflight-before-persistent-effects adapter relation |
 | Staged tree safety | `main::verify_index`, Git hook | forged raw Git object regression | Index truth, symlink, and ciphertext-refinement effect contract |
@@ -114,3 +114,19 @@ independent `Transcrypt.V3Wire` specification, plus their disjointness.
 The full extracted Rust encoder/decoder loops, errors, length checks, and
 cryptographic authentication remain separate open obligations. Do not
 interpret the snapshot-integrity test as verification of those obligations.
+
+## Experimental v3 pathname binding (no wire-core changes)
+
+The actual v3 adapter now authenticates the canonical raw Git-relative
+`*.secret` filename as AES-SIV AD component 3. Git's `%f` provides the
+argument to clean/smudge; staged index names are the authoritative input for
+verify-index, hydrate and lock. The credential-agent IPC transports the same
+raw bytes. The independent Python vector fixture tests the 3-element AD
+against OpenSSL-backed AES-SIV; Rust integration tests reject swapping two
+valid staged encrypted Git blobs. The fixed 55-byte metadata and 22-byte file
+headers, and the Aeneas-tracked pure wire codec, are byte-for-byte unchanged.
+
+This is a *cryptographic profile incompatibility* with the earlier v3 P0
+prototype. Old ciphertext must be exported before upgrading/reinitializing.
+No unproven fallback or multi-version complexity was added. Full formal
+verification of the AES-SIV adapter and Git path-to-AD mapping remains open.

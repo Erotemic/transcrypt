@@ -56,15 +56,33 @@ credentials, installing filters, or hydrating plaintext.
 | 6 | 16 | SHA-256(config bytes)[0:16] |
 | 22 | 16+N | AES-SIV tag (16 bytes) followed by N ciphertext bytes |
 
-`AD=[b"transcrypt/v3/file", complete_config_bytes]`.
+`AD=[b"transcrypt/v3/file", complete_config_bytes, canonical_git_relative_path_bytes]`.
+
+The third associated-data element is the **exact Git-relative pathname as
+raw bytes**, as supplied by Git's `%f` expansion (for filters) or the
+NUL-delimited staged index (for verification, hydration and locking). Valid
+names have a nonempty `*.secret` basename, use `/` separators, are at most
+4,096 bytes, and contain no NUL, empty component, `.` or `..` component.
+No Unicode normalization, case folding, absolute paths or filesystem-based
+canonicalization is performed: Git path bytes are the authoritative identity.
+The credential agent rejects missing or noncanonical path input.
+
+This **path-bound v3 experimental profile supersedes** the earlier v3 P0
+ciphertext profile that used only two associated-data components. Existing
+old-profile ciphertext is NOT decryptable by this implementation. To avoid
+accidental silent downgrade, there is no legacy fallback. Do not deploy this
+over an initialized earlier v3 test repository without first exporting the
+plaintext with the earlier binary, then reinitializing a fresh repository.
 
 An empty plaintext is valid (`N=0`, total record length 38 bytes).
 The selected AES-SIV mode is deterministic and **leaks equality of identical
-files in the same repository**. Records are NOT path-bound; copying an
-otherwise valid ciphertext to another protected pathname in the same
-repository can succeed. Repository/metadata substitution, modification,
-and cross-repository ciphertext replay fail unless the corresponding key and
-config bytes also match. Old valid repository snapshots can still be rolled
+plaintexts at the same Git path in the same repository**. Moving a record to
+another protected pathname fails authentication, even if its format header,
+config ID and tag are otherwise valid. Renaming a protected file therefore
+requires decrypting and re-encrypting under its new Git pathname; merely
+moving an encrypted Git blob is not safe. Repository/metadata substitution,
+modification, cross-path replay and cross-repository ciphertext replay fail
+unless the corresponding key and associated-data components also match. Old valid repository snapshots can still be rolled
 back by adversaries controlling Git history; freshness requires separate
 trusted state and is outside this POC.
 
@@ -79,16 +97,18 @@ trusted state and is outside this POC.
   pipe to a dedicated credential process. The process keeps it in memory.
   The only persistent endpoint is a mode-`0600` Unix-domain socket at
   `.git/transcrypt-v3/session.sock`, beneath a mode-`0700` directory.
-  Git filters send operation, exact public config, and plaintext/ciphertext
-  bytes over the socket; the raw key is **never returned to clients**.
+  Git filters send operation, exact public config, canonical Git-relative
+  pathname bytes, and plaintext/ciphertext bytes over the socket; the raw key is **never returned to clients**.
   The agent authenticates the supplied public config on every operation.
   Stale sockets left by dead processes may be reclaimed only after verifying
   the socket type and that it has no listening peer. Missing/dead agents fail
   closed. Earlier prototype on-disk keys must be removed or locked using the
   previous binary before starting this agent.
-- `clean`: accept plaintext only, emit a complete authenticated record only
+- `clean`: accept plaintext only, require the Git-provided `%f` path as
+  a single argument, and emit a complete path-bound authenticated record only
   after successful encryption. Do not double-encrypt recognizable records.
-- `smudge`: authenticate and then release plaintext; reject all other bytes.
+- `smudge`: authenticate including the Git-provided `%f` path and then
+  release plaintext; reject all other bytes.
   Git diffs are disabled for protected files rather than invoking textconv.
 - `verify-index`: check staged `.transcrypt/config` exactly matches worktree
   config; staged `.gitattributes` equals the fixed policy; every index
@@ -155,8 +175,10 @@ Correspondence and proof obligation map: [`v3-core-traceability.md`](../referenc
 
 This is an internal IPC format and may change independently of ciphertext
 format v3. Request: one ASCII opcode (`P` ping, `E` encrypt, `D` decrypt,
-`X` shutdown), 55-byte exact public config, four-byte big-endian body length,
-then that many payload bytes. Response: one-byte status (0 success, 1 error),
+`X` shutdown), 55-byte exact public config, four-byte big-endian path length, that many raw canonical Git-relative
+pathname bytes, four-byte big-endian body length, then that many payload
+bytes. Ping/shutdown carry an empty path and body; encrypt/decrypt require a
+validated path. Response: one-byte status (0 success, 1 error),
 four-byte big-endian output length, then bytes. Both directions enforce a
 16-MiB-plus-envelope bound. The agent verifies the supplied config bytes
 match those authenticated on startup before processing any payload. The

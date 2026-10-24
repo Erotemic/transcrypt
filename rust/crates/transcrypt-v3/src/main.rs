@@ -5,12 +5,13 @@ compile_error!("transcrypt-v3 POC requires Unix for 0600/0700 local credential p
 
 use std::{
     env, fs,
+    ffi::OsString,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
 #[cfg(unix)]
-use std::os::unix::{ffi::OsStringExt, fs::OpenOptionsExt};
+use std::os::unix::{ffi::{OsStrExt, OsStringExt}, fs::OpenOptionsExt};
 use zeroize::Zeroizing;
 mod session;
 use session::Operation;
@@ -32,25 +33,35 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let action = args.first().ok_or("usage: transcrypt-v3 init|unlock|lock|clean|smudge|verify-index|hydrate [--password-stdin]")?;
-    if args.len() > 2 || (args.len() == 2 && args[1] != "--password-stdin") {
-        return Err("unexpected arguments; only --password-stdin is supported for init/unlock".into());
-    }
-    if args.len() == 2 && action != "init" && action != "unlock" {
-        return Err("--password-stdin only applies to init/unlock".into());
-    }
+    // Git substitutes `%f` as a single shell-quoted argument. Preserve raw
+    // Unix pathname bytes: env::args() would reject valid non-UTF8 Git paths.
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let action = args.first().and_then(|x| x.to_str()).ok_or(
+        "usage: transcrypt-v3 init|unlock|lock|clean <git-path>|smudge <git-path>|verify-index|hydrate")?;
     let root = repo_root()?;
-    match action.as_str() {
-        "init" => init(&root, passphrase(args.len() == 2)?),
-        "unlock" => unlock(&root, passphrase(args.len() == 2)?),
-        "lock" => lock(&root),
-        "clean" => filter(&root, true),
-        "smudge" => filter(&root, false),
-        "verify-index" => verify_index(&root),
-        "hydrate" => hydrate(&root),
-        "serve" => session::serve(&root, &load_config(&root)?),
-        _ => Err("unknown operation; v3 supports only init/unlock/lock/clean/smudge/verify-index/hydrate".into()),
+    match action {
+        "init" | "unlock" => {
+            if args.len() > 2 || (args.len() == 2 && args[1].to_str() != Some("--password-stdin")) {
+                return Err("init/unlock accept only optional --password-stdin".into());
+            }
+            let password = passphrase(args.len() == 2)?;
+            if action == "init" { init(&root, password) } else { unlock(&root, password) }
+        },
+        "clean" | "smudge" => {
+            if args.len() != 2 { return Err("Git filter requires exactly one %f pathname".into()); }
+            filter(&root, action == "clean", args[1].as_bytes())
+        },
+        "lock" | "verify-index" | "hydrate" | "serve" => {
+            if args.len() != 1 { return Err("unexpected operation arguments".into()); }
+            match action {
+                "lock" => lock(&root),
+                "verify-index" => verify_index(&root),
+                "hydrate" => hydrate(&root),
+                "serve" => session::serve(&root, &load_config(&root)?),
+                _ => unreachable!(),
+            }
+        },
+        _ => Err("unknown v3 operation".into()),
     }
 }
 
@@ -133,8 +144,8 @@ fn install_filters(root: &Path) -> Result<(), String> {
     let path = bin.to_str().ok_or("executable path must be UTF-8")?;
     let program = shell_quote(path);
     for (k, value) in [
-        ("filter.transcrypt-v3.clean", format!("{program} clean")),
-        ("filter.transcrypt-v3.smudge", format!("{program} smudge")),
+        ("filter.transcrypt-v3.clean", format!("{program} clean %f")),
+        ("filter.transcrypt-v3.smudge", format!("{program} smudge %f")),
         ("filter.transcrypt-v3.required", "true".into()),
     ] {
         git(root, &["config", "--local", k, &value])?;
@@ -234,7 +245,7 @@ fn lock(root: &Path) -> Result<(), String> {
         return Err("untracked *.secret files exist; refusing to leave unprotected plaintext behind".into());
     }
     let config = load_config(root)?;
-    session::request(root, &config, Operation::Ping, &[])?;
+    session::request(root, &config, Operation::Ping, &[], &[])?;
     let mut to_flush = Vec::new();
     for (mode, path) in indexed_files(root)? {
         if !protected_path(&path) { continue; }
@@ -247,7 +258,7 @@ fn lock(root: &Path) -> Result<(), String> {
             .map_err(|_| "cannot read protected worktree file")?, MAX_FILE + FILE_MIN_LEN)?;
         let object = git_show(root, &path)?;
         if source == object { continue; }
-        let derived = session::request(root, &config, Operation::Encrypt, &source)?;
+        let derived = session::request(root, &config, Operation::Encrypt, &path, &source)?;
         if derived != object {
             return Err("protected worktree has uncommitted plaintext changes; refusing lock".into());
         }
@@ -281,16 +292,17 @@ fn read_limited<R: Read>(read: R, limit: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn filter(root: &Path, clean: bool) -> Result<(), String> {
+fn filter(root: &Path, clean: bool, git_path: &[u8]) -> Result<(), String> {
+    transcrypt_v3::validate_protected_path(git_path)?;
     let config = load_config(root)?;
     let input = read_limited(io::stdin(), MAX_FILE + FILE_MIN_LEN)?;
     let result = if clean {
         if parse_file_header(&input).is_ok() {
             return Err("worktree contains v3 ciphertext instead of plaintext; refusing double encryption".into());
         }
-        session::request(root, &config, Operation::Encrypt, &input)?
+        session::request(root, &config, Operation::Encrypt, git_path, &input)?
     } else {
-        session::request(root, &config, Operation::Decrypt, &input)?
+        session::request(root, &config, Operation::Decrypt, git_path, &input)?
     };
     io::stdout().write_all(&result).map_err(|_| "cannot write output")?;
     Ok(())
@@ -373,14 +385,14 @@ fn verify_index(root: &Path) -> Result<(), String> {
     if git_show(root, b".gitattributes")? != ATTRS {
         return Err("staged .gitattributes differs from required v3 policy".into());
     }
-    session::request(root, &config, Operation::Ping, &[])?;
+    session::request(root, &config, Operation::Ping, &[], &[])?;
     for (mode, path) in indexed_files(root)? {
         if !protected_path(&path) { continue; }
         if mode != b"100644" {
             return Err("protected path is not a regular file in staged index".into());
         }
         let encrypted = git_show(root, &path)?;
-        session::request(root, &config, Operation::Decrypt, &encrypted)?;
+        session::request(root, &config, Operation::Decrypt, &path, &encrypted)?;
     }
     Ok(())
 }
@@ -432,7 +444,7 @@ fn hydrate(root: &Path) -> Result<(), String> {
     for (mode, path) in &entries {
         if mode != b"100644" { return Err("protected path is not regular".into()); }
         let object = git_show(root, path)?;
-        let plaintext = session::request(root, &config, Operation::Decrypt, &object)?;
+        let plaintext = session::request(root, &config, Operation::Decrypt, path, &object)?;
         let relative = indexed_path(path)?;
         let dest = require_regular_under(root, &relative)?;
         let worktree = read_limited(fs::File::open(&dest)
@@ -452,7 +464,7 @@ fn hydrate(root: &Path) -> Result<(), String> {
 
     for (i, (path, relative)) in pending.into_iter().enumerate() {
         let object = git_show(root, &path)?;
-        let plaintext = session::request(root, &config, Operation::Decrypt, &object)?;
+        let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
         let dest = require_regular_under(root, &relative)?;
         let worktree = read_limited(fs::File::open(&dest)
             .map_err(|_| "cannot re-read protected worktree file")?, MAX_FILE + FILE_MIN_LEN)?;

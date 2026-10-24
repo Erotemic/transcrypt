@@ -111,7 +111,31 @@ git commit -m 'Add encrypted example'
 ```
 
 The command will prompt for a passphrase; `--password-stdin` is supported
-only for `init` and `unlock` in automated tests. Avoid invoking passphrases
+only for `init` and `unlock` in automated tests. Git installs `clean %f`
+and `smudge %f` filters so the **exact relative Git pathname** enters the
+AES-SIV associated data. Invoking a filter manually requires a path, e.g.
+`transcrypt-v3 clean example.secret` with plaintext on stdin. Arbitrary
+raw Unix filenames are supported, including non-UTF8 bytes.
+
+**Compatibility:** this experimental path-bound v3 profile is not
+ciphertext-compatible with the earlier no-path v3 prototype. Before
+upgrading an existing experimental v3 repository, use the earlier executable
+to unlock/hydrate and export plaintext, and initialize a fresh v3 repo with
+this version. There is intentionally no fallback to the weaker profile.
+
+Protected-file renames require **reencrypting under the new path**. A `git mv`
+may stage the old encrypted blob at its new name, which is invalid. With
+the moved plaintext still in the worktree, use:
+
+```bash
+git rm --cached -- new.secret
+git add -- new.secret
+transcrypt-v3 verify-index
+```
+
+This preserves the working-file bytes while making Git re-run `clean` with
+the new pathname. Moving only ciphertext without access to the passphrase is
+not supported. Avoid invoking passphrases
 as command-line arguments. New clones need:
 
 ```bash
@@ -143,15 +167,19 @@ killing the agent requires a new unlock; a stale socket is cleared safely
 at next unlock. The agent trusts other processes under your Unix UID and
 does not claim protection against swap or memory dumps.
 
-**Remaining security limitations:** equality leakage under
-AES-SIV, no path binding, no rollback resistance, no atomic multi-file lock,
-no formally verified Git/OS adapter, and incomplete adversarial review remain.
+**Remaining security limitations:** deterministic equality leakage **within a
+single path**, no trusted-history rollback resistance, no atomic multi-file
+lock, no formally verified Git/OS adapter, and incomplete adversarial review
+remain.
 The RustCrypto AES-SIV crate itself warns that it has not been independently
 audited. Do not yet deploy for valuable secrets.
 
 Reference vectors: `python3 tests/v3/reference/check_vectors.py -v`
 (from repository root, with `cryptography` and `argon2-cffi` installed for
-independent **development tests only**). Rust tests require no Python.
+independent **development tests only**). The exact Git `%f` byte contract
+is independently tested by `python3 -m unittest discover -s
+tests/v3/reference -p 'test_git_filter_paths.py' -v`. Rust tests require
+no Python.
 
 
 ### V3 pure-core verification seam
