@@ -22,6 +22,6 @@
   "sources": {
     "rust/crates/transcrypt-v3-core/Cargo.toml": "f868248d2434268e7d6aebac4c5aa9dcd3489acf8b1e0515865f99e9c9688255",
     "rust/crates/transcrypt-v3-core/hax.toml": "e99e3a2840fcd7f58b15a6d3af64e7a07588b102cd6b36c23f7714d9a0b72342",
-    "rust/crates/transcrypt-v3-core/src/lib.rs": "f68ececfec36a235f59b3a9a8b2295f148c33903d68c12ab152e98cbf4afb4cc"
+    "rust/crates/transcrypt-v3-core/src/lib.rs": "d387d74a7a086038b81addd2baf82264dcd3bf9cef091f5f9987fa446206c612"
   }
 }

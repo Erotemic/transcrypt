@@ -156,7 +156,6 @@ extern crate std;
 
 #[cfg(test)]
 mod tests {
-    use std::vec::Vec;
     use super::*;
 
     #[test]
