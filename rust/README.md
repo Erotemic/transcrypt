@@ -58,3 +58,22 @@ The wire-format reference is
 
 This description is derived from the released Bash implementation (see
 `docs/verification/implementation-progress.md`), not from an approved spec.
+
+
+## Pure policy kernel and proof progress (2026-10-24)
+
+`crates/transcrypt-policy` is a second zero-dependency, `no_std` Rust crate
+providing preflight decisions for **future** secure staged files, unlocking,
+and migration publication. It does not perform Git or crypto operations and
+is not yet wired into the current legacy Bash runtime. Inputs like
+`authenticated` are evidence obligations of the caller, not checks the
+policy magically performs.
+
+Both the production Base64 sextet core and the prospective policy gates have
+universal fixed-width checks in `proofs/smt/`. They were locally discharged
+using Z3, with Rust source fingerprints; see
+[`m6-formal-bitcore.md`](../docs/verification/reference/m6-formal-bitcore.md).
+The independent Lean package under `proofs/lean/` is built in a separate CI
+job. Charon/Aeneas source-to-generated-Lean refinement and Rust compilation
+remain distinct, mandatory acceptance gates; the SMT results alone are not
+an Aeneas proof of Rust.

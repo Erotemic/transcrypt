@@ -2,3 +2,6 @@
 # purpose: the CI acceptance plan (docs/verification/06, section 5)
 # requires a pinned lockfile for the verification core.
 rust/target/
+
+# Locally generated Charon/Aeneas files (not part of the source overlay)
+/proofs/aeneas/generated/

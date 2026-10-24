@@ -6,6 +6,7 @@
 //! have converted line endings, so the decoder tolerates `\r` and `\n`
 //! anywhere but nothing else, and is otherwise strict.
 
+use crate::base64_bits::{join_quartet, split_triple};
 use crate::Base64Error;
 
 const fn is_base64_char(c: u8) -> bool {
@@ -19,11 +20,11 @@ const fn is_line_break(c: u8) -> bool {
     c == b'\r' || c == b'\n'
 }
 
-fn value(c: u8) -> Option<u32> {
+fn value(c: u8) -> Option<u8> {
     match c {
-        b'A'..=b'Z' => Some((c - b'A') as u32),
-        b'a'..=b'z' => Some((c - b'a') as u32 + 26),
-        b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
         b'+' => Some(62),
         b'/' => Some(63),
         b'=' => Some(64),
@@ -55,7 +56,9 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
 
     // Pass 2: process the content characters in four-char groups.
     let mut out = Vec::with_capacity(content / 4 * 3 + 1);
-    let mut group = [0u32; 4];
+    let mut group = [0u8; 4];
+    let mut group_positions = [0usize; 4];
+    let mut group_chars = [0u8; 4];
     let mut group_len = 0usize;
     let mut group_start = 0usize;
     let mut saw_padding = false;
@@ -73,6 +76,8 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
             group_start = i;
         }
         group[group_len] = value(c).unwrap_or(64);
+        group_positions[group_len] = i;
+        group_chars[group_len] = c;
         group_len += 1;
         if group_len == 4 {
             let first_pad = group.iter().position(|&v| v == 64);
@@ -87,37 +92,27 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
             if pad > 2 {
                 return Err(Base64Error::padding(group_start, b'='));
             }
-            let pad_offset = i + 1 - pad; // index of the first `=`
             match pad {
-                0 => {
-                    let (b0, b1, b2, b3) =
-                        (group[0], group[1], group[2], group[3]);
-                    out.push((b0 << 2 | b1 >> 4) as u8);
-                    out.push((b1 << 4 | b2 >> 2) as u8);
-                    out.push((b2 << 6 | b3) as u8);
-                }
+                0 => out.extend_from_slice(&join_quartet(group)),
                 1 => {
                     // The third symbol's two spare bits must be zero.
                     if group[2] & 0b11 != 0 {
                         return Err(Base64Error::nonzero_pad(
-                            pad_offset - 1,
-                            group[2] as u8,
+                            group_positions[2],
+                            group_chars[2],
                         ));
                     }
-                    let (b0, b1, b2) = (group[0], group[1], group[2]);
-                    out.push((b0 << 2 | b1 >> 4) as u8);
-                    out.push((b1 << 4 | b2 >> 2) as u8);
+                    out.extend_from_slice(&join_quartet(group)[..2]);
                 }
                 2 => {
                     // The second symbol's four spare bits must be zero.
                     if group[1] & 0b1111 != 0 {
                         return Err(Base64Error::nonzero_pad(
-                            pad_offset - 1,
-                            group[1] as u8,
+                            group_positions[1],
+                            group_chars[1],
                         ));
                     }
-                    let (b0, b1) = (group[0], group[1]);
-                    out.push((b0 << 2 | b1 >> 4) as u8);
+                    out.push(join_quartet(group)[0]);
                 }
                 _ => unreachable!(),
             }
@@ -140,19 +135,20 @@ pub fn base64_encode(input: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::new();
     let mut column = 0usize;
     for chunk in input.chunks(3) {
-        let a = chunk[0] as u32;
-        let b = chunk.get(1).copied().unwrap_or(0) as u32;
-        let c = chunk.get(2).copied().unwrap_or(0) as u32;
-        let value = (a << 16) | (b << 8) | c;
-        encoded.push(ALPHABET[((value >> 18) & 63) as usize]);
-        encoded.push(ALPHABET[((value >> 12) & 63) as usize]);
+        let sextets = split_triple(
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        );
+        encoded.push(ALPHABET[sextets[0] as usize]);
+        encoded.push(ALPHABET[sextets[1] as usize]);
         encoded.push(if chunk.len() >= 2 {
-            ALPHABET[((value >> 6) & 63) as usize]
+            ALPHABET[sextets[2] as usize]
         } else {
             b'='
         });
         encoded.push(if chunk.len() >= 3 {
-            ALPHABET[(value & 63) as usize]
+            ALPHABET[sextets[3] as usize]
         } else {
             b'='
         });
@@ -250,6 +246,24 @@ mod tests {
         assert_eq!(
             base64_decode(b"QUJDQUJD").unwrap(),
             b"ABCABC"
+        );
+    }
+
+    #[test]
+    fn nonzero_padding_location_ignores_interspersed_newlines() {
+        assert_eq!(
+            base64_decode(b"Z0\n=="),
+            Err(Base64Error::NonZeroPadding {
+                offset: 1,
+                byte: b'0',
+            })
+        );
+        assert_eq!(
+            base64_decode(b"Zm9\r\n="),
+            Err(Base64Error::NonZeroPadding {
+                offset: 2,
+                byte: b'9',
+            })
         );
     }
 

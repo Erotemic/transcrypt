@@ -121,3 +121,7 @@ and the Bash-portability reviewer sign off. **Only then implement or revise
 ciphertext serialization.** Safe remediation of independently specified
 operational bugs (such as wrong-password rollback and symlinks) can proceed
 before the cryptographic format is frozen.
+
+### Current formal proof slice
+
+- [Universal Base64 and policy proof evidence](reference/m6-formal-bitcore.md) (Z3 checked; Lean/Aeneas status explicitly tracked).

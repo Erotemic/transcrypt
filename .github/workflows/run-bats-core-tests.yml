@@ -123,3 +123,29 @@ jobs:
 
       - name: Run OpenSSL CLI feasibility probe
         run: bash contrib/verification/d02-openssl-cli-probe.sh
+
+  proof-base64-smt:
+    # Development-only proof check. The shipped Bash tool has NO Z3
+    # dependency. This proves fixed-width Base64 transformations, not
+    # the complete Rust/Aeneas refinement or encryption security.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Z3 development linker
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libz3-dev
+      - name: Prove universal Base64 bit-vector obligations
+        run: bash proofs/smt/run-base64-proof.sh
+      - name: Prove universal preflight-policy obligations
+        run: bash proofs/smt/run-policy-proof.sh
+
+  proof-base64-lean:
+    # Independent Lean check of equivalent pure bit-vector obligations.
+    # Aeneas extraction from Rust is a later, separate mandatory gate.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: proofs/lean
+          test: false
+          use-mathlib-cache: false

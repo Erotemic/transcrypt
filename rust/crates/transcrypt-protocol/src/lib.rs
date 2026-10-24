@@ -23,6 +23,7 @@
 #![allow(clippy::manual_is_multiple_of, clippy::manual_repeat_n)]
 
 mod base64;
+mod base64_bits;
 mod v2;
 
 pub use base64::{base64_decode, base64_encode};

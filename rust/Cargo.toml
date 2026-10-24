@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/transcrypt-protocol"]
+members = ["crates/transcrypt-protocol", "crates/transcrypt-policy"]
 
 # The Rust distribution keeps a zero-dependency core (see
 # docs/verification/04-dual-implementation-architecture.md): the protocol

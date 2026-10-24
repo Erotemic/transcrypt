@@ -168,3 +168,33 @@ using `cd rust && cargo test --offline`, then translate the pure Base64 and v2
 record functions through pinned Charon/Aeneas. Keep any authenticated format
 work blocked on the external D-01 decision, and address remaining Git
 security obligations separately from legacy interoperability.
+
+
+## Update — October 24: first solver-checked proof slice and security decision kernel
+
+- **Rust codec:** isolated the actual Base64 per-block `split_triple` and
+  `join_quartet` operations in a small pure module used by both encoder and
+  decoder; corrected the reported byte/offset for invalid residual bits when
+  CR/LF interrupts a padded quartet. No wire-format change intended.
+- **Rust policy:** added `transcrypt-policy`, a `no_std`, dependency-free pure
+  preflight kernel for protected-stage acceptance, unlock persistence, and
+  migration publication. These functions are prospective; adapter wiring
+  and evidence validation are not complete.
+- **Checked SMT evidence:** Z3 4.13.3 returned UNSAT for 9 universal Base64
+  block algebra obligations and 16 universal abstract policy obligations.
+  Drivers enforce source-file SHA-256 fingerprints. See
+  `reference/m6-formal-bitcore.md` for precise scope and commands.
+- **Independent Lean source:** `proofs/lean/` contains first candidate
+  `bv_decide` proofs for those bit-vector and Boolean specifications, and
+  the CI workflow contains dedicated Lean and SMT jobs. Local Lean/Rust
+  toolchains are unavailable; no local compilation of Lean or Rust is
+  asserted. The CI jobs are not yet reported as run.
+- **Bash regression:** local Bats-compatible runner reported 196/196 cases
+  passing after stacking the preceding 13-file staged-index overlay.
+  Official Bats remains the CI gate.
+- **Next unblocked work:** compile both new Rust crates and focused Lean
+  targets in the pinned toolchains, fix any compiler/tactic errors, run
+  Charon/Aeneas on the actual bit core and policy functions using the new
+  `proofs/aeneas/translate-policy.sh` entrypoint, and establish generated-code
+  refinement rather than relying on the manual source-model correspondence. Do not claim T-01, T-07, T-08, T-09 or T-12 complete for
+  the whole application based on these smaller obligations alone.

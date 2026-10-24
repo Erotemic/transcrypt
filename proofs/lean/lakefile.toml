@@ -1,0 +1,6 @@
+name = "transcrypt_verify"
+version = "0.1.0"
+defaultTargets = ["Transcrypt"]
+
+[[lean_lib]]
+name = "Transcrypt"

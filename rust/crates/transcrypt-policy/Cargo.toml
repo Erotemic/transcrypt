@@ -1,0 +1,8 @@
+[package]
+name = "transcrypt-policy"
+version = "0.1.0"
+description = "Pure, zero-dependency security decision kernel for Transcrypt"
+license = "MIT"
+edition = "2021"
+
+[dependencies]
