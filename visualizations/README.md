@@ -34,6 +34,61 @@ command verifies that named Lean theorems exist in the referenced files,
 plans have valid edges and layers, and that evidence sources resolve. Per-operation Lean badges are also checked
 against theorem declarations in the scene's referenced Lean source files.
 
+## Fast Makefile workflow: one clip or PDF, no full render
+
+The default `make` target prints help instead of starting all Manim scenes.
+The layout follows the supplied DKPS visualization project's separation of
+**scene rendering** from **no-render deck/handout export**. Run `make setup`
+once to install dependencies in `visualizations/.venv`; subsequent Makefile
+commands use `uv run --no-sync python` to avoid resolving/syncing extras on
+every quick edit, even when another virtual environment is active.
+
+```bash
+cd ~/code/transcrypt/visualizations
+make list
+make preview SCENE=unlock BEAT=store   # instant SVG preview; no Manim
+make scene SCENE=unlock QUALITY=l       # one scene's beat clips, cached
+make focus SCENE=unlock QUALITY=l       # one scene + focused click-through HTML
+make pdf                                # all 20 static slides; no Manim
+make pdf SCENE=unlock                   # one scene's slides only
+make pdf SLIDE=sealing                  # one specific slide only
+make pdf SCENES="clean crypto"          # selected scenes in deck order
+make html                               # beat-by-beat slideshow, no Manim
+make standalone                         # portable HTML with beat MP4s embedded
+```
+
+A targeted `make scene` renders a single Manim scene with `--save_sections`,
+then publishes a separate MP4 **for each named beat** under
+`.build/presentation/videos/sections/<scene>/`. The complete MP4 is retained
+for the technical inspector, but the HTML slideshow uses the beat clips, never
+a full-scene player. The fingerprint manifest is shared with `make all`; an
+unchanged scene is reused. `make focus SCENE=unlock` also exports a focused
+`index-unlock.html` without generating the other 17 scenes. To force Manim to run again for that
+scene, use `make scene SCENE=unlock FORCE=1`; `NO_CACHE=1` additionally disables
+Manim's internal partial-movie cache if investigating stale frames.
+`make still` and `make segment SCENE=unlock ANIMATION=0,2` render partial
+material without publishing it as a complete scene video.
+
+**PDF export never renders Manim**: it draws the precise selected static beats
+from the authored plan. `make pdf` does not build HTML, the technical inspector,
+or a video. It takes about a few seconds rather than rendering 18 MP4s.
+A filtered export writes separate filenames, e.g.
+`.build/presentation/presentation-unlock.pdf` or
+`.build/presentation/presentation-sealing.pdf`, preserving the full
+`presentation.pdf`. `make html SCENE=unlock` similarly writes
+`index-unlock.html`. Filtered exports keep the order of
+`storyboards/presentation.toml`; one scene can have multiple slides.
+
+For the entire movie-and-deck build, explicitly run `make all QUALITY=l`.
+The individual clips already staged with `make scene` are reused by `make all`
+when their source fingerprints and render settings match. A full build can
+still take time; it is not needed to evaluate a single scene or a PDF change.
+
+`SCENE`, `SCENES`, `SLIDE`, and `SLIDES` work for `pdf`, `html`,
+`standalone`, and `present` (with `SCENES`/`SLIDES` taking priority in the
+Makefile if multiple filters are given). Use `make check` and `make test` for
+non-Manim validation. `PYTHON=.venv/bin/python` can override the default runner.
+
 ## Render Manim and export a full HTML/PDF presentation
 
 Manim Community 0.19 needs Cairo/Pango and FFmpeg. On Ubuntu, install its
@@ -50,10 +105,13 @@ credentials, Lean, or the cryptographic implementation.
 ```bash
 cd ~/code/transcrypt/visualizations
 uv sync --extra manim --extra presentation --extra test
-uv run python -m tvis render unlock --quality l
-uv run python -m tvis render clean --quality l
-uv run python -m tvis render crypto --quality l
-uv run python -m tvis all --quality l
+make scene SCENE=unlock QUALITY=l
+make scene SCENE=clean QUALITY=l
+make scene SCENE=crypto QUALITY=l
+make html
+make pdf
+# Optional and slower: compile the rest of the clips and complete presentation
+make all QUALITY=l
 xdg-open .build/presentation/index.html
 xdg-open .build/presentation/presentation.pdf
 ```
@@ -66,10 +124,12 @@ second copy:
 make all PYTHON=~/code/aivm-secrets/visualizations/.venv/bin/python QUALITY=l
 ```
 
-`all` renders each changed scene's MP4 only once and builds a **20-slide
+`all` renders each changed scene's beat sections only once and builds a **20-slide
 HTML presentation plus a 16:9 PDF**, speaker notes, and a separate technical
-storyboard inspector. The HTML slides use genuine Manim MP4s when they exist;
-missing videos fall back to plan-derived SVG diagrams, never invented motion.
+storyboard inspector. Each HTML click advances precisely one named operation
+beat. It plays that beat's Manim section automatically and holds the final
+frame until the next click; there is **no video Play button**. Missing beat
+videos fall back to the plan-derived SVG snapshots with identical navigation.
 The PDF uses SVG-derived static key beats and, for video slides, a link to the
 corresponding HTML slide. PDF readers do not consistently support playable
 embedded movies.
@@ -80,27 +140,37 @@ The presentation is authored independently from the source inspector:
 # No Manim needed: a usable static slide deck now, or refresh after an edit
 python3 -m tvis present --format both
 
-# With already-rendered MP4s: ALSO generate a single, portable HTML file
-# with the actual video bytes inlined, rather than relying on MP4 sidecars
+# With already-rendered beat MP4s: a portable HTML presentation
+# with each section inlined once (and no separate MP4 files required)
 python3 -m tvis present --format both --embed-videos
 xdg-open .build/presentation/embedded.html
 
-# Or the standard small HTML with relative videos/*.mp4 sidecars:
+# Or the small HTML with relative videos/sections/<scene>/*.mp4 sidecars:
 xdg-open .build/presentation/index.html
 
 # Browse every animated beat, per-operation basis, and provenance separately:
 xdg-open .build/presentation/storyboard.html
 ```
 
-`--embed-videos` is optional: it base64-encodes each available MP4 once and can
-produce a large HTML file. `index.html`, `presentation.pdf`, `speaker-notes.md`
+`--embed-videos` is optional: it base64-encodes each available **beat section**
+once and can produce a large HTML file. These sections are generated via
+Manim's built-in `next_section` / `--save_sections` support, not a new render
+pass or separate video-cutting job. `index.html`, `presentation.pdf`, `speaker-notes.md`
 and `storyboard.html` are always colocated in `.build/presentation/`. To share
 `index.html` with real video, copy its `videos/` directory too. To share one
 file, copy `embedded.html`. The PDF is static, but when viewed alongside the
 HTML its movie-slide captions link to the appropriate HTML slide (some local
 PDF viewers restrict opening file links).
 
-Run `make watch-all PYTHON=.venv/bin/python` to regenerate clips after scene edits. Try `--quality m` or `h` after reviewing draft renders.
+**Presentation controls:** click anywhere on a slide, press Right, or press
+Space for the next beat. Left returns to the previous completed beat;
+Shift+Right/Left skips a slide; R replays the current beat; N toggles speaker
+notes. Per-operation evidence and input/output transformations update with
+each beat. Plain SVG steps remain fully navigable without Manim. The PDF is
+intentionally a static one-page-per-authored-slide companion, not a collection
+of paused video segments.
+
+Run `make watch-all` to regenerate clips after scene edits (this is a full-deck watcher). Try `--quality m` or `h` after reviewing draft renders.
 For narration-driven timing, change the `duration`/`hold` in plans and the
 `narration` in the TOML storyboard. Video clips are silent so they work equally
 well with live narration or a separately recorded TTS track.
@@ -178,10 +248,11 @@ visualizations/
     scene_base.py                  # incremental Manim animation engine
     svg_preview.py                 # SVG states from the SAME plans
     gallery.py                     # technical beat-by-beat SVG/HTML inspector
-    slide_deck.py                  # heterogeneous full-slide HTML, video inlining
+    slide_deck.py                  # heterogeneous HTML with click-driven beats
+    beat_media.py                  # stage/validate one Manim section per beat
     pdf_slides.py                  # paged 16:9 static PDF with video-slide links
     assets/presentation.css        # slide templates / styles
-    assets/presentation.js         # offline arrow-key/media navigation
+    assets/presentation.js         # offline stepper: click/arrow/Space to next beat
     presentation.py                # incremental MP4 + HTML/PDF compilation
   storyboards/presentation.toml   # page order/layout (different for EACH slide)
     assets/icons/*.svg             # custom local vector artwork
@@ -220,7 +291,11 @@ and concise `points` for the stage. Available layouts are:
 | `statement` | Text-led framing, conclusions, limits and next steps |
 
 A `split` slide can use `media = "diagram"` to suppress animation; `cinema`/
-`split` default to video when the clip exists. You can show the same scene on
+`split` default to animated beat clips when staged. Any layout can opt in to
+`media = "video"` for beat playback. Set `steps = "single"` to hold one
+named beat (`beat = "..."`) or `steps = "all"` to advance through the whole
+scene. Defaults: video media steps through all beats; diagram media stays on
+one. Cover, evidence, and conclusion slides keep their independent layouts. You can show the same scene on
 multiple slides with different beat/poster/layout choices without duplicating
 assurance prose. To edit proof claims, modify the scene's `plans/*.py` and the
 source-anchored `overview.toml`, **not** slide text alone. Both HTML and PDF
