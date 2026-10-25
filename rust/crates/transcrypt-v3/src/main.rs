@@ -206,7 +206,9 @@ fn status(root: &Path) -> Result<(), String> {
         let state = (|| -> Result<&str, String> {
             if !staged.regular { return Ok("unsupported mode"); }
             let object = git_blob(root, &staged.oid)?;
-            let target = open_protected(root, &indexed_path(&staged.path)?)?;
+            let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? else {
+                return Ok("deleted");
+            };
             let (worktree, _) = target.read()?;
             if *worktree == object { return Ok("ciphertext"); }
             if target.readable_by_others()? { exposed += 1; }
@@ -214,7 +216,7 @@ fn status(root: &Path) -> Result<(), String> {
             let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &object)?;
             Ok(if *worktree == *plaintext { "plaintext" } else { "modified" })
         })().unwrap_or("error");
-        counts[match state { "ciphertext" => 0, "plaintext" => 1, "modified" | "modified or plaintext" => 2, _ => 3 }] += 1;
+        counts[match state { "ciphertext" => 0, "plaintext" => 1, "modified" | "modified or plaintext" | "deleted" => 2, _ => 3 }] += 1;
         println!("  {state:<22} {name}");
     }
     println!("protected:  {} ciphertext, {} plaintext, {} modified, {} other",
@@ -309,9 +311,12 @@ fn lock(root: &Path) -> Result<(), String> {
     }
     let config = load_config(root)?;
     let mut to_flush = Vec::new();
+    let mut present = Vec::new();
     for staged in &verified.protected {
         let relative = indexed_path(&staged.path)?;
-        let target = open_protected(root, &relative)?;
+        // A deleted file holds no plaintext: nothing to flush.
+        let Some(target) = find_protected(root, &relative)? else { continue };
+        present.push(staged.path.clone());
         let (source, stamp) = target.read()?;
         // The object the index named when it was verified, by object id.
         let object = git_blob(root, &staged.oid)?;
@@ -343,8 +348,7 @@ fn lock(root: &Path) -> Result<(), String> {
     // ciphertext now in the worktree (the clean filter returns an authentic
     // record unchanged), so a locked checkout is clean and `git commit -a`
     // does not need the key.
-    let paths: Vec<Vec<u8>> = verified.protected.iter().map(|e| e.path.clone()).collect();
-    reindex(root, &verified.listing, &paths)?;
+    reindex(root, &verified.listing, &present)?;
     session::stop(root, &config)?;
     eprintln!("Locked: tracked *.secret files flushed and the in-memory credential agent stopped. This does not securely erase historical plaintext backups.");
     Ok(())
@@ -524,7 +528,9 @@ fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, String> {
     // unreadable file aborts the whole operation.
     for staged in &verified.protected {
         let relative = indexed_path(&staged.path)?;
-        let (worktree, stamp) = open_protected(root, &relative)?.read()?;
+        // A deleted (or sparse) file holds nothing to decrypt.
+        let Some(target) = find_protected(root, &relative)? else { continue };
+        let (worktree, stamp) = target.read()?;
         let object = git_blob(root, &staged.oid)?;
         // The record this file holds, if any: the staged one, or another
         // that authenticates at this path.

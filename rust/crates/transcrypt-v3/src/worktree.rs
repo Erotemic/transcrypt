@@ -33,6 +33,12 @@ pub(crate) struct Protected {
 /// Resolve a Git-relative path below the repository root, refusing symlinks
 /// and non-directories in *every* component and a non-regular leaf.
 pub(crate) fn open_protected(root: &Path, relative: &Path) -> Result<Protected, String> {
+    find_protected(root, relative)?.ok_or_else(|| "protected worktree path missing".into())
+}
+
+/// Like `open_protected`, but `None` when the file (or a parent directory)
+/// does not exist: a deleted or sparse-checkout file holds no plaintext.
+pub(crate) fn find_protected(root: &Path, relative: &Path) -> Result<Option<Protected>, String> {
     let parts: Vec<_> = relative.components().collect();
     let Some((leaf, parents)) = parts.split_last() else {
         return Err("empty protected worktree path".into());
@@ -42,15 +48,23 @@ pub(crate) fn open_protected(root: &Path, relative: &Path) -> Result<Protected, 
         let std::path::Component::Normal(name) = part else {
             return Err("unsafe protected path component".into());
         };
-        dir = dir.subdir(name).map_err(|_| "protected worktree parent is missing, a symlink or not a directory")?;
+        dir = match dir.subdir(name) {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("protected worktree parent is a symlink or not a directory".into()),
+        };
     }
     let std::path::Component::Normal(leaf) = leaf else {
         return Err("unsafe protected path component".into());
     };
-    let (regular, link) = dir.entry_kind(leaf).map_err(|_| "protected worktree path missing")?;
+    let (regular, link) = match dir.entry_kind(leaf) {
+        Ok(kind) => kind,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("cannot examine protected worktree path".into()),
+    };
     if link { return Err("symlink in protected path rejected".into()); }
     if !regular { return Err("protected worktree entry is not a regular file".into()); }
-    Ok(Protected { dir, leaf: leaf.to_os_string() })
+    Ok(Some(Protected { dir, leaf: leaf.to_os_string() }))
 }
 
 impl Protected {

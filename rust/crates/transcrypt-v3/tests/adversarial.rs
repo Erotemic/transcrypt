@@ -1078,3 +1078,24 @@ fn rekey_rotates_the_passphrase() {
     let old_config = run(&repo, "git", &["show", &format!("{}:.transcrypt/config", old.trim())], None);
     assert_ne!(old_config, fs::read(repo.join(".transcrypt/config")).unwrap());
 }
+
+/// A protected file deleted in the worktree (or absent in a sparse
+/// checkout) holds no plaintext: it no longer blocks `lock`, `hydrate` or
+/// `unlock` for every other file, and stays deleted.
+#[test]
+fn deleted_protected_files_do_not_block_lock_or_hydrate() {
+    let mut scratch = Scratch::new("deleted");
+    let repo = scratch.repo("repo");
+    fs::remove_file(repo.join("dir/b.secret")).unwrap();
+    fs::remove_dir(repo.join("dir")).unwrap();
+    run(&repo, bin(), &["lock"], None);
+    assert!(fs::read(repo.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+    assert!(!repo.join("dir").exists());
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    assert!(status.contains("deleted") && status.contains("dir/b.secret"), "{status}");
+    run(&repo, "git", &["checkout", "--", "dir/b.secret"], None);
+    run(&repo, bin(), &["hydrate"], None);
+    assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
+}
