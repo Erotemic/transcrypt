@@ -361,11 +361,61 @@ _staged_path_mode() {
 	esac
 }
 
-# Verify that the staged object (not the worktree file) has the historical
-# v2 encryption marker. Legacy v2 has no authentication; this check cannot
-# establish that the data decrypts or has not been tampered with.
+# Succeed only if file $1 holds legacy v2 ciphertext exactly as transcrypt
+# produces it for repository path $2 under cipher $3 and password $4 (with
+# OpenSSL binary $5). The 8-byte "U2FsdGVk" marker (Base64 of "Salted") is
+# only a hint: ordinary plaintext may begin with it (#F-01). Genuine output
+# decrypts under the key AND embeds the deterministic salt, the truncated
+# HMAC-SHA256 of "path:password" over the plaintext. Plaintext carrying the
+# marker cannot satisfy both without that key, so it is never mistaken for
+# ciphertext. This proves "is our ciphertext", not integrity: v2 CBC remains
+# unauthenticated and the salt is not a MAC over the ciphertext bytes.
+# Decrypted bytes only flow through a pipe; they are never written to disk.
+_is_transcrypt_v2_ciphertext() {
+	local stored=$1 filename=$2 cipher=$3 password=$4 openssl_path=${5:-openssl}
+	local actual_salt expected_salt
+	[[ $cipher && $password ]] || return 1
+	[[ $(head -c8 "$stored" | LC_ALL=C tr -d '\0') == 'U2FsdGVk' ]] || return 1
+	# od may close the pipe early; only the extracted salt bytes matter.
+	actual_salt=$({ "$openssl_path" base64 -d -in "$stored" 2>/dev/null || true; } | od -An -tx1 -j8 -N8 2>/dev/null | tr -d '[:space:]')
+	[[ ${#actual_salt} == 16 ]] || return 1
+	# The subshell exits with the decryption status, so a failed decryption
+	# can never yield an HMAC of partial output that happens to be compared.
+	expected_salt=$(
+		ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$stored" 2>/dev/null |
+			"$openssl_path" dgst -hmac "${filename}:${password}" -sha256 | tr -d '\r\n' | tail -c16
+		exit "${PIPESTATUS[0]}"
+	) || return 1
+	[[ $actual_salt == "$expected_salt" ]]
+}
+
+# Succeed if some locally configured transcrypt context could encrypt $1,
+# i.e. a Git filter attribute (staged or worktree view) names a context
+# whose password is configured in this repository.
+_path_has_local_key() {
+	local path=$1 flag p attr info ctx
+	for flag in --cached ''; do
+		while IFS= read -r -d '' p && IFS= read -r -d '' attr && IFS= read -r -d '' info; do
+			case $info in
+			crypt) ctx='' ;;
+			crypt-*) ctx=".${info#crypt-}" ;;
+			*) continue ;;
+			esac
+			[[ $(load_password "$ctx") ]] && return 0
+		done < <(git -c core.quotePath=false check-attr ${flag:+"$flag"} filter -z -- "$path" 2>/dev/null)
+	done
+	return 1
+}
+
+# Verify that the staged object (not the worktree file) is genuine legacy v2
+# ciphertext for its path under one of this repository's configured keys
+# (see _is_transcrypt_v2_ciphertext). The marker prefix alone is accepted
+# only for an unchanged object (identical to HEAD or MERGE_HEAD) whose
+# context has no local key, so a partial-key checkout can still commit
+# without being able to introduce new plaintext. Legacy v2 has no
+# authentication; this cannot establish that ciphertext is untampered.
 _staged_file_looks_encrypted() {
-	local path=$1 mode blob_size firstbytes
+	local path=$1 mode blob_size firstbytes stored rc=1 i oid ref
 	mode=$(_staged_path_mode "$path") || return 1
 	# Symbolic links intentionally store link targets without encryption.
 	[[ $mode == 120000 ]] && return 0
@@ -374,7 +424,46 @@ _staged_file_looks_encrypted() {
 	# head may close the pipe before Git finishes for large blobs; the
 	# existence/type of the staged blob was checked above.
 	firstbytes=$(git cat-file blob ":$path" 2>/dev/null | head -c8 || true)
-	[[ $firstbytes == 'U2FsdGVk' ]]
+	[[ $firstbytes == 'U2FsdGVk' ]] || return 1
+	stored=$(mktemp 2>/dev/null || mktemp -t tmp) || return 1
+	if git cat-file blob ":$path" >"$stored" 2>/dev/null; then
+		for ((i = 0; i < ${#_V2_KEY_PASSWORDS[@]}; i++)); do
+			if _is_transcrypt_v2_ciphertext "$stored" "$path" "${_V2_KEY_CIPHERS[$i]}" \
+				"${_V2_KEY_PASSWORDS[$i]}" "$_V2_OPENSSL_PATH"; then
+				rc=0
+				break
+			fi
+		done
+	fi
+	rm -f -- "$stored"
+	[[ $rc == 0 ]] && return 0
+	_path_has_local_key "$path" && return 1
+	oid=$(git rev-parse -q --verify ":$path" 2>/dev/null) || return 1
+	for ref in HEAD MERGE_HEAD; do
+		[[ $(git rev-parse -q --verify "$ref:$path" 2>/dev/null) == "$oid" ]] && return 0
+	done
+	return 1
+}
+
+_V2_KEY_CIPHERS=()
+_V2_KEY_PASSWORDS=()
+_V2_OPENSSL_PATH=openssl
+
+# Load every locally configured context's cipher and password for the
+# pre-commit ciphertext check (inherited by parallel validation workers).
+_load_v2_keys() {
+	local context group password
+	_V2_KEY_CIPHERS=()
+	_V2_KEY_PASSWORDS=()
+	_V2_OPENSSL_PATH=$(git config --get --local transcrypt.openssl-path 2>/dev/null || printf 'openssl')
+	[[ $_V2_OPENSSL_PATH ]] || _V2_OPENSSL_PATH=openssl
+	for context in $(get_contexts_from_git_config); do
+		group=$(derive_context_config_group "$context")
+		password=$(load_password "$group")
+		[[ $password ]] || continue
+		_V2_KEY_CIPHERS+=("$(git config --get --local "transcrypt${group}.cipher")")
+		_V2_KEY_PASSWORDS+=("$password")
+	done
 }
 
 # Detect OpenSSL major version 3 or later which requires a compatibility
@@ -440,16 +529,42 @@ git_clean() {
 	if [[ $(head -c8 "$tempfile") == 'TCRYPT3:' ]]; then
 		die 1 'v3 data cannot be processed by the legacy v2 clean filter'
 	fi
+	context_config_group=$(derive_context_config_group "$context")
+	# A context without local configuration is handled below; a missing
+	# setting must not abort the filter before that decision (set -e).
+	cipher=$(git config --get --local "transcrypt${context_config_group}.cipher" || true)
+	password=$(load_password "$context_config_group" || true)
+	openssl_path=$(git config --get --local transcrypt.openssl-path || true)
 	# the first bytes of an encrypted file are always "Salted" in Base64
 	# The `head + LC_ALL=C tr` command handles binary data in old and new Bash (#116)
 	firstbytes=$(head -c8 "$tempfile" | LC_ALL=C tr -d '\0')
-	if [[ $firstbytes == "U2FsdGVk" ]]; then
+	# Pass input through unchanged only when it is already this repository's
+	# ciphertext for this path (e.g. Git re-cleaning a worktree that holds
+	# ciphertext). The marker alone is NOT evidence: plaintext beginning
+	# with "U2FsdGVk" must be encrypted like any other plaintext (#F-01).
+	if [[ ! $password ]] || [[ ! $cipher ]]; then
+		# Without this context's key the input can be neither verified nor
+		# encrypted. Only bytes Git already stores for this path (e.g. the
+		# undecrypted checkout of a context this clone lacks) pass through.
+		local input_oid ref
+		if [[ $firstbytes == "U2FsdGVk" ]] &&
+			input_oid=$(git hash-object --no-filters -- "$tempfile" 2>/dev/null); then
+			for ref in '' HEAD; do
+				if [[ $(git rev-parse -q --verify "$ref:$filename" 2>/dev/null) == "$input_oid" ]]; then
+					cat "$tempfile"
+					return 0
+				fi
+			done
+		fi
+		die 1 'cannot encrypt %s: no transcrypt key is configured for its context' "$filename"
+	fi
+	if [[ $firstbytes == "U2FsdGVk" ]] &&
+		_is_transcrypt_v2_ciphertext "$tempfile" "$filename" "$cipher" "$password" "$openssl_path"; then
 		cat "$tempfile"
 	else
-		context_config_group=$(derive_context_config_group "$context")
-		cipher=$(git config --get --local "transcrypt${context_config_group}.cipher")
-		password=$(load_password "$context_config_group")
-		openssl_path=$(git config --get --local transcrypt.openssl-path)
+		if [[ $firstbytes == "U2FsdGVk" ]]; then
+			warn '%s begins with the legacy ciphertext marker but is not ciphertext for this key and path; encrypting it' "$filename"
+		fi
 		salt=$("${openssl_path}" dgst -hmac "${filename}:${password}" -sha256 "$tempfile" | tr -d '\r\n' | tail -c16)
 
 		if [ "$(is_salt_prefix_workaround_required)" == "true" ]; then
@@ -580,6 +695,7 @@ git_pre_commit() {
 		warn 'cannot enumerate the staged protected paths; refusing to commit'
 		return 1
 	fi
+	_load_v2_keys
 
 	slow_mode_if_failed() {
 		while IFS= read -r -d '' secret_file; do

@@ -101,3 +101,47 @@ load "$BATS_TEST_DIRNAME/../_test_helper.bash"
   [ -f .git/hooks/pre-commit ]
   [ ! -f .git/hooks/pre-commit-crypt ]
 }
+
+# F-01: the pre-commit check must not accept staged plaintext merely because
+# it begins with the "U2FsdGVk" marker.
+@test "pre-commit: reject staged plaintext beginning with the ciphertext marker" {
+  encrypt_named_file sensitive_file 'Secret stuff'
+  printf 'U2FsdGVkNOT_ENCRYPTED\nprivate_token=abcdefg\n' > sensitive_file
+  # Stage the plaintext bypassing the clean filter.
+  blob=$(git hash-object -w --no-filters sensitive_file)
+  git update-index --cacheinfo "100644,$blob,sensitive_file"
+  [ "$(git cat-file blob :sensitive_file | head -c8)" = 'U2FsdGVk' ]
+
+  run git commit -m "Plaintext with marker"
+  [ "$status" -ne 0 ]
+  [[ "${output}" = *"Transcrypt managed file is not encrypted in the Git index: sensitive_file"* ]]
+  run "$TRANSCRYPT" pre_commit
+  [ "$status" -ne 0 ]
+  [ "$(git rev-list --count HEAD)" -eq 1 ]
+}
+
+@test "pre-commit: reject marker-prefixed ciphertext copied from another path" {
+  encrypt_named_file sensitive_file 'Secret stuff'
+  encrypt_named_file other_file 'Other stuff'
+  # Real ciphertext, but not this path's: its salt binds the other path.
+  blob=$(git rev-parse HEAD:sensitive_file)
+  git update-index --cacheinfo "100644,$blob,other_file"
+  run "$TRANSCRYPT" pre_commit
+  [ "$status" -ne 0 ]
+}
+
+@test "pre-commit: unchanged ciphertext of a context without a local key is accepted" {
+  "$TRANSCRYPT" --context=super-secret --cipher=aes-256-cbc --password=321cba --yes
+  encrypt_named_file super_file 'Super secret' super-secret
+  [ "$status" -eq 0 ]
+  # Simulate a checkout that holds only the default context's key.
+  git config --local --unset transcrypt.super-secret.password
+  encrypt_named_file sensitive_file 'Secret stuff'
+  [ "$status" -eq 0 ]
+  [ "$(git rev-list --count HEAD)" -eq 2 ]
+  # A new marker-prefixed object for that path cannot be verified: rejected.
+  blob=$(printf 'U2FsdGVkNOT_ENCRYPTED\n' | git hash-object -w --stdin --no-filters)
+  git update-index --cacheinfo "100644,$blob,super_file"
+  run "$TRANSCRYPT" pre_commit
+  [ "$status" -ne 0 ]
+}

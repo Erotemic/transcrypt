@@ -49,6 +49,13 @@ system, you must also run the `--upgrade` command in each repository:
   `awk -v RS='\x00'`, which fails to list any files with awk builds that read
   only the first record when the record separator is a null byte, such as the
   Homebrew "one true awk" (#213, onetrueawk/awk#270)
+- Security: a protected file whose plaintext began with `U2FsdGVk` (Base64 of
+  "Salted") was committed unencrypted, and the pre-commit hook accepted it. The
+  clean filter and pre-commit check now treat input as already encrypted only
+  if it decrypts with the repository's key and carries the file's expected
+  deterministic salt; such plaintext is now encrypted, and staged plaintext is
+  rejected. Existing ciphertext is unchanged. Run `transcrypt --upgrade` to
+  refresh the installed helper, and audit history for affected files
 
 ## [2.3.2] - 2026-05-18
 
