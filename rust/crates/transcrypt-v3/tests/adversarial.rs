@@ -1015,3 +1015,34 @@ fn long_running_filter_protocol() {
     drop(to);
     assert!(!child.wait().unwrap().success());
 }
+
+/// `uninstall` locks first, removes only what v3 installed (filters, its
+/// unchanged hooks, its ignore rules), leaves ciphertext in the worktree and
+/// a clean status, and refuses while plaintext would be left unprotected.
+#[test]
+fn uninstall_removes_v3_and_leaves_only_ciphertext() {
+    let mut scratch = Scratch::new("uninstall");
+    let repo = scratch.repo("repo");
+    fs::write(repo.join(".git/info/exclude"), b"# mine\n*.log\n").unwrap();
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    // A plaintext edit is not lost: lock (and so uninstall) refuses.
+    fs::write(repo.join("a.secret"), b"unsaved edit\n").unwrap();
+    run_fails(&repo, bin(), &["uninstall"], None);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"unsaved edit\n");
+    run(&repo, "git", &["checkout", "--", "a.secret"], None);
+    run(&repo, bin(), &["hydrate"], None);
+    run(&repo, bin(), &["uninstall"], None);
+    assert!(fs::read(repo.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+    assert!(exec(&repo, "git", &["config", "--get-regexp", "filter.transcrypt-v3"], None).stdout.is_empty());
+    for hook in ["pre-commit", "pre-push", "post-checkout"] {
+        assert!(!repo.join(".git/hooks").join(hook).exists(), "{hook}");
+    }
+    assert_eq!(fs::read(repo.join(".git/info/exclude")).unwrap(), b"# mine\n*.log\n");
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    assert!(!repo.join(".git/transcrypt-v3").exists());
+    // Unlocking reinstalls everything.
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    assert!(exec(&repo, bin(), &["doctor"], None).status.success());
+}

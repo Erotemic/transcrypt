@@ -293,8 +293,14 @@ pub(crate) fn plaintext_copy_name(path: &[u8]) -> bool {
 }
 
 /// Ignore those copies in this checkout (`.git/info/exclude`, never committed).
+const EXCLUDE_MARKER: &str = "# transcrypt-v3: editor and merge copies of *.secret files hold plaintext";
+const EXCLUDE_PATTERNS: [&str; 9] = [
+    "*.secret~", "*.secret.sw[a-p]", "*.secret.orig", "*.secret.bak", "*.secret.tmp",
+    "*.secret.rej", "*.secret.save", "\\#*.secret#", ".#*.secret",
+];
+
 fn exclude_plaintext_copies(root: &Path) -> Result<(), String> {
-    const MARKER: &str = "# transcrypt-v3: editor and merge copies of *.secret files hold plaintext";
+    const MARKER: &str = EXCLUDE_MARKER;
     let info = root.join(".git/info");
     if fs::symlink_metadata(&info).is_err() {
         fs::create_dir(&info).map_err(|e| format!("cannot create .git/info: {e}"))?;
@@ -310,12 +316,69 @@ fn exclude_plaintext_copies(root: &Path) -> Result<(), String> {
     if !existing.is_empty() && !existing.ends_with('\n') { block.push('\n'); }
     block.push_str(MARKER);
     block.push('\n');
-    for pattern in ["*.secret~", "*.secret.sw[a-p]", "*.secret.orig", "*.secret.bak", "*.secret.tmp",
-                    "*.secret.rej", "*.secret.save", "\\#*.secret#", ".#*.secret"] {
+    for pattern in EXCLUDE_PATTERNS {
         block.push_str(pattern);
         block.push('\n');
     }
     fs::OpenOptions::new().append(true).create(true).open(&path)
         .and_then(|mut f| f.write_all(block.as_bytes()))
         .map_err(|e| format!("cannot update .git/info/exclude: {e}"))
+}
+
+/// Remove v3 from this checkout. The worktree must be (or is first made, by
+/// `lock`) ciphertext only, since without the filter Git would store any
+/// plaintext as is. Then the filter configuration, the hooks v3 installed
+/// (only if unchanged) and its ignore rules are removed. The committed
+/// `.transcrypt/config` and `.gitattributes` stay: removing them from the
+/// repository is a commit, and the history stays encrypted either way.
+pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
+    let config = load_config(root)?;
+    if session::request(root, &config, Operation::Ping, &[], &[]).is_ok() {
+        crate::lock(root)?;
+    }
+    let id = transcrypt_v3::config_id(&config);
+    for staged in indexed_files(root)? {
+        if !protected_path(&staged.path) { continue; }
+        let relative = crate::worktree::indexed_path(&staged.path)?;
+        let readable = crate::worktree::open_protected(root, &relative).and_then(|p| p.read());
+        if let Ok((contents, _)) = readable {
+            if !transcrypt_v3_core::record_envelope_ok(&contents, &id) {
+                return Err(format!("{} holds plaintext; unlock, commit or discard it, and lock before uninstalling",
+                    String::from_utf8_lossy(&staged.path)));
+            }
+        }
+    }
+    let untracked = git(root, &["ls-files", "--others", "-z"])?;
+    if untracked.split(|b| *b == 0).any(protected_path) {
+        return Err("untracked *.secret files exist; remove them before uninstalling".into());
+    }
+    let _ = git(root, &["config", "--local", "--remove-section", "filter.transcrypt-v3"]);
+    for (name, command) in HOOKS {
+        let path = hook_path(root, name);
+        if fs::read_to_string(&path).ok() == expected_hook(command).ok() {
+            fs::remove_file(&path).map_err(|e| format!("cannot remove {name} hook: {e}"))?;
+        }
+    }
+    let exclude = root.join(".git/info/exclude");
+    if let Ok(text) = fs::read_to_string(&exclude) {
+        let mut kept = Vec::new();
+        let mut lines = text.lines().peekable();
+        while let Some(line) = lines.next() {
+            if line == EXCLUDE_MARKER {
+                while lines.peek().is_some_and(|l| EXCLUDE_PATTERNS.contains(l)) { lines.next(); }
+            } else {
+                kept.push(line);
+            }
+        }
+        let mut rewritten = kept.join("\n");
+        if !rewritten.is_empty() { rewritten.push('\n'); }
+        fs::write(&exclude, rewritten).map_err(|e| format!("cannot update .git/info/exclude: {e}"))?;
+    }
+    for dir in [".git/transcrypt-v3", ".git/transcrypt-v3-staging"] {
+        let _ = fs::remove_dir(root.join(dir));
+    }
+    eprintln!("Removed transcrypt-v3 from this checkout; *.secret files stay encrypted.\n\
+        WARNING: without the filter, a *.secret file you add now is committed as plaintext. To stop \
+        using v3, commit the removal of .gitattributes and .transcrypt/ (history stays encrypted).");
+    Ok(())
 }

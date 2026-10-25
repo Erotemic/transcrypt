@@ -123,13 +123,14 @@ fn run() -> Result<(), String> {
             pre_push(&root, args.get(1).map(OsString::as_os_str))
         },
         "hydrate" if args.len() == 2 && args[1] == "--auto" => auto_hydrate(&root),
-        "lock" | "verify-index" | "hydrate" | "serve" => {
+        "lock" | "verify-index" | "hydrate" | "serve" | "uninstall" => {
             if args.len() != 1 { return Err("unexpected operation arguments".into()); }
             match action {
                 "lock" => lock(&root),
                 "verify-index" => verify_index_command(&root),
                 "hydrate" => hydrate(&root).map(|n| eprintln!("Hydration complete: {n} file(s) decrypted.")),
                 "serve" => session::serve(&root, &load_config(&root)?),
+                "uninstall" => uninstall(&root),
                 _ => unreachable!(),
             }
         },
@@ -137,7 +138,7 @@ fn run() -> Result<(), String> {
     }
 }
 
-const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|doctor|verify-index|audit|lock|help \
+const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|doctor|verify-index|audit|lock|uninstall|help \
     (clean/smudge <git-path> and pre-push are invoked by Git)";
 
 const HELP: &str = "\
@@ -165,6 +166,8 @@ Typical workflow
                             from checkouts that never ran unlock
   transcrypt-v3 lock        replace plaintext by the committed ciphertext and stop the agent;
                             refuses if any protected file has uncommitted changes
+  transcrypt-v3 uninstall   lock, then remove the filters, hooks and ignore rules from this
+                            checkout (committed files and history stay encrypted)
 
 Options
   --password-stdin          (init, unlock) read the passphrase from stdin instead of the terminal
