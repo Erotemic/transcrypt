@@ -85,6 +85,16 @@ impl Scratch {
         if dir.mode().map_err(|_| "cannot examine private merge directory")? & 0o077 != 0 {
             return Err("unsafe .git/transcrypt-v3-merge; require a real 0700 directory".into());
         }
+        // Inputs left by a merge that crashed: their process no longer runs.
+        for entry in dir.entries().map_err(|_| "cannot list private merge directory")? {
+            let owner = entry.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<i32>().ok());
+            // SAFETY: kill with signal 0 only checks whether the process exists.
+            let running = owner.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0
+                || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
+            if !running {
+                let _ = dir.unlink(&entry);
+            }
+        }
         Ok(Scratch { dir, prefix: format!("{}", std::process::id()) })
     }
 

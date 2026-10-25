@@ -1154,3 +1154,26 @@ fn secrets_merge_as_plaintext() {
     }
     run(&repo, bin(), &["audit"], None);
 }
+
+/// Plaintext inputs left by a merge driver that crashed are removed by the
+/// next merge.
+#[test]
+fn crashed_merge_inputs_are_purged() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut scratch = Scratch::new("mergecrash");
+    let repo = scratch.repo("repo");
+    let dir = repo.join(".git/transcrypt-v3-merge");
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.join("2147483646-ours"), b"LEFTOVER PLAINTEXT\n").unwrap();
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
+    fs::write(repo.join("a.secret"), b"side\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "side"], None);
+    run(&repo, "git", &["checkout", "-q", main.trim()], None);
+    fs::write(repo.join("a.secret"), b"main\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "main"], None);
+    let _ = exec(&repo, "git", &["merge", "-q", "--no-edit", "side"], None);
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "merge inputs left behind");
+    run(&repo, "git", &["merge", "--abort"], None);
+}
