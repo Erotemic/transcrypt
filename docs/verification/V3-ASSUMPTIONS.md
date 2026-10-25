@@ -44,7 +44,7 @@ one.
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED; selection by Git ASSUMED (A19); TESTED end to end |
 | A17 | The stored key is local-only, used only for the config it authenticates, and mode-independent | TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
-| A18 | Path-bound renames are re-encrypted for the new path, never laundered | TESTED (real Git) + REVIEWED |
+| A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision PROVED (`seal_action`); TESTED (real Git) + REVIEWED |
 | A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK |
 
 ## Detailed register
@@ -465,8 +465,12 @@ one.
   - Git's content-based rename detection cannot pair path-bound records, so
     a rename on one branch and an edit on another merge as modify/delete
     (recoverable in plaintext; tested).
-- **Next reduction:** a Lean model of `seal_staged`'s decision.
-- **Status:** TESTED + REVIEWED.
+- **Proof:** the decision itself is the verified `seal_action`
+  (`seal_action_spec`, `sealSpec_repairs_only_local`: only a local change
+  that does not already open is ever repaired). The adapter computes its
+  inputs: `local` from `HEAD` and the sequencing state, and `moved` from
+  `open_record` at a `HEAD` path that has left the index (A4).
+- **Status:** decision PROVED; inputs TESTED + REVIEWED.
 
 ### A19 — Git's attribute evaluation (new)
 
@@ -530,6 +534,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
 | Parsing Git's attribute answers (what is protected) | `parse_attr_record_spec` (both directions), `attrResponse_recordAt`, `attrFlagsModel_sound`, `attrFlagsModel_complete` |
 | Smudge keeps only genuine envelopes; opens only its own config | `smudge_action_spec`, `smudgeSpec_keep_envelope`, `smudgeModel_spec` |
+| The pre-commit hook repairs only local changes | `seal_action_spec`, `sealSpec_repairs_only_local` |
 | Index record parsing | `parse_index_entry_spec` |
 | Git filter-protocol packet lengths | `decode_pkt_len_spec` |
 | Object ids passed to Git are plain hex names, taken from the right bytes | `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` |
@@ -549,7 +554,7 @@ verified decision that gates it:
 | `clean` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
 | Key loading | `authenticate_config` with the stored key (else locked), or agent `Ping` | stored 64-byte key; current config | `Ok` |
 | Protected-file selection | `parse_attr_record` per path, in order, response consumed exactly; `is_reserved_path` | raw paths sent to `check-attr -z --stdin filter` (`--cached`, worktree, or a commit's temporary index) | `protected = true` |
-| Pre-commit re-encryption (`seal_staged`) | `open_record` (staged record at its path: nothing to do; else at the `HEAD` source path of a local move), `parse_file_header` (plaintext), then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` listing; sequencing state | only local, non-sequencing changes |
+| Pre-commit re-encryption (`seal_staged`) | `seal_action` on (`open_record` at its path, local change, `parse_file_header`, `open_record` at the `HEAD` source path of a local move), then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` listing; sequencing state | `Seal` or `Rebind` only |
 | Agent framing | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, lengths | proved roundtrip |
 | Git filter-process framing | `decode_pkt_len` for every packet; then the same conversion as the per-file filters | 4-byte pkt-line headers from Git; `command=`/`pathname=` values | `Ok` (else the process ends and Git fails) |
 | Agent dispatch | `authorize_agent_request` before the body is read; peer UID check | opcode, supplied config, startup config, path, length | `Ok(op)` from a same-UID peer |

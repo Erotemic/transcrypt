@@ -144,7 +144,7 @@ verified" or "cryptographic security has been proved from first principles."
 ### Next milestones, ranked by expected value
 
 1. External review (R-01) of the new selection, credential and rebind code.
-2. The rebind decision (`seal_staged`) as a verified core function.
+2. Done: the rebind decision is the verified `seal_action`; next, its adapter inputs (A4).
 3. A hint for cross-branch rename conflicts (Git cannot pair path-bound records; documented limitation).
 4. A4 narrowing for `protected_flags` and the stored-key load.
 5. Optional: private-agent idle timeout.

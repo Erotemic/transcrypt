@@ -126,4 +126,14 @@ inductive SmudgeAction where
 | Open : SmudgeAction
 | Keep : SmudgeAction
 
+/-- [transcrypt_v3_core::SealAction]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 732:0-741:1
+    Visibility: public -/
+@[discriminant isize]
+inductive SealAction where
+| Keep : SealAction
+| Seal : SealAction
+| Rebind : SealAction
+| Leave : SealAction
+
 end transcrypt_v3_core

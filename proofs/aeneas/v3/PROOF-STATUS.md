@@ -6,7 +6,7 @@ translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All are `WP.spec`
 triples, so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;
-`bash proofs/aeneas/check-v3-axioms.sh` confirms the 41 headline theorems use
+`bash proofs/aeneas/check-v3-axioms.sh` confirms the 43 headline theorems use
 only `propext`, `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
 `axiom`, `native_decide` or `bv_decide` occurs in any verification module
 (enforced by `v3_snapshot.py verify`).
@@ -35,6 +35,7 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
 | `Attr` | `find_nul`, `parse_attr_record`; adapter loop model `attrFlagsModel` (mirrors `git::protected_flags`) | `find_nul_spec`, `parse_attr_record_spec`, `attrFlagsModel_sound`, `attrFlagsModel_complete` | `Ok` ⇒ the spec's `AttrRecordAt` (`path NUL filter NUL value NUL`) for exactly the requested path at `start`, `next` = its end, `protected` ⇔ `Selected value`; `Err Attribute` ⇒ no such record exists (no preconditions; the length guard is overflow-free). The loop succeeds iff the response is exactly `attrResponse` of the requested paths with NUL-free values, ending at the response length, and returns exactly their selections (completeness also uses `attrResponse_recordAt`, `attrRecordAt_unique`) |
 | `Index` | `parse_index_entry` | `parse_index_entry_spec` | Accepts exactly the spec's `IndexRecord` (stage 0, path after the first TAB, `regular` flag ⇔ mode `100644` or `100755`) and returns that path |
 | `Frame` | `encode_be_u32`, `decode_be_u32`, `encode_frame_header`, `decode_frame_header` | `encode_be_u32_spec`, `decode_be_u32_spec`, `encode_frame_header_spec`, `decode_frame_header_spec`, `decode_frame_header_encode` | Agent request header is exactly the spec's `frameHeader`; decoding inverts encoding |
+| `Bytes` (repair) | `seal_action` | `seal_action_spec`, `sealSpec_repairs_only_local`, `sealSpec_seal_plain`, `sealSpec_rebind_moved` | The pre-commit repair decision is exactly `sealSpec`: only a local change that does not already open is repaired (no laundering of committed content), only plaintext is sealed, only a moved record is re-sealed |
 | `Envelope` | `is_object_id`, `record_envelope_ok`, `smudge_action` | `is_object_id_spec`, `record_envelope_ok_spec`, `smudge_action_spec` | Object ids passed to Git are exactly the spec's `ObjectId` (40/64 lowercase hex: never revision syntax or an option, `objectId_plain`); the keyless check is exactly `EnvelopeOk` (size bound, magic, config id), which every genuine record satisfies (`opensTo_envelopeOk`); the smudge decision is exactly `smudgeSpec` (`Ok Open`/`Ok Keep` ⇔ `some .open_`/`some .keep`; `Err Size`/`Err Foreign` ⇔ `none`, classified) |
 | `Pkt` | `decode_pkt_len` | `decode_pkt_len_spec` | Git filter-protocol packet headers: `Ok n` exactly when the header is four lowercase hex digits for a flush (0) or a 5..65520-byte packet (`PktLenAccepted`); otherwise `Err Request` |
 | `Protocol` | `initialize_config` | `initialize_config_spec` | Output is the spec layout and authenticates |

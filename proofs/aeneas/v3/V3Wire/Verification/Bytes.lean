@@ -127,4 +127,22 @@ theorem lock_action_spec (w r s : Slice U8) :
   step*
   all_goals simp_all [Transcrypt.V3Policy.lockSpec, lockResult, sliceBytes_inj]
 
+/-- Rust encoding of the specification's pre-commit repair decision. -/
+def sealResult : Transcrypt.V3Policy.SealAction → SealAction
+  | .keep => .Keep
+  | .seal => .Seal
+  | .rebind => .Rebind
+  | .leave => .Leave
+
+/-- `seal_action` makes exactly the spec's repair decision, so the adapter's
+    pre-commit hook re-encrypts only local changes
+    (`sealSpec_repairs_only_local`). -/
+@[step]
+theorem seal_action_spec (opens isLocal envelope moved : Bool) :
+    seal_action opens isLocal envelope moved ⦃ r =>
+      r = sealResult (Transcrypt.V3Policy.sealSpec opens isLocal envelope moved) ⦄ := by
+  rcases opens with _ | _ <;> rcases isLocal with _ | _ <;> rcases envelope with _ | _ <;>
+    rcases moved with _ | _ <;>
+    simp [seal_action, Transcrypt.V3Policy.sealSpec, sealResult]
+
 end Transcrypt.V3Verification

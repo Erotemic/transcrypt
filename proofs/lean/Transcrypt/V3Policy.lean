@@ -303,6 +303,38 @@ theorem smudgeSpec_keep_envelope {blob id : List Nat} {unlocked : Bool}
     · rename_i found hd
       exact ⟨found, hd, by omega⟩
 
+/-! ## Pre-commit repair -/
+
+inductive SealAction | keep | seal | rebind | leave
+  deriving DecidableEq
+
+/-- The pre-commit decision for one staged protected entry. `opens`: the
+    staged blob opens at its own path. `isLocal`: the user staged it (not
+    content of a commit being merged, picked or already committed).
+    `envelope`: it has the v3 file header. `moved`: it opens at a path the
+    user moved it from. Only local content that does not already open is
+    repaired: plaintext is sealed, a moved record is re-sealed. -/
+def sealSpec (opens isLocal envelope moved : Bool) : SealAction :=
+  if opens then .keep
+  else if !isLocal then .leave
+  else if !envelope then .seal
+  else if moved then .rebind
+  else .leave
+
+/-- Content from a commit is never re-encrypted (no laundering of a hostile
+    move), and neither is a record that already opens at its path. -/
+theorem sealSpec_repairs_only_local {o l e m : Bool}
+    (h : sealSpec o l e m = .seal ∨ sealSpec o l e m = .rebind) : l = true ∧ o = false := by
+  cases o <;> cases l <;> cases e <;> cases m <;> simp_all [sealSpec]
+
+/-- Only plaintext (no envelope) is sealed; only a moved record is re-sealed. -/
+theorem sealSpec_seal_plain {o l e m : Bool} (h : sealSpec o l e m = .seal) : e = false := by
+  cases o <;> cases l <;> cases e <;> cases m <;> simp_all [sealSpec]
+
+theorem sealSpec_rebind_moved {o l e m : Bool} (h : sealSpec o l e m = .rebind) :
+    e = true ∧ m = true := by
+  cases o <;> cases l <;> cases e <;> cases m <;> simp_all [sealSpec]
+
 /-! ## Git long-running filter protocol framing (local IPC with Git) -/
 
 /-- The value of a lowercase hexadecimal digit. -/

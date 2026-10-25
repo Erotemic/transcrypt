@@ -1642,13 +1642,32 @@ def smudge_action
       else ok (core.result.Result.Ok SmudgeAction.Keep)
     | core.result.Result.Err _ => ok (core.result.Result.Err Refusal.Foreign)
 
+/-- [transcrypt_v3_core::seal_action]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 751:0-763:1
+    Visibility: public -/
+def seal_action
+  (opens : Bool) (local_change : Bool) (envelope : Bool) (moved : Bool) :
+  RustM SealAction
+  := do
+  if opens
+  then ok SealAction.Keep
+  else
+    if local_change
+    then
+      if envelope
+      then if moved
+           then ok SealAction.Rebind
+           else ok SealAction.Leave
+      else ok SealAction.Seal
+    else ok SealAction.Leave
+
 /-- [transcrypt_v3_core::MAX_PKT_LEN]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 731:0-731:37
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 766:0-766:37
     Visibility: public -/
 @[global_simps, irreducible] def MAX_PKT_LEN : Std.Usize := 65520#usize
 
 /-- [transcrypt_v3_core::decode_pkt_len]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-752:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-787:5
     Visibility: public -/
 @[rust_loop_body]
 def decode_pkt_len_loop.body
@@ -1706,7 +1725,7 @@ def decode_pkt_len_loop.body
   else ok (done (value, false))
 
 /-- [transcrypt_v3_core::decode_pkt_len]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-752:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-787:5
     Visibility: public -/
 @[rust_loop]
 def decode_pkt_len_loop
@@ -1719,7 +1738,7 @@ def decode_pkt_len_loop
     (value, ok1, i)
 
 /-- [transcrypt_v3_core::decode_pkt_len]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 738:0-757:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 773:0-792:1
     Visibility: public -/
 def decode_pkt_len
   (header : Array Std.U8 4#usize) :

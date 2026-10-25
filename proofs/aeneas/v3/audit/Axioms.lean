@@ -46,4 +46,6 @@ open Transcrypt.V3Verification
 #print axioms smudge_action_spec
 #print axioms smudgeModel_spec
 #print axioms Transcrypt.V3Policy.smudgeSpec_keep_envelope
+#print axioms seal_action_spec
+#print axioms Transcrypt.V3Policy.sealSpec_repairs_only_local
 #print axioms decode_pkt_len_spec

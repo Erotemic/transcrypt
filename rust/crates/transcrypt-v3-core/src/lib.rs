@@ -727,6 +727,41 @@ pub fn smudge_action(blob: &[u8], id: &[u8; ID_LEN], unlocked: bool) -> Result<S
     }
 }
 
+/// What the pre-commit hook does with one staged protected entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SealAction {
+    /// The staged blob already opens at its own path.
+    Keep,
+    /// Seal the staged blob, which is plaintext, at its path.
+    Seal,
+    /// Re-seal, for this path, the plaintext of a record moved here.
+    Rebind,
+    /// Change nothing; verification decides (and refuses a bad record).
+    Leave,
+}
+
+/// The pre-commit repair decision. `opens`: the staged blob opens at its
+/// own path. `local_change`: the user staged it (it differs from `HEAD`'s
+/// blob there and no merge, cherry-pick, revert or rebase is in progress),
+/// or `protect` selected it. `envelope`: it has the v3 file header.
+/// `moved`: it opens at a `HEAD` path that is no longer in the index. Only a
+/// local change is ever sealed or re-sealed: content that came from a
+/// commit is checked, never repaired, so a hostile move cannot be laundered
+/// into a genuine record.
+pub fn seal_action(opens: bool, local_change: bool, envelope: bool, moved: bool) -> SealAction {
+    if opens {
+        SealAction::Keep
+    } else if !local_change {
+        SealAction::Leave
+    } else if !envelope {
+        SealAction::Seal
+    } else if moved {
+        SealAction::Rebind
+    } else {
+        SealAction::Leave
+    }
+}
+
 /// Largest pkt-line Git sends or accepts: 4 length digits plus 65516 data bytes.
 pub const MAX_PKT_LEN: usize = 65520;
 
@@ -1064,6 +1099,19 @@ mod tests {
         record[0] ^= 1;
         assert!(!record_envelope_ok(&record, &id));
         assert!(!record_envelope_ok(b"plaintext that is long enough to pass the size bound", &id));
+    }
+
+    #[test]
+    fn only_local_changes_are_repaired() {
+        use SealAction::*;
+        for (opens, local, envelope, moved, expected) in [
+            (true, true, true, true, Keep), (true, false, false, false, Keep),
+            (false, false, false, false, Leave), (false, false, true, true, Leave),
+            (false, true, false, false, Seal), (false, true, false, true, Seal),
+            (false, true, true, true, Rebind), (false, true, true, false, Leave),
+        ] {
+            assert_eq!(seal_action(opens, local, envelope, moved), expected);
+        }
     }
 
     #[test]

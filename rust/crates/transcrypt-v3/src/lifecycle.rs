@@ -5,8 +5,8 @@
 use std::{collections::HashMap, env, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    hydrate_action, is_reserved_path, lock_action, parse_file_header, record_envelope_ok,
-    HydrateAction, LockAction,
+    hydrate_action, is_reserved_path, lock_action, parse_file_header, record_envelope_ok, seal_action,
+    HydrateAction, LockAction, SealAction,
 };
 use crate::{
     credential::Key,
@@ -165,21 +165,32 @@ pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<u
     let mut index_info = Vec::new();
     let mut count = 0;
     for staged in &protected {
-        let local = !sequencing && head_oid.get(&staged.path) != Some(&staged.oid);
-        if !local && !force.contains(&staged.path) { continue; }
+        let local = force.contains(&staged.path)
+            || (!sequencing && head_oid.get(&staged.path) != Some(&staged.oid));
+        // `seal_action` never repairs a non-local entry; skip decrypting it
+        // here (`check_index` verifies it right after).
+        if !local { continue; }
         let record = git_blob(root, &staged.oid)?;
-        if key.open(&staged.path, &record).is_ok() { continue; }
+        let opens = key.open(&staged.path, &record).is_ok();
+        let envelope = parse_file_header(&record).is_ok();
+        let moved = if opens || !envelope { None } else {
+            moved_from.get(&staged.oid).map(Vec::as_slice).unwrap_or_default().iter()
+                .find_map(|p| key.open(p, &record).ok().map(|pt| (p, pt)))
+        };
         let name = String::from_utf8_lossy(&staged.path).into_owned();
-        let plaintext: Zeroizing<Vec<u8>> = if parse_file_header(&record).is_err() {
-            eprintln!("transcrypt-v3: encrypting {name}, which was staged unencrypted");
-            Zeroizing::new(record)
-        } else {
-            let sources = moved_from.get(&staged.oid).map(Vec::as_slice).unwrap_or_default();
-            let Some((source, plaintext)) = sources.iter()
-                .find_map(|p| key.open(p, &record).ok().map(|pt| (p, pt))) else { continue };
-            eprintln!("transcrypt-v3: re-encrypting {name} for its new name (it was {})",
-                String::from_utf8_lossy(source));
-            plaintext
+        // The verified core decides.
+        let plaintext: Zeroizing<Vec<u8>> = match seal_action(opens, local, envelope, moved.is_some()) {
+            SealAction::Keep | SealAction::Leave => continue,
+            SealAction::Seal => {
+                eprintln!("transcrypt-v3: encrypting {name}, which was staged unencrypted");
+                Zeroizing::new(record)
+            },
+            SealAction::Rebind => {
+                let Some((source, plaintext)) = moved else { continue };
+                eprintln!("transcrypt-v3: re-encrypting {name} for its new name (it was {})",
+                    String::from_utf8_lossy(source));
+                plaintext
+            },
         };
         let sealed = key.clean(&staged.path, &plaintext)?;
         let oid = hash_object(root, &sealed)?;

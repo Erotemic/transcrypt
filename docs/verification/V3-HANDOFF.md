@@ -172,10 +172,9 @@ The branch is unpushed: push needs the owner's credentials.
 1. **External review (R-01)** of the crypto adapter, credential handling,
    selection and rebind logic; the internal review is in
    [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md).
-2. **Move the rebind decision into the verified core.** `seal_staged`'s
-   choice (open at path / seal plaintext / reseal a local move / refuse)
-   is a pure function of a few booleans and two `open_record` results.
-   Extract it and prove "never re-encrypts content from a commit".
+2. **Done:** the rebind decision is the verified `seal_action`
+   (`sealSpec_repairs_only_local`). Remaining: show the adapter computes its
+   inputs (`local`, `moved`) correctly.
 3. **Renames across branches** conflict as modify/delete, because Git's
    content-based rename detection cannot match path-bound ciphertext
    (tested, documented). A rename-aware merge driver cannot help, since Git
