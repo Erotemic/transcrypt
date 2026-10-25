@@ -106,7 +106,11 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     altered_metadata[8] ^= 1;
     fs::write(&metadata_path, altered_metadata).unwrap();
     run_fails(&clone, bin, &["clean", "account.secret"], Some(b"must not encrypt under changed metadata"));
+    // The agent saw its checkout's config change, so it retired its key.
     fs::write(&metadata_path, authentic_metadata).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_in_memory_session(&clone, false);
+    run(&clone, bin, &["unlock", "--password-stdin", "--no-hydrate"], Some(pass));
     // Hydrate replaces only authentic records. Unexpected local bytes in
     // another protected file are never overwritten (nor staged).
     fs::write(clone.join("ledger.secret"), b"unexpected local worktree data\n").unwrap();
