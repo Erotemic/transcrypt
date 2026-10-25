@@ -386,6 +386,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
 | Effective filter attribute check | `check_attr_response_ok_spec`, `check_attr_paths` |
 | Index record parsing | `parse_index_entry_spec` |
+| Git filter-protocol packet lengths | `decode_pkt_len_spec` |
 | Object ids passed to Git are plain hex names, taken from the right bytes | `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` |
 | Keyless envelope check | `record_envelope_ok_spec`, `opensTo_envelopeOk` |
 | Clean and locked-filter behavior (models of adapter compositions) | `cleanModel_spec`, `cleanModel_genuine`, `cleanModel_idempotent`, `lockedFilterModel_spec` |
