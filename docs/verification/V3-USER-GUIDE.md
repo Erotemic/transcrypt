@@ -164,10 +164,10 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
   clean filter still encrypts everything it processes. If `core.hooksPath`
   is set, Git ignores `.git/hooks`; `status` warns about this.
 - **Files you create follow your umask.** Transcrypt never lets Git write
-  plaintext readable by others, and `hydrate` makes protected plaintext
-  files private, but a new file you create with `umask 022` is readable by
-  other local users until then. `status` warns about such files; `umask 077`
-  avoids the window.
+  plaintext readable by others, and makes a secret you create private as
+  soon as you `git add` it (or at the next `hydrate`). Until then a new file
+  created with `umask 022` is readable by other local users; `status` warns,
+  and `umask 077` avoids the window.
 - Files larger than 16 MiB are refused.
 - **Editor and merge copies are plaintext.** `a.secret~`, `.a.secret.swp`
   or `a.secret.orig` do not end in `.secret` and are not encrypted. `unlock`

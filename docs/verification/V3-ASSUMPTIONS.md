@@ -215,8 +215,9 @@ one.
     `renameat`.
   - Hard links to a plaintext file survive `lock`.
   - Root; hibernation and swap of non-key buffers.
-  - Files the user creates follow their umask until `hydrate` makes them
-    private (Git itself no longer writes readable plaintext: A15).
+  - Files the user creates follow their umask until `git add` (the clean
+    filter) or `hydrate` makes them private (Git itself no longer writes
+    readable plaintext: A15).
   - All ACCEPTED RISK.
 - **Next reduction:** done: `lock` warns on `nlink > 1`; `hydrate` makes
   kept plaintext private. Remaining: none cheap.

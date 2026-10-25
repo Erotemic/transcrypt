@@ -475,7 +475,17 @@ fn convert(root: &Path, clean: bool, git_path: &[u8], input: Zeroizing<Vec<u8>>)
     // releases plaintext only after authenticating it under this config and
     // exact Git path.
     if clean {
-        return session::request(root, &config, Operation::Encrypt, git_path, &input);
+        let record = session::request(root, &config, Operation::Encrypt, git_path, &input)?;
+        if *record != *input {
+            // Git is staging plaintext of this path: if the worktree file was
+            // created readable by others (a permissive umask), make it private
+            // now rather than at the next `hydrate`. Best effort, through the
+            // same symlink-refusing resolution as every other worktree write.
+            if let Ok(Some(target)) = indexed_path(git_path).and_then(|p| find_protected(root, &p)) {
+                let _ = target.make_private();
+            }
+        }
+        return Ok(record);
     }
     let plaintext = session::request(root, &config, Operation::Decrypt, git_path, &input)?;
     if !umask_is_private() {

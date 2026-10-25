@@ -121,7 +121,10 @@ trusted state and is outside this POC.
   expects of filters: input that already opens as a record at this path under
   this config is returned unchanged (by determinism, exactly the record that
   sealing its plaintext gives); any other recognizable v3 record is refused
-  (no double encryption); everything else is sealed.
+  (no double encryption); everything else is sealed. When it seals
+  plaintext, clean also makes the worktree file at that path private
+  (best-effort `fchmod` of group and other bits through the
+  symlink-refusing resolution).
 - `smudge`: authenticate including the Git-provided `%f` path; reject all
   other bytes. Release the plaintext only if the umask inherited from Git
   (which Git applies when it creates the worktree file, `0666 & ~umask`) has

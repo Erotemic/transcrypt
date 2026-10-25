@@ -1270,3 +1270,17 @@ fn submodules_are_independent_v3_repositories() {
     run(&sub, bin(), &["lock"], None);
     assert!(fs::read(sub.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
 }
+
+/// A secret created under a permissive umask is made private as soon as Git
+/// stages it (the clean filter sees its plaintext).
+#[test]
+fn staging_a_new_secret_makes_it_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut scratch = Scratch::new("addprivate");
+    let repo = scratch.repo("repo");
+    fs::write(repo.join("new.secret"), b"fresh secret\n").unwrap();
+    fs::set_permissions(repo.join("new.secret"), fs::Permissions::from_mode(0o644)).unwrap();
+    run(&repo, "git", &["add", "new.secret"], None);
+    assert_eq!(fs::metadata(repo.join("new.secret")).unwrap().permissions().mode() & 0o777, 0o600);
+    run(&repo, "git", &["commit", "-qm", "new secret"], None);
+}
