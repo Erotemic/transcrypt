@@ -163,6 +163,19 @@ clean `git status` after hydrate).
 | H-32 | High (legacy) | Review **F-01**: the Bash v2 clean filter and pre-commit hook treated the `U2FsdGVk` prefix as proof of encryption. | Ciphertext is accepted only if it decrypts under the key and embeds the per-path salt (commit `c3c2bc8`; bats regressions). |
 | H-33 | Medium (selection) | A `.gitattributes` pattern such as `*` would select `.gitattributes` itself; Git would then read ciphertext as the policy. | `.transcrypt/`, every `.gitattributes` and `.gitmodules` are reserved in the verified path policy. Clean refuses them with an explanation, and `protect` reverts such a pattern. Test `protect_and_unprotect_change_the_policy_explicitly`. |
 
+A separate adversarial review of the new code (an independent agent that
+reproduced each finding with the compiled binary in disposable
+repositories) found:
+
+| ID | Severity | Finding | Fix and evidence |
+| --- | --- | --- | --- |
+| H-34 | High (plaintext committed) | `protect` wrote patterns that select nothing (`dir/`, `dir`, `./x`, `!x`, names with glob characters), while reporting that `git add` would encrypt matching files. | Such patterns are refused with the right form (`dir/**`, no `./`, no negation). A pattern naming an existing file must select it, or the edit is reverted. Test `protect_refuses_patterns_that_select_nothing`. |
+| H-35 | High (undecryptable commit) | `git mv x.env x.env.bak` committed a record at an unprotected name, where nothing ever decrypts it. | `check_index` refuses an unprotected staged change that is a record of this config. The keyless audit refuses a record moved to an unprotected name. Test `records_moved_to_unprotected_names_are_refused`. |
+| H-36 | Medium (half-applied) | `unprotect` staged `.gitattributes` before decrypting the records it releases. An error (a staged rename) left the policy changed and the next commit undecryptable. | Records are decrypted first (rename-aware: `open_staged`). The worktree changes before the index. `.gitattributes` and its index entry are restored on any error, in `protect` too. Test `unprotect_follows_renames_and_protect_finishes_manual_rules`. |
+| H-37 | High (plaintext after migration) | `migrate` skipped quoted v2 patterns and rules in `.git/info/attributes`. Once Bash was removed, those files were committed in plaintext. | Quoted patterns are parsed. v2 rules in local attribute files are refused with instructions. After conversion, every v2-protected file must be v3-protected, or everything rolls back. Test `migrate_converts_quoted_rules_and_refuses_local_ones`. |
+| H-38 | Medium (usability) | Renames were refused during any merge or rebase stop, and when a new file replaced the moved one (secret rotation). | An entry is local unless it equals a file of an incoming commit (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`). Rename sources include `HEAD` paths whose index entry was replaced. Test `renames_during_rotation_and_rebase_stops_work`. |
+| H-39 | Low (usability) | A rule added by hand for a file tracked in plaintext left the user stuck: the commit failed and `protect` did nothing. | The hook's error suggests `transcrypt-v3 protect` or `git add --renormalize`, and `protect` seals every selected plaintext entry (never re-encrypting a record). |
+
 Attack review of the new surface:
 - **Selection.** v3 never matches patterns. Git's answers are parsed by
   `parse_attr_record`, which is proved to accept exactly the requested

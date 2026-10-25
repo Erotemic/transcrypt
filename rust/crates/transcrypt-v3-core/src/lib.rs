@@ -535,6 +535,39 @@ pub fn parse_attr_record(response: &[u8], start: usize, path: &[u8]) -> Result<A
     Ok(AttrRecord { protected: bytes_eq(&response[value..end], &FILTER_DRIVER), next: end + 1 })
 }
 
+/// Parse Git's complete answer to a `check-attr -z --stdin filter` request:
+/// `request` is the exact stdin sent (each path followed by one NUL) and
+/// `flags` has one slot per requested path. Succeeds only if `response` is
+/// one record per requested path, in order (`parse_attr_record`), and
+/// nothing else; then `flags[i]` says whether path `i` is protected. On
+/// failure the flags must not be used.
+pub fn parse_attr_response(request: &[u8], response: &[u8], flags: &mut [bool]) -> bool {
+    let mut ok = true;
+    let mut start = 0;
+    let mut at = 0;
+    let mut i = 0;
+    let mut k = 0;
+    while ok && k < request.len() {
+        if request[k] == 0 {
+            if i < flags.len() {
+                match parse_attr_record(response, at, &request[start..k]) {
+                    Ok(record) => {
+                        flags[i] = record.protected;
+                        at = record.next;
+                        i += 1;
+                        start = k + 1;
+                    }
+                    Err(_) => ok = false,
+                }
+            } else {
+                ok = false;
+            }
+        }
+        k += 1;
+    }
+    ok && start == request.len() && i == flags.len() && at == response.len()
+}
+
 /// Whether `bytes[at..]` starts with `expected`.
 fn matches_at(bytes: &[u8], at: usize, expected: &[u8]) -> bool {
     if at > bytes.len() || bytes.len() - at < expected.len() {
@@ -1034,6 +1067,24 @@ mod tests {
         let tricky = b"x\0filter\0transcrypt-v3\0";
         assert!(parse_attr_record(tricky, 0, b"x").unwrap().protected);
         assert_eq!(parse_attr_record(tricky, 0, b"x\0filter"), Err(Refusal::Attribute));
+    }
+
+    #[test]
+    fn attr_responses_must_answer_every_path_in_order() {
+        let request = b"a.secret\0d/b c\0e\0";
+        let response = b"a.secret\0filter\0transcrypt-v3\0d/b c\0filter\0unspecified\0e\0filter\0transcrypt-v3\0";
+        let mut flags = [false; 3];
+        assert!(parse_attr_response(request, response, &mut flags));
+        assert_eq!(flags, [true, false, true]);
+        assert!(parse_attr_response(b"", b"", &mut []));
+        assert!(!parse_attr_response(b"", b"x", &mut []));
+        // Truncated, extended, reordered, too few or too many slots, unterminated request.
+        assert!(!parse_attr_response(request, &response[..response.len() - 1], &mut flags));
+        assert!(!parse_attr_response(request, &[&response[..], b"x"].concat(), &mut flags));
+        assert!(!parse_attr_response(b"e\0a.secret\0d/b c\0", response, &mut flags));
+        assert!(!parse_attr_response(request, response, &mut [false; 2]));
+        assert!(!parse_attr_response(request, response, &mut [false; 4]));
+        assert!(!parse_attr_response(b"a.secret\0d/b c\0e", response, &mut flags));
     }
 
     #[test]

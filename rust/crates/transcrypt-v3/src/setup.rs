@@ -310,6 +310,71 @@ pub(crate) fn unlock(root: &Path, options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// The top-level `.gitattributes` as it was, in the worktree and the index,
+/// so that a command that fails after editing it can put both back.
+struct AttributesUndo {
+    worktree: Option<Vec<u8>>,
+    staged: Option<(String, String)>,
+}
+
+impl AttributesUndo {
+    fn capture(root: &Path) -> Result<AttributesUndo, String> {
+        Ok(AttributesUndo {
+            worktree: find_protected(root, Path::new(".gitattributes"))?
+                .map(|f| f.read().map(|(bytes, _)| bytes.to_vec())).transpose()?,
+            staged: indexed_files(root)?.into_iter().find(|e| e.path == b".gitattributes").map(|e| (e.mode, e.oid)),
+        })
+    }
+
+    fn restore(&self, root: &Path) {
+        match (&self.worktree, staging_dir(root)) {
+            (Some(bytes), Ok(staging)) => { let _ = write_repository_file(root, &staging, Path::new(".gitattributes"), bytes); },
+            (None, _) => { let _ = fs::remove_file(root.join(".gitattributes")); },
+            _ => {},
+        }
+        let _ = match &self.staged {
+            Some((mode, oid)) => git_with_input(root, &["update-index", "-z", "--index-info"],
+                format!("{mode} {oid}\t.gitattributes\0").as_bytes()),
+            None => git(root, &["update-index", "--force-remove", "--", ".gitattributes"]),
+        };
+    }
+}
+
+/// Patterns as the user wrote them must select what they name. Git applies
+/// `.gitattributes` patterns to files only, relative to the top-level
+/// directory, without `./`, and has no negation: refuse what would silently
+/// select nothing.
+fn check_pattern(root: &Path, pattern: &[u8]) -> Result<Vec<u8>, String> {
+    let shown = String::from_utf8_lossy(pattern).into_owned();
+    let mut pattern = pattern;
+    while let Some(rest) = pattern.strip_prefix(b"./") { pattern = rest; }
+    if pattern.starts_with(b"!") {
+        return Err(format!("{shown}: .gitattributes has no negative patterns; to exclude a file from a \
+            protected pattern, add `PATH -filter -diff -merge` to .gitattributes"));
+    }
+    if pattern.ends_with(b"/") || root.join(std::ffi::OsStr::from_bytes(pattern)).is_dir() {
+        let dir = String::from_utf8_lossy(pattern.strip_suffix(b"/").unwrap_or(pattern)).into_owned();
+        return Err(format!("{shown}: attribute patterns select files, not directories; use '{dir}/**' \
+            for everything below it"));
+    }
+    Ok(pattern.to_vec())
+}
+
+/// After `.gitattributes` was edited: a pattern that names an existing file
+/// must select it (a backslash or bracket in a name is a glob character).
+fn check_selects(root: &Path, patterns: &[Vec<u8>]) -> Result<(), String> {
+    let files: Vec<&[u8]> = patterns.iter().map(Vec::as_slice)
+        .filter(|p| root.join(std::ffi::OsStr::from_bytes(p)).is_file()).collect();
+    for (path, protected) in files.iter().zip(protected_flags(root, &files, Attributes::Worktree)?) {
+        if !protected {
+            return Err(format!("the pattern {} does not select the file of that name (Git reads `\\`, `*`, \
+                `?` and `[` in patterns as glob characters); escape them, e.g. `[[]` for `[`",
+                String::from_utf8_lossy(path)));
+        }
+    }
+    Ok(())
+}
+
 /// One `.gitattributes` line, as bytes, without its newline.
 type Line = Vec<u8>;
 
@@ -385,73 +450,96 @@ fn protect_line(pattern: &[u8]) -> Result<Line, String> {
 pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
     let config = load_config(root)?;
     let key = Key::require(root, &config)?;
-    let lines = patterns.iter().map(|p| protect_line(p.as_bytes())).collect::<Result<Vec<_>, _>>()?;
-    let before: Vec<Vec<u8>> = staged_protected(root, indexed_files(root)?)?.into_iter().map(|e| e.path).collect();
-    let staging = staging_dir(root)?;
-    edit_attributes(root, &staging, |existing| {
-        for line in lines {
-            if !existing.contains(&line) { existing.push(line); }
+    let patterns = patterns.iter().map(|p| check_pattern(root, p.as_bytes())).collect::<Result<Vec<_>, _>>()?;
+    let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<Vec<_>, _>>()?;
+    let undo = AttributesUndo::capture(root)?;
+    let result = (|| -> Result<(), String> {
+        let staging = staging_dir(root)?;
+        edit_attributes(root, &staging, |existing| {
+            for line in lines {
+                if !existing.contains(&line) { existing.push(line); }
+            }
+            Ok(())
+        })?;
+        drop(staging);
+        check_selects(root, &patterns)?;
+        // Seal every selected file still staged in plaintext: newly selected
+        // ones, and ones a hand-edited `.gitattributes` selected earlier.
+        let protected = staged_protected(root, indexed_files(root)?)?;
+        let selected: Vec<Vec<u8>> = protected.iter().map(|e| e.path.clone()).collect();
+        let sealed = seal_staged(root, &key, &selected)?;
+        match protected.len() {
+            0 => eprintln!("Protected patterns added; no tracked file matches yet. `git add` encrypts matching files."),
+            n => eprintln!("{n} tracked file(s) protected{}.",
+                if sealed > 0 { format!("; {sealed} of them encrypted in the index just now") } else { String::new() }),
+        }
+        if sealed > 0 && git(root, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]).is_ok() {
+            eprintln!("Files that were committed before they were protected stay readable in earlier commits: \
+                if the history is public, change those secrets.");
         }
         Ok(())
-    })?;
-    drop(staging);
-    let protected = staged_protected(root, indexed_files(root)?)?;
-    let selected: Vec<Vec<u8>> = protected.iter().map(|e| e.path.clone()).filter(|p| !before.contains(p)).collect();
-    let sealed = seal_staged(root, &key, &selected)?;
-    match protected.len() {
-        0 => eprintln!("Protected patterns added; no tracked file matches yet. `git add` encrypts matching files."),
-        n => eprintln!("{n} tracked file(s) protected{}.",
-            if sealed > 0 { format!("; {sealed} of them encrypted in the index just now") } else { String::new() }),
-    }
-    if sealed > 0 && git(root, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]).is_ok() {
-        eprintln!("Files that were committed before they were protected stay readable in earlier commits: \
-            if the history is public, change those secrets.");
-    }
-    Ok(())
+    })();
+    if result.is_err() { undo.restore(root); }
+    result
 }
 
 /// `unprotect PATTERN...`: remove the `PATTERN transcrypt` lines, and stage
 /// the plaintext of each tracked file that is no longer protected (its next
-/// commit publishes it unencrypted, which is the point).
+/// commit publishes it unencrypted, which is the point). Every record to be
+/// released is decrypted first; on any error `.gitattributes` and the index
+/// are restored.
 pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
     let config = load_config(root)?;
     let key = Key::require(root, &config)?;
-    let lines = patterns.iter().map(|p| protect_line(p.as_bytes())).collect::<Result<Vec<_>, _>>()?;
+    let patterns = patterns.iter().map(|p| check_pattern(root, p.as_bytes())).collect::<Result<Vec<_>, _>>()?;
+    let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<Vec<_>, _>>()?;
     let before = staged_protected(root, indexed_files(root)?)?;
-    let staging = staging_dir(root)?;
-    edit_attributes(root, &staging, |existing| {
-        for line in &lines {
-            let n = existing.len();
-            existing.retain(|l| l != line);
-            if existing.len() == n {
-                return Err(format!("no `{}` line in .gitattributes; edit it directly to change other rules",
-                    String::from_utf8_lossy(line)));
+    let undo = AttributesUndo::capture(root)?;
+    let result = (|| -> Result<Vec<Vec<u8>>, String> {
+        let staging = staging_dir(root)?;
+        edit_attributes(root, &staging, |existing| {
+            for line in &lines {
+                let n = existing.len();
+                existing.retain(|l| l != line);
+                if existing.len() == n {
+                    return Err(format!("no `{}` line in .gitattributes; edit it directly to change other rules",
+                        String::from_utf8_lossy(line)));
+                }
+            }
+            Ok(())
+        })?;
+        let still: Vec<Vec<u8>> = staged_protected(root, indexed_files(root)?)?.into_iter().map(|e| e.path).collect();
+        // Decrypt everything before changing any file or index entry.
+        let mut released = Vec::new();
+        for staged in before.into_iter().filter(|e| !still.contains(&e.path)) {
+            let plaintext = open_staged(root, &key, &staged)?;
+            released.push((staged, plaintext));
+        }
+        // A worktree file that still holds the record gets its plaintext
+        // (harmless if a later step fails); the index changes last.
+        for (staged, plaintext) in &released {
+            if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
+                let (worktree, stamp) = target.read()?;
+                if *worktree == git_blob(root, &staged.oid)? {
+                    target.replace(&staging, plaintext, &stamp, key.private())?;
+                }
             }
         }
-        Ok(())
-    })?;
-    let still: Vec<Vec<u8>> = staged_protected(root, indexed_files(root)?)?.into_iter().map(|e| e.path).collect();
-    let mut index_info = Vec::new();
-    let mut released = Vec::new();
-    for staged in before.into_iter().filter(|e| !still.contains(&e.path)) {
-        let record = git_blob(root, &staged.oid)?;
-        let plaintext = key.open(&staged.path, &record)
-            .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
-        index_info.extend_from_slice(format!("{} {}\t", staged.mode, hash_object(root, &plaintext)?).as_bytes());
-        index_info.extend_from_slice(&staged.path);
-        index_info.push(0);
-        // A worktree file that still holds the record gets its plaintext.
-        if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
-            let (worktree, stamp) = target.read()?;
-            if *worktree == record {
-                target.replace(&staging, &plaintext, &stamp, key.private())?;
-            }
+        let mut index_info = Vec::new();
+        for (staged, plaintext) in &released {
+            index_info.extend_from_slice(format!("{} {}\t", staged.mode, hash_object(root, plaintext)?).as_bytes());
+            index_info.extend_from_slice(&staged.path);
+            index_info.push(0);
         }
-        released.push(staged.path);
-    }
-    if !index_info.is_empty() {
-        git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
-    }
+        if !index_info.is_empty() {
+            git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
+        }
+        Ok(released.into_iter().map(|(staged, _)| staged.path).collect())
+    })();
+    let released = match result {
+        Ok(released) => released,
+        Err(e) => { undo.restore(root); return Err(e); },
+    };
     eprintln!("{} file(s) are no longer protected; their next commit stores them UNENCRYPTED:", released.len());
     for path in &released {
         eprintln!("  {}", String::from_utf8_lossy(path));

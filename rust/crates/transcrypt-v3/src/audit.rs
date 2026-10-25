@@ -198,7 +198,23 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     entries.retain(|e| !is_reserved_path(&e.path));
     let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
     let flags = state.policy.protected(root, &attributes, &paths)?;
-    let protected: Vec<&Staged> = entries.iter().zip(flags).filter(|(_, p)| *p).map(|(e, _)| e).collect();
+    let protected: Vec<&Staged> = entries.iter().zip(&flags).filter(|(_, p)| **p).map(|(e, _)| e).collect();
+    let unprotected = entries.iter().zip(&flags).filter(|(_, p)| !**p).map(|(e, _)| e);
+    // A record this commit moved from a deleted path to an unprotected one is
+    // never decrypted there (`git mv x.env x.bak`, committed by any route).
+    let moved_away: Vec<(&Staged, &[u8])> = unprotected
+        .filter_map(|e| deleted.iter().find(|(_, oid)| *oid == e.oid).map(|(p, _)| (e, p.as_slice())))
+        .collect();
+    if protected.is_empty() && moved_away.is_empty() { return Ok(()); }
+    if let (Some(config_oid), false) = (&config_oid, moved_away.is_empty()) {
+        let id = transcrypt_v3::config_id(&git_blob(root, config_oid)?);
+        for (entry, from) in moved_away {
+            if crate::git::git_blob_if_record_sized(root, &entry.oid)?.is_some_and(|b| record_envelope_ok(&b, &id)) {
+                return Err(format!("{}: the encrypted {} moved to this unprotected name without decryption; \
+                    nothing decrypts it here", at(&entry.path), String::from_utf8_lossy(from)));
+            }
+        }
+    }
     if protected.is_empty() { return Ok(()); }
     let Some(config_oid) = config_oid else {
         return Err(format!("{}: protected file in a commit without a v3 configuration (plaintext?)",

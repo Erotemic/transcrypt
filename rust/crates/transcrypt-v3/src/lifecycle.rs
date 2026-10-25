@@ -2,7 +2,7 @@
 //! hook, `hydrate`, and `lock` (`flush` per worktree). Every decision to
 //! publish, keep or replace bytes is made by the verified core.
 
-use std::{collections::HashMap, env, path::{Path, PathBuf}};
+use std::{collections::{HashMap, HashSet}, env, fs, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
     hydrate_action, is_reserved_path, lock_action, parse_file_header, record_envelope_ok, seal_action,
@@ -41,13 +41,16 @@ pub(crate) fn staged_protected(root: &Path, entries: Vec<Staged>) -> Result<Vec<
     Ok(protected)
 }
 
-/// Read one snapshot of the index and check it: the staged public config
-/// equals the worktree's, and every protected entry is a file whose blob
-/// opens at its own path under `key`. Without a key, each must at least have
-/// the envelope of this configuration and not be the blob of another path
-/// in the index or `HEAD`: a record moved or copied to another name
-/// (`git mv` while locked) would no longer open there, and only the key can
-/// re-encrypt it.
+/// Read one snapshot of the index and check it:
+/// - the staged public config equals the worktree's;
+/// - every protected entry is a file whose blob opens at its own path under
+///   `key`; without a key, it has the envelope of this configuration and is
+///   not the blob of another path in the index or `HEAD` (a record moved or
+///   copied to another name would no longer open there, and only the key
+///   can re-encrypt it);
+/// - no unprotected entry staged since `HEAD` is a record of this
+///   configuration: one moved to an unprotected name (`git mv x.env x.bak`)
+///   would be committed where nothing ever decrypts it.
 pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, String> {
     let config = load_config(root)?;
     let listing = git(root, &["ls-files", "--stage", "-z"])?;
@@ -56,20 +59,34 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
         Some(e) if e.regular && git_blob(root, &e.oid)? == config => {},
         _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree".into()),
     }
+    let head = head_files(root)?;
+    let head_oid: HashMap<&[u8], &str> = head.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
     let mut elsewhere: HashMap<String, Vec<u8>> = HashMap::new();
-    if key.is_none() {
-        for entry in head_files(root)?.into_iter().chain(entries.iter().map(|e| Staged {
-            regular: e.regular, mode: e.mode.clone(), oid: e.oid.clone(), path: e.path.clone() })) {
-            elsewhere.entry(entry.oid).or_insert(entry.path);
-        }
+    for entry in head.iter().chain(entries.iter()) {
+        elsewhere.entry(entry.oid.clone()).or_insert_with(|| entry.path.clone());
     }
+    let changed: Vec<(Vec<u8>, String)> = entries.iter()
+        .filter(|e| e.regular && head_oid.get(e.path.as_slice()) != Some(&e.oid.as_str()))
+        .map(|e| (e.path.clone(), e.oid.clone())).collect();
     let protected = staged_protected(root, entries)?;
     let id = transcrypt_v3::config_id(&config);
+    for (path, oid) in changed.iter().filter(|(p, _)| !protected.iter().any(|e| e.path == *p)) {
+        if git_blob_if_record_sized(root, oid)?.is_some_and(|blob| record_envelope_ok(&blob, &id)) {
+            return Err(format!("{} holds an encrypted record but is not protected (moved to an unprotected \
+                name?): nothing would ever decrypt it there. Protect that name, move the file back, or \
+                stage its plaintext", String::from_utf8_lossy(path)));
+        }
+    }
     for staged in &protected {
         let record = git_blob(root, &staged.oid)?;
         let name = String::from_utf8_lossy(&staged.path);
+        if parse_file_header(&record).is_err() {
+            return Err(format!("staged {name} is not encrypted (was it staged before it was protected?); \
+                run `transcrypt-v3 protect` or `git add --renormalize -- {name}`"));
+        }
         match key {
-            Some(key) => { key.open(&staged.path, &record).map_err(|e| format!("staged {name}: {e}"))?; },
+            Some(key) => { key.open(&staged.path, &record).map_err(|e| format!("staged {name}: {e}; if it \
+                was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
             None if !record_envelope_ok(&record, &id) =>
                 return Err(format!("staged {name} is not v3 ciphertext for this repository")),
             None => if let Some(other) = elsewhere.get(&staged.oid).filter(|p| **p != staged.path) {
@@ -90,12 +107,30 @@ fn head_files(root: &Path) -> Result<Vec<Staged>, String> {
     tree_files(root, "HEAD")
 }
 
-/// Whether a merge, cherry-pick, revert or rebase is in progress: the index
-/// then holds content of other commits, which is checked, never repaired.
-fn sequencing(root: &Path) -> bool {
-    ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"].iter()
-        .any(|name| git(root, &["rev-parse", "-q", "--verify", name]).is_ok())
-        || ["rebase-merge", "rebase-apply"].iter().any(|dir| git_dir(root).join(dir).exists())
+/// Files as (path, object id) pairs.
+type Files = HashSet<(Vec<u8>, String)>;
+
+/// Every (path, blob) of the commits a merge, cherry-pick, revert or rebase
+/// is bringing in: index content equal to one of them came from a commit and
+/// is checked, never repaired. `None` when a rebase or `git am` is in
+/// progress without a known commit: then nothing is repaired.
+fn incoming(root: &Path) -> Result<Option<Files>, String> {
+    let mut commits: Vec<String> = fs::read_to_string(git_dir(root).join("MERGE_HEAD")).unwrap_or_default()
+        .lines().map(str::to_owned).collect();
+    for name in ["CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD"] {
+        if let Ok(id) = git(root, &["rev-parse", "-q", "--verify", &format!("{name}^{{commit}}")]) {
+            commits.push(String::from_utf8_lossy(&id).trim().to_owned());
+        }
+    }
+    commits.retain(|c| transcrypt_v3_core::is_object_id(c.as_bytes()));
+    if commits.is_empty() && ["rebase-merge", "rebase-apply"].iter().any(|dir| git_dir(root).join(dir).exists()) {
+        return Ok(None);
+    }
+    let mut files = HashSet::new();
+    for commit in commits {
+        files.extend(tree_files(root, &commit)?.into_iter().map(|e| (e.path, e.oid)));
+    }
+    Ok(Some(files))
 }
 
 /// `verify-index`: the read-only check. Locked, it checks the keyless
@@ -137,27 +172,28 @@ pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
 ///   selected it, or `git mv` from an unprotected name. It is sealed at its
 ///   path; its earlier commits stay plaintext in history.
 /// - **A renamed record**: `git mv` keeps the blob, which is bound to the
-///   old path. If the same blob is in `HEAD` at a path that is no longer in
-///   the index and opens there, its plaintext is sealed for the new path.
+///   old path. If the same blob is in `HEAD` at a path whose index entry is
+///   gone or replaced (a move, or a move and a new file in its place) and
+///   opens there, its plaintext is sealed for the new path.
 ///
-/// Only local changes are repaired: an entry equal to `HEAD`'s, or any entry
-/// while a merge, cherry-pick, revert or rebase is in progress, came from a
-/// commit, and re-encrypting it would turn a hostile commit's moved or
-/// plaintext content into genuine records; `check_index` refuses those
-/// instead. `force` lists paths to seal even when unchanged from `HEAD`
-/// (`protect` selecting files committed in plaintext). Returns how many
-/// entries were sealed.
+/// Only local changes are repaired (the verified `seal_action` decides): an
+/// entry equal to `HEAD`'s, or equal to a file of a commit being merged,
+/// picked, reverted or rebased, came from a commit, and re-encrypting it
+/// would turn a hostile commit's moved or plaintext content into genuine
+/// records; `check_index` refuses those instead. `force` lists paths whose
+/// plaintext is sealed even when unchanged from `HEAD` (`protect` selecting
+/// files committed before they were protected). Returns how many entries
+/// were sealed.
 pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<usize, String> {
-    let sequencing = sequencing(root);
-    if sequencing && force.is_empty() { return Ok(0); }
+    let incoming = incoming(root)?;
     let listing = git(root, &["ls-files", "--stage", "-z"])?;
     let entries = parse_listing(&listing)?;
-    let indexed: std::collections::HashSet<Vec<u8>> = entries.iter().map(|e| e.path.clone()).collect();
+    let indexed: HashMap<Vec<u8>, String> = entries.iter().map(|e| (e.path.clone(), e.oid.clone())).collect();
     let protected = staged_protected(root, entries)?;
     let mut head_oid: HashMap<Vec<u8>, String> = HashMap::new();
     let mut moved_from: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
     for entry in head_files(root)? {
-        if !indexed.contains(&entry.path) {
+        if indexed.get(&entry.path) != Some(&entry.oid) {
             moved_from.entry(entry.oid.clone()).or_default().push(entry.path.clone());
         }
         head_oid.insert(entry.path, entry.oid);
@@ -165,16 +201,20 @@ pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<u
     let mut index_info = Vec::new();
     let mut count = 0;
     for staged in &protected {
-        let local = force.contains(&staged.path)
-            || (!sequencing && head_oid.get(&staged.path) != Some(&staged.oid));
+        let changed = head_oid.get(&staged.path) != Some(&staged.oid);
+        let committed = incoming.as_ref().is_none_or(|files| files.contains(&(staged.path.clone(), staged.oid.clone())));
+        let forced = force.contains(&staged.path);
         // `seal_action` never repairs a non-local entry; skip decrypting it
         // here (`check_index` verifies it right after).
-        if !local { continue; }
+        if !(changed && !committed) && !forced { continue; }
         let record = git_blob(root, &staged.oid)?;
         let opens = key.open(&staged.path, &record).is_ok();
         let envelope = parse_file_header(&record).is_ok();
+        // `protect` may force sealing plaintext, never re-encrypting a record.
+        let local = (changed && !committed) || (forced && !envelope);
         let moved = if opens || !envelope { None } else {
             moved_from.get(&staged.oid).map(Vec::as_slice).unwrap_or_default().iter()
+                .filter(|p| **p != staged.path)
                 .find_map(|p| key.open(p, &record).ok().map(|pt| (p, pt)))
         };
         let name = String::from_utf8_lossy(&staged.path).into_owned();
@@ -203,6 +243,24 @@ pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<u
         git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
     }
     Ok(count)
+}
+
+/// The plaintext of a staged protected record: opened at its own path, or,
+/// for a record moved there by a local `git mv`, at the `HEAD` path it came
+/// from (whose index entry is gone or replaced).
+pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zeroizing<Vec<u8>>, String> {
+    let record = git_blob(root, &staged.oid)?;
+    let error = match key.open(&staged.path, &record) {
+        Ok(plaintext) => return Ok(plaintext),
+        Err(e) => e,
+    };
+    let indexed: HashMap<Vec<u8>, String> = indexed_files(root)?.into_iter().map(|e| (e.path, e.oid)).collect();
+    for entry in head_files(root)? {
+        if entry.oid == staged.oid && entry.path != staged.path && indexed.get(&entry.path) != Some(&entry.oid) {
+            if let Ok(plaintext) = key.open(&entry.path, &record) { return Ok(plaintext); }
+        }
+    }
+    Err(format!("{}: {error}", String::from_utf8_lossy(&staged.path)))
 }
 
 /// Write `bytes` as a Git blob, unfiltered; its verified object id.
