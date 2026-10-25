@@ -104,9 +104,10 @@ verified" or "cryptographic security has been proved from first principles."
 2. **R-01 — external review** of the construction, `aes-siv`, the
    locked-filter envelope pass-through (A14) and the adapter, using the
    [review package](V3-SECURITY-REVIEW.md#review-package). Release blocker.
-3. **A4 — adapter remainder.** Batch object reads through
-   `git cat-file --batch` with a proved header parser; keep the call-site
-   table current.
+3. **A4 — adapter remainder.** Object reads are batched
+   (`cat-file --batch`, exact header check); move that check into the proved
+   core, adopt Git's long-running filter protocol (one filter process per
+   Git command instead of one per file), keep the call-site table current.
 4. **A7 — Git versions.** CI covers Git 2.34, 2.43 and Apple Git; extend if
    users report others.
 5. **A8/A6 — same-UID** races and agent access are accepted; an optional

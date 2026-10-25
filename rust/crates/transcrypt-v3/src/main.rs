@@ -571,27 +571,89 @@ fn filter(root: &Path, clean: bool, git_path: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// The content of one Git object, named by an id the verified core accepted
+/// The content of one Git blob, named by an id the verified core accepted
 /// (never revision syntax such as `:path`, which reads `:0:x.secret` as stage
-/// 0 of `x.secret`). Reading stops at the v3 size bound, so a hostile
-/// oversized blob is refused without being loaded.
+/// 0 of `x.secret`). Reads stop at the v3 size bound, so a hostile oversized
+/// blob is refused without being loaded. All reads of one process share a
+/// single `git cat-file --batch`.
 fn git_blob(root: &Path, oid: &str) -> Result<Vec<u8>, String> {
     if !is_object_id(oid.as_bytes()) {
         return Err("invalid Git object id".into());
     }
-    let mut child = git_command(Some(root))
-        .args(["cat-file", "blob", oid])
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-        .spawn().map_err(|e| format!("cannot run git cat-file: {e}"))?;
-    let stdout = child.stdout.take().ok_or("git cat-file output pipe missing")?;
-    let data = read_limited(stdout, MAX_RECORD);
-    if data.is_err() { let _ = child.kill(); }
-    let status = child.wait().map_err(|_| "cannot wait for git cat-file")?;
-    let data = data?;
-    if !status.success() {
-        return Err(format!("cannot read Git blob {oid}"));
+    OBJECTS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(Objects::open(root)?);
+        }
+        let objects = slot.as_mut().ok_or("Git object reader unavailable")?;
+        let result = objects.blob(oid);
+        if result.is_err() {
+            // The stream may be out of step; never reuse it.
+            *slot = None;
+        }
+        result
+    })
+}
+
+thread_local! {
+    static OBJECTS: std::cell::RefCell<Option<Objects>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One `git cat-file --batch` process. Each reply must be exactly
+/// `<oid> blob <size> LF`, with `<size>` in canonical decimal, followed by
+/// `<size>` bytes and LF; anything else (a missing object, another type, a
+/// different id, a malformed or oversized header) is an error, so bytes can
+/// never be attributed to the wrong object.
+struct Objects {
+    child: std::process::Child,
+    input: Option<std::process::ChildStdin>,
+    output: io::BufReader<std::process::ChildStdout>,
+}
+
+impl Objects {
+    fn open(root: &Path) -> Result<Objects, String> {
+        let mut child = git_command(Some(root))
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().map_err(|e| format!("cannot run git cat-file: {e}"))?;
+        let input = child.stdin.take().ok_or("git cat-file input pipe missing")?;
+        let output = child.stdout.take().ok_or("git cat-file output pipe missing")?;
+        Ok(Objects { child, input: Some(input), output: io::BufReader::new(output) })
     }
-    Ok(data)
+
+    fn blob(&mut self, oid: &str) -> Result<Vec<u8>, String> {
+        use io::BufRead;
+        let input = self.input.as_mut().ok_or("Git object reader closed")?;
+        input.write_all(format!("{oid}\n").as_bytes())
+            .and_then(|_| input.flush()).map_err(|_| "cannot query git cat-file")?;
+        let mut header = Vec::new();
+        (&mut self.output).take(160).read_until(b'\n', &mut header)
+            .map_err(|_| "cannot read git cat-file reply")?;
+        let size = header.strip_prefix(oid.as_bytes())
+            .and_then(|rest| rest.strip_prefix(b" blob "))
+            .and_then(|rest| rest.strip_suffix(b"\n"))
+            .and_then(|digits| std::str::from_utf8(digits).ok())
+            .and_then(|digits| digits.parse::<usize>().ok())
+            .filter(|size| header == format!("{oid} blob {size}\n").as_bytes())
+            .ok_or_else(|| format!("Git object {oid} is missing or not a blob"))?;
+        if size > MAX_RECORD {
+            return Err("input exceeds the 16 MiB v3 size limit".into());
+        }
+        let mut data = vec![0u8; size + 1];
+        self.output.read_exact(&mut data).map_err(|_| "truncated git cat-file reply")?;
+        if data.pop() != Some(b'\n') {
+            return Err("malformed git cat-file reply".into());
+        }
+        Ok(data)
+    }
+}
+
+impl Drop for Objects {
+    fn drop(&mut self) {
+        drop(self.input.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 fn indexed_path(path: &[u8]) -> Result<PathBuf, String> {

@@ -86,8 +86,8 @@ These came out of the hardening campaign (`V3-SECURITY-REVIEW.md` §5); each
 has a regression test in `tests/adversarial.rs`.
 
 - Read Git objects only by object id, from one parsed snapshot, through
-  `git_blob` (`cat-file blob`, bounded). Never use `:<path>` revision
-  syntax.
+  `git_blob` (one shared `cat-file --batch` with exact reply framing,
+  bounded). Never use `:<path>` revision syntax.
 - Create Git subprocesses only with `git_command` (literal pathspecs, no
   replace refs). Never `git add -- <path>` with repository-derived paths;
   re-index with `update-index -z --stdin`.
@@ -101,7 +101,8 @@ has a regression test in `tests/adversarial.rs`.
 
 See the ranked list in `V3-ROADMAP.md` ("Remaining"). In short:
 server-side `audit` deployment (A13), external review R-01, then the A4
-remainder (batched object reads through a proved `cat-file --batch` parser).
+remainder (prove the `cat-file --batch` header check; long-running filter
+protocol for speed).
 
 **Decision rule:** spend effort on proofs connected to shipped Rust or on
 exploitable lifecycle failures, not on theorem counts.

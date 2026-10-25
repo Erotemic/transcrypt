@@ -622,3 +622,25 @@ fn init_refuses_secrets_already_tracked_in_plaintext() {
     assert!(err.contains("old.secret"), "{err}");
     assert!(!repo.join(".transcrypt").exists());
 }
+
+/// A hostile staged or committed blob above the 16 MiB bound is refused
+/// without being loaded, by `verify-index` and by `audit`, and refusing it
+/// does not disturb later object reads.
+#[test]
+fn oversized_hostile_blobs_are_refused() {
+    let mut scratch = Scratch::new("oversized");
+    let repo = scratch.repo("repo");
+    let big = vec![b'A'; 16 * 1024 * 1024 + 39];
+    let path = scratch.root.join("big");
+    fs::write(&path, &big).unwrap();
+    let oid = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--no-filters", path.to_str().unwrap()], None)).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", oid.trim(), "big.secret"], None);
+    let err = run_fails(&repo, bin(), &["verify-index"], None);
+    assert!(err.contains("16 MiB"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "oversized"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD"], None);
+    assert!(err.contains("16 MiB") && err.contains("big.secret"), "{err}");
+    run(&repo, bin(), &["audit", "HEAD~1"], None);
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    run(&repo, bin(), &["verify-index"], None);
+}

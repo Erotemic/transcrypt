@@ -106,8 +106,9 @@ one.
   `entry[7..path_start-3]` is proved to extract the object id of every
   accepted record (`indexRecord_oid`), but the Rust slice expression itself
   is reviewed, not extracted.
-- **Next reduction:** batch object reads through one `git cat-file --batch`
-  with a proved header parser (also a performance gain for `audit`).
+- **Next reduction:** object reads now go through one `git cat-file --batch`
+  per process with an exact, re-serialized header check; moving that check
+  into the proved core is the remaining step.
 - **Status:** narrowed; PROVED (model) + REVIEWED + TESTED.
 
 ### A5 — `Keyed` realizes the primitive contract
@@ -323,8 +324,10 @@ by cost.
 4. **Plaintext permissions from Git checkout (A8).** Smudge output follows
    the umask. *Action:* hydrate could tighten kept plaintext files; the
    guide requires `umask 077`.
-5. **Unverified adapter remainder (A4).** *Action:* batch object reads
-   through a proved `cat-file --batch` header parser.
+5. **Unverified adapter remainder (A4).** *Action:* move the `cat-file
+   --batch` header check into the proved core; replace per-file filter
+   spawns with Git's long-running filter protocol (performance, so that
+   hooks stay fast enough to keep enabled).
 6. **Git-version drift (A7).** *Action:* CI matrix over Git versions.
 7. **Rollback and equality leakage (A10).** Protocol limits, accepted.
 
@@ -364,7 +367,7 @@ verified decision that gates it:
 | Agent startup | `authenticate_config` | config bytes, piped key | `Ok` |
 | `unlock` / `init` | `authenticate_config` / `initialize_config` | config bytes / fresh salt | `Ok`, before any persistent effect |
 | Index and tree listings | `parse_index_entry`, then `is_object_id` on `entry[7..path_start-3]` | each NUL-delimited `ls-files --stage -z` record, or `ls-tree -r -z` record rewritten to that shape (path copied verbatim) | `Ok` and `true` (else refuse) |
-| Object reads | `is_object_id` | oid from the parsed snapshot | `true`; read ≤ 16 MiB via `cat-file blob` |
+| Object reads | `is_object_id` | oid from the parsed snapshot | `true`; one `cat-file --batch` per process; reply header must re-serialize exactly as `<oid> blob <size>`, size ≤ 16 MiB, trailing LF checked |
 | `verify-index` | `check_attr_response_ok`, then agent `Decrypt` per entry (or `record_envelope_ok` while locked) | exact `check-attr` request; snapshot paths; blobs by oid | `true` / `Ok` for every entry |
 | `hydrate` publish | agent `Decrypt`, then `hydrate_action`, all entries before any write; stamp equality | blob by snapshot oid; worktree bytes and stamp via held dirfd | `Ok(Publish)` for all; `Keep` untouched |
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action`; stamp equality | worktree bytes and stamp, blob by oid, reseal output | `Ok(Flush)`; `Keep` untouched |

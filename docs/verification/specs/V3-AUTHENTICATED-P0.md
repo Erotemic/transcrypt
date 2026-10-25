@@ -133,7 +133,9 @@ trusted state and is outside this POC.
   when unlocked (`verify-index`, `hydrate`, `audit`).
 - **Git object access.** Every staged or committed object is read by the
   object id from one `ls-files --stage -z` (or `ls-tree`) snapshot, through
-  `git cat-file blob <oid>`, never by `:<path>` revision syntax (which reads
+  one `git cat-file --batch` per process whose every reply must be exactly
+  `<oid> blob <size>` LF, `<size>` bytes, LF (re-serialized and compared), never
+  by `:<path>` revision syntax (which reads
   `:0:x.secret` as stage 0 of `x.secret`). Object ids must be 40 or 64
   lowercase hex digits. Every Git subprocess runs with
   `GIT_LITERAL_PATHSPECS=1` and `GIT_NO_REPLACE_OBJECTS=1`. Blob reads stop
