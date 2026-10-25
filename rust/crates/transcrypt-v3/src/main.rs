@@ -286,10 +286,30 @@ impl<'a> Filters<'a> {
         let found = parse_file_header(&input).ok();
         if clean {
             // A record of another config (from before a rekey) cannot be
-            // re-encrypted here; it passes through unchanged so Git keeps
-            // working, and verification refuses to commit it.
-            if found.is_some_and(|found| found != id) { return Ok(input); }
+            // re-encrypted here. It passes through unchanged, so Git keeps
+            // working, only if Git already has exactly these bytes at this
+            // path (verification then refuses to commit it); anything else
+            // starting with such a header is refused.
+            if found.is_some_and(|found| found != id) {
+                if blobs_at(self.root, git_path)?.contains(&blob_id(self.root, &input)?) { return Ok(input); }
+                return Err(format!("{} starts like a record of another config but is not the one Git has \
+                    for it; refusing to store it", String::from_utf8_lossy(git_path)));
+            }
             let Some(key) = key else {
+                // A worktree on another config than the stored key's (a branch
+                // from before a rekey) shows files the stored key decrypted:
+                // the record Git has for the path, if it opens to exactly
+                // these bytes, is their clean form.
+                if self.stored.is_none() { self.stored = Some(Key::stored(self.root)?); }
+                if let Some(stored) = self.stored.as_ref().and_then(Option::as_ref) {
+                    for oid in blobs_at(self.root, git_path)? {
+                        let record = git_blob(self.root, &oid)?;
+                        if parse_file_header(&record).is_ok_and(|f| f == stored.config_id())
+                            && stored.open(git_path, &record).is_ok_and(|pt| *pt == *input) {
+                            return Ok(Zeroizing::new(record));
+                        }
+                    }
+                }
                 // Locked: without the key nothing can be encrypted, but Git
                 // re-cleans worktree files (a locked checkout holds
                 // ciphertext), so a record of this configuration passes
@@ -327,8 +347,8 @@ impl<'a> Filters<'a> {
         match smudge_action(&input, &decided, key.is_some()) {
             Ok(SmudgeAction::Keep) => {
                 if found.is_some_and(|found| found != id) && self.current.as_ref().is_some_and(|(_, k)| k.is_some()) {
-                    eprintln!("transcrypt-v3: {} is encrypted for another config (from before a rekey?) and \
-                        stays encrypted; if it belongs to the current version, run `transcrypt-v3 reencrypt`",
+                    eprintln!("transcrypt-v3: {} is encrypted under another config, without a key here; \
+                        it stays encrypted (`transcrypt-v3 status` tells whether it needs `reencrypt`)",
                         String::from_utf8_lossy(git_path));
                 }
                 Ok(input)
@@ -451,7 +471,7 @@ fn status(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

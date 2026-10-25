@@ -181,7 +181,10 @@ git commit --amend --no-edit
 
 Each such record is authenticated under the earlier config, at its own
 path, and re-encrypted under the current one; the pre-commit hook and the
-pre-push audit refuse to publish it until then.
+pre-push audit refuse to publish it until then. Only configs your branch
+had before its current one are accepted, so `reencrypt` never moves newer
+content back under a revoked passphrase. Do it only for your own work: the
+content becomes trusted under the current config.
 
 All worktrees of a clone share one stored key. Unlocking a worktree that
 is on a commit from before a rekey replaces it, and the other worktrees

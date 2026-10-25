@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use std::os::unix::ffi::OsStrExt;
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
     is_object_id, parse_attr_response, parse_index_entry, MAX_RECORD,
@@ -368,6 +369,37 @@ pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
 
 pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
     parse_listing(&git(root, &["ls-files", "--stage", "-z"])?)
+}
+
+/// The blobs Git already has for exactly `path`: every index stage, and
+/// `HEAD`'s. Used to let a filter pass bytes through unchanged only when
+/// they are one of these, never because of a header alone.
+pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> {
+    let name = std::ffi::OsStr::from_bytes(path).to_str().map(str::to_owned);
+    let mut oids = Vec::new();
+    let mut parse = |listing: &[u8], tree: bool| {
+        for entry in listing.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+            let Some(tab) = entry.iter().position(|b| *b == b'\t') else { continue };
+            if &entry[tab + 1..] != path { continue; }
+            let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
+            let oid = if tree { fields.get(2) } else { fields.get(1) };
+            if let Some(oid) = oid.filter(|o| is_object_id(o)) {
+                oids.push(String::from_utf8_lossy(oid).into_owned());
+            }
+        }
+    };
+    let Some(name) = name else { return Ok(oids) };
+    parse(&git(root, &["ls-files", "--stage", "-z", "--", &name])?, false);
+    if let Ok(listing) = git(root, &["ls-tree", "-z", "HEAD", "--", &name]) { parse(&listing, true); }
+    Ok(oids)
+}
+
+/// The object id Git gives `bytes` (nothing is written).
+pub(crate) fn blob_id(root: &Path, bytes: &[u8]) -> Result<String, String> {
+    let oid = git_with_input(root, &["hash-object", "--no-filters", "--stdin"], bytes)?;
+    let oid = String::from_utf8_lossy(&oid).trim().to_owned();
+    if !is_object_id(oid.as_bytes()) { return Err("malformed git hash-object output".into()); }
+    Ok(oid)
 }
 
 /// Which attribute files Git consults to decide what is protected.

@@ -152,6 +152,9 @@ pub(crate) fn verify_index_command(root: &Path) -> Result<(), String> {
 /// The pre-commit hook. First encrypt what ordinary Git commands stage
 /// without the filter (`seal_staged`), then check the whole index.
 pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
+    if let Some(problem) = crate::setup::macro_disabled(root)? {
+        return Err(format!("files marked `transcrypt` would not be encrypted: {problem}; remove that definition"));
+    }
     let config = load_config(root)?;
     let key = Key::load(root, &config)?;
     if let Some(key) = &key {

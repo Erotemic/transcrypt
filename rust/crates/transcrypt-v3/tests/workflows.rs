@@ -755,7 +755,7 @@ fn work_across_a_rekey_is_kept_and_reencrypted() {
     assert_eq!(fs::read(repo.join("z.key")).unwrap(), b"zed\n");
     // Cherry-pick across the rekey: Git keeps working, v3 explains.
     let err = String::from_utf8_lossy(&exec(&repo, "git", &["cherry-pick", "feature"], None).stderr).into_owned();
-    assert!(err.contains("b.env is encrypted for another config"), "{err}");
+    assert!(err.contains("b.env is encrypted under another config"), "{err}");
     assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("other config (reencrypt)"), "{status}");
@@ -848,4 +848,91 @@ fn private_sessions_expire_when_idle() {
     std::thread::sleep(std::time::Duration::from_millis(4500));
     assert!(status().contains("key:        locked"), "{}", status());
     assert!(!repo.join(".git/transcrypt-v3/session.sock").exists());
+}
+
+/// Third review F1: clean lets another config's record through only when
+/// Git already has exactly those bytes for the path; plaintext appended
+/// after such a header, or a record from elsewhere, is refused.
+#[test]
+fn foreign_records_pass_clean_only_as_gits_own_blobs() {
+    let mut scratch = Scratch::new("foreignclean");
+    let other = scratch.git_repo("other");
+    run(&other, bin(), &["init", "--password-stdin", "*.env"], Some(NEW));
+    let foreign = run(&other, bin(), &["clean", "a.env"], Some(b"other repository\n"));
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    for bytes in [foreign.clone(), [foreign.as_slice(), b"TOPSECRET=leaked\n"].concat()] {
+        fs::write(repo.join("a.env"), &bytes).unwrap();
+        let err = run_fails(&repo, "git", &["add", "a.env"], None);
+        assert!(err.contains("not the one Git has for it"), "{err}");
+    }
+}
+
+/// Third review F2/F3: a linked worktree on a branch from before a rekey
+/// that cherry-picks newer work keeps a working `git status`; `reencrypt`
+/// refuses to move content under a config the branch never had before.
+#[test]
+fn old_branches_stay_usable_and_reencrypt_only_goes_forward() {
+    let mut scratch = Scratch::new("oldbranch");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"a\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    run(&repo, "git", &["branch", "old"], None);
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    fs::write(repo.join("b.env"), b"created after the rekey\n").unwrap();
+    run(&repo, "git", &["add", "b.env"], None);
+    run(&repo, "git", &["commit", "-qm", "addb"], None);
+    let linked = scratch.root.join("linked");
+    run(&repo, "git", &["worktree", "add", "-q", linked.to_str().unwrap(), "old"], None);
+    scratch.repos.push(linked.clone());
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    run(&linked, "git", &["cherry-pick", main.trim()], None);
+    assert_eq!(fs::read(linked.join("b.env")).unwrap(), b"created after the rekey\n");
+    assert!(run(&linked, "git", &["status", "--porcelain"], None).is_empty());
+    // Unlocking with the old passphrase, then trying to pull the newer
+    // record back under the old config, is refused.
+    run(&linked, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    let err = run_fails(&linked, bin(), &["reencrypt", "--password-stdin"], Some(NEW));
+    assert!(err.contains("never had before"), "{err}");
+}
+
+/// Third review F4/F5/F6: a key file from an earlier version counts as
+/// locked (unlock replaces it); a quoted redefinition of the macro in a
+/// local attribute file stops the commit; a CRLF `.gitattributes` still
+/// works with `protect`.
+#[test]
+fn legacy_keys_macro_redefinitions_and_crlf() {
+    let mut scratch = Scratch::new("review3");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"S=1\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    fs::write(repo.join(".git/transcrypt-v3/key"), [7u8; 64]).unwrap();
+    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    assert!(status.contains("key:        locked"), "{status}");
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::metadata(repo.join(".git/transcrypt-v3/key")).unwrap().len(), 119);
+    // A quoted macro redefinition in .git/info/attributes.
+    fs::write(repo.join(".git/info/attributes"), b"\"[attr]transcrypt\" -diff\n").unwrap();
+    fs::write(repo.join("a.env"), b"S=3\n").unwrap();
+    let err = run_fails(&repo, "git", &["commit", "-qam", "x"], None);
+    assert!(err.contains("marked `transcrypt` would not be encrypted"), "{err}");
+    assert!(!run(&repo, "git", &["show", "HEAD:a.env"], None).starts_with(b"S=3"));
+    assert!(!exec(&repo, bin(), &["doctor"], None).status.success());
+    fs::remove_file(repo.join(".git/info/attributes")).unwrap();
+    run(&repo, "git", &["checkout", "--", "a.env"], None);
+    // CRLF line endings in .gitattributes.
+    let text = fs::read(repo.join(".gitattributes")).unwrap();
+    let crlf: Vec<u8> = text.split(|b| *b == b'\n').map(|l| l.to_vec()).collect::<Vec<_>>().join(&b"\r\n"[..]);
+    fs::write(repo.join(".gitattributes"), crlf).unwrap();
+    run(&repo, "git", &["commit", "-qam", "crlf"], None);
+    fs::write(repo.join("k.key"), b"K\n").unwrap();
+    run(&repo, bin(), &["protect", "*.key"], None);
+    run(&repo, "git", &["add", "k.key"], None);
+    run(&repo, "git", &["commit", "-qm", "key"], None);
+    assert!(is_record(&committed(&repo, "k.key")));
 }

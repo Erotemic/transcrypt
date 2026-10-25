@@ -135,6 +135,10 @@ fn read_stored(root: &Path) -> Result<Option<(Vec<u8>, SecretKey)>, String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("unsafe .git/transcrypt-v3/key: expected a regular file".into()),
     };
+    // A key stored by an earlier version (the key alone, without its
+    // config) is not used: the checkout counts as locked until `unlock`
+    // replaces it.
+    if file.metadata().is_ok_and(|m| m.len() == KEY_SIZE as u64) { return Ok(None); }
     let mut config = vec![0u8; CONFIG_LEN];
     let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
     let mut extra = [0u8; 1];

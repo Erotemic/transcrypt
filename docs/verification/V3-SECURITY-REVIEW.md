@@ -187,6 +187,24 @@ and the long-running filter, reproduced five more:
 | H-43 | Medium (plaintext committed after uninstall) | With a stale key in this worktree, `lock` and `uninstall` ignored plaintext in other worktrees. They then deleted the shared key or removed the filters. | Both check every other worktree (`check-encrypted`) first. `lock` also no longer fails on a worktree that holds only another config's ciphertext. Same test. |
 | H-44 | Low (truthfulness) | `rekey` with a deleted protected file completed, then reported failure. | A deleted file counts as an uncommitted change and is refused before anything changes. Same test. |
 
+A third round, on those fixes, reproduced seven more (none reached a
+remote: the pre-push audit still refused):
+
+| ID | Severity | Finding | Fix and evidence |
+| --- | --- | --- | --- |
+| H-45 | High, a regression from H-40 (plaintext staged) | Clean's pass-through for another config's record checked only the header, so plaintext appended after such a header was staged (and committed by `rebase --continue`, which skips pre-commit). | The bytes pass through only if they are exactly a blob Git already has for the path (index stages or `HEAD`); anything else is refused. Test `foreign_records_pass_clean_only_as_gits_own_blobs`. |
+| H-46 | Medium (usability) | On a branch from before a rekey, files the stored key decrypted could not be cleaned: `git status` failed. | Clean returns Git's record for the path when the stored key opens it to exactly the worktree bytes. Test `old_branches_stay_usable_and_reencrypt_only_goes_forward`. |
+| H-47 | Medium (revocation undone) | `reencrypt` accepted any config in any branch's history. A secret created after a rekey could be moved back under the revoked config. | Only configs this branch had **before** its current one are accepted. Each is shown with its id and introducing commit, with a warning that the content becomes trusted. Same test. |
+| H-48 | Medium (dead end) | A 64-byte key file from the earlier format made every command fail, `unlock` included. | It counts as locked, and `unlock` replaces it. Test `legacy_keys_macro_redefinitions_and_crlf`. |
+| H-49 | Medium (plaintext committed) | A quoted `"[attr]transcrypt"` redefinition, or one appended to `.gitattributes`, disabled the filter without the hook noticing. | When any staged file is marked `transcrypt`, the hook and `doctor` probe the macro as Git resolves it for the next commit: a temporary index with the staged `.gitattributes` and a probe directory marked `transcrypt`, with local attribute files applying. The probe must get `filter=transcrypt-v3`, or the commit is refused. Deliberate exclusions (`PATH -filter`) are unaffected. Same test. |
+| H-50 | Low | A CRLF `.gitattributes` made `protect` refuse our own macro line. | Lines are compared trimmed. Same test. |
+| H-51 | Low (UX) | Checking out a legitimate pre-rekey branch printed "run reencrypt". | The warning only says the file stays encrypted; `status` says whether it needs `reencrypt`. |
+
+Design note from that round (out of the charter's scope: a malicious
+committer): `reencrypt` makes records that only an earlier passphrase can
+produce genuine under the current config. It is now limited to the branch's
+own earlier configs and says so before asking for that passphrase.
+
 Attack review of the new surface:
 - **Selection.** v3 never matches patterns. Git's answers are parsed by
   `parse_attr_record`, which is proved to accept exactly the requested
