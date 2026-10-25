@@ -74,6 +74,10 @@ fn run() -> Result<(), String> {
             if args.len() != 1 { return Err("status takes no arguments".into()); }
             status(&root)
         },
+        "doctor" => {
+            if args.len() != 1 { return Err("doctor takes no arguments".into()); }
+            doctor(&root)
+        },
         "init" | "unlock" => {
             let mut stdin = false;
             let mut auto_hydrate = true;
@@ -110,7 +114,7 @@ fn run() -> Result<(), String> {
     }
 }
 
-const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|verify-index|audit|lock|help \
+const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|doctor|verify-index|audit|lock|help \
     (clean/smudge <git-path> and pre-push are invoked by Git)";
 
 const HELP: &str = "\
@@ -124,6 +128,8 @@ Typical workflow
   transcrypt-v3 hydrate     decrypt the staged *.secret files into the worktree
                             (only needed after `unlock --no-hydrate` or a refused hydration)
   transcrypt-v3 status      show lock state and each protected file's worktree state
+  transcrypt-v3 doctor      verify that filters, attributes, hooks and the staged index
+                            protect this checkout (non-zero exit if anything is missing)
   transcrypt-v3 verify-index
                             check every staged *.secret is ciphertext for its own path
                             (also run by the installed pre-commit hook; while locked it
@@ -342,16 +348,79 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-fn install_filters(root: &Path) -> Result<(), String> {
+/// The Git filter configuration this binary installs.
+fn expected_filters() -> Result<[(&'static str, String); 3], String> {
     let bin = env::current_exe().map_err(|_| "cannot resolve current executable")?;
     let path = bin.to_str().ok_or("executable path must be UTF-8")?;
     let program = shell_quote(path);
-    for (k, value) in [
+    Ok([
         ("filter.transcrypt-v3.clean", format!("{program} clean %f")),
         ("filter.transcrypt-v3.smudge", format!("{program} smudge %f")),
         ("filter.transcrypt-v3.required", "true".into()),
-    ] {
+    ])
+}
+
+fn install_filters(root: &Path) -> Result<(), String> {
+    for (k, value) in expected_filters()? {
         git(root, &["config", "--local", k, &value])?;
+    }
+    Ok(())
+}
+
+/// Check that every local protection is actually in place, and say what
+/// cannot be checked from here. Exits non-zero if a protection is missing.
+fn doctor(root: &Path) -> Result<(), String> {
+    let mut failures = 0;
+    let mut report = |ok: bool, what: &str| {
+        if !ok { failures += 1; }
+        println!("{} {what}", if ok { "ok  " } else { "FAIL" });
+    };
+    let config = load_config(root);
+    report(config.is_ok(), "committed .transcrypt/config is a valid v3 config");
+    let unlocked = config.as_ref().is_ok_and(|c| session::request(root, c, Operation::Ping, &[], &[]).is_ok());
+    // Filters, as Git will resolve them (any config scope).
+    let effective = |key: &str| git(root, &["config", "--get", key]).ok()
+        .map(|v| String::from_utf8_lossy(&v).trim_end().to_owned());
+    match expected_filters() {
+        Ok(filters) => for (key, value) in filters {
+            report(effective(key).as_deref() == Some(value.as_str()), &format!("{key} runs this transcrypt-v3"));
+        },
+        Err(e) => report(false, &e),
+    }
+    report(effective("filter.transcrypt-v3.process").is_none(),
+        "no filter.transcrypt-v3.process overrides the clean/smudge filters");
+    // Attributes a *new* file would get (the worktree .gitattributes).
+    for probe in ["transcrypt-v3-probe.secret", "a/b/transcrypt-v3-probe.secret"] {
+        let attr = git(root, &["check-attr", "filter", "--", probe]).unwrap_or_default();
+        report(attr.ends_with(b": filter: transcrypt-v3\n"), &format!("a new {probe} would be encrypted"));
+    }
+    if config.is_ok() {
+        let checked = check_index(root, unlocked);
+        report(checked.is_ok(), &match checked {
+            Ok(_) if unlocked => "every staged *.secret authenticates at its path".to_owned(),
+            Ok(_) => "every staged *.secret has the v3 envelope (unlock to authenticate)".to_owned(),
+            Err(e) => format!("staged index: {e}"),
+        });
+    }
+    for (name, command) in HOOKS {
+        let installed = fs::read_to_string(hook_path(root, name)).ok() == expected_hook(command).ok();
+        if hook_required(name) {
+            report(installed, &format!("{name} hook installed"));
+        } else if !installed {
+            println!("note {name} hook not installed: run `transcrypt-v3 hydrate` after Git rewrites *.secret files");
+        }
+    }
+    report(!hooks_bypassed(root), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
+    println!("note session {}", if unlocked { "unlocked" } else { "locked" });
+    println!("note {}", if umask_is_private() {
+        "umask is private: Git checkouts write plaintext directly (mode 0600)"
+    } else {
+        "umask is permissive: Git checkouts write ciphertext; hooks or `hydrate` decrypt with mode 0600"
+    });
+    println!("note remote enforcement cannot be checked from here: deploy contrib/v3/pre-receive or \
+        `transcrypt-v3 audit` in CI on every shared remote");
+    if failures > 0 {
+        return Err(format!("{failures} protection(s) missing; run `transcrypt-v3 unlock` to reinstall filters and hooks"));
     }
     Ok(())
 }

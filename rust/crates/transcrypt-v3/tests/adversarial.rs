@@ -859,3 +859,54 @@ fn incremental_audit_covers_merges_and_config_changes() {
     let err = run_fails(&repo, bin(), &["audit", "--max-commits=1", "HEAD"], None);
     assert!(err.contains("more than 1 commits"), "{err}");
 }
+
+/// `doctor` passes on a protected checkout and fails, naming the gap, when
+/// any local protection is missing or overridden.
+#[test]
+fn doctor_detects_missing_protection() {
+    let mut scratch = Scratch::new("doctor");
+    let repo = scratch.repo("repo");
+    let out = String::from_utf8(run(&repo, bin(), &["doctor"], None)).unwrap();
+    assert!(!out.contains("FAIL"), "{out}");
+    let hook = repo.join(".git/hooks/pre-push");
+    let saved = fs::read(&hook).unwrap();
+    fs::remove_file(&hook).unwrap();
+    let out = exec(&repo, bin(), &["doctor"], None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL pre-push hook installed"));
+    fs::write(&hook, saved).unwrap();
+    for (key, value) in [("core.hooksPath", "/nonexistent"), ("filter.transcrypt-v3.process", "cat"),
+                         ("filter.transcrypt-v3.required", "false")] {
+        run(&repo, "git", &["config", key, value], None);
+        assert!(!exec(&repo, bin(), &["doctor"], None).status.success(), "{key}");
+        run(&repo, "git", &["config", "--unset", key], None);
+    }
+    run(&repo, "git", &["config", "filter.transcrypt-v3.required", "true"], None);
+    fs::write(repo.join(".git/info/attributes"), b"*.secret -filter\n").unwrap();
+    let out = exec(&repo, bin(), &["doctor"], None);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL a new transcrypt-v3-probe.secret"));
+    fs::remove_file(repo.join(".git/info/attributes")).unwrap();
+    assert!(exec(&repo, bin(), &["doctor"], None).status.success());
+}
+
+/// `contrib/v3/check-remote-enforcement` tells a remote that enforces the
+/// audit from one that does not (and cleans up after the unprotected one).
+#[test]
+fn remote_enforcement_check_detects_unprotected_remotes() {
+    let mut scratch = Scratch::new("enforcement");
+    let repo = scratch.repo("repo");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contrib/v3/check-remote-enforcement");
+    let hook = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contrib/v3/pre-receive");
+    for (name, protected) in [("open.git", false), ("guarded.git", true)] {
+        run(&scratch.root, "git", &["init", "-q", "--bare", name], None);
+        if protected {
+            fs::copy(&hook, scratch.root.join(name).join("hooks/pre-receive")).unwrap();
+        }
+        let out = Command::new(&script).arg(format!("../{name}")).current_dir(&repo)
+            .env("TRANSCRYPT_V3", bin()).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.success(), protected, "{name}: {text}");
+        let refs = run(&scratch.root.join(name), "git", &["for-each-ref"], None);
+        assert!(refs.is_empty(), "{name}: canary left behind");
+    }
+}
