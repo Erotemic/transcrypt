@@ -297,8 +297,22 @@ pub(crate) fn harden_process() -> Result<(), String> {
     Ok(())
 }
 
+/// Close every descriptor inherited beyond stdio, so the long-lived agent
+/// never keeps a caller's pipes, files or locks open.
+fn close_inherited_fds() {
+    let fds: Vec<i32> = fs::read_dir("/dev/fd")
+        .map(|dir| dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok()).collect())
+        .unwrap_or_default();
+    for fd in fds.into_iter().filter(|fd| *fd > 2) {
+        // SAFETY: nothing in this process uses these descriptors yet; closing
+        // an already closed one (the directory listing's own) is harmless.
+        unsafe { libc::close(fd) };
+    }
+}
+
 /// Internal child entrypoint. Runs until explicit lock or a process shutdown.
 pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
+    close_inherited_fds();
     let config = config_array(config)?;
     let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
     // Keep the key page out of swap where the OS allows it (best effort:

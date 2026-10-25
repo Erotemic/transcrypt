@@ -6,7 +6,7 @@ translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All are `WP.spec`
 triples, so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;
-`bash proofs/aeneas/check-v3-axioms.sh` confirms the 31 headline theorems use
+`bash proofs/aeneas/check-v3-axioms.sh` confirms the 35 headline theorems use
 only `propext`, `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
 `axiom`, `native_decide` or `bv_decide` occurs in any verification module
 (enforced by `v3_snapshot.py verify`).
@@ -40,7 +40,8 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
 | `Protocol` | `seal_record` | `seal_record_spec` | `Ok` ⇒ `MaySeal` and output = `sealedRecord`; every refusal names a violated precondition or primitive failure |
 | `Protocol` | `open_record` | `open_record_spec`, `open_record_complete` | `Ok` ⇒ `OpensTo` for exactly the released bytes; authentication failure ⇒ zeroed buffer and no genuine record exists; other refusals leave the buffer untouched; genuine right-sized records always open to their plaintext |
 | `Protocol` | `authorize_agent_request` | `authorize_agent_request_spec` | Exactly `authorizeSpec` |
-| `Lifecycle` | adapter sequencing models over the above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec`, `check_attr_paths` | Hydrate only replaces exact staged ciphertext by its authentic plaintext (all-or-nothing); lock only discards plaintext the record restores; verify-index success ⇒ every staged record opens at its own path; accepted check-attr ⇒ filter reported for every path |
+| `Lifecycle` | adapter sequencing models over the above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec`, `check_attr_paths` | Hydrate only replaces exact staged ciphertext by its authentic plaintext (all-or-nothing); lock (resealing with the agent's idempotent clean, `cleanModel`) only discards plaintext the record restores; verify-index success ⇒ every staged record opens at its own path; accepted check-attr ⇒ filter reported for every path |
+| `Filters` | adapter filter models over `open_record`, `seal_record`, `record_envelope_ok` | `cleanModel_spec`, `cleanModel_genuine`, `cleanModel_idempotent`, `lockedFilterModel_spec` | Unlocked clean (`clean_file`) stores only genuine records: either the input already opens at this path, or it is sealed under `MaySeal`; a genuine record is returned unchanged (idempotence). The locked filters output only the unchanged input, and only if it has the v3 envelope of the config |
 | spec (`V3Policy`) | — | `opensTo_unique`, `seal_opens`, `lock_flush_recoverable`, `expectedAttrResponse_paths`, `objectId_plain`, `opensTo_envelopeOk`, `indexRecord_oid` | Spec-level consequences used above (`indexRecord_oid`: the adapter's `entry[7..path_start-3]` is the record's object id) |
 
 ## Explicit assumptions in the statements

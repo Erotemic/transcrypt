@@ -97,7 +97,10 @@ one.
     - `hydrate`/`lock` re-index only the verified paths, through
       `update-index -z --stdin`, which takes no pathspecs and adds no files.
   - **PROVED (model).** Lifecycle sequencing: `hydratePlan_spec`,
-    `lockEntry_spec`, `verifyPlan_spec`.
+    `lockEntry_spec`, `verifyPlan_spec`. Filter behavior: `cleanModel_spec`,
+    `cleanModel_genuine`, `cleanModel_idempotent` (unlocked clean stores
+    only genuine records) and `lockedFilterModel_spec` (locked filters emit
+    only unchanged envelopes).
   - **REVIEWED.** [Call-site table](#adapter-call-site-table-a4).
   - **TESTED.** Real-Git lifecycle and adversarial suites, including
     pathspec-magic and revision-syntax filenames, and SIGKILL fault
@@ -350,6 +353,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Index record parsing | `parse_index_entry_spec` |
 | Object ids passed to Git are plain hex names, taken from the right bytes | `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` |
 | Keyless envelope check | `record_envelope_ok_spec`, `opensTo_envelopeOk` |
+| Clean and locked-filter behavior (models of adapter compositions) | `cleanModel_spec`, `cleanModel_genuine`, `cleanModel_idempotent`, `lockedFilterModel_spec` |
 | Hydrate/lock never lose data; verify-index soundness | `hydrate_action_spec`, `lock_action_spec`, `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` |
 
 ## Adapter call-site table (A4)

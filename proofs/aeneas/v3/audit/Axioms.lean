@@ -37,3 +37,7 @@ open Transcrypt.V3Verification
 #print axioms record_envelope_ok_spec
 #print axioms Transcrypt.V3Policy.opensTo_envelopeOk
 #print axioms Transcrypt.V3Policy.indexRecord_oid
+#print axioms cleanModel_spec
+#print axioms cleanModel_genuine
+#print axioms cleanModel_idempotent
+#print axioms lockedFilterModel_spec

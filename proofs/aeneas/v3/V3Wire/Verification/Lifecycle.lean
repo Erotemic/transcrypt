@@ -1,4 +1,5 @@
 import V3Wire.Verification.Protocol
+import V3Wire.Verification.Filters
 
 /-!
 End-to-end lifecycle guarantees for multi-file Git operations.
@@ -117,25 +118,30 @@ theorem hydratePlan_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
     · simp
 
 /-- One staged entry as seen by `lock`: path, staged record, worktree, and
-    the agent's `seal_record` output for the worktree (`resealed`). -/
+    the buffers the agent's Encrypt operation (`cleanModel`) uses to reseal
+    the worktree: `openBuf` for its `open_record` attempt and `scratch` for
+    its `seal_record` output. -/
 structure LockEntry where
   path : Slice U8
   record : Slice U8
   worktree : Slice U8
+  openBuf : Slice U8
   scratch : Slice U8
 
 /-- Per-entry lock step as performed across the adapter and the agent: the
-    agent reseals the worktree (`seal_record`), the core decides
-    (`lock_action`). `true` = flush (replace worktree by the record). -/
+    agent reseals the worktree with clean semantics (`cleanModel`: a worktree
+    that already is a genuine record is returned unchanged, anything else is
+    sealed), and the core decides (`lock_action`). `true` = flush (replace
+    worktree by the record). -/
 def lockEntry (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
     (e : LockEntry) : RustM (core.result.Result Bool Refusal) := do
   let k ← bytes_eq e.worktree e.record
   if k then ok (core.result.Result.Ok false)
   else
-    let (r, resealed) ← seal_record inst prims config e.path e.worktree e.scratch
-    match r with
-    | core.result.Result.Err x => ok (core.result.Result.Err x)
-    | core.result.Result.Ok _ =>
+    let c ← cleanModel inst prims config e.path e.worktree e.openBuf e.scratch
+    match c with
+    | none => ok (core.result.Result.Err Refusal.Primitive)
+    | some resealed =>
       let a ← lock_action e.worktree e.record resealed
       match a with
       | core.result.Result.Ok LockAction.Flush => ok (core.result.Result.Ok true)
@@ -156,10 +162,10 @@ theorem lockEntry_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#us
   split
   · rename_i hkt
     simp only [WP.spec_ok, sliceBytes, hk.1 hkt]
-  · step with seal_record_spec h config e.path e.worktree e.scratch as ⟨ r, resealed, hr ⟩
-    rcases r with u | x
-    · simp only at hr ⊢
-      obtain ⟨hmay, hres⟩ := hr
+  · step with cleanModel_spec h config e.path e.worktree e.openBuf e.scratch as ⟨ c, hc ⟩
+    rcases c with _ | resealed
+    · simp
+    · simp only
       step with lock_action_spec as ⟨ a, ha ⟩
       unfold lockSpec at ha
       by_cases h1 : sliceBytes e.worktree = sliceBytes e.record
@@ -169,11 +175,14 @@ theorem lockEntry_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#us
         by_cases h2 : sliceBytes resealed = sliceBytes e.record
         · rw [if_pos h2] at ha
           simp only [ha, lockResult, WP.spec_ok]
-          rw [← h2, hres]
-          exact seal_opens σ hmay
+          rcases hc resealed rfl with ⟨heq, _⟩ | ⟨hmay, hres⟩
+          · -- Pass-through: the resealed bytes are the worktree, which is
+            -- not the record, so `lock_action` cannot have flushed.
+            exact absurd (heq.symm.trans h2) h1
+          · rw [← h2, hres]
+            exact seal_opens σ hmay
         · rw [if_neg h2] at ha
           simp [ha, lockResult]
-    · simp
 
 /-- `verify-index` for the staged protected entries: every staged record
     must open at its own path under the checkout's config. -/

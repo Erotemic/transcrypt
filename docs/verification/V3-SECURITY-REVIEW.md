@@ -82,6 +82,7 @@ regression test that fails on the old implementation.
 | H-10 | Low | Git checkout writes plaintext with the umask. | `hydrate` now makes already-decrypted protected files private (via an `O_NOFOLLOW` descriptor); `status` warns. Test `hydrate_makes_existing_plaintext_private`. |
 | H-11 | Low | `pre-push` input over 1 MiB would have been truncated (found while reviewing this campaign's own code before commit). | Oversized input is refused. |
 | H-12 | Medium | `init` in a repository already tracking `*.secret` files left them plaintext in the index and history while v3 appeared enabled. | `init` refuses while a `*.secret` path is in the index or `HEAD`. Test `init_refuses_secrets_already_tracked_in_plaintext`. |
+| H-14 | Low | The long-lived agent kept every descriptor it inherited from `unlock`'s caller (a pipe it held open could hang a script waiting for EOF). | The agent closes inherited descriptors beyond stdio at startup. Test `agent_does_not_keep_inherited_descriptors`. |
 | H-13 | Medium (availability) | `audit` used `ls-tree --format` (Git ≥ 2.36), so on Git 2.34 the installed `pre-push` hook would refuse every push. | Default `ls-tree` records are rewritten to the verified parser's shape; CI runs on Git 2.34. |
 
 **Crash safety evidence.** `killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind`

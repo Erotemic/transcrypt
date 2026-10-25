@@ -644,3 +644,33 @@ fn oversized_hostile_blobs_are_refused() {
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
     run(&repo, bin(), &["verify-index"], None);
 }
+
+/// The agent does not keep descriptors it inherited from `unlock`'s caller:
+/// a pipe held open by the agent would hang whoever waits for its EOF.
+#[test]
+fn agent_does_not_keep_inherited_descriptors() {
+    use std::os::fd::AsRawFd;
+    let mut scratch = Scratch::new("fds");
+    let repo = scratch.repo("repo");
+    run(&repo, bin(), &["lock"], None);
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    // Make the write end inheritable, as a shell would leave it.
+    unsafe { libc_fcntl_clear_cloexec(fd) };
+    let mut child = Command::new(bin()).args(["unlock", "--password-stdin", "--no-hydrate"])
+        .current_dir(&repo).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().unwrap();
+    child.stdin.take().unwrap().write_all(PASS).unwrap();
+    assert!(child.wait().unwrap().success());
+    drop(writer);
+    // EOF arrives only if no process (the agent) still holds the write end.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let mut buf = Vec::new(); let _ = reader.read_to_end(&mut buf); let _ = tx.send(()); });
+    assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok(), "agent kept an inherited pipe open");
+}
+
+unsafe fn libc_fcntl_clear_cloexec(fd: i32) {
+    extern "C" { fn fcntl(fd: i32, cmd: i32, ...) -> i32; }
+    const F_SETFD: i32 = 2;
+    fcntl(fd, F_SETFD, 0);
+}
