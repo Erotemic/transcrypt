@@ -506,7 +506,11 @@ fn auto_hydrate(root: &Path) -> Result<(), String> {
 /// replaced, so no edit can be lost, and replacing a record by its plaintext
 /// loses nothing (clean seals it back to the same record).
 fn hydrate(root: &Path) -> Result<usize, String> {
-    let staging = staging_dir(root)?;
+    hydrate_locked(root, &staging_dir(root)?)
+}
+
+/// `hydrate` for a caller that already holds the staging lock.
+fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, String> {
     let config = load_config(root)?;
     // Authenticate ALL staged protected objects, the staged metadata and the
     // effective filter before exposing any plaintext in the checkout.
@@ -555,7 +559,7 @@ fn hydrate(root: &Path) -> Result<usize, String> {
     for (i, (staged, relative, stamp, record, is_staged)) in pending.into_iter().enumerate() {
         let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &record)?;
         // `replace` refuses unless the file is still the record checked above.
-        open_protected(root, &relative)?.replace(&staging, &plaintext, i, &stamp)?;
+        open_protected(root, &relative)?.replace(staging, &plaintext, i, &stamp)?;
         if is_staged { refresh.push(staged.path.clone()); }
     }
     // Plaintext that Git's checkout wrote follows the umask and may be

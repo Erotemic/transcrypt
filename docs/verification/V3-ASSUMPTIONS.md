@@ -399,7 +399,7 @@ verified decision that gates it:
 | Adapter action | Gate (verified core function) | Inputs passed | Acts only on |
 | --- | --- | --- | --- |
 | `clean` filter output (unlocked) | agent `Encrypt` → `clean_file`: `open_record` (authentic record ⇒ returned unchanged) else `seal_record` | config bytes from `.transcrypt/config`; Git `%f` bytes; stdin | `Ok` (else Git aborts) |
-| `smudge` filter output (unlocked) | agent `Decrypt` → `open_record` | same config; `%f`; blob from stdin | `Ok` |
+| `smudge` filter output (unlocked) | agent `Decrypt` → `open_record`; then `umask_is_private` chooses plaintext or the unchanged (now authenticated) record | same config; `%f`; blob from stdin | `Ok` |
 | `clean`/`smudge` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
 | Agent framing | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, lengths | proved roundtrip |
 | Git filter-process framing | `decode_pkt_len` for every packet; then the same conversion as the per-file filters | 4-byte pkt-line headers from Git; `command=`/`pathname=` values | `Ok` (else the process ends and Git fails) |
@@ -413,6 +413,9 @@ verified decision that gates it:
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action`; stamp equality | worktree bytes and stamp, blob by oid, reseal output | `Ok(Flush)`; `Keep` untouched |
 | Re-index after hydrate/lock | none (bookkeeping); listing compared with the verified snapshot afterwards | verified protected paths, raw, via `update-index -z --stdin` | listing unchanged |
 | `audit` / `pre-push` | `parse_index_entry`, `is_object_id`, `parse_config`, `record_envelope_ok`, agent `Decrypt` when it serves that config | `ls-tree` per commit; blobs by oid | every protected entry `true`/`Ok` |
+| `rekey` staging | agent `Decrypt` of each staged record, equality with the worktree, then `seal_record` under the new config (`encrypt_file`); `initialize_config` for the new config | staged blobs by oid, worktree bytes, fresh salt | all `Ok`, before any index or agent change |
+| `uninstall` | `lock` (above), then `record_envelope_ok` for every protected worktree file | worktree bytes | all `true` before removing filters |
+| `doctor` | none (read-only checks of Git config, attributes, hooks, `check_index`) | — | reports only |
 | Protected file selection | `is_protected_path` | index/tree path bytes | — |
 
 The Lean lifecycle models (`Lifecycle.lean`) reproduce the hydrate, lock and

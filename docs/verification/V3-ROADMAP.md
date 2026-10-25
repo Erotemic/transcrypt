@@ -102,7 +102,14 @@ verified" or "cryptographic security has been proved from first principles."
       - hydrate decrypts exactly the authentic records and never touches
         edits (H-17; Lean model re-proved);
       - bounded subprocess output and an incremental, budgeted audit (H-18);
-      - `doctor` and the remote-enforcement check (H-19).
+      - `doctor` and the remote-enforcement check (H-19);
+      - Git's long-running filter protocol, with pkt-lines decoded by the
+        verified core (H-20: 5–17× faster);
+      - strict listing parsers found by fuzzing (H-21);
+      - confirmed new passphrases (H-22);
+      - `rekey` and `uninstall` (H-23);
+      - adapter split into modules;
+      - the [Bash correspondence](V3-BASH-CORRESPONDENCE.md).
 
 ### Remaining, ranked by security value (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md#ranked-unresolved-risks))
 

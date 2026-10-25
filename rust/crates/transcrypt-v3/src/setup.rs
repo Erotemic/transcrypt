@@ -394,9 +394,11 @@ pub(crate) fn rekey(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), Str
     let old_config = load_config(root)?;
     session::request(root, &old_config, Operation::Ping, &[], &[])
         .map_err(|_| "unlock with the current passphrase first")?;
+    // No hydrate or lock may run meanwhile.
+    let staging = crate::worktree::staging_dir(root)?;
     // Decrypt everything first, then require that each file is exactly the
     // plaintext of its staged record.
-    crate::hydrate(root)?;
+    crate::hydrate_locked(root, &staging)?;
     let verified = crate::verify_index(root)?;
     let mut plaintexts = Vec::new();
     for staged in &verified.protected {
