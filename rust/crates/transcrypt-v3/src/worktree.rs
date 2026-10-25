@@ -69,7 +69,7 @@ pub(crate) fn find_protected(root: &Path, relative: &Path) -> Result<Option<Prot
 
 impl Protected {
     /// Remove group and other permissions (through an `O_NOFOLLOW`
-    /// descriptor, so a swapped-in symlink is never followed).
+    /// descriptor, so a swapped-in symlink is never followed). Private mode.
     pub(crate) fn make_private(&self) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let file = self.dir.open_regular(&self.leaf).map_err(|_| "cannot open protected worktree file")?;
@@ -88,14 +88,6 @@ impl Protected {
         Ok(file.metadata().map_err(|_| "cannot stat protected worktree file")?.nlink())
     }
 
-    /// Whether group or other users may read the file.
-    pub(crate) fn readable_by_others(&self) -> Result<bool, String> {
-        use std::os::unix::fs::PermissionsExt;
-        let file = self.dir.open_regular(&self.leaf).map_err(|_| "cannot open protected worktree file")?;
-        let mode = file.metadata().map_err(|_| "cannot stat protected worktree file")?.permissions().mode();
-        Ok(mode & 0o044 != 0)
-    }
-
     /// The contents and the stamp of the file they were read from.
     pub(crate) fn read(&self) -> Result<(Zeroizing<Vec<u8>>, fsat::Stamp), String> {
         let file = self.dir.open_regular(&self.leaf)
@@ -110,17 +102,23 @@ impl Protected {
 
     /// Replace the file by `contents` through an exclusive mode-0600 file in
     /// the private staging directory, fsync, `renameat` into the held parent
-    /// directory, then fsync that directory. The entry must still have the
-    /// `expected` stamp of the read that justified the replacement, so an
-    /// edit made since then is refused instead of being lost (a same-UID
-    /// writer can still race the final check and the rename). A
-    /// cross-filesystem rename fails closed (EXDEV) without touching the
-    /// file. Not a multi-file transaction.
-    pub(crate) fn replace(&self, staging: &Staging, contents: &[u8], slot: usize, expected: &fsat::Stamp) -> Result<(), String> {
-        let temp = OsString::from(format!("{}-{slot}.tmp", std::process::id()));
+    /// directory, then fsync that directory. The new file keeps the old one's
+    /// permissions (an executable stays executable), restricted to this user
+    /// when `private`. The entry must still have the `expected` stamp of the
+    /// read that justified the replacement, so an edit made since then is
+    /// refused instead of being lost (a same-UID writer can still race the
+    /// final check and the rename). A cross-filesystem rename fails closed
+    /// (EXDEV) without touching the file. Not a multi-file transaction.
+    pub(crate) fn replace(&self, staging: &Staging, contents: &[u8], expected: &fsat::Stamp, private: bool) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = self.dir.entry_mode(&self.leaf).map_err(|_| "cannot stat protected worktree file")?;
+        let mode = if private { mode & 0o700 } else { mode & 0o777 };
+        let temp = staging.temporary();
         let mut file = staging.dir.create_new(&temp, 0o600)
             .map_err(|e| format!("cannot create private staged file: {e}"))?;
-        let result = file.write_all(contents).and_then(|_| file.sync_all());
+        let result = file.write_all(contents)
+            .and_then(|_| file.set_permissions(fs::Permissions::from_mode(mode)))
+            .and_then(|_| file.sync_all());
         drop(file);
         if let Err(e) = result {
             let _ = staging.dir.unlink(&temp);
@@ -138,6 +136,36 @@ impl Protected {
     }
 }
 
+/// Write a repository file that v3 maintains (`.gitattributes`,
+/// `.transcrypt/config`): replace it if it exists, else create it, with the
+/// same symlink-refusing resolution and staged atomic rename as protected
+/// files. A committed symlink at the path or in a parent is refused, never
+/// followed, so the write cannot land outside the repository.
+pub(crate) fn write_repository_file(root: &Path, staging: &Staging, relative: &Path, contents: &[u8]) -> Result<(), String> {
+    if let Some(target) = find_protected(root, relative)? {
+        let (_, stamp) = target.read()?;
+        return target.replace(staging, contents, &stamp, false);
+    }
+    let parts: Vec<_> = relative.components().collect();
+    let Some((std::path::Component::Normal(leaf), parents)) = parts.split_last() else {
+        return Err("unsafe repository file path".into());
+    };
+    let mut dir = fsat::Dir::open(root).map_err(|_| "cannot open repository root")?;
+    for part in parents {
+        let std::path::Component::Normal(name) = part else { return Err("unsafe repository file path".into()) };
+        match dir.mkdir(name, 0o777) {
+            Ok(()) => {},
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(format!("cannot create {}: {e}", relative.display())),
+        }
+        dir = dir.subdir(name).map_err(|_| format!("{} has a parent that is a symlink or not a directory", relative.display()))?;
+    }
+    let mut file = dir.create_new(leaf, 0o666).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
+    file.write_all(contents).and_then(|_| file.sync_all())
+        .map_err(|e| format!("cannot write {}: {e}", relative.display()))?;
+    dir.sync().map_err(|e| format!("cannot sync {}: {e}", relative.display()))
+}
+
 /// Private staging directory for whole-file replacements:
 /// `.git/transcrypt-v3-staging`, a real mode-0700 directory held open by fd.
 /// Temporaries never live in the worktree, so a crash cannot leave plaintext
@@ -147,6 +175,16 @@ impl Protected {
 /// left in it is from an interrupted earlier run and is removed.
 pub(crate) struct Staging {
     dir: fsat::Dir,
+    next: std::cell::Cell<usize>,
+}
+
+impl Staging {
+    /// A fresh name for a temporary in this (locked, private) directory.
+    fn temporary(&self) -> OsString {
+        let slot = self.next.get();
+        self.next.set(slot + 1);
+        OsString::from(format!("{}-{slot}.tmp", std::process::id()))
+    }
 }
 
 pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
@@ -170,7 +208,7 @@ pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
         }
         dir.unlink(&entry).map_err(|e| format!("cannot remove stale staged file: {e}"))?;
     }
-    Ok(Staging { dir })
+    Ok(Staging { dir, next: std::cell::Cell::new(0) })
 }
 
 /// `.git/transcrypt-v3-scratch`: a real mode-0700 directory for plaintext
@@ -235,6 +273,17 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `staging_dir`, retried briefly: another test thread may fork a child
+    /// that holds a copy of a just-released lock descriptor until it execs.
+    fn staging(root: &Path) -> Staging {
+        for _ in 0..100 {
+            if let Ok(staging) = staging_dir(root) { return staging; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        staging_dir(root).unwrap()
+    }
+
     #[test]
     fn replacement_is_private_and_leaves_no_worktree_temporaries() {
         use std::os::unix::fs::PermissionsExt;
@@ -244,11 +293,11 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join(".git")).unwrap();
         let sdir = tmp.join(".git/transcrypt-v3-staging");
-        drop(staging_dir(&tmp).unwrap());
+        drop(staging(&tmp));
         assert_eq!(fs::metadata(&sdir).unwrap().permissions().mode() & 0o777, 0o700);
         // A crash-leftover temporary is purged on the next use.
         fs::write(sdir.join("stale.tmp"), b"stale plaintext").unwrap();
-        let staging = staging_dir(&tmp).unwrap();
+        let staging = staging(&tmp);
         // A concurrent operation cannot enter (or purge) while it is held.
         assert!(staging_dir(&tmp).is_err());
         assert_eq!(fs::read_dir(&sdir).unwrap().count(), 0);
@@ -256,7 +305,7 @@ mod tests {
         fs::write(&path, b"ciphertext placeholder").unwrap();
         let target = open_protected(&tmp, Path::new("item.secret")).unwrap();
         let (_, stamp) = target.read().unwrap();
-        target.replace(&staging, b"authenticated plaintext", 0, &stamp).unwrap();
+        target.replace(&staging, b"authenticated plaintext", &stamp, true).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"authenticated plaintext");
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
         assert_eq!(fs::read_dir(&tmp).unwrap().count(), 2, "only .git and the file");
@@ -283,7 +332,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join(".git")).unwrap();
-        let staging = staging_dir(&tmp).unwrap();
+        let staging = staging(&tmp);
         let path = tmp.join("item.secret");
         fs::write(&path, b"checked contents").unwrap();
         let target = open_protected(&tmp, Path::new("item.secret")).unwrap();
@@ -291,13 +340,13 @@ mod tests {
         // A concurrent edit after the check, even one of the same size.
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(&path, b"edited contents!").unwrap();
-        assert!(target.replace(&staging, b"replacement", 0, &stamp).is_err());
+        assert!(target.replace(&staging, b"replacement", &stamp, false).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"edited contents!", "edit must survive");
         // So is a file replaced by a different inode.
         let (_, stamp) = target.read().unwrap();
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"edited contents!").unwrap();
-        assert!(target.replace(&staging, b"replacement", 1, &stamp).is_err());
+        assert!(target.replace(&staging, b"replacement", &stamp, false).is_err());
         assert_eq!(fs::read_dir(tmp.join(".git/transcrypt-v3-staging")).unwrap().count(), 0);
         fs::remove_dir_all(&tmp).unwrap();
     }
@@ -326,10 +375,10 @@ mod tests {
         assert_eq!(*contents, b"test");
         // Race: after resolution, the parent is swapped for a symlink to an
         // outside directory. The held directory fd keeps the write inside.
-        let staging = staging_dir(&checkout).unwrap();
+        let staging = staging(&checkout);
         fs::rename(checkout.join("regular"), checkout.join("moved")).unwrap();
         symlink(&external, checkout.join("regular")).unwrap();
-        target.replace(&staging, b"plaintext", 0, &stamp).unwrap();
+        target.replace(&staging, b"plaintext", &stamp, false).unwrap();
         assert_eq!(fs::read(external.join("item.secret")).unwrap(), b"test", "write escaped");
         assert_eq!(fs::read(checkout.join("moved/item.secret")).unwrap(), b"plaintext");
         let _ = fs::remove_dir_all(tmp);

@@ -2,7 +2,8 @@ import Transcrypt.V3WireCodec
 
 /-
 Independent specification of the v3 protocol *decisions* (path policy, Git
-attribute check, record sealing/opening, lifecycle actions, agent requests).
+attribute records, record sealing/opening, smudge, lifecycle actions, agent
+requests).
 Written from `docs/verification/specs/V3-AUTHENTICATED-P0.md`, not from the
 Rust source. Aeneas refinement theorems in `proofs/aeneas/v3` relate the
 production Rust core to these definitions.
@@ -30,60 +31,56 @@ def maxPath : Nat := 4096
 def maxRecord : Nat := maxFile + 38
 def slash : Nat := 47
 def dot : Nat := 46
-def protectedSuffix : List Nat := ascii ".secret"
 def configDomain : List Nat := ascii "transcrypt/v3/config"
 def fileDomain : List Nat := ascii "transcrypt/v3/file"
-/-- What Git's `check-attr -z` prints after a path whose `filter` is ours. -/
-def filterAttrSuffix : List Nat := [0] ++ ascii "filter" ++ [0] ++ ascii "transcrypt-v3" ++ [0]
+/-- The Git attribute selecting protected files, and the value that does. -/
+def filterAttr : List Nat := ascii "filter"
+def filterDriver : List Nat := ascii "transcrypt-v3"
+def metadataDir : List Nat := ascii ".transcrypt/"
+def attributesName : List Nat := ascii ".gitattributes"
+def modulesName : List Nat := ascii ".gitmodules"
 
 /-! ## Path policy -/
 
-/-- Protected Git paths are those whose name ends in `.secret`. -/
-def Protected (path : List Nat) : Prop := protectedSuffix <:+ path
+/-- Repository metadata that must stay readable without the key, whatever
+    the attributes select: the committed configuration directory, every
+    `.gitattributes` (Git reads it to decide what is protected) and the
+    top-level `.gitmodules`. -/
+def Reserved (path : List Nat) : Prop :=
+  metadataDir <+: path ∨ path = attributesName ∨ (slash :: attributesName) <:+ path ∨
+    path = modulesName
 
 /-- A component is acceptable iff nonempty and neither `.` nor `..`. -/
 def ComponentOk (c : List Nat) : Prop := c ≠ [] ∧ c ≠ [dot] ∧ c ≠ [dot, dot]
 
 /-- The canonical authenticated-path policy of the v3 spec: nonempty, at most
     4096 bytes, no NUL, every `/`-separated component acceptable (which
-    excludes absolute paths and empty, `.` and `..` components), protected. -/
+    excludes absolute paths and empty, `.` and `..` components), and not
+    reserved. *Which* of these paths are protected is the user's choice,
+    expressed in Git attributes (below), not a property of the name. -/
 def CanonicalProtectedPath (path : List Nat) : Prop :=
   path ≠ [] ∧ path.length ≤ maxPath ∧ 0 ∉ path ∧
-  (∀ c ∈ path.splitOn slash, ComponentOk c) ∧ Protected path
+  (∀ c ∈ path.splitOn slash, ComponentOk c) ∧ ¬ Reserved path
 
-/-! ## Effective Git filter attribute -/
+/-! ## Protected-file selection: Git's `filter` attribute -/
 
-/-- The exact `check-attr -z` response expected for a request: every NUL
-    terminating a requested path becomes `NUL filter NUL transcrypt-v3 NUL`. -/
-def expectedAttrResponse (request : List Nat) : List Nat :=
-  request.flatMap (fun b => if b = 0 then filterAttrSuffix else [b])
+/-- One record of `git check-attr -z --stdin filter` output: the path as
+    requested, the attribute name and its value, each NUL-terminated. -/
+def attrRecord (path value : List Nat) : List Nat :=
+  path ++ [0] ++ filterAttr ++ [0] ++ value ++ [0]
 
-/-- The request the adapter sends for a list of NUL-free paths. -/
-def attrRequest (paths : List (List Nat)) : List Nat := paths.flatMap (· ++ [0])
+/-- A path is protected iff Git reports `filter` = `transcrypt-v3` for it. -/
+def Selected (value : List Nat) : Prop := value = filterDriver
 
-theorem expand_nul_free (p : List Nat) (hp : 0 ∉ p) :
-    p.flatMap (fun b => if b = 0 then filterAttrSuffix else [b]) = p := by
-  induction p with
-  | nil => rfl
-  | cons b bs ih =>
-    have hb : b ≠ 0 := fun hb => hp (hb ▸ List.mem_cons_self ..)
-    have hbs : 0 ∉ bs := fun hm => hp (List.mem_cons_of_mem _ hm)
-    simp [hb, ih hbs]
+/-- `response` holds, at offset `start`, the record for `path` with the
+    NUL-free value `value`; the next record starts at `next`. -/
+def AttrRecordAt (response : List Nat) (start : Nat) (path value : List Nat) (next : Nat) : Prop :=
+  0 ∉ value ∧ attrRecord path value <+: response.drop start ∧
+    next = start + (attrRecord path value).length
 
-/-- For NUL-free paths the expected response reports, for every path in
-    order, `path NUL filter NUL transcrypt-v3 NUL` and nothing else. -/
-theorem expectedAttrResponse_paths (paths : List (List Nat))
-    (h : ∀ p ∈ paths, 0 ∉ p) :
-    expectedAttrResponse (attrRequest paths) = paths.flatMap (· ++ filterAttrSuffix) := by
-  induction paths with
-  | nil => rfl
-  | cons p ps ih =>
-    have hp : 0 ∉ p := h p (List.mem_cons_self ..)
-    have hps : ∀ q ∈ ps, 0 ∉ q := fun q hq => h q (List.mem_cons_of_mem _ hq)
-    have ih' := ih hps
-    simp only [expectedAttrResponse, attrRequest] at ih' ⊢
-    simp only [List.flatMap_cons, List.flatMap_append, expand_nul_free p hp, ih']
-    simp
+/-- Git's complete answer to a request for the listed paths, in order. -/
+def attrResponse (records : List (List Nat × List Nat)) : List Nat :=
+  records.flatMap (fun r => attrRecord r.1 r.2)
 
 /-! ## Abstract cryptographic suite -/
 
@@ -197,8 +194,11 @@ noncomputable def authorizeSpec (opcode : Nat) (supplied active path : List Nat)
 
 /-! ## Git index records -/
 
-/-- Git mode of a regular, non-executable file. -/
+/-- Git modes of a regular file, non-executable and executable: the only
+    modes whose content Git passes through filters (a symlink stores its
+    target unfiltered; a submodule stores a commit id). -/
 def regularMode : List Nat := ascii "100644"
+def executableMode : List Nat := ascii "100755"
 
 /-- A stage-0 `git ls-files --stage -z` record `mode SP oid SP 0 TAB path`.
     Modes and object ids never contain TAB, so the path (which becomes
@@ -207,7 +207,7 @@ def regularMode : List Nat := ascii "100644"
 def IndexRecord (entry : List Nat) (regular : Bool) (path : List Nat) : Prop :=
   ∃ mode oid, entry = mode ++ [32] ++ oid ++ [32, 48, 9] ++ path ∧
     mode.length = 6 ∧ oid ≠ [] ∧ 9 ∉ mode ∧ 9 ∉ oid ∧ path ≠ [] ∧
-    (regular = true ↔ mode = regularMode)
+    (regular = true ↔ mode = regularMode ∨ mode = executableMode)
 
 /-- The adapter takes the object id of an accepted record as the bytes from
     offset 7 up to 3 bytes before the path, i.e. `entry[7..path_start-3]`.
@@ -272,6 +272,36 @@ theorem opensTo_envelopeOk (s : Suite) {config path record pt : List Nat}
   obtain ⟨_, _, hlen, rfl⟩ := h
   refine ⟨hlen, ?_⟩
   exact decode_file_header_encode _ _ (s.digest16_length config) (by simp [s.siv_length])
+
+/-! ## Smudge -/
+
+inductive SmudgeAction | open_ | keep
+  deriving DecidableEq
+
+/-- The smudge decision for a committed blob at a protected path, for the
+    configuration with identifier `id`. Bytes that are no v3 record (for
+    example plaintext that bypassed the clean filter) are refused, so they are
+    never presented as a protected file; a record of this configuration is
+    opened (authenticated or refused) when the key is available; any other
+    record (locked, or another configuration such as history before a
+    rekey) stays encrypted. -/
+def smudgeSpec (blob id : List Nat) (unlocked : Bool) : Option SmudgeAction :=
+  if blob.length > maxRecord then none
+  else match decodeFileHeaderShape blob with
+    | none => none
+    | some found => if unlocked = true ∧ found = id then some .open_ else some .keep
+
+/-- Smudge only ever keeps a blob that has the v3 file envelope. -/
+theorem smudgeSpec_keep_envelope {blob id : List Nat} {unlocked : Bool}
+    (h : smudgeSpec blob id unlocked = some .keep) :
+    ∃ found, decodeFileHeaderShape blob = some found ∧ blob.length ≤ maxRecord := by
+  unfold smudgeSpec at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · rename_i found hd
+      exact ⟨found, hd, by omega⟩
 
 /-! ## Git long-running filter protocol framing (local IPC with Git) -/
 

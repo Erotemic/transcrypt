@@ -11,7 +11,8 @@ Functional refinement of the production Git index-record parser
 `parse_index_entry`: it accepts exactly the records described by
 `Transcrypt.V3Policy.IndexRecord`, returning the regular-mode flag and the
 offset of the path (everything after the first TAB). The first loop finds the
-least TAB; the second compares the mode field with `REGULAR_MODE`.
+least TAB; the second compares the mode field with `REGULAR_MODE` and
+`EXECUTABLE_MODE` at once.
 -/
 
 theorem idx_sliceBytes_length (s : Slice U8) : (sliceBytes s).length = s.length := by
@@ -82,56 +83,80 @@ theorem REGULAR_MODE_matches_spec :
 
 @[simp] theorem REGULAR_MODE_length : REGULAR_MODE.length = 6 := by simp
 
-/-- Invariant of the mode comparison loop. -/
-def RegInv (entry : Slice U8) (s : Bool × Usize) : Prop :=
-  s.2.val ≤ 6 ∧ (s.1 = true ↔ MatchesUpTo entry.val REGULAR_MODE.val 0 s.2.val)
+theorem EXECUTABLE_MODE_matches_spec :
+    EXECUTABLE_MODE.val.map (·.val) = Transcrypt.V3Policy.executableMode := by
+  unfold EXECUTABLE_MODE Transcrypt.V3Policy.executableMode Transcrypt.V3Policy.ascii
+  decide
 
-theorem reg_body_spec (entry : Slice U8) (h6 : 6 ≤ entry.length) (regular : Bool) (k : Usize)
-    (hinv : RegInv entry (regular, k)) :
-    parse_index_entry_loop1.body entry regular k ⦃ cf => match cf with
-      | .cont s' => RegInv entry s' ∧ 6 - s'.2.val < 6 - k.val
-      | .done r => r = true ↔ MatchesUpTo entry.val REGULAR_MODE.val 0 6 ⦄ := by
-  obtain ⟨hk, hiff⟩ := hinv
+@[simp] theorem EXECUTABLE_MODE_length : EXECUTABLE_MODE.length = 6 := by simp
+
+/-- Invariant of the mode comparison loop: each flag records whether the
+    mode field agrees so far with the respective mode constant. -/
+def RegInv (entry : Slice U8) (s : Bool × Bool × Usize) : Prop :=
+  s.2.2.val ≤ 6 ∧ (s.1 = true ↔ MatchesUpTo entry.val REGULAR_MODE.val 0 s.2.2.val) ∧
+    (s.2.1 = true ↔ MatchesUpTo entry.val EXECUTABLE_MODE.val 0 s.2.2.val)
+
+theorem idx_ite_ok {α : Type} (c : Prop) [Decidable c] (a b : α) :
+    (if c then (ok a : RustM α) else ok b) = ok (if c then a else b) := by
+  split <;> rfl
+
+theorem matches_flag_step (entry mode : List U8) (k : Nat) (hk : k < entry.length)
+    (hm : k < mode.length) (flag : Bool) (x y : U8) (hx : x = entry[k]) (hy : y = mode[k])
+    (hiff : flag = true ↔ MatchesUpTo entry mode 0 k) :
+    (if (x != y) = true then false else flag) = true ↔ MatchesUpTo entry mode 0 (k + 1) := by
+  subst hx hy
+  by_cases hne : (entry[k] != mode[k]) = true
+  · rw [if_pos hne]
+    simp only [bne_iff_ne, ne_eq] at hne
+    simp only [Bool.false_eq_true, false_iff]
+    intro hm'
+    apply hne
+    have := hm' k (by omega)
+    rwa [Nat.zero_add, getElem!_pos entry k hk, getElem!_pos mode k hm] at this
+  · rw [if_neg hne, hiff]
+    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+    constructor
+    · intro h
+      apply h.step
+      rw [Nat.zero_add, getElem!_pos entry k hk, getElem!_pos mode k hm, hne]
+    · intro h j hj
+      exact h j (by omega)
+
+theorem reg_body_spec (entry : Slice U8) (h6 : 6 ≤ entry.length) (plain executable : Bool)
+    (k : Usize) (hinv : RegInv entry (plain, executable, k)) :
+    parse_index_entry_loop1.body entry plain executable k ⦃ cf => match cf with
+      | .cont s' => RegInv entry s' ∧ 6 - s'.2.2.val < 6 - k.val
+      | .done r => (r.1 = true ↔ MatchesUpTo entry.val REGULAR_MODE.val 0 6) ∧
+          (r.2 = true ↔ MatchesUpTo entry.val EXECUTABLE_MODE.val 0 6) ⦄ := by
+  obtain ⟨hk, hp, he⟩ := hinv
   unfold parse_index_entry_loop1.body
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
   have hF := REGULAR_MODE_length
+  have hE := EXECUTABLE_MODE_length
   have hrl : entry.length = entry.val.length := rfl
-  simp only at hk hiff
+  simp only at hk hp he
+  simp only [idx_ite_ok]
   step*
-  split <;> step*
-  · have hne := ‹(_ != _) = true›
-    simp only [bne_iff_ne, ne_eq] at hne
-    refine ⟨⟨by simp only; omega, ?_⟩, by omega⟩
-    simp only [Bool.false_eq_true, false_iff]
-    intro hm
-    apply hne
-    have := hm k.val (by omega)
-    rw [Nat.zero_add, getElem!_pos entry.val k.val i1, getElem!_pos REGULAR_MODE.val k.val i2] at this
-    rw [i1_post2, i2_post2, this]
-  · have hne := ‹¬(_ != _) = true›
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
-    refine ⟨⟨by simp only; omega, ?_⟩, by omega⟩
-    simp only
-    rw [hiff, k1_post]
-    constructor
-    · intro hm
-      apply hm.step
-      rw [Nat.zero_add, getElem!_pos entry.val k.val i1, getElem!_pos REGULAR_MODE.val k.val i2,
-        ← i1_post2, ← i2_post2, hne]
-    · intro hm j hj
-      exact hm j (by omega)
+  have hk' : k.val < entry.val.length := by omega
+  simp only [RegInv]
+  refine ⟨⟨by omega, ?_, ?_⟩, by omega⟩
+  · rw [k1_post]
+    exact matches_flag_step _ _ _ hk' (by simp; omega) _ _ _ i1_post2 i2_post2 hp
+  · rw [k1_post]
+    exact matches_flag_step _ _ _ hk' (by simp; omega) _ _ _ i1_post2 i3_post2 he
 
 theorem reg_loop_spec (entry : Slice U8) (h6 : 6 ≤ entry.length) :
-    parse_index_entry_loop1 entry true 0#usize ⦃ r =>
-      r = true ↔ MatchesUpTo entry.val REGULAR_MODE.val 0 6 ⦄ := by
+    parse_index_entry_loop1 entry true true 0#usize ⦃ r =>
+      (r.1 = true ↔ MatchesUpTo entry.val REGULAR_MODE.val 0 6) ∧
+      (r.2 = true ↔ MatchesUpTo entry.val EXECUTABLE_MODE.val 0 6) ⦄ := by
   unfold parse_index_entry_loop1
-  apply loop.spec_decr_nat (fun s => 6 - s.2.val) (RegInv entry)
-  · rintro ⟨r, k⟩ hinv
-    apply WP.spec_mono (reg_body_spec entry h6 r k hinv)
-    rintro (⟨r', k'⟩ | r)
+  apply loop.spec_decr_nat (fun s => 6 - s.2.2.val) (RegInv entry)
+  · rintro ⟨p, e, k⟩ hinv
+    apply WP.spec_mono (reg_body_spec entry h6 p e k hinv)
+    rintro (⟨p', e', k'⟩ | r)
     · exact id
     · exact id
-  · exact ⟨by simp, by simp [MatchesUpTo.zero]⟩
+  · exact ⟨by simp, by simp [MatchesUpTo.zero], by simp [MatchesUpTo.zero]⟩
 
 theorem idx_map_val_inj {a b : List U8} : a.map (·.val) = b.map (·.val) ↔ a = b := by
   constructor
@@ -140,11 +165,11 @@ theorem idx_map_val_inj {a b : List U8} : a.map (·.val) = b.map (·.val) ↔ a 
       simpa using (UScalar.eq_equiv x y).mpr hxy) h
   · rintro rfl; rfl
 
-theorem matches_regular_iff (entry : Slice U8) (h6 : 6 ≤ entry.length) :
-    MatchesUpTo entry.val REGULAR_MODE.val 0 6 ↔
-      (sliceBytes entry).take 6 = Transcrypt.V3Policy.regularMode := by
-  rw [← REGULAR_MODE_matches_spec, sliceBytes, ← List.map_take, idx_map_val_inj]
-  have hR : REGULAR_MODE.val.length = 6 := by simp
+theorem matches_mode_iff (entry : Slice U8) (h6 : 6 ≤ entry.length) (mode : List U8)
+    (hR : mode.length = 6) :
+    MatchesUpTo entry.val mode 0 6 ↔
+      (sliceBytes entry).take 6 = mode.map (·.val) := by
+  rw [sliceBytes, ← List.map_take, idx_map_val_inj]
   have he : entry.length = entry.val.length := rfl
   constructor
   · intro h
@@ -152,7 +177,7 @@ theorem matches_regular_iff (entry : Slice U8) (h6 : 6 ≤ entry.length) :
     intro k h1 h2
     have := h k (by simp at h1; omega)
     rw [Nat.zero_add, getElem!_pos entry.val k (by simp at h1; omega),
-      getElem!_pos REGULAR_MODE.val k h2] at this
+      getElem!_pos mode k h2] at this
     simpa using this
   · intro h k hk
     rw [← h, Nat.zero_add, getElem!_pos entry.val k (by omega),
@@ -170,7 +195,8 @@ theorem drop_three (l : List Nat) (j : Nat) (hj : j + 2 < l.length) :
 theorem index_sound (l : List Nat) (t : Nat) (reg : Bool) (h10 : 10 ≤ t)
     (hn : t + 1 < l.length) (h9 : l[t]! = 9) (hno : ∀ k < t, l[k]! ≠ 9)
     (h6 : l[6]! = 32) (h2 : l[t-2]! = 32) (h1 : l[t-1]! = 48)
-    (hreg : reg = true ↔ l.take 6 = Transcrypt.V3Policy.regularMode) :
+    (hreg : reg = true ↔ l.take 6 = Transcrypt.V3Policy.regularMode ∨
+      l.take 6 = Transcrypt.V3Policy.executableMode) :
     Transcrypt.V3Policy.IndexRecord l reg (l.drop (t+1)) := by
   have hsplit : l = l.take 6 ++ [32] ++ (l.drop 7).take (t - 9) ++ [32, 48, 9] ++ l.drop (t+1) := by
     have e3 := drop_three l (t - 2) (by omega)
@@ -212,7 +238,8 @@ theorem index_complete (l : List Nat) (reg : Bool) (path : List Nat)
     (h : Transcrypt.V3Policy.IndexRecord l reg path) :
     ∃ t, 10 ≤ t ∧ t + 1 < l.length ∧ l[t]! = 9 ∧ (∀ k < t, l[k]! ≠ 9) ∧
       l[6]! = 32 ∧ l[t-2]! = 32 ∧ l[t-1]! = 48 ∧ path = l.drop (t+1) ∧
-      (reg = true ↔ l.take 6 = Transcrypt.V3Policy.regularMode) := by
+      (reg = true ↔ l.take 6 = Transcrypt.V3Policy.regularMode ∨
+        l.take 6 = Transcrypt.V3Policy.executableMode) := by
   obtain ⟨mode, oid, rfl, hm, ho, h9m, h9o, hp, hreg⟩ := h
   have hol : 0 < oid.length := List.length_pos_iff.mpr ho
   have hpl : 0 < path.length := List.length_pos_iff.mpr hp
@@ -282,9 +309,7 @@ theorem parse_index_entry_spec (entry : Slice U8) :
       intro k hk b hb
       rw [idx_sliceBytes_getElem! entry k hk, hb]
     step*
-    step with reg_loop_spec entry (by omega) as ⟨ regular, hreg ⟩
-    step*
-    case h_fail => scalar_tac
+    step with reg_loop_spec entry (by omega) as ⟨ plain, executable, hplain, hexec ⟩
     have hbyte' : ∀ (k : Nat) (hk : k < entry.val.length) (b : U8), b = entry.val[k] →
         ∀ c : U8, ¬(b != c) = true → (sliceBytes entry)[k]! = c.val := by
       intro k hk b hb c hne
@@ -295,8 +320,15 @@ theorem parse_index_entry_spec (entry : Slice U8) :
       rw [← i2_post1]; exact hbyte' i2.val (by omega) _ i3_post2 32#u8 ‹_›
     have h1 : (sliceBytes entry)[t.val - 1]! = 48 := by
       rw [← i4_post1]; exact hbyte' i4.val (by omega) _ i5_post2 48#u8 ‹_›
+    simp only [idx_ite_ok]
+    step*
+    case h_fail => scalar_tac
     rw [i6_post]
-    apply index_sound _ t.val regular (by scalar_tac) (by scalar_tac) ht9 hno h6 h2 h1
-    rw [hreg, matches_regular_iff entry (by omega)]
+    apply index_sound _ t.val _ (by scalar_tac) (by scalar_tac) ht9 hno h6 h2 h1
+    have hR := REGULAR_MODE_matches_spec
+    have hE := EXECUTABLE_MODE_matches_spec
+    rw [← hR, ← hE, ← matches_mode_iff entry (by omega) _ (by simp),
+      ← matches_mode_iff entry (by omega) _ (by simp), ← hplain, ← hexec]
+    cases plain <;> cases executable <;> simp
 
 end Transcrypt.V3Verification

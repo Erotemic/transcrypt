@@ -1,4 +1,5 @@
 import V3Wire.Verification.Copy
+import V3Wire.Verification.Bytes
 import Transcrypt.V3Policy
 open CoreModels Aeneas
 open Aeneas.Std hiding namespace core alloc
@@ -6,95 +7,133 @@ open RustM ControlFlow
 namespace Transcrypt.V3Verification
 open transcrypt_v3_core
 
-theorem protected_suffix_matches_spec :
-    PROTECTED_SUFFIX.val.map (·.val) = Transcrypt.V3Policy.protectedSuffix := by
-  unfold PROTECTED_SUFFIX Transcrypt.V3Policy.protectedSuffix Transcrypt.V3Policy.ascii
+/-!
+Functional refinement of the production path policy: the byte-matching
+helpers `matches_at` and `ends_with`, the reserved-metadata test
+`is_reserved_path`, `component_ok` and the canonical-path scan
+`is_canonical_protected_path`, each against `Transcrypt.V3Policy`.
+-/
+
+/-! ## `matches_at` and `ends_with` -/
+
+theorem matches_at_loop_spec (bytes expected : Slice U8) (a : Usize)
+    (hj : a.val + expected.length ≤ bytes.length) (k : Usize) (hk : k.val ≤ expected.length)
+    (h : MatchesUpTo bytes.val expected.val a.val k.val) :
+    matches_at_loop bytes a expected k ⦃ r =>
+      r = true ↔ MatchesUpTo bytes.val expected.val a.val expected.length ⦄ := by
+  unfold matches_at_loop
+  apply compare_loop _ (fun n => MatchesUpTo bytes.val expected.val a.val n) expected.length _ _ k hk h
+  intro m hm hc
+  unfold matches_at_loop.body
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  have hrl : bytes.length = bytes.val.length := rfl
+  have hel : expected.length = expected.val.length := rfl
+  step*
+  · have hne := ‹(_ != _) = true›
+    simp only [bne_iff_ne, ne_eq] at hne
+    simp only [Bool.false_eq_true, false_iff]
+    intro hall
+    apply hne
+    have := hall m.val (by omega)
+    rw [getElem!_pos bytes.val (a.val + m.val) (by omega),
+      getElem!_pos expected.val m.val (by omega)] at this
+    rw [i2_post2, i3_post2, ← this]
+    simp only [i1_post]
+  · refine ⟨k1_post, by omega, ?_⟩
+    rw [k1_post]
+    apply hc.step
+    have hne := ‹¬(_ != _) = true›
+    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+    rw [getElem!_pos bytes.val (a.val + m.val) (by omega),
+      getElem!_pos expected.val m.val (by omega)]
+    rw [i2_post2, i3_post2] at hne
+    simpa only [i1_post] using hne
+
+/-- `matches_at bytes at expected` holds iff `at` is within `bytes` and
+    `expected` is a prefix of `bytes[at..]`. -/
+@[step]
+theorem matches_at_spec (bytes : Slice U8) (a : Usize) (expected : Slice U8) :
+    matches_at bytes a expected ⦃ r => r = true ↔
+      (a.val ≤ bytes.length ∧ sliceBytes expected <+: (sliceBytes bytes).drop a.val) ⦄ := by
+  unfold matches_at
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  have hrl : bytes.length = bytes.val.length := rfl
+  have hel : expected.length = expected.val.length := rfl
+  step*
+  · simp only [Bool.false_eq_true, false_iff, not_and]
+    intro hle hp
+    have := hp.length_le
+    simp only [sliceBytes, List.length_map, List.length_drop] at this
+    scalar_tac
+  · rename_i hge
+    have hlen : a.val + expected.length ≤ bytes.length := by scalar_tac
+    have hale : a.val ≤ bytes.length := by omega
+    apply WP.spec_mono (matches_at_loop_spec bytes expected a hlen 0#usize (by simp)
+      (MatchesUpTo.zero _ _ _))
+    intro r hr
+    rw [hr, sliceBytes, sliceBytes, map_prefix_drop_iff _ _ _ (by omega)]
+    constructor
+    · intro hm; exact ⟨hale, by omega, hm⟩
+    · intro hm; exact hm.2.2
+
+/-- `ends_with bytes suffix` holds iff `suffix` is a suffix of `bytes`. -/
+@[step]
+theorem ends_with_spec (bytes suffix : Slice U8) :
+    ends_with bytes suffix ⦃ r => r = true ↔ sliceBytes suffix <:+ sliceBytes bytes ⦄ := by
+  unfold ends_with
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  have hbl := sliceBytes_length bytes
+  have hsl := sliceBytes_length suffix
+  step*
+  · have hi2 : i2.val = bytes.length - suffix.length := by simp at i2_post1; exact i2_post1
+    rw [r_post, List.suffix_iff_eq_drop, hbl, hsl, ← hi2]
+    constructor
+    · rintro ⟨_, hp⟩
+      exact hp.eq_of_length (by simp only [List.length_drop, hbl, hsl]; scalar_tac)
+    · intro h
+      refine ⟨by omega, ?_⟩
+      rw [h]
+  · simp only [Bool.false_eq_true, false_iff]
+    intro hs
+    have := hs.length_le
+    rw [hbl, hsl] at this
+    scalar_tac
+
+/-! ## Reserved metadata paths -/
+
+theorem METADATA_DIR_bytes :
+    sliceBytes (Array.to_slice METADATA_DIR) = Transcrypt.V3Policy.metadataDir := by
+  unfold METADATA_DIR Transcrypt.V3Policy.metadataDir Transcrypt.V3Policy.ascii sliceBytes
   decide
 
-theorem is_protected_path_loop_body_spec (path : Slice U8) (start k : Usize)
-    (hs : start.val + 7 = path.length) (hk : k.val ≤ 7)
-    (hm : MatchesUpTo path.val PROTECTED_SUFFIX.val start.val k.val) :
-    is_protected_path_loop.body path start k ⦃ cf => match cf with
-        | .cont k' => k'.val = k.val + 1 ∧ k'.val ≤ 7 ∧ MatchesUpTo path.val PROTECTED_SUFFIX.val start.val k'.val
-        | .done r => r = true ↔ MatchesUpTo path.val PROTECTED_SUFFIX.val start.val 7 ⦄ := by
-  unfold is_protected_path_loop.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  have hlen : PROTECTED_SUFFIX.length = 7 := by simp
-  step*
-  · rename_i hne
-    simp only [Bool.false_eq_true, false_iff]
-    intro hm7
-    have := hm7 k.val (by omega)
-    rw [← i1_post, getElem!_pos path.val i1.val i2, getElem!_pos PROTECTED_SUFFIX.val k.val (by simp; omega)] at this
-    simp [i2_post2, i3_post2, this] at hne
-  · rename_i hne
-    refine ⟨k1_post, by omega, ?_⟩
-    rw [k1_post]
-    apply hm.step
-    rw [← i1_post, getElem!_pos path.val i1.val i2, getElem!_pos PROTECTED_SUFFIX.val k.val (by simp; omega)]
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
-    rw [← i2_post2, ← i3_post2, hne]
+theorem ATTRIBUTES_NAME_bytes :
+    sliceBytes (Array.to_slice ATTRIBUTES_NAME) = Transcrypt.V3Policy.attributesName := by
+  unfold ATTRIBUTES_NAME Transcrypt.V3Policy.attributesName Transcrypt.V3Policy.ascii sliceBytes
+  decide
 
-theorem matchesUpTo_iff_drop (a b : List U8) (off m : Nat) (hb : b.length = m)
-    (ha : a.length = off + m) : MatchesUpTo a b off m ↔ a.drop off = b := by
-  constructor
-  · intro h
-    apply List.ext_getElem (by simp; omega)
-    intro k h1 h2
-    have := h k (by omega)
-    rw [getElem!_pos a (off + k) (by omega), getElem!_pos b k h2] at this
-    simpa using this
-  · intro h k hk
-    subst h
-    rw [getElem!_pos a (off + k) (by omega), getElem!_pos (a.drop off) k (by simp; omega)]
-    simp
+theorem ATTRIBUTES_SUFFIX_bytes :
+    sliceBytes (Array.to_slice ATTRIBUTES_SUFFIX) =
+      Transcrypt.V3Policy.slash :: Transcrypt.V3Policy.attributesName := by
+  unfold ATTRIBUTES_SUFFIX Transcrypt.V3Policy.attributesName Transcrypt.V3Policy.slash
+    Transcrypt.V3Policy.ascii sliceBytes
+  decide
 
-theorem map_val_inj {a b : List U8} : a.map (·.val) = b.map (·.val) ↔ a = b := by
-  constructor
-  · intro h
-    exact List.map_injective_iff.mpr (fun x y hxy => by
-      simpa using (UScalar.eq_equiv x y).mpr hxy) h
-  · rintro rfl; rfl
+theorem MODULES_NAME_bytes :
+    sliceBytes (Array.to_slice MODULES_NAME) = Transcrypt.V3Policy.modulesName := by
+  unfold MODULES_NAME Transcrypt.V3Policy.modulesName Transcrypt.V3Policy.ascii sliceBytes
+  decide
 
-theorem protected_iff (path : Slice U8) (hn : 7 ≤ path.length) :
-    Transcrypt.V3Policy.Protected (sliceBytes path) ↔
-      MatchesUpTo path.val PROTECTED_SUFFIX.val (path.length - 7) 7 := by
-  rw [matchesUpTo_iff_drop _ _ _ _ (by simp) (by simp at hn ⊢; omega)]
-  unfold Transcrypt.V3Policy.Protected sliceBytes
-  rw [List.suffix_iff_eq_drop, ← protected_suffix_matches_spec, eq_comm]
-  simp only [List.length_map, ← List.map_drop]
-  have : PROTECTED_SUFFIX.val.length = 7 := by simp
-  rw [this, map_val_inj]
-
-theorem not_protected_of_short (path : Slice U8) (hn : path.length < 7) :
-    ¬ Transcrypt.V3Policy.Protected (sliceBytes path) := by
-  intro h
-  have := h.length_le
-  rw [← protected_suffix_matches_spec] at this
-  simp [sliceBytes] at this hn
-  omega
-
+/-- `is_reserved_path` decides exactly the spec's `Reserved`. -/
 @[step]
-theorem is_protected_path_spec (p : Slice U8) :
-    is_protected_path p ⦃ r => r = true ↔ Transcrypt.V3Policy.Protected (sliceBytes p) ⦄ := by
-  unfold is_protected_path is_protected_path_loop
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  have hlen : PROTECTED_SUFFIX.length = 7 := by simp
+theorem is_reserved_path_spec (p : Slice U8) :
+    is_reserved_path p ⦃ r => r = true ↔ Transcrypt.V3Policy.Reserved (sliceBytes p) ⦄ := by
+  unfold is_reserved_path Transcrypt.V3Policy.Reserved
   step*
-  · rename_i hlt
-    simp only [UScalar.lt_equiv, Slice.len_val, s_post] at hlt
-    simp only [Bool.false_eq_true, false_iff]
-    exact not_protected_of_short p (by simp at hlt ⊢; omega)
-  · simp only [Slice.len_val, s1_post] at start_post1 start_post2
-    have h7 : 7 ≤ p.length := by simp at start_post2 ⊢; omega
-    have hst : start.val = p.length - 7 := by simp at start_post1 ⊢; omega
-    rw [protected_iff p h7, ← hst]
-    apply compare_loop _ (fun k => MatchesUpTo p.val PROTECTED_SUFFIX.val start.val k) 7
-    · intro k hk hm
-      apply WP.spec_mono (is_protected_path_loop_body_spec p start k (by omega) hk hm)
-      rintro (k' | r) <;> exact id
-    · simp
-    · exact MatchesUpTo.zero _ _ _
+  all_goals
+    subst_vars
+    simp only [METADATA_DIR_bytes, ATTRIBUTES_NAME_bytes, ATTRIBUTES_SUFFIX_bytes,
+      MODULES_NAME_bytes, List.drop_zero, Nat.zero_le, true_and, ← sliceBytes_inj] at *
+    tauto
 
 theorem componentOk_iff (c : List Nat) :
     Transcrypt.V3Policy.ComponentOk c ↔
@@ -306,7 +345,7 @@ theorem scan_loop_spec (path : Slice U8) (n : Usize) (hn : n.val = path.length)
 
 theorem canonical_iff (l : List Nat) :
     Transcrypt.V3Policy.CanonicalProtectedPath l ↔
-      l ≠ [] ∧ l.length ≤ 4096 ∧ PathGood l ∧ Transcrypt.V3Policy.Protected l := by
+      l ≠ [] ∧ l.length ≤ 4096 ∧ PathGood l ∧ ¬ Transcrypt.V3Policy.Reserved l := by
   unfold Transcrypt.V3Policy.CanonicalProtectedPath PathGood Transcrypt.V3Policy.maxPath
     Transcrypt.V3Policy.slash
   tauto
@@ -335,10 +374,9 @@ theorem is_canonical_protected_path_spec (p : Slice U8) :
     have hne : sliceBytes p ≠ [] := fun h => hn0 (by rw [← hlen, h]; rfl)
     split
     · rename_i htrue
-      step with is_protected_path_spec as ⟨ r, hr ⟩
-      rw [hr]
+      step with is_reserved_path_spec as ⟨ r, hr ⟩
       have := hok1.mp htrue
-      simp only [hne, ne_eq, not_false_eq_true, hlen, hle, this, true_and]
+      simp only [decide_eq_true_eq, hr, ne_eq, hne, not_false_eq_true, hlen, hle, this, true_and]
     · rename_i hfalse
       simp only [Bool.not_eq_true] at hfalse
       simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]

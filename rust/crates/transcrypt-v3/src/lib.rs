@@ -21,7 +21,7 @@ pub fn validate_protected_path(path: &[u8]) -> Result<(), String> {
     if transcrypt_v3_core::is_canonical_protected_path(path) {
         Ok(())
     } else {
-        Err("v3 requires a canonical Git-relative *.secret path".into())
+        Err(refusal(Refusal::Path))
     }
 }
 pub const ARGON_MEMORY_KIB: u32 = 65_536;
@@ -127,7 +127,7 @@ impl V3Primitives for Keyed<'_> {
 
 fn refusal(r: Refusal) -> String {
     match r {
-        Refusal::Path => "v3 requires a canonical Git-relative *.secret path",
+        Refusal::Path => "v3 requires a canonical Git-relative path that is not .gitattributes, .gitmodules or in .transcrypt/",
         Refusal::Size => "input exceeds the 16 MiB v3 limit or has an invalid length",
         Refusal::Config => "invalid public v3 configuration",
         Refusal::ConfigAuthentication => "incorrect credentials or tampered public v3 configuration",
@@ -139,6 +139,8 @@ fn refusal(r: Refusal) -> String {
         Refusal::UnexpectedWorktree => "protected worktree differs from staged ciphertext and its plaintext",
         Refusal::Request => "unsupported agent request",
         Refusal::Index => "malformed or unmerged Git index entry",
+        Refusal::Attribute => "unexpected git check-attr output",
+        Refusal::Foreign => "not a v3 record of this configuration",
     }
     .into()
 }
@@ -292,7 +294,7 @@ mod tests {
             let record = encrypt_file(&config, &key, path, b"payload").unwrap();
             assert_eq!(&decrypt_file(&config, &key, path, &record).unwrap()[..], b"payload");
         }
-        for path in [b"".as_slice(), b"absolute", b"/root.secret", b"../bad.secret", b"x/../bad.secret", b"./x.secret", b"x//y.secret", b"x/./y.secret", b"x.secret/", b"evil\0.secret"] {
+        for path in [b"".as_slice(), b".gitattributes", b"/root.secret", b"../bad.secret", b"x/../bad.secret", b"./x.secret", b"x//y.secret", b"x/./y.secret", b"x.secret/", b"evil\0.secret"] {
             assert!(validate_protected_path(path).is_err(), "accepted {:?}", path);
         }
         assert!(validate_protected_path(&std::vec![b'x'; MAX_PATH + 1]).is_err());

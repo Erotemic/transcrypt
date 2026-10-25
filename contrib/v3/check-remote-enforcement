@@ -1,11 +1,12 @@
 #!/bin/sh
-# Check that a Git remote refuses unencrypted *.secret files, i.e. that it
+# Check that a Git remote refuses unencrypted protected files, i.e. that it
 # runs the transcrypt-v3 audit (contrib/v3/pre-receive or an equivalent).
 #
 #   contrib/v3/check-remote-enforcement <remote>
 #
-# Pushes a synthetic, non-secret canary commit (HEAD plus a plaintext
-# `transcrypt-v3-canary.secret`) to a throwaway branch with --no-verify. A
+# Pushes a synthetic, non-secret canary commit to a throwaway branch with
+# --no-verify: HEAD plus a directory `transcrypt-v3-canary/` whose own
+# `.gitattributes` protects its file `canary`, stored in plaintext. A
 # protected remote rejects it with the audit's message. If the remote accepts
 # it, the branch is deleted again and this exits 1. Any other failure (auth,
 # network) is reported as inconclusive, never as protected.
@@ -13,16 +14,18 @@ set -eu
 remote=${1:?usage: check-remote-enforcement <remote>}
 ref=refs/heads/transcrypt-v3-canary-$$
 blob=$(printf 'transcrypt-v3 enforcement canary: not a secret\n' | git hash-object -w --stdin)
-tree=$( { git ls-tree -z HEAD; printf '100644 blob %s\ttranscrypt-v3-canary.secret\0' "$blob"; } | git mktree -z )
+attributes=$(printf 'canary filter=transcrypt-v3\n' | git hash-object -w --stdin)
+canary=$(printf '100644 blob %s\t.gitattributes\000100644 blob %s\tcanary\000' "$attributes" "$blob" | git mktree -z)
+tree=$( { git ls-tree -z HEAD; printf '040000 tree %s\ttranscrypt-v3-canary\0' "$canary"; } | git mktree -z )
 commit=$(git commit-tree "$tree" -p HEAD -m 'transcrypt-v3 enforcement canary (must be rejected)')
 if out=$(git push --no-verify --porcelain "$remote" "$commit:$ref" 2>&1); then
   git push --no-verify -q "$remote" ":$ref" || true
-  echo "FAIL $remote accepted an unencrypted *.secret: deploy contrib/v3/pre-receive or a CI audit" >&2
+  echo "FAIL $remote accepted an unencrypted protected file: deploy contrib/v3/pre-receive or a CI audit" >&2
   exit 1
 fi
 case $out in
-  *transcrypt-v3-canary.secret*"plaintext?"*)
-    echo "ok   $remote rejected an unencrypted *.secret" ;;
+  *transcrypt-v3-canary/canary*"plaintext?"*)
+    echo "ok   $remote rejected an unencrypted protected file" ;;
   *)
     printf 'INCONCLUSIVE the push failed for another reason:\n%s\n' "$out" >&2
     exit 2 ;;

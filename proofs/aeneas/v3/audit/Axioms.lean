@@ -13,8 +13,11 @@ open Transcrypt.V3Verification
 #print axioms decode_config_exact_spec
 #print axioms decode_file_header_exact_spec
 #print axioms parse_config_encode_config
+#print axioms is_reserved_path_spec
 #print axioms is_canonical_protected_path_spec
-#print axioms check_attr_response_ok_spec
+#print axioms parse_attr_record_spec
+#print axioms attrFlagsModel_sound
+#print axioms attrFlagsModel_complete
 #print axioms hydrate_action_spec
 #print axioms lock_action_spec
 #print axioms initialize_config_spec
@@ -26,7 +29,6 @@ open Transcrypt.V3Verification
 #print axioms hydratePlan_spec
 #print axioms lockEntry_spec
 #print axioms verifyPlan_spec
-#print axioms check_attr_paths
 #print axioms Transcrypt.V3Policy.opensTo_unique
 #print axioms Transcrypt.V3Policy.lock_flush_recoverable
 #print axioms parse_index_entry_spec
@@ -41,4 +43,7 @@ open Transcrypt.V3Verification
 #print axioms cleanModel_genuine
 #print axioms cleanModel_idempotent
 #print axioms lockedFilterModel_spec
+#print axioms smudge_action_spec
+#print axioms smudgeModel_spec
+#print axioms Transcrypt.V3Policy.smudgeSpec_keep_envelope
 #print axioms decode_pkt_len_spec

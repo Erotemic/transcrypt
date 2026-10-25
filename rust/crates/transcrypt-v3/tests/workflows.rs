@@ -1,0 +1,550 @@
+//! Everyday workflows with arbitrary protected-file patterns and the
+//! default stored-key unlock, against real Git: selection by
+//! `.gitattributes`, renames, unusual names, credential modes, policy
+//! changes and the reviewed `rekey` symlink attack.
+use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::{ffi::OsString, fs};
+
+const PASS: &[u8] = b"long correct horse battery staple test passphrase\n";
+const NEW: &[u8] = b"a completely different long passphrase\n";
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_transcrypt-v3")
+}
+
+fn exec(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> Output {
+    let mut command = Command::new(name);
+    command.args(args).current_dir(dir).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command.spawn().unwrap();
+    if let Some(value) = input {
+        child.stdin.take().unwrap().write_all(value).unwrap();
+    }
+    child.wait_with_output().unwrap()
+}
+
+fn run(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+    let out = exec(dir, name, args, input);
+    assert!(out.status.success(), "{name} {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    out.stdout
+}
+
+/// Run and return stderr (where v3 reports what it did).
+fn run_err(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> String {
+    let out = exec(dir, name, args, input);
+    assert!(out.status.success(), "{name} {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn run_fails(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> String {
+    let out = exec(dir, name, args, input);
+    assert!(!out.status.success(), "{name} {args:?} unexpectedly succeeded");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn staged(repo: &Path, path: &str) -> Vec<u8> {
+    run(repo, "git", &["show", &format!(":{path}")], None)
+}
+
+fn committed(repo: &Path, path: &str) -> Vec<u8> {
+    run(repo, "git", &["show", &format!("HEAD:{path}")], None)
+}
+
+fn is_record(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"TV3F\0\x01")
+}
+
+struct Scratch {
+    root: PathBuf,
+    repos: Vec<PathBuf>,
+}
+
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "transcrypt-v3-flow-{tag}-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        Scratch { root, repos: Vec::new() }
+    }
+
+    /// A Git repository with one public commit, not yet using v3.
+    fn git_repo(&mut self, name: &str) -> PathBuf {
+        let repo = self.root.join(name);
+        fs::create_dir_all(&repo).unwrap();
+        run(&repo, "git", &["init", "-q"], None);
+        run(&repo, "git", &["config", "user.name", "Example"], None);
+        run(&repo, "git", &["config", "user.email", "example@example.test"], None);
+        fs::write(repo.join("README"), b"public\n").unwrap();
+        run(&repo, "git", &["add", "README"], None);
+        run(&repo, "git", &["commit", "-qm", "seed"], None);
+        self.repos.push(repo.clone());
+        repo
+    }
+
+    fn clone(&mut self, from: &str, name: &str) -> PathBuf {
+        run(&self.root, "git", &["clone", "-q", from, name], None);
+        let repo = self.root.join(name);
+        run(&repo, "git", &["config", "user.name", "Example"], None);
+        run(&repo, "git", &["config", "user.email", "example@example.test"], None);
+        self.repos.push(repo.clone());
+        repo
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        for repo in &self.repos {
+            let _ = exec(repo, bin(), &["lock"], None);
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// The acceptance criterion of the product charter: `.env`, a file in a
+/// directory, a whole directory, a custom pattern, names with spaces,
+/// quotes, newlines and non-UTF-8 bytes, an executable, a nested
+/// `.gitattributes` and an exclusion all get exactly the guarantees the
+/// old `*.secret` files had, through ordinary Git commands.
+#[test]
+fn arbitrary_patterns_protect_exactly_the_selected_files() {
+    let mut scratch = Scratch::new("patterns");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", ".env", "config/production.yaml", "private/**", "*.key",
+        "name with space.txt"], Some(PASS));
+    fs::create_dir_all(repo.join("config")).unwrap();
+    fs::create_dir_all(repo.join("private/deep/er")).unwrap();
+    fs::create_dir_all(repo.join("nested")).unwrap();
+    let odd = OsString::from_vec(b"private/odd \xff'\"\nname".to_vec());
+    let files: Vec<(PathBuf, &[u8])> = vec![
+        (".env".into(), b"API_KEY=hunter2\n"),
+        ("config/production.yaml".into(), b"password: swordfish\n"),
+        ("private/deep/er/notes.md".into(), b"deep private notes\n"),
+        ("private/run.sh".into(), b"#!/bin/sh\necho private\n"),
+        ("server.key".into(), b"-----BEGIN KEY-----\n"),
+        ("name with space.txt".into(), b"spaced secret\n"),
+        (odd.clone().into(), b"odd secret\x00\xff"),
+        ("nested/local.cfg".into(), b"nested secret\n"),
+    ];
+    for (path, content) in &files {
+        fs::write(repo.join(path), content).unwrap();
+    }
+    fs::set_permissions(repo.join("private/run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    // A nested policy, and a public file excluded from a protected directory.
+    fs::write(repo.join("nested/.gitattributes"), b"local.cfg transcrypt\n").unwrap();
+    fs::write(repo.join("private/PUBLIC.md"), b"public readme\n").unwrap();
+    let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    attributes.extend_from_slice(b"private/PUBLIC.md -filter -diff -merge\n");
+    fs::write(repo.join(".gitattributes"), attributes).unwrap();
+    fs::write(repo.join("config/development.yaml"), b"public config\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "protected files"], None);
+    let listing = run(&repo, "git", &["ls-files", "-z", "-s"], None);
+    assert!(listing.split(|b| *b == 0).any(|e| e.starts_with(b"100755") && e.ends_with(b"private/run.sh")));
+    for (path, content) in &files {
+        let name = path.to_str().map(str::to_owned).unwrap_or_else(|| String::from_utf8_lossy(odd.as_encoded_bytes()).into_owned());
+        let blob = match path.to_str() {
+            Some(p) => committed(&repo, p),
+            None => {
+                let entry = listing.split(|b| *b == 0).find(|e| e.ends_with(b"odd \xff'\"\nname")).unwrap();
+                let oid = std::str::from_utf8(&entry[7..entry.iter().position(|b| *b == b'\t').unwrap() - 2]).unwrap();
+                run(&repo, "git", &["cat-file", "blob", oid], None)
+            },
+        };
+        assert!(is_record(&blob), "{name} committed unencrypted");
+        assert!(!blob.windows(content.len().min(6)).any(|w| w == &content[..content.len().min(6)]), "{name} leaks");
+        assert_eq!(fs::read(repo.join(path)).unwrap(), *content, "{name} worktree");
+    }
+    for public in ["README", "private/PUBLIC.md", "config/development.yaml", ".gitattributes", "nested/.gitattributes"] {
+        assert!(!is_record(&committed(&repo, public)), "{public} must stay public");
+    }
+    let out = String::from_utf8(run(&repo, bin(), &["audit"], None)).unwrap();
+    assert!(out.contains("8 protected record(s) checked, all authenticated"), "{out}");
+    // A fresh clone sees ciphertext until it unlocks, then the same files.
+    let clone = scratch.clone("repo", "clone");
+    assert!(is_record(&fs::read(clone.join(".env")).unwrap()));
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    for (path, content) in &files {
+        assert_eq!(fs::read(clone.join(path)).unwrap(), *content);
+    }
+    assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & 0o111, 0o111,
+        "an executable protected file stays executable");
+    assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
+    // Lock restores ciphertext (keeping modes), and unlock decrypts again.
+    run(&clone, bin(), &["lock"], None);
+    assert!(is_record(&fs::read(clone.join("private/run.sh")).unwrap()));
+    assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & 0o111, 0o111);
+    assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(clone.join(&odd)).unwrap(), b"odd secret\x00\xff");
+}
+
+/// Unlock once: the key is stored (not the passphrase), no process keeps
+/// running, and Git works in later processes without prompting. Plaintext
+/// has ordinary permissions. Lock forgets the key.
+#[test]
+fn stored_key_unlock_needs_no_agent_and_follows_the_umask() {
+    let mut scratch = Scratch::new("stored");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", ".env"], Some(PASS));
+    fs::write(repo.join(".env"), b"one\n").unwrap();
+    run(&repo, "git", &["add", ".env"], None);
+    run(&repo, "git", &["commit", "-qm", "env"], None);
+    let key = repo.join(".git/transcrypt-v3/key");
+    assert_eq!(fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(!repo.join(".git/transcrypt-v3/session.sock").exists(), "no agent in the default mode");
+    assert!(!fs::read(repo.join(".git/config")).unwrap().windows(8).any(|w| w == &PASS[..8]));
+    // Every later Git command finds the key by itself.
+    run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
+    fs::write(repo.join(".env"), b"two\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "two"], None);
+    let script = "umask 022 && exec git checkout -q -";
+    run(&repo, "sh", &["-c", script], None);
+    assert_eq!(fs::read(repo.join(".env")).unwrap(), b"one\n", "checkout decrypts directly");
+    assert_eq!(fs::metadata(repo.join(".env")).unwrap().permissions().mode() & 0o777, 0o644,
+        "plaintext follows the umask in the default mode");
+    let diff = String::from_utf8(run(&repo, "git", &["diff", "HEAD", "side", "--", ".env"], None)).unwrap();
+    assert!(diff.contains("-one") && diff.contains("+two"), "{diff}");
+    run(&repo, "git", &["merge", "-q", "side"], None);
+    assert_eq!(fs::read(repo.join(".env")).unwrap(), b"two\n");
+    run(&repo, bin(), &["lock"], None);
+    assert!(!key.exists(), "lock forgets the key");
+    assert!(is_record(&fs::read(repo.join(".env")).unwrap()));
+    fs::write(repo.join("new.env"), b"x\n").unwrap();
+    let err = run_fails(&repo, bin(), &["protect", "new.env"], None);
+    assert!(err.contains("locked"), "{err}");
+    fs::remove_file(repo.join("new.env")).unwrap();
+}
+
+/// Both credential modes produce byte-identical records: the mode changes
+/// where the key waits, not the ciphertext.
+#[test]
+fn stored_and_private_modes_encrypt_identically() {
+    let mut scratch = Scratch::new("modes");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.txt"], Some(PASS));
+    let stored = run(&repo, bin(), &["clean", "a.txt"], Some(b"same input\n"));
+    assert_eq!(run(&repo, bin(), &["smudge", "a.txt"], Some(&stored)), b"same input\n");
+    run(&repo, bin(), &["unlock", "--private", "--password-stdin"], Some(PASS));
+    assert!(!repo.join(".git/transcrypt-v3/key").exists());
+    assert!(repo.join(".git/transcrypt-v3/session.sock").exists());
+    let private = run(&repo, bin(), &["clean", "a.txt"], Some(b"same input\n"));
+    assert!(is_record(&stored));
+    assert_eq!(stored, private);
+    // Private mode releases plaintext to Git only under a private umask.
+    let smudge = format!("umask 077 && exec '{}' smudge a.txt", bin());
+    assert_eq!(run(&repo, "sh", &["-c", &smudge], Some(&stored)), b"same input\n");
+    let smudge = format!("umask 022 && exec '{}' smudge a.txt", bin());
+    assert_eq!(run(&repo, "sh", &["-c", &smudge], Some(&stored)), stored);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert!(repo.join(".git/transcrypt-v3/key").exists());
+    assert!(!repo.join(".git/transcrypt-v3/session.sock").exists(), "switching back stops the agent");
+}
+
+/// `git mv` keeps the blob, which is bound to the old path. The pre-commit
+/// hook re-encrypts it for the new name, also for whole directories and for
+/// moves from an unprotected name; a clone decrypts every result.
+#[test]
+fn renames_are_re_encrypted_for_their_new_path() {
+    let mut scratch = Scratch::new("rename");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.secret", "vault/**"], Some(PASS));
+    fs::create_dir_all(repo.join("dir")).unwrap();
+    fs::write(repo.join("a.secret"), b"alpha\n").unwrap();
+    fs::write(repo.join("dir/b.secret"), b"beta\n").unwrap();
+    fs::write(repo.join("dir/c.secret"), b"gamma\n").unwrap();
+    fs::write(repo.join("notes.txt"), b"was public\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "files"], None);
+    run(&repo, "git", &["mv", "a.secret", "renamed.secret"], None);
+    run(&repo, "git", &["mv", "dir", "vault"], None);
+    run(&repo, "git", &["mv", "notes.txt", "vault/notes.txt"], None);
+    // Status says what the hook will do. Until then Git refuses to decrypt
+    // the moved record at its new path, and says how to fix it.
+    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    assert!(status.contains("renamed or invalid") && status.contains("staged unencrypted"), "{status}");
+    let err = run_fails(&repo, "git", &["diff", "--cached", "-M"], None);
+    assert!(err.contains("run `git add renamed.secret`"), "{err}");
+    let err = run_err(&repo, "git", &["commit", "-qm", "moves"], None);
+    assert!(err.contains("re-encrypting renamed.secret for its new name (it was a.secret)"), "{err}");
+    assert!(err.contains("encrypting vault/notes.txt"), "{err}");
+    for path in ["renamed.secret", "vault/b.secret", "vault/c.secret", "vault/notes.txt"] {
+        assert!(is_record(&committed(&repo, path)), "{path}");
+    }
+    run(&repo, bin(), &["verify-index"], None);
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    let out = String::from_utf8(run(&repo, bin(), &["audit"], None)).unwrap();
+    assert!(out.contains("all authenticated"), "{out}");
+    // `git add` after the move re-encrypts right away (Git re-cleans the
+    // renamed file), so `git diff --cached` works before committing too.
+    run(&repo, "git", &["mv", "renamed.secret", "again.secret"], None);
+    run(&repo, "git", &["add", "again.secret"], None);
+    let diff = String::from_utf8(run(&repo, "git", &["diff", "--cached", "-M"], None)).unwrap();
+    assert!(diff.contains("again.secret") && !diff.contains("TV3F"), "{diff}");
+    run(&repo, bin(), &["verify-index"], None);
+    run(&repo, "git", &["commit", "-qm", "again"], None);
+    let clone = scratch.clone("repo", "clone");
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(clone.join("again.secret")).unwrap(), b"alpha\n");
+    assert_eq!(fs::read(clone.join("vault/c.secret")).unwrap(), b"gamma\n");
+    assert_eq!(fs::read(clone.join("vault/notes.txt")).unwrap(), b"was public\n");
+}
+
+/// While locked nothing can be re-encrypted: a renamed record is refused at
+/// commit (its envelope alone would pass), and a record moved without
+/// re-encryption (`--no-verify`) is refused by the keyless audit.
+#[test]
+fn locked_renames_and_unbound_moves_are_refused() {
+    let mut scratch = Scratch::new("lockedmv");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
+    fs::write(repo.join("a.secret"), b"alpha\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "a"], None);
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, "git", &["mv", "a.secret", "b.secret"], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "locked move"], None);
+    assert!(err.contains("b.secret holds the encrypted a.secret") && err.contains("unlocked"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "unbound move"], None);
+    let err = run_fails(&repo, bin(), &["audit"], None);
+    assert!(err.contains("moved here without re-encryption"), "{err}");
+    // Unlocked again: undo, and the same move goes through.
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&repo, "git", &["mv", "a.secret", "b.secret"], None);
+    run(&repo, "git", &["commit", "-qm", "unlocked move"], None);
+    run(&repo, bin(), &["audit"], None);
+}
+
+/// `protect` encrypts files that were already tracked (warning that history
+/// keeps them), refuses patterns that select repository metadata, and
+/// `unprotect` deliberately returns files to plaintext.
+#[test]
+fn protect_and_unprotect_change_the_policy_explicitly() {
+    let mut scratch = Scratch::new("protect");
+    let repo = scratch.git_repo("repo");
+    fs::write(repo.join("creds.json"), b"{\"token\": \"t\"}\n").unwrap();
+    run(&repo, "git", &["add", "creds.json"], None);
+    run(&repo, "git", &["commit", "-qm", "plaintext creds"], None);
+    run(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    let err = run_err(&repo, bin(), &["protect", "creds.json"], None);
+    assert!(err.contains("encrypting creds.json") && err.contains("earlier commits"), "{err}");
+    assert!(is_record(&staged(&repo, "creds.json")));
+    assert_eq!(fs::read(repo.join("creds.json")).unwrap(), b"{\"token\": \"t\"}\n");
+    run(&repo, "git", &["commit", "-qm", "protect creds"], None);
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    run(&repo, bin(), &["audit"], None);
+    // Protecting again changes nothing.
+    run(&repo, bin(), &["protect", "creds.json"], None);
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    // Metadata is never encrypted.
+    let attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    let err = run_fails(&repo, bin(), &["protect", "*"], None);
+    assert!(err.contains(".gitattributes") && err.contains("narrower"), "{err}");
+    assert_eq!(fs::read(repo.join(".gitattributes")).unwrap(), attributes, "refused edit is undone");
+    // A hand-written rule that selects metadata is refused by Git's filter
+    // run and by verify-index, with the same explanation.
+    fs::write(repo.join(".gitattributes"), [attributes.as_slice(), b".gitattributes transcrypt\n"].concat()).unwrap();
+    let err = run_fails(&repo, "git", &["add", ".gitattributes"], None);
+    assert!(err.contains("never encrypts .gitattributes"), "{err}");
+    fs::write(repo.join(".gitattributes"), &attributes).unwrap();
+    // Unprotect: the next commit stores the plaintext, as asked.
+    let err = run_err(&repo, bin(), &["unprotect", "creds.json"], None);
+    assert!(err.contains("UNENCRYPTED") && err.contains("creds.json"), "{err}");
+    assert_eq!(staged(&repo, "creds.json"), b"{\"token\": \"t\"}\n");
+    run(&repo, "git", &["commit", "-qm", "unprotect"], None);
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    let err = run_fails(&repo, bin(), &["unprotect", "creds.json"], None);
+    assert!(err.contains("no `creds.json transcrypt` line"), "{err}");
+}
+
+/// A pulled rekey leaves the stored key stale: nothing is decrypted or
+/// encrypted with it (files stay ciphertext, plaintext is refused with an
+/// explanation) until `unlock` with the new passphrase.
+#[test]
+fn pulled_rekey_makes_the_stored_key_stale_until_unlock() {
+    let mut scratch = Scratch::new("stale");
+    let origin = scratch.git_repo("origin");
+    run(&origin, bin(), &["init", "--password-stdin", ".env"], Some(PASS));
+    fs::write(origin.join(".env"), b"before\n").unwrap();
+    run(&origin, "git", &["add", "-A"], None);
+    run(&origin, "git", &["commit", "-qm", "env"], None);
+    let clone = scratch.clone("origin", "clone");
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&origin, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    run(&origin, "git", &["commit", "-qm", "rekey"], None);
+    run(&clone, "git", &["pull", "-q", "--no-rebase"], None);
+    assert!(is_record(&fs::read(clone.join(".env")).unwrap()), "a stale key decrypts nothing");
+    let status = String::from_utf8(run(&clone, bin(), &["status"], None)).unwrap();
+    assert!(status.contains("does not match .transcrypt/config"), "{status}");
+    fs::write(clone.join(".env"), b"edited\n").unwrap();
+    let err = run_fails(&clone, "git", &["add", ".env"], None);
+    assert!(err.contains("rekeyed"), "{err}");
+    run(&clone, "git", &["checkout", "--", ".env"], None);
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(NEW));
+    assert_eq!(fs::read(clone.join(".env")).unwrap(), b"before\n");
+}
+
+/// Review F-02: `rekey` wrote `.transcrypt/config.rekey` with a path-based
+/// write that followed a committed symlink out of the repository. The new
+/// config is now written through held directory descriptors, never through
+/// a symlink, and nothing outside the repository changes.
+#[test]
+fn rekey_never_writes_through_committed_symlinks() {
+    let mut scratch = Scratch::new("rekeylink");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
+    fs::write(repo.join("a.secret"), b"alpha\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "a"], None);
+    let sentinel = scratch.root.join("outside.txt");
+    fs::write(&sentinel, b"SENTINEL\n").unwrap();
+    std::os::unix::fs::symlink(&sentinel, repo.join(".transcrypt/config.rekey")).unwrap();
+    std::os::unix::fs::symlink(&sentinel, repo.join(".transcrypt/config.tmp")).unwrap();
+    run(&repo, "git", &["add", ".transcrypt"], None);
+    run(&repo, "git", &["commit", "-qm", "hostile symlinks"], None);
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    assert_eq!(fs::read(&sentinel).unwrap(), b"SENTINEL\n", "rekey wrote outside the repository");
+    let meta = fs::symlink_metadata(repo.join(".transcrypt/config")).unwrap();
+    assert!(meta.file_type().is_file(), ".transcrypt/config must stay a regular file");
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha\n");
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(NEW));
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha\n");
+    // A config that is itself a symlink is refused before anything is written.
+    fs::remove_file(repo.join(".transcrypt/config")).unwrap();
+    std::os::unix::fs::symlink(&sentinel, repo.join(".transcrypt/config")).unwrap();
+    let err = run_fails(&repo, bin(), &["rekey", "--password-stdin"], Some(PASS));
+    assert!(err.contains("unsafe .transcrypt/config"), "{err}");
+    assert_eq!(fs::read(&sentinel).unwrap(), b"SENTINEL\n");
+    fs::remove_file(repo.join(".transcrypt/config")).unwrap();
+    run(&repo, "git", &["checkout", "--", ".transcrypt/config"], None);
+}
+
+/// A repository protected by Bash transcrypt (v2) converts to v3 with one
+/// explicit command that keeps the selected patterns, re-encrypts the
+/// decrypted worktree with v3 and leaves the v2 credentials for the user to
+/// remove after checking a fresh clone.
+#[test]
+fn bash_v2_repositories_migrate_to_v3() {
+    let mut scratch = Scratch::new("migrate");
+    let repo = scratch.git_repo("repo");
+    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    fs::create_dir_all(repo.join("private")).unwrap();
+    fs::write(repo.join(".gitattributes"),
+        b"*.key filter=crypt diff=crypt merge=crypt\nprivate/** filter=crypt diff=crypt merge=crypt\n").unwrap();
+    fs::write(repo.join("server.key"), b"v2 protected key\n").unwrap();
+    fs::write(repo.join("private/notes"), b"v2 protected notes\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "v2 secrets"], None);
+    assert!(committed(&repo, "server.key").starts_with(b"U2FsdGVk"), "v2 encrypts");
+    // Uncommitted work is refused, nothing changes.
+    fs::write(repo.join("server.key"), b"edited\n").unwrap();
+    let err = run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
+    assert!(err.contains("commit or discard"), "{err}");
+    assert!(!repo.join(".transcrypt").exists());
+    run(&repo, "git", &["checkout", "--", "server.key"], None);
+    let err = run_err(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
+    assert!(err.contains("Converted 2 file(s)") && err.contains("--remove-section transcrypt"), "{err}");
+    let attributes = String::from_utf8(fs::read(repo.join(".gitattributes")).unwrap()).unwrap();
+    assert!(attributes.contains("*.key transcrypt") && attributes.contains("private/** transcrypt")
+        && !attributes.contains("filter=crypt"), "{attributes}");
+    for path in ["server.key", "private/notes"] {
+        assert!(is_record(&staged(&repo, path)), "{path} not v3 ciphertext");
+    }
+    assert_eq!(fs::read(repo.join("server.key")).unwrap(), b"v2 protected key\n");
+    run(&repo, "git", &["commit", "-qm", "convert to v3"], None);
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    run(&repo, bin(), &["audit"], None);
+    // A fresh clone needs only v3.
+    let clone = scratch.clone("repo", "clone");
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(clone.join("private/notes")).unwrap(), b"v2 protected notes\n");
+    // The v2 history is still v2 ciphertext.
+    assert!(run(&repo, "git", &["show", "HEAD~1:server.key"], None).starts_with(b"U2FsdGVk"));
+}
+
+/// A merge that needs no conflict resolution never runs `pre-commit`; the
+/// `pre-merge-commit` hook verifies the merged index instead (read-only),
+/// so a branch carrying a moved record is refused before the merge commit
+/// exists, and a good branch merges normally.
+#[test]
+fn merges_are_verified_before_the_merge_commit() {
+    let mut scratch = Scratch::new("premerge");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
+    fs::write(repo.join("a.secret"), b"alpha\n").unwrap();
+    fs::write(repo.join("b.secret"), b"beta\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "secrets"], None);
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    // A branch that moves a.secret's record over b.secret without re-encryption.
+    run(&repo, "git", &["checkout", "-q", "-b", "hostile"], None);
+    let a_oid = String::from_utf8(run(&repo, "git", &["rev-parse", ":a.secret"], None)).unwrap();
+    run(&repo, "git", &["update-index", "--cacheinfo", "100644", a_oid.trim(), "b.secret"], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "hostile move"], None);
+    run(&repo, "git", &["checkout", "-q", "-f", main.trim()], None);
+    fs::write(repo.join("README"), b"diverge\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "diverge"], None);
+    // Unlocked, the merge's own checkout refuses to decrypt the moved record.
+    let err = run_fails(&repo, "git", &["merge", "-q", "--no-edit", "hostile"], None);
+    assert!(err.contains("does not open at b.secret"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD"], None);
+    run(&repo, bin(), &["hydrate"], None);
+    // Locked, checkout keeps records encrypted, so the pre-merge-commit hook
+    // is what refuses: b.secret holds a.secret's record.
+    run(&repo, bin(), &["lock"], None);
+    let err = run_fails(&repo, "git", &["merge", "-q", "--no-edit", "hostile"], None);
+    assert!(err.contains("b.secret holds the encrypted a.secret"), "{err}");
+    let _ = exec(&repo, "git", &["merge", "--abort"], None);
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    // An honest branch merges without ceremony.
+    run(&repo, "git", &["checkout", "-q", "-b", "honest", "HEAD~1"], None);
+    fs::write(repo.join("a.secret"), b"alpha v2\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "edit"], None);
+    run(&repo, "git", &["checkout", "-q", main.trim()], None);
+    run(&repo, "git", &["merge", "-q", "--no-edit", "honest"], None);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha v2\n");
+    run(&repo, bin(), &["audit"], None);
+}
+
+/// Git finds renames by content similarity, and a record re-encrypted for
+/// its new path shares no bytes with the old one. So a protected file
+/// renamed on one branch and edited on the other merges as a modify/delete
+/// conflict. That conflict is recoverable in plaintext: both versions are
+/// decrypted in the worktree, and the resolution is committed encrypted.
+#[test]
+fn rename_and_edit_on_two_branches_conflict_in_plaintext() {
+    let mut scratch = Scratch::new("renamemerge");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
+    fs::write(repo.join("a.secret"), b"one\ntwo\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "base"], None);
+    run(&repo, "git", &["checkout", "-q", "-b", "renamed"], None);
+    run(&repo, "git", &["mv", "a.secret", "b.secret"], None);
+    run(&repo, "git", &["commit", "-qm", "rename"], None);
+    run(&repo, "git", &["checkout", "-q", "-b", "edited", "HEAD~1"], None);
+    fs::write(repo.join("a.secret"), b"one\nTWO\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "edit"], None);
+    let err = String::from_utf8_lossy(&exec(&repo, "git", &["merge", "--no-edit", "renamed"], None).stdout).into_owned();
+    assert!(err.contains("CONFLICT (modify/delete): a.secret"), "{err}");
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"one\nTWO\n", "our edit, decrypted");
+    assert_eq!(fs::read(repo.join("b.secret")).unwrap(), b"one\ntwo\n", "their rename, decrypted");
+    fs::write(repo.join("b.secret"), b"one\nTWO\n").unwrap();
+    run(&repo, "git", &["rm", "-q", "a.secret"], None);
+    run(&repo, "git", &["add", "b.secret"], None);
+    run(&repo, "git", &["commit", "-qm", "merge: keep the edit under the new name"], None);
+    assert!(is_record(&committed(&repo, "b.secret")));
+    run(&repo, bin(), &["audit"], None);
+}

@@ -129,6 +129,11 @@ impl Dir {
         Ok((kind == libc::S_IFREG, kind == libc::S_IFLNK))
     }
 
+    /// Permission bits of an entry, without following a symlink.
+    pub(crate) fn entry_mode(&self, name: &OsStr) -> io::Result<u32> {
+        self.lstat(name).map(|st| st.st_mode as u32 & 0o7777)
+    }
+
     /// The stamp of an entry, without following a symlink.
     pub(crate) fn stamp(&self, name: &OsStr) -> io::Result<Stamp> {
         self.lstat(name).map(|st| Stamp::from_stat(&st))

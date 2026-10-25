@@ -8,7 +8,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    check_attr_response_ok, is_object_id, parse_index_entry, MAX_RECORD,
+    is_object_id, parse_attr_record, parse_index_entry, MAX_RECORD,
 };
 
 /// The most any Git subprocess may print to us. Listings of a hostile index
@@ -31,10 +31,14 @@ fn run_bounded(command: Command, input: Option<Vec<u8>>, limit: usize) -> Result
     Ok(data.to_vec())
 }
 
+/// A finished subprocess: exit status, output (wiped when dropped) and the
+/// kept part of its error output.
+pub(crate) type Finished = (std::process::ExitStatus, Zeroizing<Vec<u8>>, Vec<u8>);
+
 /// `run_bounded`, returning the exit status (and output, which may be
 /// plaintext, kept in wiped memory) instead of failing on a non-zero exit.
 pub(crate) fn run_bounded_status(mut command: Command, input: Option<Vec<u8>>, limit: usize)
-    -> Result<(std::process::ExitStatus, Zeroizing<Vec<u8>>, Vec<u8>), String>
+    -> Result<Finished, String>
 {
     let desc = format!("{:?}", command);
     command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
@@ -253,7 +257,9 @@ impl Drop for Objects {
 /// of its content goes through `oid`, so a concurrent index change cannot
 /// substitute other bytes for the ones that were verified.
 pub(crate) struct Staged {
+    /// The mode is 100644 or 100755 (`mode`): a file Git filters.
     pub(crate) regular: bool,
+    pub(crate) mode: String,
     pub(crate) oid: String,
     pub(crate) path: Vec<u8>,
 }
@@ -280,6 +286,7 @@ pub(crate) fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
         }
         entries.push(Staged {
             regular: parsed.regular,
+            mode: String::from_utf8_lossy(&entry[..6]).into_owned(),
             oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
             path: entry[parsed.path_start..].to_vec(),
         });
@@ -344,54 +351,99 @@ pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
     parse_listing(&git(root, &["ls-files", "--stage", "-z"])?)
 }
 
-/// Check Git's *effective* staged filter policy, not just the contents of the
-/// committed root .gitattributes file. Per-directory attributes and the
-/// checkout-local .git/info/attributes take precedence over that file.
-/// `--cached` evaluates staged .gitattributes, while -z/--stdin transports
-/// exact path bytes, including newlines and non-UTF8 names.
-pub(crate) fn verify_staged_filter_attributes(root: &Path, paths: &[&[u8]]) -> Result<(), String> {
-    if paths.is_empty() { return Ok(()); }
+/// Which attribute files Git consults to decide what is protected.
+#[derive(Clone, Copy)]
+pub(crate) enum Attributes<'a> {
+    /// The staged `.gitattributes` files: what the next commit will say.
+    Staged,
+    /// The worktree's: what `git add` applies to a new file.
+    Worktree,
+    /// Those of a temporary index file (a commit's, for `audit`).
+    Index(&'a Path),
+}
+
+/// For each path, whether Git's effective `filter` attribute is
+/// `transcrypt-v3`. Git evaluates its own attribute rules (patterns, nested
+/// files, macros, `.git/info/attributes`); every answer record is parsed by
+/// the verified core (`parse_attr_record`), which requires the records to
+/// name exactly the requested paths, in order, and nothing else. Paths go to
+/// Git as raw bytes (`-z --stdin`), so any valid Unix name works.
+pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<bool>, String> {
+    if paths.is_empty() { return Ok(Vec::new()); }
     if paths.iter().any(|path| path.is_empty() || path.contains(&0)) {
-        return Err("invalid indexed protected path".into());
+        return Err("invalid Git path".into());
     }
     let mut request = Vec::new();
     for path in paths {
         request.extend_from_slice(path);
         request.push(0);
     }
-    let response = git_with_input(root, &["check-attr", "--cached", "-z", "--stdin", "filter"], &request)?;
-    if !check_attr_response_ok(&request, &response) {
-        return Err("protected staged path does not have the required effective transcrypt-v3 filter".into());
+    let mut command = git_command(Some(root));
+    command.arg("check-attr");
+    match from {
+        Attributes::Staged => { command.arg("--cached"); },
+        Attributes::Worktree => {},
+        Attributes::Index(file) => { command.arg("--cached").env("GIT_INDEX_FILE", file); },
     }
-    Ok(())
+    command.args(["-z", "--stdin", "filter"]);
+    let response = run_bounded(command, Some(request), GIT_OUTPUT_LIMIT)?;
+    let mut flags = Vec::with_capacity(paths.len());
+    let mut at = 0;
+    for path in paths {
+        let record = parse_attr_record(&response, at, path)
+            .map_err(|_| "unexpected git check-attr output")?;
+        flags.push(record.protected);
+        at = record.next;
+    }
+    if at != response.len() {
+        return Err("unexpected git check-attr output".into());
+    }
+    Ok(flags)
+}
+
+/// The entries among `entries` that Git's attributes protect.
+pub(crate) fn protected_entries(root: &Path, entries: Vec<Staged>, from: Attributes) -> Result<Vec<Staged>, String> {
+    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
+    let flags = protected_flags(root, &paths, from)?;
+    Ok(entries.into_iter().zip(flags).filter(|(_, protected)| *protected).map(|(e, _)| e).collect())
 }
 
 /// The entries a commit adds or changes relative to `parent` (all of its
 /// entries for a root commit), from `diff-tree -r -z --raw` between the two
-/// trees, rewritten to the index-record shape and parsed by the verified core.
-pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Vec<Staged>, String> {
-    let Some(parent) = parent else { return tree_files(root, commit) };
+/// trees, rewritten to the index-record shape and parsed by the verified
+/// core, and the paths it deletes with their old object ids.
+/// Paths a commit deletes, with their old object ids.
+pub(crate) type Deleted = Vec<(Vec<u8>, String)>;
+
+pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<(Vec<Staged>, Deleted), String> {
+    let Some(parent) = parent else { return Ok((tree_files(root, commit)?, Vec::new())) };
     let data = git(root, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
     parse_diff_tree(&data)
 }
 
 /// Parse `diff-tree -r -z --raw` records,
 /// `:<old mode> <new mode> <old oid> <new oid> <status> NUL <path> NUL`, keeping
-/// the new side of every entry that is not deleted.
-fn parse_diff_tree(data: &[u8]) -> Result<Vec<Staged>, String> {
+/// the new side of every entry that is not deleted, and the deleted paths
+/// with their old object ids.
+fn parse_diff_tree(data: &[u8]) -> Result<(Vec<Staged>, Deleted), String> {
     if !data.is_empty() && data.last() != Some(&0) {
         return Err("truncated git diff-tree output".into());
     }
     let mut fields = data.split(|b| *b == 0);
     let mut listing = Vec::new();
+    let mut deleted = Vec::new();
     while let Some(header) = fields.next() {
         if header.is_empty() { break; }
         let path = fields.next().ok_or("malformed git diff-tree output")?;
         let parts: Vec<&[u8]> = header.strip_prefix(b":").ok_or("malformed git diff-tree output")?
             .split(|b| *b == b' ').collect();
-        let [_, mode, _, oid, status] = parts[..] else { return Err("malformed git diff-tree output".into()) };
+        let [_, mode, old, oid, status] = parts[..] else { return Err("malformed git diff-tree output".into()) };
         match status {
-            b"D" => continue,
+            b"D" => {
+                if !is_object_id(old) { return Err("malformed git diff-tree output".into()); }
+                deleted.push((path.to_vec(), String::from_utf8_lossy(old).into_owned()));
+                continue
+            },
             b"A" | b"M" | b"T" => {},
             _ => return Err("unexpected git diff-tree status".into()),
         }
@@ -402,7 +454,7 @@ fn parse_diff_tree(data: &[u8]) -> Result<Vec<Staged>, String> {
         listing.extend_from_slice(path);
         listing.push(0);
     }
-    parse_listing(&listing)
+    Ok((parse_listing(&listing)?, deleted))
 }
 
 /// The `.transcrypt/config` blob of a commit, if it has one.
@@ -466,7 +518,7 @@ mod tests {
                     }
                 }
             }
-            if let Ok(entries) = parse_diff_tree(&input) {
+            if let Ok((entries, _)) = parse_diff_tree(&input) {
                 for e in entries {
                     assert!(is_object_id(e.oid.as_bytes()));
                     let mut needle = e.path.clone();
@@ -482,14 +534,15 @@ mod tests {
         // The valid records parse to exactly their fields.
         let tree = parse_listing(&[tree_record(&valid_tree).unwrap().as_slice(), b"\0"].concat()).unwrap();
         assert_eq!((tree[0].regular, tree[0].oid.as_str(), tree[0].path.as_slice()), (true, oid, &b"dir/a b.secret"[..]));
-        let diff = parse_diff_tree(&valid_diff).unwrap();
+        let (diff, _) = parse_diff_tree(&valid_diff).unwrap();
         assert_eq!((diff[0].regular, diff[0].oid.as_str(), diff[0].path.as_slice()), (true, oid, &b"dir/a\tb.secret"[..]));
         assert_eq!(batch_blob_size(format!("{oid} blob 12\n").as_bytes(), oid), Some(12));
         for bad in ["blob 12\n", " blob 012\n", " blob +12\n", " blob 12", " tree 12\n", " missing\n"] {
             let header = if bad.starts_with(' ') { format!("{oid}{bad}") } else { bad.to_owned() };
             assert_eq!(batch_blob_size(header.as_bytes(), oid), None, "{bad:?}");
         }
-        assert!(parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap().is_empty());
+        let (kept, deleted) = parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap();
+        assert!(kept.is_empty() && deleted == [(b"gone.secret".to_vec(), oid.to_owned())]);
     }
 
     #[test]

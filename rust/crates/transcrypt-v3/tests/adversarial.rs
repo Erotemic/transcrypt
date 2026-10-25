@@ -63,7 +63,7 @@ impl Scratch {
         fs::write(repo.join("README"), b"public\n").unwrap();
         run(&repo, "git", &["add", "README"], None);
         run(&repo, "git", &["commit", "-qm", "seed"], None);
-        run(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+        run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
         fs::create_dir(repo.join("dir")).unwrap();
         fs::write(repo.join("a.secret"), b"alpha plaintext\n").unwrap();
         fs::write(repo.join("dir/b.secret"), b"beta plaintext\n").unwrap();
@@ -85,6 +85,18 @@ impl Drop for Scratch {
         }
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// Switch a repository to the private mode: key in an in-memory agent,
+/// decrypted files private to this user.
+fn private(repo: &Path) {
+    run(repo, bin(), &["unlock", "--private", "--password-stdin"], Some(PASS));
+    assert!(socket(repo).exists() && !repo.join(".git/transcrypt-v3/key").exists());
+}
+
+/// Whether a key is available (stored, or held by the private agent).
+fn unlocked(repo: &Path) -> bool {
+    repo.join(".git/transcrypt-v3/key").exists() || socket(repo).exists()
 }
 
 fn staged(repo: &Path, path: &str) -> Vec<u8> {
@@ -123,7 +135,7 @@ fn interrupted_lock_resumes_and_unstaged_edits_are_never_discarded() {
     run(&repo, bin(), &["lock"], None);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), a_record);
     assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), staged(&repo, "dir/b.secret"));
-    assert!(!socket(&repo).exists());
+    assert!(!unlocked(&repo));
 
     run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
     run(&repo, bin(), &["hydrate"], None);
@@ -132,7 +144,7 @@ fn interrupted_lock_resumes_and_unstaged_edits_are_never_discarded() {
     run_fails(&repo, bin(), &["lock"], None);
     assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), b"unsaved edit\n");
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
-    assert!(socket(&repo).exists(), "a refused lock keeps the key available");
+    assert!(unlocked(&repo), "a refused lock keeps the key available");
     fs::write(repo.join("dir/b.secret"), b"beta plaintext\n").unwrap();
     run(&repo, bin(), &["lock"], None);
 }
@@ -190,19 +202,20 @@ fn symlinked_protected_files_are_never_followed() {
 fn stale_agent_socket_is_reclaimed_but_live_agent_is_not_replaced() {
     let mut scratch = Scratch::new("socket");
     let repo = scratch.repo("repo");
+    private(&repo);
     // Unlocking again keeps the live agent (and needs no passphrase).
-    let out = exec(&repo, bin(), &["unlock"], None);
+    let out = exec(&repo, bin(), &["unlock", "--private"], None);
     assert!(out.status.success() && String::from_utf8_lossy(&out.stderr).contains("Already unlocked"));
     run(&repo, bin(), &["lock"], None);
     // A dead agent leaves its socket inode behind; it has no listener.
     drop(UnixListener::bind(socket(&repo)).unwrap());
     assert!(socket(&repo).exists());
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&repo, bin(), &["unlock", "--private", "--password-stdin"], Some(PASS));
     run(&repo, bin(), &["verify-index"], None);
     // A regular file squatting on the socket path is never removed.
     run(&repo, bin(), &["lock"], None);
     fs::write(socket(&repo), b"not a socket").unwrap();
-    run_fails(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run_fails(&repo, bin(), &["unlock", "--private", "--password-stdin"], Some(PASS));
     fs::remove_file(socket(&repo)).unwrap();
 }
 
@@ -210,6 +223,7 @@ fn stale_agent_socket_is_reclaimed_but_live_agent_is_not_replaced() {
 fn agent_refuses_hostile_requests_and_keeps_serving() {
     let mut scratch = Scratch::new("agent");
     let repo = scratch.repo("repo");
+    private(&repo);
     let config = fs::read(repo.join(".transcrypt/config")).unwrap();
     let record = staged(&repo, "a.secret");
     assert_eq!(agent_request(&repo, b'D', &config, b"a.secret", &record).unwrap(), b"alpha plaintext\n");
@@ -219,7 +233,8 @@ fn agent_refuses_hostile_requests_and_keeps_serving() {
         (b'D', &foreign, &b"a.secret"[..], &record[..]),   // different public config
         (b'D', &config, b"dir/b.secret", &record[..]),     // cross-path replay
         (b'D', &config, b"../a.secret", &record[..]),      // noncanonical path
-        (b'D', &config, b"a.txt", &record[..]),            // unprotected path
+        (b'D', &config, b"a.txt", &record[..]),            // another path
+        (b'D', &config, b".gitattributes", &record[..]),   // reserved path
         (b'E', &config, b"dir/b.secret", &record[..]),     // double encryption
         (b'P', &config, b"a.secret", &b""[..]),            // control op with a path
         (b'Q', &config, b"", &b""[..]),                    // unknown opcode
@@ -265,31 +280,22 @@ fn foreign_truncated_and_plaintext_index_entries_fail_closed() {
 fn help_and_status_report_state_without_changing_anything() {
     let mut scratch = Scratch::new("status");
     let help = String::from_utf8(run(&scratch.root, bin(), &["help"], None)).unwrap();
-    assert!(help.contains("transcrypt-v3 unlock") && help.contains("*.secret"));
+    assert!(help.contains("transcrypt-v3 unlock") && help.contains("transcrypt-v3 protect PATTERN"));
     let repo = scratch.repo("repo");
     let text = |repo: &Path| String::from_utf8(run(repo, bin(), &["status"], None)).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    for f in ["a.secret", "dir/b.secret"] {
-        fs::set_permissions(repo.join(f), fs::Permissions::from_mode(0o644)).unwrap();
-    }
     let unlocked = text(&repo);
-    assert!(unlocked.contains("session:    unlocked"), "{unlocked}");
-    assert!(unlocked.contains("2 decrypted *.secret file(s) are readable by other users"), "{unlocked}");
-    for f in ["a.secret", "dir/b.secret"] {
-        fs::set_permissions(repo.join(f), fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    assert!(!text(&repo).contains("readable by other users"));
+    assert!(unlocked.contains("key:        unlocked (stored"), "{unlocked}");
     assert!(unlocked.contains("2 plaintext"), "{unlocked}");
     fs::write(repo.join("a.secret"), b"edited\n").unwrap();
     fs::write(repo.join("new.secret"), b"untracked\n").unwrap();
     let edited = text(&repo);
-    assert!(edited.contains("modified") && edited.contains("1 untracked"), "{edited}");
+    assert!(edited.contains("modified") && edited.contains("1 untracked protected"), "{edited}");
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"edited\n", "status is read-only");
     fs::remove_file(repo.join("new.secret")).unwrap();
     fs::write(repo.join("a.secret"), b"alpha plaintext\n").unwrap();
     run(&repo, bin(), &["lock"], None);
     let locked = text(&repo);
-    assert!(locked.contains("session:    locked") && locked.contains("2 ciphertext"), "{locked}");
+    assert!(locked.contains("key:        locked") && locked.contains("2 ciphertext"), "{locked}");
 }
 
 #[cfg(target_os = "linux")]
@@ -298,6 +304,7 @@ fn key_agent_is_not_dumpable_or_ptrace_readable() {
     use std::os::fd::AsRawFd;
     let mut scratch = Scratch::new("dump");
     let repo = scratch.repo("repo");
+    private(&repo);
     let stream = UnixStream::connect(socket(&repo)).unwrap();
     let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -348,7 +355,7 @@ fn failed_init_rolls_back_so_it_can_be_rerun() {
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(dir.join("session.sock"), b"squatter").unwrap();
-    let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    let err = run_fails(&repo, bin(), &["init", "--private", "--password-stdin"], Some(PASS));
     assert!(err.contains("rolled back"), "{err}");
     assert!(!repo.join(".transcrypt").exists());
     assert!(!repo.join(".gitattributes").exists());
@@ -391,7 +398,7 @@ fn unlock_hydrates_by_default_and_reports_refusals() {
     std::os::unix::fs::symlink("../a.secret", clone.join("dir/b.secret")).unwrap();
     let out = exec(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("hydration changed nothing"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("decryption changed nothing"));
     assert_eq!(fs::read(clone.join("a.secret")).unwrap(), record);
     fs::remove_file(clone.join("dir/b.secret")).unwrap();
     run(&clone, "git", &["checkout", "--", "dir/b.secret"], None);
@@ -459,7 +466,11 @@ fn pre_push_and_audit_refuse_plaintext_in_history() {
     let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
         Some(b"PLAINTEXT LEAK\n"))).unwrap();
     run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
-    run_fails(&repo, "git", &["commit", "-qm", "blocked by pre-commit"], None);
+    // The pre-commit hook encrypts what was staged around the filter.
+    run(&repo, "git", &["commit", "-qm", "sealed by pre-commit"], None);
+    assert!(staged(&repo, "leak.secret").starts_with(b"TV3F\0\x01"));
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "bypass"], None);
     let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
     assert!(err.contains("leak.secret") && err.contains("refusing to push"), "{err}");
@@ -561,7 +572,7 @@ fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
     run(&repo, bin(), &["lock"], None);
     let full = start.elapsed().as_micros() as u64;
     run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
-    let live = |repo: &Path| repo.join(".git/transcrypt-v3/session.sock").exists();
+    let live = |repo: &Path| unlocked(repo);
     for round in 0..12u64 {
         let op = if round % 2 == 0 { "lock" } else { "hydrate" };
         if !live(&repo) {
@@ -598,44 +609,44 @@ fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
     }
 }
 
-/// Plaintext that Git's checkout wrote with a permissive umask is made
-/// private by hydrate (published files are created 0600).
+/// Private mode: plaintext that Git's checkout wrote with a permissive umask
+/// is made private by hydrate (published files are created 0600).
 #[test]
 fn hydrate_makes_existing_plaintext_private() {
     use std::os::unix::fs::PermissionsExt;
     let mut scratch = Scratch::new("perms");
     let repo = scratch.repo("repo");
+    private(&repo);
     fs::set_permissions(repo.join("a.secret"), fs::Permissions::from_mode(0o644)).unwrap();
-    fs::write(repo.join("KEY.SECRET"), b"looks protected\n").unwrap();
-    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
-    assert!(status.contains("readable by other users"), "{status}");
-    assert!(status.contains("KEY.SECRET is NOT encrypted"), "{status}");
-    fs::remove_file(repo.join("KEY.SECRET")).unwrap();
     run(&repo, bin(), &["hydrate"], None);
     assert_eq!(fs::metadata(repo.join("a.secret")).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
 }
 
-/// `init` refuses a repository that already tracks `*.secret` files: they
-/// are plaintext in the index and history, and v3 would only appear to
-/// protect them.
+/// Files tracked in plaintext before their pattern was protected are
+/// encrypted in the index right away, with a warning that their earlier
+/// commits stay readable.
 #[test]
-fn init_refuses_secrets_already_tracked_in_plaintext() {
-    let scratch = Scratch::new("pretracked");
+fn init_encrypts_files_already_tracked_in_plaintext() {
+    let mut scratch = Scratch::new("pretracked");
     let repo = scratch.root.join("repo");
     fs::create_dir(&repo).unwrap();
+    scratch.repos.push(repo.clone());
     run(&repo, "git", &["init", "-q"], None);
     run(&repo, "git", &["config", "user.name", "Example"], None);
     run(&repo, "git", &["config", "user.email", "example@example.test"], None);
     fs::write(repo.join("old.secret"), b"PLAINTEXT IN HISTORY\n").unwrap();
     run(&repo, "git", &["add", "old.secret"], None);
-    let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
-    assert!(err.contains("old.secret") && err.contains("already tracked"), "{err}");
     run(&repo, "git", &["commit", "-qm", "plaintext secret"], None);
-    run(&repo, "git", &["rm", "-q", "--cached", "old.secret"], None);
-    let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
-    assert!(err.contains("old.secret"), "{err}");
-    assert!(!repo.join(".transcrypt").exists());
+    let out = exec(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("encrypting old.secret") && err.contains("stay readable in earlier commits"), "{err}");
+    assert!(staged(&repo, "old.secret").starts_with(b"TV3F\0\x01"));
+    assert_eq!(fs::read(repo.join("old.secret")).unwrap(), b"PLAINTEXT IN HISTORY\n");
+    run(&repo, "git", &["commit", "-qm", "enable"], None);
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    run(&repo, bin(), &["audit"], None);
 }
 
 /// A hostile staged or committed blob above the 16 MiB bound is refused
@@ -690,34 +701,6 @@ unsafe fn libc_fcntl_clear_cloexec(fd: i32) {
     fcntl(fd, F_SETFD, 0);
 }
 
-/// Editor and merge copies of secrets (`a.secret~`, `.a.secret.swp`,
-/// `a.secret.orig`) are plaintext but not protected: they are ignored
-/// locally, reported by status, and refused by the push audit.
-#[test]
-fn editor_and_merge_copies_of_secrets_are_caught() {
-    let mut scratch = Scratch::new("copies");
-    let repo = scratch.repo("repo");
-    for name in ["a.secret~", "dir/.b.secret.swp", "a.secret.orig"] {
-        fs::write(repo.join(name), b"PLAINTEXT COPY\n").unwrap();
-    }
-    // Ignored by `git add -A` in an unlocked checkout.
-    run(&repo, "git", &["add", "-A"], None);
-    assert!(run(&repo, "git", &["diff", "--cached", "--name-only"], None).is_empty());
-    // Reported by status even when force-added, and refused by audit.
-    run(&repo, "git", &["add", "-f", "a.secret.orig"], None);
-    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
-    assert!(status.contains("a.secret.orig is NOT encrypted"), "{status}");
-    let err = run_fails(&repo, "git", &["commit", "-qm", "blocked by pre-commit"], None);
-    assert!(err.contains("a.secret.orig"), "{err}");
-    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "backup copy"], None);
-    let err = run_fails(&repo, bin(), &["audit"], None);
-    assert!(err.contains("a.secret.orig") && err.contains("copy of a secret"), "{err}");
-    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
-    for name in ["a.secret~", "dir/.b.secret.swp", "a.secret.orig"] {
-        let _ = fs::remove_file(repo.join(name));
-    }
-}
-
 /// The shipped server-side hook (`contrib/v3/pre-receive`) refuses a push
 /// carrying plaintext even when the client skipped its own pre-push hook.
 #[test]
@@ -766,8 +749,8 @@ fn assert_no_exposed_plaintext(repo: &Path, step: &str) {
     }
 }
 
-/// Regression: with `umask 022`, Git wrote smudged plaintext with mode
-/// 0644, readable by every local user. Smudge now releases plaintext only
+/// Private mode. Regression: with `umask 022`, Git wrote smudged plaintext
+/// with mode 0644, readable by every local user. Smudge now releases plaintext only
 /// when Git's umask makes the file private; otherwise Git writes the
 /// authenticated ciphertext and the post-checkout/post-merge/post-rewrite
 /// hooks (or `hydrate`) publish the plaintext with mode 0600.
@@ -775,6 +758,7 @@ fn assert_no_exposed_plaintext(repo: &Path, step: &str) {
 fn git_never_writes_plaintext_readable_by_others() {
     let mut scratch = Scratch::new("umask");
     let repo = scratch.repo("repo");
+    private(&repo);
     run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
     fs::write(repo.join("a.secret"), b"alpha on side\n").unwrap();
     run(&repo, "git", &["commit", "-qam", "side change"], None);
@@ -890,7 +874,8 @@ fn doctor_detects_missing_protection() {
     }
     fs::write(repo.join(".git/info/attributes"), b"*.secret -filter\n").unwrap();
     let out = exec(&repo, bin(), &["doctor"], None);
-    assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL a new transcrypt-v3-probe.secret"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL no local attribute file overrides"), "{}",
+        String::from_utf8_lossy(&out.stdout));
     fs::remove_file(repo.join(".git/info/attributes")).unwrap();
     assert!(exec(&repo, bin(), &["doctor"], None).status.success());
 }
@@ -925,6 +910,7 @@ fn remote_enforcement_check_detects_unprotected_remotes() {
 fn agent_survives_random_hostile_frames() {
     let mut scratch = Scratch::new("agentfuzz");
     let repo = scratch.repo("repo");
+    private(&repo);
     let config = fs::read(repo.join(".transcrypt/config")).unwrap();
     let record = staged(&repo, "a.secret");
     let mut state = 0x51ed_270b_2b3a_44c1u64;
@@ -1104,12 +1090,13 @@ fn deleted_protected_files_do_not_block_lock_or_hydrate() {
 
 /// Concurrent edits of one secret merge like plaintext: non-overlapping
 /// edits merge automatically, and a conflict shows decrypted conflict
-/// markers (mode 0600, after `hydrate` under a permissive umask) that are
+/// markers (in private mode: mode 0600, after `hydrate` under a permissive umask) that are
 /// resolved and committed as usual. The merged record stays encrypted.
 #[test]
 fn secrets_merge_as_plaintext() {
     let mut scratch = Scratch::new("merge");
     let repo = scratch.repo("repo");
+    private(&repo);
     let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
     let main = main.trim().to_owned();
     fs::write(repo.join("a.secret"), b"one\ntwo\nthree\nfour\nfive\n").unwrap();
@@ -1218,7 +1205,7 @@ fn unlock_and_lock_are_idempotent() {
     run(&repo, bin(), &["lock"], None);
 }
 
-/// Linked worktrees share the repository's agent, hooks and drivers: one
+/// Linked worktrees share the repository's key, hooks and drivers: one
 /// unlock decrypts every worktree, each with its own private staging, and
 /// commits made in a linked worktree are encrypted and verified.
 #[test]
@@ -1226,8 +1213,7 @@ fn linked_worktrees_share_one_unlocked_session() {
     let mut scratch = Scratch::new("worktree");
     let repo = scratch.repo("repo");
     let linked = scratch.root.join("linked");
-    git_with_umask(&repo, "022", &["worktree", "add", "-q", "-b", "feature", linked.to_str().unwrap()]);
-    assert_no_exposed_plaintext(&linked, "linked worktree checkout");
+    run(&repo, "git", &["worktree", "add", "-q", "-b", "feature", linked.to_str().unwrap()], None);
     assert_eq!(fs::read(linked.join("a.secret")).unwrap(), b"alpha plaintext\n");
     fs::write(linked.join("dir/b.secret"), b"beta from the linked worktree\n").unwrap();
     run(&linked, "git", &["commit", "-qam", "edit in linked worktree"], None);
@@ -1252,7 +1238,7 @@ fn linked_worktrees_share_one_unlocked_session() {
 }
 
 /// A v3 repository used as a submodule (its `.git` is a file pointing into
-/// the superproject) unlocks, hydrates privately and locks on its own.
+/// the superproject) unlocks, decrypts and locks on its own.
 #[test]
 fn submodules_are_independent_v3_repositories() {
     let mut scratch = Scratch::new("submodule");
@@ -1266,18 +1252,18 @@ fn submodules_are_independent_v3_repositories() {
     assert!(fs::symlink_metadata(sub.join(".git")).unwrap().is_file());
     run(&sub, bin(), &["unlock", "--password-stdin"], Some(PASS));
     assert_eq!(fs::read(sub.join("a.secret")).unwrap(), b"alpha plaintext\n");
-    assert_no_exposed_plaintext(&sub, "submodule");
     run(&sub, bin(), &["lock"], None);
     assert!(fs::read(sub.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
 }
 
-/// A secret created under a permissive umask is made private as soon as Git
-/// stages it (the clean filter sees its plaintext).
+/// Private mode: a secret created under a permissive umask is made private
+/// as soon as Git stages it (the clean filter sees its plaintext).
 #[test]
 fn staging_a_new_secret_makes_it_private() {
     use std::os::unix::fs::PermissionsExt;
     let mut scratch = Scratch::new("addprivate");
     let repo = scratch.repo("repo");
+    private(&repo);
     fs::write(repo.join("new.secret"), b"fresh secret\n").unwrap();
     fs::set_permissions(repo.join("new.secret"), fs::Permissions::from_mode(0o644)).unwrap();
     run(&repo, "git", &["add", "new.secret"], None);
@@ -1298,17 +1284,17 @@ fn pulled_rekey_retires_the_stale_agent() {
     scratch.repos.push(clone.clone());
     run(&clone, "git", &["config", "user.name", "Example"], None);
     run(&clone, "git", &["config", "user.email", "example@example.test"], None);
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&clone, bin(), &["unlock", "--private", "--password-stdin"], Some(PASS));
     run(&origin, bin(), &["rekey", "--password-stdin"], Some(NEW));
     run(&origin, "git", &["commit", "-qm", "rekey"], None);
     run(&clone, "git", &["pull", "-q", "--no-rebase"], None);
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(NEW));
+    run(&clone, bin(), &["unlock", "--private", "--password-stdin"], Some(NEW));
     assert_eq!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
     run(&clone, bin(), &["lock"], None);
     assert!(!socket(&clone).exists(), "an agent survived lock");
     // Without unlocking again, lock alone also retires a stale agent.
     run(&clone, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&clone, bin(), &["unlock", "--private", "--password-stdin"], Some(PASS));
     run(&clone, "git", &["pull", "-q", "--no-rebase"], None);
     run(&clone, bin(), &["lock"], None);
     std::thread::sleep(Duration::from_millis(300));

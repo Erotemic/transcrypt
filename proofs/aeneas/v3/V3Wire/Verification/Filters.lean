@@ -8,6 +8,12 @@ Models of the Git filter decisions made by the adapter.
   authentically opens at its path is returned unchanged (idempotent clean);
   anything else is sealed with `seal_record`. The agent's Encrypt operation
   and the reseal step of `lock` both go through this function.
+* `smudgeModel` mirrors the smudge filter of `transcrypt_v3`: the verified
+  core decides (`smudge_action`); a record of this configuration is opened
+  with `open_record` when the key is available (and, when `keepRecord` -- the
+  adapter's private mode under a permissive umask -- the authenticated record
+  itself is kept), any other v3 record is kept unchanged, and bytes without
+  the v3 envelope are refused.
 * `lockedFilterModel` mirrors the clean and smudge filters when no agent is
   running: the input passes through unchanged only if its keyless envelope
   names the checkout's configuration; otherwise the filter refuses.
@@ -106,6 +112,64 @@ theorem lockedFilterModel_spec (input : Slice U8) (id : Std.Array U8 16#usize) :
     simp only [WP.spec_ok, Option.some.injEq]
     rintro out rfl
     exact ⟨rfl, hk.1 hkt⟩
+  · simp
+
+/-- Model of the smudge filter. `id` is the checkout's configuration id and
+    `unlocked` whether the key is available. `none` = refusal. -/
+def smudgeModel (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
+    (id : Std.Array U8 16#usize) (unlocked keepRecord : Bool) (path input buf : Slice U8) :
+    RustM (Option (Slice U8)) := do
+  let a ← smudge_action input id unlocked
+  match a with
+  | core.result.Result.Ok SmudgeAction.Keep => ok (some input)
+  | core.result.Result.Ok SmudgeAction.Open =>
+    let (r, out) ← open_record inst prims config path input buf
+    match r with
+    | core.result.Result.Ok _ => ok (some (if keepRecord then input else out))
+    | core.result.Result.Err _ => ok none
+  | core.result.Result.Err _ => ok none
+
+/-- **Smudge never presents unauthenticated non-record bytes.** Its output is
+    either the unchanged input, which then has the v3 file envelope (within
+    the size bound) and, whenever the spec's smudge decision was to open it,
+    authenticates at this path under this configuration; or exactly the
+    plaintext that the input authentically opens to. -/
+theorem smudgeModel_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
+    (id : Std.Array U8 16#usize) (unlocked keepRecord : Bool) (path input buf : Slice U8) :
+    smudgeModel inst prims config id unlocked keepRecord path input buf ⦃ r => ∀ out, r = some out →
+      (out = input ∧
+        (∃ found, Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes input) = some found ∧
+          input.length ≤ maxRecord) ∧
+        (smudgeSpec (sliceBytes input) (wireBytes id) unlocked = some .open_ →
+          ∃ pt, OpensTo σ (wireBytes config) (sliceBytes path) (sliceBytes input) pt)) ∨
+      OpensTo σ (wireBytes config) (sliceBytes path) (sliceBytes input) (sliceBytes out) ⦄ := by
+  unfold smudgeModel
+  step with smudge_action_spec input id unlocked as ⟨ a, ha ⟩
+  rcases a with (_ | _) | e
+  · -- Open
+    simp only
+    step with open_record_spec h config path input buf as ⟨ r, out, hr ⟩
+    rcases r with u | x
+    · simp only at hr ⊢
+      simp only [WP.spec_ok, Option.some.injEq]
+      rintro out' rfl
+      cases keepRecord
+      · exact Or.inr hr
+      · left
+        obtain ⟨hl, hd⟩ := opensTo_envelopeOk σ hr
+        refine ⟨rfl, ⟨_, hd, by rw [sliceBytes_length'] at hl; exact hl⟩, fun _ => ⟨_, hr⟩⟩
+    · simp
+  · -- Keep
+    obtain ⟨s, hs, ha'⟩ := ha
+    have hk : s = .keep := by cases s <;> simp_all [smudgeResult]
+    subst hk
+    simp only [WP.spec_ok, Option.some.injEq]
+    rintro out rfl
+    left
+    obtain ⟨found, hf, hl⟩ := smudgeSpec_keep_envelope hs
+    refine ⟨rfl, ⟨found, hf, by rw [sliceBytes_length'] at hl; exact hl⟩, fun ho => ?_⟩
+    rw [hs] at ho
+    cases ho
   · simp
 
 end Transcrypt.V3Verification

@@ -165,4 +165,72 @@ theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize)
           simp only at hr
           omega
 
+/-! ## Smudge decision -/
+
+/-- Rust encoding of the specification's smudge decision. -/
+def smudgeResult : Transcrypt.V3Policy.SmudgeAction → SmudgeAction
+  | .open_ => .Open
+  | .keep => .Keep
+
+/-- `smudge_action` makes exactly the spec's smudge decision: `Ok` with the
+    spec's action when `smudgeSpec` decides one, and a refusal exactly when
+    `smudgeSpec` refuses (`Size` for an oversized blob, `Foreign` for bytes
+    without the v3 file envelope). -/
+@[step]
+theorem smudge_action_spec (blob : Slice U8) (id : Std.Array U8 16#usize) (unlocked : Bool) :
+    smudge_action blob id unlocked ⦃ r => match r with
+      | core.result.Result.Ok a => ∃ s, Transcrypt.V3Policy.smudgeSpec (sliceBytes blob)
+          (wireBytes id) unlocked = some s ∧ a = smudgeResult s
+      | core.result.Result.Err e =>
+          Transcrypt.V3Policy.smudgeSpec (sliceBytes blob) (wireBytes id) unlocked = none ∧
+          (e = Refusal.Size ∧ Transcrypt.V3Policy.maxRecord < blob.length ∨
+           e = Refusal.Foreign ∧ blob.length ≤ Transcrypt.V3Policy.maxRecord ∧
+             Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes blob) = none) ⦄ := by
+  unfold smudge_action Transcrypt.V3Policy.smudgeSpec
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  have hrl : blob.len.val = blob.length := by simp
+  have hbl := env_sliceBytes_length blob
+  have := usize_max_ge
+  step with MAX_RECORD_spec as ⟨ i1, i1_post ⟩
+  split
+  · rename_i hgt
+    have hgt' : Transcrypt.V3Policy.maxRecord < blob.length := by
+      simp only [gt_iff_lt, UScalar.lt_equiv, i1_post, hrl] at hgt; exact hgt
+    simp only [WP.spec_ok, hbl, gt_iff_lt, hgt', if_true, true_and]
+    simp
+  · rename_i hgt
+    have hle : blob.length ≤ Transcrypt.V3Policy.maxRecord := by
+      simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, i1_post, hrl] at hgt; exact hgt
+    have hng : ¬ (sliceBytes blob).length > Transcrypt.V3Policy.maxRecord := by omega
+    rw [if_neg hng]
+    step with parse_file_header_spec as ⟨ r, hr ⟩
+    cases r with
+    | Ok found =>
+      simp only at hr ⊢
+      rw [hr]
+      simp only
+      split
+      · rename_i hu
+        step*
+        all_goals
+          have hiff : b = true ↔ wireBytes found = wireBytes id := by
+            rw [b_post, s_post, s1_post]
+            simp only [Array.to_slice]
+            constructor
+            · intro h; simp only [wireBytes]; rw [h]
+            · intro h; exact map_val_injective h
+        · rename_i hb
+          exact ⟨_, by rw [if_pos ⟨hu, hiff.mp hb⟩], rfl⟩
+        · rename_i hb
+          exact ⟨_, by rw [if_neg (fun h => hb (hiff.mpr h.2))], rfl⟩
+      · rename_i hu
+        simp only [WP.spec_ok]
+        exact ⟨_, by rw [if_neg (fun h => hu h.1)], rfl⟩
+    | Err e =>
+      have hnone : Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes blob) = none := by
+        cases e with
+        | Magic => exact hr.2
+        | Length => exact Transcrypt.V3Wire.file_truncated _ (by rw [hbl]; exact hr)
+      simp [WP.spec_ok, hnone, hle]
+
 end Transcrypt.V3Verification

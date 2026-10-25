@@ -335,15 +335,4 @@ theorem verifyPlan_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#u
       · exact hb hbt e' he'
     · simp
 
-/-- **Effective filter attribute.** If the core accepts Git's `check-attr`
-    response for the request built from NUL-free paths, Git reported
-    `filter: transcrypt-v3` for every one of those paths, in order. -/
-theorem check_attr_paths (request response : Slice U8) (paths : List (List Nat))
-    (hreq : sliceBytes request = attrRequest paths) (hnul : ∀ p ∈ paths, 0 ∉ p) :
-    check_attr_response_ok request response ⦃ b => b = true →
-      sliceBytes response = paths.flatMap (· ++ filterAttrSuffix) ⦄ := by
-  apply WP.spec_mono (check_attr_response_ok_spec request response)
-  intro b hb hbt
-  rw [hb.1 hbt, hreq, expectedAttrResponse_paths paths hnul]
-
 end Transcrypt.V3Verification

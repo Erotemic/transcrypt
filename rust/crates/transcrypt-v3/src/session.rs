@@ -1,4 +1,4 @@
-//! Unix credential agent for the v3 proof of concept.
+//! The credential agent of the private mode (`unlock --private`).
 //!
 //! The authenticated 64-byte key enters the child through a private pipe,
 //! never through argv, the environment, an on-disk key file, or the socket.
@@ -42,12 +42,23 @@ pub(crate) enum Operation {
 }
 
 fn directory(root: &Path) -> Result<PathBuf, String> {
+    existing_directory(root)?.ok_or_else(|| "no local v3 session directory; run unlock".into())
+}
+
+/// `.git/transcrypt-v3`, shared by all worktrees, if it exists: the stored
+/// key or the agent's socket. Anything but a real 0700 directory owned by
+/// this user is refused.
+pub(crate) fn existing_directory(root: &Path) -> Result<Option<PathBuf>, String> {
     let path = crate::git::common_dir(root).join("transcrypt-v3");
-    let meta = fs::symlink_metadata(&path).map_err(|_| "no local v3 session directory; run unlock")?;
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("cannot examine .git/transcrypt-v3".into()),
+    };
     if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 || meta.uid() != euid() {
-        return Err("unsafe local v3 session directory; require a real 0700 directory owned by this user".into());
+        return Err("unsafe local v3 credential directory; require a real 0700 directory owned by this user".into());
     }
-    Ok(path)
+    Ok(Some(path))
 }
 
 fn euid() -> u32 {
@@ -91,23 +102,17 @@ fn same_user(stream: &UnixStream) -> Result<(), String> {
     }
 }
 
-fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
     let path = crate::git::common_dir(root).join("transcrypt-v3");
     match fs::symlink_metadata(&path) {
         Ok(_) => {},
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             fs::DirBuilder::new().mode(0o700).create(&path)
-                .map_err(|e| format!("cannot create session directory: {e}"))?;
+                .map_err(|e| format!("cannot create the credential directory: {e}"))?;
         },
-        Err(e) => return Err(format!("cannot examine session directory: {e}")),
+        Err(e) => return Err(format!("cannot examine the credential directory: {e}")),
     }
-    let path = directory(root)?;
-    // Never silently leave the previous proof-of-concept's disk key behind.
-    // Users can `lock` with the earlier binary before applying this update.
-    if fs::symlink_metadata(path.join("key")).is_ok() {
-        return Err("old v3 on-disk key found; lock with the prior binary or remove .git/transcrypt-v3/key before unlocking".into());
-    }
-    Ok(path)
+    directory(root)
 }
 
 /// Unix socket addresses are limited to ~104 (macOS) or 108 (Linux) bytes,

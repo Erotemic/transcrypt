@@ -167,15 +167,20 @@ pub const MAX_FILE: usize = 16 * 1024 * 1024;
 pub const MAX_PATH: usize = 4096;
 /// Largest record or agent body: a maximal plaintext plus its envelope.
 pub const MAX_RECORD: usize = MAX_FILE + FILE_MIN_LEN;
-/// Protected Git paths are exactly those ending in this suffix.
-pub const PROTECTED_SUFFIX: [u8; 7] = *b".secret";
-/// Git `check-attr -z` output following each path: `NUL filter NUL transcrypt-v3 NUL`.
-pub const FILTER_ATTR_SUFFIX: [u8; 22] = *b"\0filter\0transcrypt-v3\0";
+/// The Git attribute that selects protected files, and its value.
+pub const FILTER_ATTR: [u8; 6] = *b"filter";
+pub const FILTER_DRIVER: [u8; 13] = *b"transcrypt-v3";
+/// Repository metadata that Git or v3 must read unencrypted: the committed
+/// configuration directory, attribute files and the submodule map.
+pub const METADATA_DIR: [u8; 12] = *b".transcrypt/";
+pub const ATTRIBUTES_NAME: [u8; 14] = *b".gitattributes";
+pub const ATTRIBUTES_SUFFIX: [u8; 15] = *b"/.gitattributes";
+pub const MODULES_NAME: [u8; 11] = *b".gitmodules";
 
 /// Every reason the protocol core refuses an operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// Path is not a canonical protected Git-relative pathname.
+    /// Path is not a canonical Git-relative pathname that may be protected.
     Path,
     /// Input, output buffer or record exceeds or mismatches a size bound.
     Size,
@@ -199,6 +204,11 @@ pub enum Refusal {
     Request,
     /// A `git ls-files --stage -z` record is malformed or not stage 0.
     Index,
+    /// A `git check-attr -z` record is malformed or names another path.
+    Attribute,
+    /// A record of another configuration, or bytes that are no v3 record,
+    /// where a record of this configuration is required.
+    Foreign,
 }
 
 /// The cryptographic boundary. Implementations must realize exactly the
@@ -239,23 +249,21 @@ pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-/// A Git path is protected iff it ends in `.secret`. Because the suffix has
-/// no `/`, this is the same as the basename ending in `.secret`, which is
-/// also what Git's `*.secret` attribute pattern matches.
-pub fn is_protected_path(path: &[u8]) -> bool {
-    let n = path.len();
-    if n < PROTECTED_SUFFIX.len() {
-        return false;
-    }
-    let start = n - PROTECTED_SUFFIX.len();
-    let mut k = 0;
-    while k < PROTECTED_SUFFIX.len() {
-        if path[start + k] != PROTECTED_SUFFIX[k] {
-            return false;
-        }
-        k += 1;
-    }
-    true
+/// Whether `bytes` ends with `suffix`.
+fn ends_with(bytes: &[u8], suffix: &[u8]) -> bool {
+    bytes.len() >= suffix.len() && matches_at(bytes, bytes.len() - suffix.len(), suffix)
+}
+
+/// Paths that are never protected, whatever the attributes say: anything in
+/// `.transcrypt/` (the public configuration), every `.gitattributes` (Git
+/// reads the staged blob to decide what is protected) and `.gitmodules`.
+/// Which other paths are protected is the user's choice, made with Git
+/// attributes (`filter=transcrypt-v3`); see `parse_attr_record`.
+pub fn is_reserved_path(path: &[u8]) -> bool {
+    matches_at(path, 0, &METADATA_DIR)
+        || bytes_eq(path, &ATTRIBUTES_NAME)
+        || ends_with(path, &ATTRIBUTES_SUFFIX)
+        || bytes_eq(path, &MODULES_NAME)
 }
 
 /// A path component `path[start..end]` is acceptable iff it is nonempty and
@@ -273,8 +281,9 @@ fn component_ok(path: &[u8], start: usize, end: usize) -> bool {
 
 /// The authenticated-path policy: nonempty, at most `MAX_PATH` bytes, no NUL,
 /// every `/`-separated component nonempty and neither `.` nor `..` (so no
-/// absolute paths, duplicate or trailing separators), and protected. Raw
-/// bytes are authoritative; there is no Unicode or filesystem normalization.
+/// absolute paths, duplicate or trailing separators), and not reserved
+/// metadata. Raw bytes are authoritative; there is no Unicode or filesystem
+/// normalization. Any such path may be protected.
 pub fn is_canonical_protected_path(path: &[u8]) -> bool {
     let n = path.len();
     if n == 0 || n > MAX_PATH {
@@ -292,7 +301,7 @@ pub fn is_canonical_protected_path(path: &[u8]) -> bool {
         }
         i += 1;
     }
-    ok && is_protected_path(path)
+    ok && !is_reserved_path(path)
 }
 
 /// Create the public configuration for a freshly derived key and salt.
@@ -489,14 +498,51 @@ pub fn authorize_agent_request(
     Err(Refusal::Request)
 }
 
-/// Whether `response[j..]` starts with `FILTER_ATTR_SUFFIX`.
-fn filter_suffix_at(response: &[u8], j: usize) -> bool {
-    if response.len() < j || response.len() - j < FILTER_ATTR_SUFFIX.len() {
+/// One record of `git check-attr -z filter` output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttrRecord {
+    /// The value is exactly `transcrypt-v3`: the path is protected.
+    pub protected: bool,
+    /// Where the next record starts.
+    pub next: usize,
+}
+
+/// Parse the record at `response[start..]`, which must be
+/// `path NUL filter NUL value NUL` for exactly the requested `path` (Git
+/// answers `--stdin` requests in order). `value` is `unspecified`, `set`,
+/// `unset` or a driver name; only `transcrypt-v3` protects. Selection is
+/// Git's own attribute evaluation: v3 never matches patterns itself.
+pub fn parse_attr_record(response: &[u8], start: usize, path: &[u8]) -> Result<AttrRecord, Refusal> {
+    let n = response.len();
+    // Room for `path NUL filter NUL NUL` at least, written without any
+    // addition that could overflow.
+    if start > n || n - start < path.len() || n - start - path.len() < FILTER_ATTR.len() + 3 {
+        return Err(Refusal::Attribute);
+    }
+    let name = start + path.len();
+    if !matches_at(response, start, path)
+        || response[name] != 0
+        || !matches_at(response, name + 1, &FILTER_ATTR)
+        || response[name + 1 + FILTER_ATTR.len()] != 0
+    {
+        return Err(Refusal::Attribute);
+    }
+    let value = name + FILTER_ATTR.len() + 2;
+    let end = find_nul(response, value);
+    if end == n {
+        return Err(Refusal::Attribute);
+    }
+    Ok(AttrRecord { protected: bytes_eq(&response[value..end], &FILTER_DRIVER), next: end + 1 })
+}
+
+/// Whether `bytes[at..]` starts with `expected`.
+fn matches_at(bytes: &[u8], at: usize, expected: &[u8]) -> bool {
+    if at > bytes.len() || bytes.len() - at < expected.len() {
         return false;
     }
     let mut k = 0;
-    while k < FILTER_ATTR_SUFFIX.len() {
-        if response[j + k] != FILTER_ATTR_SUFFIX[k] {
+    while k < expected.len() {
+        if bytes[at + k] != expected[k] {
             return false;
         }
         k += 1;
@@ -504,30 +550,13 @@ fn filter_suffix_at(response: &[u8], j: usize) -> bool {
     true
 }
 
-/// Check Git's `check-attr --cached -z --stdin filter` response. `request`
-/// is the exact stdin sent to Git: each path followed by one NUL. The
-/// response is accepted iff it is the request with every NUL replaced by
-/// `FILTER_ATTR_SUFFIX`, i.e. every requested path, in order, reports
-/// `filter: transcrypt-v3` and nothing else is reported.
-pub fn check_attr_response_ok(request: &[u8], response: &[u8]) -> bool {
-    let mut ok = true;
-    let mut i = 0;
-    let mut j = 0;
-    while ok && i < request.len() {
-        if request[i] == 0 {
-            if filter_suffix_at(response, j) {
-                j += FILTER_ATTR_SUFFIX.len();
-            } else {
-                ok = false;
-            }
-        } else if j < response.len() && response[j] == request[i] {
-            j += 1;
-        } else {
-            ok = false;
-        }
-        i += 1;
+/// The position of the first NUL in `bytes[from..]`, or `bytes.len()`.
+fn find_nul(bytes: &[u8], from: usize) -> usize {
+    let mut j = from;
+    while j < bytes.len() && bytes[j] != 0 {
+        j += 1;
     }
-    ok && j == response.len()
+    j
 }
 
 /// Length of a credential-agent request header: opcode, the 55-byte public
@@ -583,13 +612,15 @@ pub fn decode_be_u32(b: &[u8; 4]) -> u32 {
     ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
 }
 
-/// Git mode of a regular, non-executable file.
+/// Git modes of a regular file: non-executable and executable.
 pub const REGULAR_MODE: [u8; 6] = *b"100644";
+pub const EXECUTABLE_MODE: [u8; 6] = *b"100755";
 
 /// One parsed `git ls-files --stage -z` record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IndexEntry {
-    /// The mode is exactly `100644`.
+    /// The mode is `100644` or `100755`: a file whose content Git filters
+    /// (not a symlink, whose target Git stores unfiltered, or a submodule).
     pub regular: bool,
     /// The path is `entry[path_start..]`: everything after the first TAB.
     pub path_start: usize,
@@ -616,15 +647,19 @@ pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
     if entry[6] != b' ' || entry[t - 2] != b' ' || entry[t - 1] != b'0' {
         return Err(Refusal::Index);
     }
-    let mut regular = true;
+    let mut plain = true;
+    let mut executable = true;
     let mut k = 0;
     while k < REGULAR_MODE.len() {
         if entry[k] != REGULAR_MODE[k] {
-            regular = false;
+            plain = false;
+        }
+        if entry[k] != EXECUTABLE_MODE[k] {
+            executable = false;
         }
         k += 1;
     }
-    Ok(IndexEntry { regular, path_start: t + 1 })
+    Ok(IndexEntry { regular: plain || executable, path_start: t + 1 })
 }
 
 /// A Git object name as printed by `ls-files --stage` or `ls-tree`: 40
@@ -658,6 +693,37 @@ pub fn record_envelope_ok(record: &[u8], id: &[u8; ID_LEN]) -> bool {
     match parse_file_header(record) {
         Ok(found) => bytes_eq(&found, id),
         Err(_) => false,
+    }
+}
+
+/// What the smudge filter does with a committed blob at a protected path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmudgeAction {
+    /// Authenticate and decrypt it (`open_record`).
+    Open,
+    /// Leave it encrypted: a record that cannot be opened here (locked, or
+    /// another configuration such as history from before a rekey).
+    Keep,
+}
+
+/// Decide the smudge of `blob` for configuration `id`. Only a v3 record is
+/// ever let through unchanged, so a checkout never presents unauthenticated
+/// non-record bytes (plaintext that bypassed the filter) as a protected
+/// file. A record of this configuration is opened when `unlocked`, and that
+/// open authenticates it or fails.
+pub fn smudge_action(blob: &[u8], id: &[u8; ID_LEN], unlocked: bool) -> Result<SmudgeAction, Refusal> {
+    if blob.len() > MAX_RECORD {
+        return Err(Refusal::Size);
+    }
+    match parse_file_header(blob) {
+        Err(_) => Err(Refusal::Foreign),
+        Ok(found) => {
+            if unlocked && bytes_eq(&found, id) {
+                Ok(SmudgeAction::Open)
+            } else {
+                Ok(SmudgeAction::Keep)
+            }
+        }
     }
 }
 
@@ -831,21 +897,23 @@ mod tests {
     #[test]
     fn canonical_path_policy() {
         for good in [b"a.secret".as_slice(), b"dir/x.secret", b"a b.secret", b".secret", b"d/.secret",
-                     b"raw/\xff.secret", b"dir/new\nline.secret", b"...secret", b"a/.../b.secret"] {
+                     b"raw/\xff.secret", b"dir/new\nline.secret", b"...secret", b"a/.../b.secret",
+                     b".env", b"config/production.yaml", b"private/key", b"x", b"x.secret.txt",
+                     b"d/.transcrypt/config", b".transcrypt", b"a.gitattributes", b"d/.gitmodules",
+                     b".gitattributes.d/x"] {
             assert!(is_canonical_protected_path(good), "rejected {:?}", good);
-            assert!(is_protected_path(good));
         }
-        for bad in [b"".as_slice(), b"absolute", b"/root.secret", b"../bad.secret", b"x/../bad.secret",
+        for bad in [b"".as_slice(), b"/root.secret", b"../bad.secret", b"x/../bad.secret",
                     b"./x.secret", b"x//y.secret", b"x/./y.secret", b"x.secret/", b"evil\0.secret",
-                    b"x.secret/..", b"x.secret/.", b"secret", b"x.secreT", b".secre"] {
+                    b"x.secret/..", b"x.secret/.", b".transcrypt/config", b".transcrypt/x",
+                    b".gitattributes", b"d/.gitattributes", b".gitmodules"] {
             assert!(!is_canonical_protected_path(bad), "accepted {:?}", bad);
         }
-        let mut long = std::vec![b'x'; MAX_PATH - 7];
-        long.extend_from_slice(b".secret");
+        let mut long = std::vec![b'x'; MAX_PATH];
         assert!(is_canonical_protected_path(&long));
-        long.insert(0, b'x');
+        long.push(b'x');
         assert!(!is_canonical_protected_path(&long));
-        assert!(is_protected_path(b"x/.secret") && !is_protected_path(b"x.secret.txt"));
+        assert!(is_reserved_path(b".transcrypt/") && !is_reserved_path(b".transcrypt"));
     }
 
     #[test]
@@ -867,7 +935,7 @@ mod tests {
             assert!(open(&m, &config, b"v/a.secret", &flipped).is_err());
             assert_eq!(seal(&m, &config, b"v/a.secret", &rec), Err(Refusal::DoubleEncryption));
             assert_eq!(seal(&m, &config, b"../a.secret", pt), Err(Refusal::Path));
-            assert_eq!(open(&m, &config, b"v/a", &rec), Err(Refusal::Path));
+            assert_eq!(open(&m, &config, b".gitattributes", &rec), Err(Refusal::Path));
         }
         let other = initialize_config(&m, &[4u8; SALT_LEN]).unwrap();
         let rec = seal(&m, &config, b"a.secret", b"x").unwrap();
@@ -903,7 +971,7 @@ mod tests {
         assert_eq!(authorize_agent_request(b'E', &a, &a, b"x.secret", 9), Ok(AgentOp::Encrypt));
         assert_eq!(authorize_agent_request(b'D', &a, &a, b"x.secret", 0), Ok(AgentOp::Decrypt));
         assert_eq!(authorize_agent_request(b'D', &b, &a, b"x.secret", 0), Err(Refusal::ConfigMismatch));
-        assert_eq!(authorize_agent_request(b'E', &a, &a, b"x", 0), Err(Refusal::Path));
+        assert_eq!(authorize_agent_request(b'E', &a, &a, b".transcrypt/config", 0), Err(Refusal::Path));
         assert_eq!(authorize_agent_request(b'P', &a, &a, b"x.secret", 0), Err(Refusal::Request));
         assert_eq!(authorize_agent_request(b'X', &a, &a, b"", 1), Err(Refusal::Request));
         assert_eq!(authorize_agent_request(b'Q', &a, &a, b"", 0), Err(Refusal::Request));
@@ -911,21 +979,39 @@ mod tests {
     }
 
     #[test]
-    fn check_attr_response_must_report_the_filter_for_every_path() {
-        let request = b"a.secret\0d/b.secret\0";
-        let good = b"a.secret\0filter\0transcrypt-v3\0d/b.secret\0filter\0transcrypt-v3\0";
-        assert!(check_attr_response_ok(request, good));
-        assert!(check_attr_response_ok(b"", b""));
-        assert!(!check_attr_response_ok(b"", b"x"));
-        assert!(!check_attr_response_ok(request, &good[..good.len() - 1]));
-        let mut extra = good.to_vec();
-        extra.push(b'a');
-        assert!(!check_attr_response_ok(request, &extra));
-        assert!(!check_attr_response_ok(request,
-            b"a.secret\0filter\0unspecified\0d/b.secret\0filter\0transcrypt-v3\0"));
-        assert!(!check_attr_response_ok(request,
-            b"d/b.secret\0filter\0transcrypt-v3\0a.secret\0filter\0transcrypt-v3\0"));
-        assert!(!check_attr_response_ok(b"a.secret\0", b"a.secret\0filter\0transcrypt-v4\0"));
+    fn attr_records_name_the_requested_path_and_its_filter() {
+        let response = b"a.secret\0filter\0transcrypt-v3\0d/b c\0filter\0unspecified\0e\0filter\0transcrypt-v3x\0";
+        let first = parse_attr_record(response, 0, b"a.secret").unwrap();
+        assert!(first.protected);
+        let second = parse_attr_record(response, first.next, b"d/b c").unwrap();
+        assert!(!second.protected);
+        let third = parse_attr_record(response, second.next, b"e").unwrap();
+        assert!(!third.protected);
+        assert_eq!(third.next, response.len());
+        assert_eq!(parse_attr_record(response, third.next, b""), Err(Refusal::Attribute));
+        // Another path, another attribute, a truncated record, a start beyond the end.
+        assert_eq!(parse_attr_record(response, 0, b"a.secreT"), Err(Refusal::Attribute));
+        assert_eq!(parse_attr_record(response, 0, b"a"), Err(Refusal::Attribute));
+        assert_eq!(parse_attr_record(b"a\0diff\0transcrypt-v3\0", 0, b"a"), Err(Refusal::Attribute));
+        assert_eq!(parse_attr_record(b"a\0filter\0transcrypt-v3", 0, b"a"), Err(Refusal::Attribute));
+        assert_eq!(parse_attr_record(response, response.len() + 1, b""), Err(Refusal::Attribute));
+        // A path containing what looks like a record separator still must match exactly.
+        let tricky = b"x\0filter\0transcrypt-v3\0";
+        assert!(parse_attr_record(tricky, 0, b"x").unwrap().protected);
+        assert_eq!(parse_attr_record(tricky, 0, b"x\0filter"), Err(Refusal::Attribute));
+    }
+
+    #[test]
+    fn smudge_keeps_only_records_and_opens_only_its_own_config() {
+        let id = [7u8; ID_LEN];
+        let mut record = std::vec::Vec::from(&encode_file_header(&id)[..]);
+        record.extend_from_slice(&[0u8; TAG_LEN]);
+        assert_eq!(smudge_action(&record, &id, true), Ok(SmudgeAction::Open));
+        assert_eq!(smudge_action(&record, &id, false), Ok(SmudgeAction::Keep));
+        assert_eq!(smudge_action(&record, &[8u8; ID_LEN], true), Ok(SmudgeAction::Keep));
+        assert_eq!(smudge_action(b"plaintext that bypassed the filter", &id, true), Err(Refusal::Foreign));
+        assert_eq!(smudge_action(b"", &id, false), Err(Refusal::Foreign));
+        assert_eq!(smudge_action(&std::vec![0u8; MAX_RECORD + 1], &id, true), Err(Refusal::Size));
     }
 
     #[test]
@@ -939,7 +1025,9 @@ mod tests {
         assert!(parsed.regular);
         assert_eq!(&e[parsed.path_start..], b"dir/a\tb.secret");
         let exec: std::vec::Vec<u8> = [b"100755 ".as_slice(), oid, b" 0\tx.secret"].concat();
-        assert!(!parse_index_entry(&exec).unwrap().regular);
+        assert!(parse_index_entry(&exec).unwrap().regular);
+        let group: std::vec::Vec<u8> = [b"100664 ".as_slice(), oid, b" 0\tx.secret"].concat();
+        assert!(!parse_index_entry(&group).unwrap().regular);
         let link: std::vec::Vec<u8> = [b"120000 ".as_slice(), oid, b" 0\tx.secret"].concat();
         assert!(!parse_index_entry(&link).unwrap().regular);
         for bad in [

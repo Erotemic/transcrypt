@@ -1,0 +1,175 @@
+//! One-time, explicit conversion of a repository protected by Bash
+//! transcrypt (the v2 protocol) to v3. The v3 binary has no v2 crypto: it
+//! relies on the Bash filters having decrypted the worktree, re-encrypts
+//! that plaintext with v3, and keeps the user's selection by rewriting each
+//! `filter=crypt` attribute rule to the `transcrypt` macro.
+//!
+//! Nothing is lost if it fails or is interrupted: the worktree plaintext is
+//! never modified, the rewritten attribute files and hook are restored, and
+//! the v2 configuration (including its password) is left in place until the
+//! user has verified the result.
+
+use std::{fs, os::unix::ffi::OsStrExt, path::Path};
+use crate::{
+    git::*,
+    setup::{init_with_rollback, Rollback},
+    worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
+    Options,
+};
+
+/// Whether an attribute token belongs to Bash transcrypt: `filter`, `diff`
+/// or `merge` set to `crypt` or `crypt-<context>`.
+fn v2_token(token: &[u8]) -> bool {
+    [&b"filter="[..], b"diff=", b"merge="].iter().any(|key| token.strip_prefix(*key)
+        .is_some_and(|value| value == b"crypt" || value.starts_with(b"crypt-")))
+}
+
+/// Rewrite one `.gitattributes` text: every rule with v2 tokens keeps its
+/// pattern and other attributes and gets `transcrypt` instead. Returns the
+/// new text if anything changed.
+fn rewrite_attributes(text: &[u8]) -> Option<Vec<u8>> {
+    let mut changed = false;
+    let lines: Vec<Vec<u8>> = text.split(|b| *b == b'\n').map(|line| {
+        let trimmed = line.trim_ascii_start();
+        if trimmed.starts_with(b"#") || trimmed.starts_with(b"\"") || !line.split(|b| b.is_ascii_whitespace()).skip(1).any(v2_token) {
+            return line.to_vec();
+        }
+        changed = true;
+        let mut tokens = line.split(|b| b.is_ascii_whitespace()).filter(|t| !t.is_empty());
+        let mut out = tokens.next().unwrap_or_default().to_vec();
+        for token in tokens.filter(|t| !v2_token(t)) {
+            out.push(b' ');
+            out.extend_from_slice(token);
+        }
+        out.extend_from_slice(b" transcrypt");
+        out
+    }).collect();
+    changed.then(|| lines.join(&b'\n'))
+}
+
+/// `migrate`: see the module documentation.
+pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
+    if fs::symlink_metadata(root.join(".transcrypt")).is_ok() {
+        return Err("this repository already uses v3".into());
+    }
+    if git(root, &["config", "--get", "filter.crypt.clean"]).is_err() {
+        return Err("Bash transcrypt is not set up in this checkout: install it and unlock with the v2 \
+            password first (`transcrypt -c <cipher> -p <password>`), so the worktree holds plaintext".into());
+    }
+    if !git(root, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
+        return Err("commit or discard your changes first; the conversion must start from a committed state".into());
+    }
+    // The files Bash protects, by its attributes.
+    let entries = indexed_files(root)?;
+    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
+    let mut command = git_command(Some(root));
+    command.args(["check-attr", "-z", "--stdin", "filter"]);
+    let mut request = Vec::new();
+    for path in &paths {
+        request.extend_from_slice(path);
+        request.push(0);
+    }
+    let response = run_git_input(command, request)?;
+    let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
+    let mut selected = Vec::new();
+    for record in fields.chunks(3).filter(|r| r.len() == 3) {
+        if record[2] == b"crypt" || record[2].starts_with(b"crypt-") {
+            selected.push(record[0].to_vec());
+        }
+    }
+    for path in &selected {
+        let name = String::from_utf8_lossy(path);
+        let target = find_protected(root, &indexed_path(path)?)?
+            .ok_or_else(|| format!("{name} is missing from the worktree"))?;
+        if target.read()?.0.starts_with(b"U2FsdGVk") {
+            return Err(format!("{name} still holds v2 ciphertext: unlock it with Bash transcrypt first"));
+        }
+    }
+    // Rewrite every tracked .gitattributes that has v2 rules.
+    let staging = staging_dir(root)?;
+    let mut rewritten = Vec::new();
+    for entry in entries.iter().filter(|e| e.path == b".gitattributes" || e.path.ends_with(b"/.gitattributes")) {
+        let relative = indexed_path(&entry.path)?;
+        let Some(file) = find_protected(root, &relative)? else { continue };
+        let original = file.read()?.0.to_vec();
+        if let Some(text) = rewrite_attributes(&original) {
+            write_repository_file(root, &staging, &relative, &text)?;
+            rewritten.push((relative, original));
+        }
+    }
+    // Bash's own pre-commit hook checks only `filter=crypt` files, which no
+    // longer exist; it is set aside so the v3 hook can be installed.
+    let hooks = common_dir(root).join("hooks");
+    let bash_hook = fs::read(hooks.join("pre-commit-crypt")).ok()
+        .filter(|hook| fs::read(hooks.join("pre-commit")).ok().as_ref() == Some(hook));
+    if bash_hook.is_some() {
+        fs::rename(hooks.join("pre-commit"), hooks.join("pre-commit.transcrypt-v2"))
+            .map_err(|e| format!("cannot set aside the Bash pre-commit hook: {e}"))?;
+    }
+    drop(staging);
+    let undo = |rewritten: &[(std::path::PathBuf, Vec<u8>)]| {
+        if let Ok(staging) = staging_dir(root) {
+            for (relative, original) in rewritten {
+                let _ = write_repository_file(root, &staging, relative, original);
+            }
+        }
+        if bash_hook.is_some() {
+            let _ = fs::rename(hooks.join("pre-commit.transcrypt-v2"), hooks.join("pre-commit"));
+        }
+        let _ = git(root, &["reset", "-q", "--", "."]);
+    };
+    let result = (|| -> Result<(), String> {
+        let rollback: Rollback = init_with_rollback(root, options)?;
+        let converted = (|| -> Result<(), String> {
+            // Stage the rewritten attribute files and re-clean the decrypted
+            // worktree files with the v3 filter (raw path bytes, no pathspec
+            // magic: GIT_LITERAL_PATHSPECS).
+            let mut paths = Vec::new();
+            for path in rewritten.iter().map(|(p, _)| p.as_os_str().as_bytes()).chain(selected.iter().map(Vec::as_slice)) {
+                paths.extend_from_slice(path);
+                paths.push(0);
+            }
+            git_with_input(root, &["add", "--renormalize", "--pathspec-from-file=-", "--pathspec-file-nul"], &paths)?;
+            crate::lifecycle::verify_index_command(root)
+        })();
+        if converted.is_err() { rollback.run(); }
+        converted
+    })();
+    if let Err(e) = result {
+        undo(&rewritten);
+        return Err(format!("{e}; the conversion was rolled back"));
+    }
+    eprintln!("Converted {} file(s) from Bash transcrypt to v3; review and commit:\n  \
+        git commit -m 'Convert to transcrypt-v3'\n\
+        Then clone the repository afresh and check that `transcrypt-v3 unlock` decrypts it. Only then \
+        remove the v2 password from .git/config (`git config --remove-section transcrypt`).\n\
+        Earlier commits keep their v2 ciphertext, readable with the v2 password: if that password \
+        or the history was ever exposed, change the secrets themselves.", selected.len());
+    if bash_hook.is_some() {
+        eprintln!("The Bash pre-commit hook was renamed to .git/hooks/pre-commit.transcrypt-v2.");
+    }
+    Ok(())
+}
+
+/// Run a Git command with input; its output.
+fn run_git_input(command: std::process::Command, input: Vec<u8>) -> Result<Vec<u8>, String> {
+    let (status, out, errors) = run_bounded_status(command, Some(input), 256 << 20)?;
+    if !status.success() {
+        return Err(format!("git check-attr failed: {}", String::from_utf8_lossy(&errors)));
+    }
+    Ok(out.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v2_rules_become_the_transcrypt_macro() {
+        let text = b"# comment filter=crypt\n*.key  filter=crypt diff=crypt merge=crypt\nsecret/** filter=crypt-ops diff=crypt-ops merge=crypt-ops -text\n*.png binary\n";
+        let out = rewrite_attributes(text).unwrap();
+        assert_eq!(out, b"# comment filter=crypt\n*.key transcrypt\nsecret/** -text transcrypt\n*.png binary\n");
+        assert_eq!(rewrite_attributes(b"*.png binary\n"), None);
+        assert!(!v2_token(b"filter=cryptic") && v2_token(b"merge=crypt-a"));
+    }
+}

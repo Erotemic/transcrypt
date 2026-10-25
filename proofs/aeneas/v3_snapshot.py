@@ -49,7 +49,7 @@ ENTRYPOINTS = (
     'parse_config', 'parse_file_header',
     'is_canonical_protected_path', 'initialize_config', 'authenticate_config',
     'seal_record', 'open_record', 'hydrate_action', 'lock_action',
-    'authorize_agent_request', 'check_attr_response_ok', 'parse_index_entry',
+    'authorize_agent_request', 'parse_attr_record', 'smudge_action', 'parse_index_entry',
     'encode_frame_header', 'decode_frame_header',
     'is_object_id', 'record_envelope_ok', 'decode_pkt_len',
 )

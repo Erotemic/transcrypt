@@ -2,7 +2,7 @@
 //! version 2): one process serves every clean and smudge of a Git command,
 //! instead of one process per file. Packet lengths are decoded by the
 //! verified core (`decode_pkt_len`), and every file goes through the same
-//! `convert` as the per-file filters. Any malformed exchange ends the
+//! `Filters::convert` as the per-file filters (with the key loaded once). Any malformed exchange ends the
 //! process, which makes Git fail the command (the filter is required).
 
 use std::{
@@ -11,7 +11,7 @@ use std::{
 };
 use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD};
 use zeroize::Zeroizing;
-use crate::{convert, git::append_wiped};
+use crate::{git::append_wiped, Filters};
 
 /// The most data one packet carries.
 const MAX_DATA: usize = MAX_PKT_LEN - 4;
@@ -82,6 +82,7 @@ pub(crate) fn serve(root: &Path) -> Result<(), String> {
     }
     write_flush(&mut output).map_err(io_error)?;
     output.flush().map_err(io_error)?;
+    let mut filters = Filters::new(root);
     while let Some(request) = read_request(&mut input)? {
         let value = |key: &[u8]| request.iter().find_map(|line| line.strip_prefix(key)).map(<[u8]>::to_vec);
         let (command, path) = (value(b"command="), value(b"pathname="));
@@ -94,8 +95,8 @@ pub(crate) fn serve(root: &Path) -> Result<(), String> {
         }
         let result = match (command.as_deref(), &path) {
             _ if too_large => Err("input exceeds the 16 MiB v3 size limit".into()),
-            (Some(b"clean"), Some(path)) => convert(root, true, path, content),
-            (Some(b"smudge"), Some(path)) => convert(root, false, path, content),
+            (Some(b"clean"), Some(path)) => filters.convert(true, path, content),
+            (Some(b"smudge"), Some(path)) => filters.convert(false, path, content),
             _ => Err("unsupported filter request".to_owned()),
         };
         match result {
