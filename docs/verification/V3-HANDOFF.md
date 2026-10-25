@@ -1,6 +1,6 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
-**Last reconciled:** 2026-10-25. **Branch:** `work/m2-nul-safe-path-enumeration`.
+**Last reconciled:** 2026-10-25 (after the third hardening pass, H-16 to H-27). **Branch:** `work/m2-nul-safe-path-enumeration`.
 Always begin by checking the working tree and latest commits; this file is a
 continuity aid, not a claim about later changes.
 
@@ -105,13 +105,52 @@ has a regression test in `tests/adversarial.rs`.
 - Run every subprocess through `run_bounded` (directly or via `git`,
   `git_with_input`, `output`); never `Command::output()`.
 
+## Product state (checkpoint)
+
+**Commands.** `init`, `unlock`, `hydrate`, `status`, `doctor`,
+`verify-index`, `audit`, `lock`, `rekey`, `uninstall`.
+
+**Git integration.**
+- Long-running `filter-process`, with per-file `clean`/`smudge` as the
+  fallback.
+- Merge and diff drivers.
+- Hooks:
+  - `pre-commit` (`verify-index`) and `pre-push` (`audit`) are required;
+  - `post-checkout`, `post-merge` and `post-rewrite` (`hydrate --auto`) are
+    optional.
+- Server-side: `contrib/v3/pre-receive` and
+  `contrib/v3/check-remote-enforcement`.
+
+**Supported layouts.** Ordinary checkouts, linked worktrees (one shared
+agent; `lock` flushes all of them) and submodules.
+
+**Plaintext permissions.**
+- Git never writes plaintext readable by others (umask-aware smudge).
+- `hydrate` and the clean filter make plaintext private.
+
+**Gates at this checkpoint (all passing).**
+- 105 Rust tests.
+- Python vectors, the differential corpus and the Git transport tests.
+- Snapshot verify/compare.
+- Tracked Lean build (1750 jobs); 36 headline theorems on standard axioms.
+- Darwin type-check.
+
+The branch is unpushed: push needs the owner's credentials.
+
 ## Next tasks
 
-See the ranked list in `V3-ROADMAP.md` ("Remaining"). In short:
-server-side `audit` deployment (A13; `contrib/v3/pre-receive`), external
-review R-01, then the A4
-remainder (prove the `cat-file --batch` header check; long-running filter
-protocol for speed).
+See the ranked list in `V3-ROADMAP.md` ("Remaining"). Owner decisions and
+external work first:
+1. Deploy `contrib/v3/pre-receive` or the CI `audit` on shared remotes, and
+   confirm with `check-remote-enforcement` (A13).
+2. External review R-01, using the review package in `V3-SECURITY-REVIEW.md`.
+3. Decide whether OpenSSL ≥ 3.2 is an acceptable Bash dependency (unblocks
+   a Bash v3, stage V7).
+
+Implementable, lower value:
+- move the `ls-tree`/`diff-tree` record rewriting, the unmerged-entry
+  detection and the `cat-file --batch` header check into the proved core;
+- an optional agent idle timeout.
 
 **Decision rule:** spend effort on proofs connected to shipped Rust or on
 exploitable lifecycle failures, not on theorem counts.

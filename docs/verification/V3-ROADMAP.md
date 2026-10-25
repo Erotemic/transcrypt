@@ -109,7 +109,12 @@ verified" or "cryptographic security has been proved from first principles."
       - confirmed new passphrases (H-22);
       - `rekey` and `uninstall` (H-23);
       - adapter split into modules;
-      - the [Bash correspondence](V3-BASH-CORRESPONDENCE.md).
+      - the [Bash correspondence](V3-BASH-CORRESPONDENCE.md);
+      - merge and diff drivers, conflict-aware hydrate/status (H-24, H-25);
+      - linked worktrees and submodules (H-26);
+      - stale-agent retirement after a pulled rekey (H-27);
+      - idempotent unlock/lock;
+      - clean makes new secrets private.
 
 ### Remaining, ranked by security value (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md#ranked-unresolved-risks))
 
@@ -120,10 +125,11 @@ verified" or "cryptographic security has been proved from first principles."
 2. **R-01 — external review** of the construction, `aes-siv`, the
    locked-filter envelope pass-through (A14) and the adapter, using the
    [review package](V3-SECURITY-REVIEW.md#review-package). Release blocker.
-3. **A4 — adapter remainder.** Object reads are batched
-   (`cat-file --batch`, exact header check); move that check into the proved
-   core, adopt Git's long-running filter protocol (one filter process per
-   Git command instead of one per file), keep the call-site table current.
+3. **A4 — adapter remainder.** The long-running filter protocol is in place
+   (pkt-line lengths proved). Remaining: move the `cat-file --batch` header
+   check, the `ls-tree`/`diff-tree` record rewriting and unmerged-entry
+   detection into the proved core (all fuzz-tested and fail-closed today),
+   and keep the call-site table current.
 4. **A7 — Git versions.** CI covers Git 2.34, 2.43 and Apple Git; extend if
    users report others.
 5. **A8/A6 — same-UID** races and agent access are accepted; an optional
