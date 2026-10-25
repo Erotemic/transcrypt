@@ -63,6 +63,21 @@ fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Unix socket addresses are limited to ~104 (macOS) or 108 (Linux) bytes,
+/// which a deep repository path easily exceeds. Every v3 process runs with
+/// the repository root as its working directory, so the socket is bound and
+/// connected through this short relative address; ownership and permission
+/// checks still use the absolute path.
+const SOCK_ADDR: &str = ".git/transcrypt-v3/session.sock";
+
+fn socket_addr(root: &Path) -> Result<&'static Path, String> {
+    let cwd = std::env::current_dir().map_err(|_| "cannot read working directory")?;
+    if cwd.canonicalize().ok() != root.canonicalize().ok() {
+        return Err("internal error: v3 must run from the repository root".into());
+    }
+    Ok(Path::new(SOCK_ADDR))
+}
+
 fn socket(root: &Path) -> Result<PathBuf, String> {
     Ok(directory(root)?.join(SOCK))
 }
@@ -97,7 +112,7 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
     }
     let path = socket(root)?;
     check_socket(&path)?;
-    let mut stream = UnixStream::connect(&path).map_err(|_| "v3 credential agent is not running; run unlock")?;
+    let mut stream = UnixStream::connect(socket_addr(root)?).map_err(|_| "v3 credential agent is not running; run unlock")?;
     // Bound a broken local peer rather than hanging a Git operation forever.
     stream.set_read_timeout(Some(Duration::from_secs(120)))
         .map_err(|_| "cannot set agent read timeout")?;
@@ -129,7 +144,7 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), S
     match fs::symlink_metadata(&path) {
         Ok(meta) => {
             if !meta.file_type().is_socket() { return Err("unsafe existing session socket path".into()); }
-            if UnixStream::connect(&path).is_ok() {
+            if UnixStream::connect(socket_addr(root)?).is_ok() {
                 return Err("already unlocked: an agent is running".into());
             }
             // A dead process may leave its socket inode; our 0700 parent is
@@ -217,14 +232,36 @@ fn transaction(stream: &mut UnixStream, config: &[u8; CONFIG_LEN], key: &SecretK
     Ok(false)
 }
 
+/// Process hardening for every v3 process (all of them handle keys or
+/// plaintext): no core dumps and, on Linux, not dumpable, which also stops
+/// same-UID processes from attaching with ptrace or reading /proc/PID/mem.
+/// It does not protect against root or against use of the agent socket.
+pub(crate) fn harden_process() -> Result<(), String> {
+    let none = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: setrlimit reads a valid, fully initialized rlimit struct.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
+        return Err("cannot disable core dumps".into());
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_DUMPABLE takes integer arguments only.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err("cannot mark process non-dumpable".into());
+    }
+    Ok(())
+}
+
 /// Internal child entrypoint. Runs until explicit lock or a process shutdown.
 pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
     let config = config_array(config)?;
     let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
+    // Keep the key page out of swap where the OS allows it (best effort:
+    // RLIMIT_MEMLOCK may forbid it; the key is still never written to disk).
+    // SAFETY: the pointer and length describe `key`, which outlives the lock.
+    let _ = unsafe { libc::mlock(key.as_ptr().cast(), KEY_SIZE) };
     io::stdin().read_exact(&mut key[..]).map_err(|_| "missing private startup key")?;
     authenticate_config(config, &key)?;
     let path = directory(root)?.join(SOCK);
-    let listener = UnixListener::bind(&path).map_err(|e| format!("cannot bind private credential socket: {e}"))?;
+    let listener = UnixListener::bind(socket_addr(root)?).map_err(|e| format!("cannot bind private credential socket: {e}"))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .map_err(|_| "cannot secure session socket")?;
     let mut stopping = false;

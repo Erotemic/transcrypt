@@ -278,3 +278,72 @@ fn help_and_status_report_state_without_changing_anything() {
     let locked = text(&repo);
     assert!(locked.contains("session:    locked") && locked.contains("2 ciphertext"), "{locked}");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn key_agent_is_not_dumpable_or_ptrace_readable() {
+    use std::os::fd::AsRawFd;
+    let mut scratch = Scratch::new("dump");
+    let repo = scratch.repo("repo");
+    let stream = UnixStream::connect(socket(&repo)).unwrap();
+    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `len` bytes into `cred`.
+    let rc = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(), &mut len)
+    };
+    assert_eq!(rc, 0);
+    drop(stream);
+    let proc_dir = PathBuf::from(format!("/proc/{}", cred.pid));
+    let limits = fs::read_to_string(proc_dir.join("limits")).unwrap();
+    let core = limits.lines().find(|l| l.starts_with("Max core file size")).unwrap();
+    assert!(core.split_whitespace().nth(4) == Some("0"), "core dumps enabled: {core}");
+    // The kernel makes a non-dumpable process's /proc entries root-owned,
+    // which is what denies same-UID ptrace attach and /proc/PID/mem reads.
+    use std::os::unix::fs::MetadataExt;
+    let owner = fs::metadata(proc_dir.join("environ")).unwrap().uid();
+    assert_eq!(owner, 0, "agent is dumpable: /proc entries owned by uid {owner}");
+}
+
+#[test]
+fn deep_repository_paths_and_subdirectories_work() {
+    let mut scratch = Scratch::new("deep");
+    // The absolute socket path would exceed the 104/108-byte sun_path limit.
+    let deep = scratch.root.join("a".repeat(60)).join("b".repeat(60));
+    fs::create_dir_all(&deep).unwrap();
+    let repo_name = deep.strip_prefix(&scratch.root).unwrap().join("repo");
+    let repo = scratch.repo(repo_name.to_str().unwrap());
+    assert!(socket(&repo).as_os_str().len() > 108);
+    run(&repo.join("dir"), bin(), &["status"], None);
+    run(&repo.join("dir"), bin(), &["verify-index"], None);
+    run(&repo, bin(), &["lock"], None);
+    run(&repo.join("dir"), bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&repo, bin(), &["hydrate"], None);
+    assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
+}
+
+#[test]
+fn failed_init_rolls_back_so_it_can_be_rerun() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("rollback");
+    let repo = scratch.root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    run(&repo, "git", &["init", "-q"], None);
+    // A regular file squatting on the socket path makes agent startup fail.
+    let dir = repo.join(".git/transcrypt-v3");
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.join("session.sock"), b"squatter").unwrap();
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    assert!(err.contains("rolled back"), "{err}");
+    assert!(!repo.join(".transcrypt").exists());
+    assert!(!repo.join(".gitattributes").exists());
+    assert!(!repo.join(".git/hooks/pre-commit").exists());
+    assert!(exec(&repo, "git", &["config", "--local", "--get", "filter.transcrypt-v3.clean"], None)
+        .stdout.is_empty());
+    assert!(run(&repo, "git", &["diff", "--cached", "--name-only"], None).is_empty());
+    fs::remove_file(dir.join("session.sock")).unwrap();
+    run(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    run(&repo, bin(), &["lock"], None);
+}

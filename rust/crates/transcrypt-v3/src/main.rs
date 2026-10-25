@@ -5,7 +5,7 @@ compile_error!("transcrypt-v3 POC requires Unix for 0600/0700 local credential p
 
 use std::{
     env, fs,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
@@ -13,6 +13,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::{ffi::{OsStrExt, OsStringExt}, fs::OpenOptionsExt};
 use zeroize::Zeroizing;
+mod fsat;
 mod session;
 use session::Operation;
 use transcrypt_v3::{initialize_config, unlock_config};
@@ -41,7 +42,11 @@ fn run() -> Result<(), String> {
         println!("{HELP}");
         return Ok(());
     }
+    session::harden_process()?;
     let root = repo_root()?;
+    // All v3 paths, including the agent's short relative socket address,
+    // are interpreted from the repository root.
+    env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
     match action {
         "status" => {
             if args.len() != 1 { return Err("status takes no arguments".into()); }
@@ -119,8 +124,7 @@ fn status(root: &Path) -> Result<(), String> {
         let state = (|| -> Result<&str, String> {
             if mode != b"100644" { return Ok("unsupported mode"); }
             let object = git_show(root, &path)?;
-            let dest = require_regular_under(root, &indexed_path(&path)?)?;
-            let worktree = read_limited(fs::File::open(&dest).map_err(|_| "unreadable")?, MAX_RECORD)?;
+            let worktree = open_protected(root, &indexed_path(&path)?)?.read()?;
             if worktree == object { return Ok("ciphertext"); }
             if !unlocked { return Ok("modified or plaintext"); }
             let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
@@ -292,20 +296,47 @@ fn init(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
         return Err(".gitattributes already exists; this POC requires a new attributes policy".into());
     }
     check_hook_available(root)?;
+    let hook_preexisted = fs::symlink_metadata(root.join(".git/hooks/pre-commit")).is_ok();
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
     let (config, key) = initialize_config(&password, &salt)?;
-    fs::create_dir(&dir).map_err(|e| format!("cannot create .transcrypt: {e}"))?;
-    let path = dir.join("config");
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    options.open(path).map_err(|e| format!("cannot create config: {e}"))?
-        .write_all(&config).map_err(|e| format!("cannot write config: {e}"))?;
-    fs::write(root.join(".gitattributes"), ATTRS)
-        .map_err(|e| format!("cannot write attributes: {e}"))?;
-    activate_session(root, &config, &key, true)?;
+    let result = (|| -> Result<(), String> {
+        fs::create_dir(&dir).map_err(|e| format!("cannot create .transcrypt: {e}"))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        options.open(dir.join("config")).map_err(|e| format!("cannot create config: {e}"))?
+            .write_all(&config).map_err(|e| format!("cannot write config: {e}"))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        options.open(root.join(".gitattributes")).map_err(|e| format!("cannot create attributes: {e}"))?
+            .write_all(ATTRS).map_err(|e| format!("cannot write attributes: {e}"))?;
+        activate_session(root, &config, &key, true)
+    })();
+    if let Err(e) = result {
+        rollback_init(root, &config, hook_preexisted);
+        return Err(format!("{e}; initialization rolled back"));
+    }
     eprintln!("Initialized v3; commit public metadata. Key lives only in the private credential agent until lock.");
     Ok(())
+}
+
+/// Undo exactly what a failed `init` created, so it can simply be rerun:
+/// staged metadata, the files it wrote (only if unchanged), its hook (only
+/// if it did not exist before) and its filter configuration.
+fn rollback_init(root: &Path, config: &[u8], hook_preexisted: bool) {
+    let _ = git(root, &["reset", "-q", "--", ".transcrypt/config", ".gitattributes"]);
+    if fs::read(root.join(".gitattributes")).ok().as_deref() == Some(ATTRS) {
+        let _ = fs::remove_file(root.join(".gitattributes"));
+    }
+    if fs::read(root.join(".transcrypt/config")).ok().as_deref() == Some(config) {
+        let _ = fs::remove_file(root.join(".transcrypt/config"));
+    }
+    let _ = fs::remove_dir(root.join(".transcrypt"));
+    let hook = root.join(".git/hooks/pre-commit");
+    if !hook_preexisted && fs::read_to_string(&hook).ok() == expected_hook().ok() {
+        let _ = fs::remove_file(&hook);
+    }
+    let _ = git(root, &["config", "--local", "--remove-section", "filter.transcrypt-v3"]);
 }
 
 fn unlock(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
@@ -334,9 +365,8 @@ fn lock(root: &Path) -> Result<(), String> {
             return Err("protected staged object is not a regular file".into());
         }
         let relative = indexed_path(&path)?;
-        let dest = require_regular_under(root, &relative)?;
-        let source = read_limited(fs::File::open(&dest)
-            .map_err(|_| "cannot read protected worktree file")?, MAX_RECORD)?;
+        let target = open_protected(root, &relative)?;
+        let source = target.read()?;
         let object = git_show(root, &path)?;
         // Only the agent holds the key, so it reseals; the verified core decides.
         let resealed = if source == object { Vec::new() } else {
@@ -344,7 +374,7 @@ fn lock(root: &Path) -> Result<(), String> {
         };
         match lock_action(&source, &object, &resealed) {
             Ok(LockAction::Keep) => {},
-            Ok(LockAction::Flush) => to_flush.push((dest, object)),
+            Ok(LockAction::Flush) => to_flush.push((target, object)),
             Err(_) => return Err("protected worktree has uncommitted plaintext changes; refusing lock".into()),
         }
     }
@@ -353,8 +383,8 @@ fn lock(root: &Path) -> Result<(), String> {
     // in the agent until every rename succeeds, and rerunning `lock` resumes
     // (already-flushed files are `LockAction::Keep`). No secure erasure claim.
     let staging = staging_dir(root)?;
-    for (i, (dest, object)) in to_flush.iter().enumerate() {
-        replace_file(&staging, dest, object, i)?;
+    for (i, (target, object)) in to_flush.iter().enumerate() {
+        target.replace(&staging, object, i)?;
     }
     session::stop(root, &config)?;
     eprintln!("Locked: tracked *.secret files flushed and the in-memory credential agent stopped. This does not securely erase historical plaintext backups.");
@@ -408,30 +438,63 @@ fn indexed_path(path: &[u8]) -> Result<PathBuf, String> {
     Ok(relative)
 }
 
-/// Reject a symlink in *any* worktree path component, not only the leaf.
-/// This is a preflight check; it is not a substitute for race-free dirfd
-/// operations against a concurrently hostile process running as this UID.
-fn require_regular_under(root: &Path, relative: &Path) -> Result<PathBuf, String> {
-    let mut current = root.to_path_buf();
+/// A protected worktree file resolved race-free: its parent directory is
+/// held open, every component having been opened with `O_NOFOLLOW`.
+struct Protected {
+    dir: fsat::Dir,
+    leaf: OsString,
+}
+
+/// Resolve a Git-relative path below the repository root, refusing symlinks
+/// and non-directories in *every* component and a non-regular leaf.
+fn open_protected(root: &Path, relative: &Path) -> Result<Protected, String> {
     let parts: Vec<_> = relative.components().collect();
-    if parts.is_empty() { return Err("empty protected worktree path".into()); }
-    for (i, part) in parts.iter().copied().enumerate() {
-        match part {
-            std::path::Component::Normal(name) => current.push(name),
-            _ => return Err("unsafe protected path component".into()),
-        }
-        let meta = fs::symlink_metadata(&current)
-            .map_err(|_| "protected worktree path missing")?;
-        if meta.file_type().is_symlink() {
-            return Err("symlink in protected path rejected".into());
-        }
-        if i + 1 == parts.len() {
-            if !meta.is_file() { return Err("protected worktree entry is not a regular file".into()); }
-        } else if !meta.is_dir() {
-            return Err("protected worktree parent is not a directory".into());
-        }
+    let Some((leaf, parents)) = parts.split_last() else {
+        return Err("empty protected worktree path".into());
+    };
+    let mut dir = fsat::Dir::open(root).map_err(|_| "cannot open repository root")?;
+    for part in parents {
+        let std::path::Component::Normal(name) = part else {
+            return Err("unsafe protected path component".into());
+        };
+        dir = dir.subdir(name).map_err(|_| "protected worktree parent is missing, a symlink or not a directory")?;
     }
-    Ok(current)
+    let std::path::Component::Normal(leaf) = leaf else {
+        return Err("unsafe protected path component".into());
+    };
+    let (regular, link) = dir.entry_kind(leaf).map_err(|_| "protected worktree path missing")?;
+    if link { return Err("symlink in protected path rejected".into()); }
+    if !regular { return Err("protected worktree entry is not a regular file".into()); }
+    Ok(Protected { dir, leaf: leaf.to_os_string() })
+}
+
+impl Protected {
+    fn read(&self) -> Result<Vec<u8>, String> {
+        let file = self.dir.open_regular(&self.leaf)
+            .map_err(|_| "cannot read protected worktree file (missing, symlink or not regular)")?;
+        read_limited(file, MAX_RECORD)
+    }
+
+    /// Replace the file by `contents` through an exclusive mode-0600 file in
+    /// the private staging directory, fsync, `renameat` into the held parent
+    /// directory, then fsync that directory. A cross-filesystem rename fails
+    /// closed (EXDEV) without touching the file. Not a multi-file transaction.
+    fn replace(&self, staging: &Staging, contents: &[u8], slot: usize) -> Result<(), String> {
+        let temp = OsString::from(format!("{}-{slot}.tmp", std::process::id()));
+        let mut file = staging.dir.create_new(&temp, 0o600)
+            .map_err(|e| format!("cannot create private staged file: {e}"))?;
+        let result = file.write_all(contents).and_then(|_| file.sync_all());
+        drop(file);
+        if let Err(e) = result {
+            let _ = staging.dir.unlink(&temp);
+            return Err(format!("cannot write private staged file: {e}"));
+        }
+        if let Err(e) = staging.dir.rename_to(&temp, &self.dir, &self.leaf) {
+            let _ = staging.dir.unlink(&temp);
+            return Err(format!("cannot replace protected worktree file: {e}"));
+        }
+        self.dir.sync().map_err(|e| format!("cannot sync protected file directory: {e}"))
+    }
 }
 
 /// Stage-0 files with paths represented as raw bytes (no newline splitting).
@@ -526,64 +589,37 @@ fn verify_index(root: &Path) -> Result<(), String> {
 }
 
 /// Private staging directory for whole-file replacements:
-/// `.git/transcrypt-v3-staging`, a real mode-0700 directory. Temporaries never
-/// live in the worktree, so a crash cannot leave plaintext where `git add`
-/// could commit it unencrypted, and Git never reads files under `.git`.
-/// Anything left there by an interrupted earlier run is ours and is removed.
-fn staging_dir(root: &Path) -> Result<PathBuf, String> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let dir = root.join(".git/transcrypt-v3-staging");
-    match fs::symlink_metadata(&dir) {
-        Ok(_) => {},
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            fs::DirBuilder::new().mode(0o700).create(&dir)
-                .map_err(|e| format!("cannot create private staging directory: {e}"))?;
-        },
-        Err(e) => return Err(format!("cannot examine private staging directory: {e}")),
-    }
-    let meta = fs::symlink_metadata(&dir).map_err(|_| "cannot examine private staging directory")?;
-    if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 {
-        return Err("unsafe .git/transcrypt-v3-staging; require a real 0700 directory".into());
-    }
-    for entry in fs::read_dir(&dir).map_err(|_| "cannot list private staging directory")? {
-        let path = entry.map_err(|_| "cannot list private staging directory")?.path();
-        let kind = fs::symlink_metadata(&path).map_err(|_| "cannot examine stale staged file")?;
-        if !kind.is_file() || kind.file_type().is_symlink() {
-            return Err("unexpected entry in private staging directory".into());
-        }
-        fs::remove_file(&path).map_err(|e| format!("cannot remove stale staged file: {e}"))?;
-    }
-    Ok(dir)
+/// `.git/transcrypt-v3-staging`, a real mode-0700 directory held open by fd.
+/// Temporaries never live in the worktree, so a crash cannot leave plaintext
+/// where `git add` could commit it unencrypted, and Git never reads files
+/// under `.git`. Anything left by an interrupted earlier run is ours and is
+/// removed.
+struct Staging {
+    dir: fsat::Dir,
 }
 
-/// Replace `dest` by `contents` through an exclusive mode-0600 file in the
-/// private staging directory, fsync, atomic rename, then fsync the parent.
-/// Rename across filesystems fails closed (EXDEV) without touching `dest`.
-/// This is not a race-free or multi-file transactional operation: the spec
-/// documents that dirfd-based guarantees against same-UID races are pending.
-fn replace_file(staging: &Path, dest: &Path, contents: &[u8], slot: usize) -> Result<(), String> {
-    let temp = staging.join(format!("{}-{slot}.tmp", std::process::id()));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&temp)
-        .map_err(|e| format!("cannot create private staged file: {e}"))?;
-    let result = file.write_all(contents).and_then(|_| file.sync_all());
-    drop(file);
-    if let Err(e) = result {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("cannot write private staged file: {e}"));
+fn staging_dir(root: &Path) -> Result<Staging, String> {
+    let git_dir = fsat::Dir::open(root).and_then(|r| r.subdir(OsStr::new(".git")))
+        .map_err(|_| "cannot open .git directory")?;
+    let name = OsStr::new("transcrypt-v3-staging");
+    match git_dir.mkdir(name, 0o700) {
+        Ok(()) => {},
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {},
+        Err(e) => return Err(format!("cannot create private staging directory: {e}")),
     }
-    if let Err(e) = fs::rename(&temp, dest) {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("cannot replace protected worktree file: {e}"));
+    let dir = git_dir.subdir(name)
+        .map_err(|_| "unsafe .git/transcrypt-v3-staging; require a real 0700 directory")?;
+    if dir.mode().map_err(|_| "cannot examine private staging directory")? & 0o077 != 0 {
+        return Err("unsafe .git/transcrypt-v3-staging; require a real 0700 directory".into());
     }
-    if let Some(parent) = dest.parent() {
-        fs::File::open(parent).and_then(|d| d.sync_all())
-            .map_err(|e| format!("cannot sync protected file directory: {e}"))?;
+    for entry in dir.entries().map_err(|_| "cannot list private staging directory")? {
+        let (regular, _) = dir.entry_kind(&entry).map_err(|_| "cannot examine stale staged file")?;
+        if !regular {
+            return Err("unexpected entry in private staging directory".into());
+        }
+        dir.unlink(&entry).map_err(|e| format!("cannot remove stale staged file: {e}"))?;
     }
-    Ok(())
+    Ok(Staging { dir })
 }
 
 fn hydrate(root: &Path) -> Result<(), String> {
@@ -604,9 +640,7 @@ fn hydrate(root: &Path) -> Result<(), String> {
         let object = git_show(root, path)?;
         let plaintext = session::request(root, &config, Operation::Decrypt, path, &object)?;
         let relative = indexed_path(path)?;
-        let dest = require_regular_under(root, &relative)?;
-        let worktree = read_limited(fs::File::open(&dest)
-            .map_err(|_| "cannot read protected worktree file")?, MAX_RECORD)?;
+        let worktree = open_protected(root, &relative)?.read()?;
         match hydrate_action(&worktree, &object, &plaintext) {
             Ok(HydrateAction::Publish) => pending.push((path.clone(), relative)),
             Ok(HydrateAction::Keep) => {},
@@ -624,13 +658,11 @@ fn hydrate(root: &Path) -> Result<(), String> {
     for (i, (path, relative)) in pending.into_iter().enumerate() {
         let object = git_show(root, &path)?;
         let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
-        let dest = require_regular_under(root, &relative)?;
-        let worktree = read_limited(fs::File::open(&dest)
-            .map_err(|_| "cannot re-read protected worktree file")?, MAX_RECORD)?;
-        if worktree != object {
+        let target = open_protected(root, &relative)?;
+        if target.read()? != object {
             return Err("protected worktree changed during hydration; refusing overwrite".into());
         }
-        replace_file(&staging, &dest, &plaintext, i)?;
+        target.replace(&staging, &plaintext, i)?;
     }
     // Git's index still caches the size/mtime of the encrypted checkout.
     // `git add` is needed to refresh the worktree stat cache: merely having
@@ -666,22 +698,28 @@ mod local_path_tests {
         ));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join(".git")).unwrap();
-        let staging = staging_dir(&tmp).unwrap();
-        assert_eq!(fs::metadata(&staging).unwrap().permissions().mode() & 0o777, 0o700);
+        let sdir = tmp.join(".git/transcrypt-v3-staging");
+        drop(staging_dir(&tmp).unwrap());
+        assert_eq!(fs::metadata(&sdir).unwrap().permissions().mode() & 0o777, 0o700);
         // A crash-leftover temporary is purged on the next use.
-        fs::write(staging.join("stale.tmp"), b"stale plaintext").unwrap();
+        fs::write(sdir.join("stale.tmp"), b"stale plaintext").unwrap();
         let staging = staging_dir(&tmp).unwrap();
-        assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&sdir).unwrap().count(), 0);
         let path = tmp.join("item.secret");
         fs::write(&path, b"ciphertext placeholder").unwrap();
-        replace_file(&staging, &path, b"authenticated plaintext", 0).unwrap();
+        let target = open_protected(&tmp, Path::new("item.secret")).unwrap();
+        target.replace(&staging, b"authenticated plaintext", 0).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"authenticated plaintext");
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
         assert_eq!(fs::read_dir(&tmp).unwrap().count(), 2, "only .git and the file");
-        assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
-        // A symlinked staging directory is refused.
-        fs::remove_dir(&staging).unwrap();
-        std::os::unix::fs::symlink(&tmp, &staging).unwrap();
+        assert_eq!(fs::read_dir(&sdir).unwrap().count(), 0);
+        // A symlinked or loosely permissioned staging directory is refused.
+        fs::remove_dir(&sdir).unwrap();
+        std::os::unix::fs::symlink(&tmp, &sdir).unwrap();
+        assert!(staging_dir(&tmp).is_err());
+        fs::remove_file(&sdir).unwrap();
+        fs::create_dir(&sdir).unwrap();
+        fs::set_permissions(&sdir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(staging_dir(&tmp).is_err());
         fs::remove_dir_all(&tmp).unwrap();
     }
@@ -698,16 +736,23 @@ mod local_path_tests {
         fs::create_dir(&external).unwrap();
         fs::write(external.join("item.secret"), b"test").unwrap();
         let checkout = tmp.join("checkout");
-        fs::create_dir(&checkout).unwrap();
+        fs::create_dir_all(checkout.join(".git")).unwrap();
         symlink(&external, checkout.join("linked")).unwrap();
-        let path = Path::new("linked/item.secret");
-        assert!(require_regular_under(&checkout, path).is_err());
+        assert!(open_protected(&checkout, Path::new("linked/item.secret")).is_err());
+        symlink(external.join("item.secret"), checkout.join("leaf.secret")).unwrap();
+        assert!(open_protected(&checkout, Path::new("leaf.secret")).is_err());
         fs::create_dir(checkout.join("regular")).unwrap();
         fs::write(checkout.join("regular/item.secret"), b"test").unwrap();
-        assert_eq!(
-            require_regular_under(&checkout, Path::new("regular/item.secret")).unwrap(),
-            checkout.join("regular/item.secret")
-        );
+        let target = open_protected(&checkout, Path::new("regular/item.secret")).unwrap();
+        assert_eq!(target.read().unwrap(), b"test");
+        // Race: after resolution, the parent is swapped for a symlink to an
+        // outside directory. The held directory fd keeps the write inside.
+        let staging = staging_dir(&checkout).unwrap();
+        fs::rename(checkout.join("regular"), checkout.join("moved")).unwrap();
+        symlink(&external, checkout.join("regular")).unwrap();
+        target.replace(&staging, b"plaintext", 0).unwrap();
+        assert_eq!(fs::read(external.join("item.secret")).unwrap(), b"test", "write escaped");
+        assert_eq!(fs::read(checkout.join("moved/item.secret")).unwrap(), b"plaintext");
         let _ = fs::remove_dir_all(tmp);
     }
 }

@@ -7,13 +7,18 @@ description = "Authenticated deterministic Rust Transcrypt v3 proof of concept"
 
 [dependencies]
 transcrypt-v3-core = { path = "../transcrypt-v3-core" }
-aes-siv = "=0.8.0"
+# `zeroize` wipes the AES/CMAC/CTR key schedules when each SIV instance drops.
+aes-siv = { version = "=0.8.0", features = ["zeroize"] }
+aes = { version = "=0.9.3", features = ["zeroize"] }
+cmac = { version = "=0.8.0", features = ["zeroize"] }
+ctr = { version = "=0.10.1", features = ["zeroize"] }
 argon2 = "=0.6.0"
 sha2 = "=0.10.9"
 getrandom = "=0.3.4"
 rpassword = "=7.4.0"
-zeroize = "=1.8.2"
-subtle = "=2.6.1"
+zeroize = "=1.9.1"
+# Agent hardening: disable core dumps and lock the key page in memory.
+libc = "=0.2.191"
 
 [[bin]]
 name = "transcrypt-v3"
