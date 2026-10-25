@@ -692,7 +692,9 @@ fn editor_and_merge_copies_of_secrets_are_caught() {
     run(&repo, "git", &["add", "-f", "a.secret.orig"], None);
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("a.secret.orig is NOT encrypted"), "{status}");
-    run(&repo, "git", &["commit", "-qm", "backup copy"], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "blocked by pre-commit"], None);
+    assert!(err.contains("a.secret.orig"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "backup copy"], None);
     let err = run_fails(&repo, bin(), &["audit"], None);
     assert!(err.contains("a.secret.orig") && err.contains("copy of a secret"), "{err}");
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);

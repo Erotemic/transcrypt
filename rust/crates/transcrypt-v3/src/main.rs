@@ -924,6 +924,10 @@ fn check_index(root: &Path, keyed: bool) -> Result<Verified, String> {
     if keyed {
         session::request(root, &config, Operation::Ping, &[], &[])?;
     }
+    if let Some(copy) = entries.iter().find(|e| plaintext_copy_name(&e.path)) {
+        return Err(format!("staged {} looks like an unencrypted editor or merge copy of a secret; \
+            unstage it", String::from_utf8_lossy(&copy.path)));
+    }
     let protected: Vec<Staged> = entries.into_iter().filter(|e| protected_path(&e.path)).collect();
     if protected.iter().any(|e| !e.regular) {
         return Err("protected path is not a regular file in staged index".into());
