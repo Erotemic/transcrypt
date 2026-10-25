@@ -89,6 +89,7 @@ fn run() -> Result<(), String> {
             if args.len() > 3 { return Err("pre-push takes the remote name and URL".into()); }
             pre_push(&root, args.get(1).map(OsString::as_os_str))
         },
+        "hydrate" if args.len() == 2 && args[1] == "--auto" => auto_hydrate(&root),
         "lock" | "verify-index" | "hydrate" | "serve" => {
             if args.len() != 1 { return Err("unexpected operation arguments".into()); }
             match action {
@@ -200,7 +201,7 @@ fn status(root: &Path) -> Result<(), String> {
 }
 
 const HOOKS_BYPASSED: &str = "core.hooksPath is set, so Git does not run the v3 pre-commit and \
-    pre-push checks installed in .git/hooks";
+    pre-push checks (or automatic hydration) installed in .git/hooks";
 
 /// Whether Git is configured to run hooks from somewhere other than
 /// `.git/hooks`, where v3 installs its checks.
@@ -335,7 +336,21 @@ fn install_filters(root: &Path) -> Result<(), String> {
 /// verify the staged index before every commit, and audit the commits being
 /// pushed (which also covers merges, rebases, cherry-picks and
 /// `--no-verify` commits that never ran the pre-commit hook).
-const HOOKS: [(&str, &str); 2] = [("pre-commit", "verify-index"), ("pre-push", "pre-push \"$@\"")];
+const HOOKS: [(&str, &str); 5] = [
+    ("pre-commit", "verify-index"),
+    ("pre-push", "pre-push \"$@\""),
+    // After Git writes worktree files (which smudge leaves as ciphertext
+    // unless Git's umask makes them private), decrypt them with mode 0600.
+    ("post-checkout", "hydrate --auto"),
+    ("post-merge", "hydrate --auto"),
+    ("post-rewrite", "hydrate --auto"),
+];
+
+/// The checks whose absence would let plaintext through. The others only
+/// automate hydration: a foreign hook of that name is left alone.
+fn hook_required(name: &str) -> bool {
+    matches!(name, "pre-commit" | "pre-push")
+}
 
 fn expected_hook(command: &str) -> Result<String, String> {
     let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
@@ -348,7 +363,7 @@ fn hook_path(root: &Path, name: &str) -> PathBuf {
 }
 
 fn check_hook_available(root: &Path) -> Result<(), String> {
-    for (name, command) in HOOKS {
+    for (name, command) in HOOKS.into_iter().filter(|(name, _)| hook_required(name)) {
         let path = hook_path(root, name);
         match fs::symlink_metadata(&path) {
             Ok(meta) => {
@@ -368,7 +383,13 @@ fn install_hook(root: &Path) -> Result<(), String> {
     check_hook_available(root)?;
     for (name, command) in HOOKS {
         let path = hook_path(root, name);
-        if fs::symlink_metadata(&path).is_ok() { continue; }
+        if fs::symlink_metadata(&path).is_ok() {
+            if !hook_required(name) && fs::read_to_string(&path).ok() != expected_hook(command).ok() {
+                eprintln!("note: existing {name} hook left in place; run `transcrypt-v3 hydrate` \
+                    after Git commands that rewrite *.secret files");
+            }
+            continue;
+        }
         let script = expected_hook(command)?;
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -527,7 +548,8 @@ fn lock(root: &Path) -> Result<(), String> {
     // ciphertext now in the worktree (the clean filter returns an authentic
     // record unchanged), so a locked checkout is clean and `git commit -a`
     // does not need the key.
-    reindex(root, &verified)?;
+    let paths: Vec<Vec<u8>> = verified.protected.iter().map(|e| e.path.clone()).collect();
+    reindex(root, &verified.listing, &paths)?;
     session::stop(root, &config)?;
     eprintln!("Locked: tracked *.secret files flushed and the in-memory credential agent stopped. This does not securely erase historical plaintext backups.");
     Ok(())
@@ -566,10 +588,29 @@ fn filter(root: &Path, clean: bool, git_path: &[u8]) -> Result<(), String> {
     let result = if clean {
         session::request(root, &config, Operation::Encrypt, git_path, &input)?
     } else {
-        session::request(root, &config, Operation::Decrypt, git_path, &input)?
+        let plaintext = session::request(root, &config, Operation::Decrypt, git_path, &input)?;
+        if !umask_is_private() {
+            // Git would create this file readable by other users. Emit the
+            // record, now authenticated, unchanged; the post-checkout hook
+            // (or `hydrate`) publishes the plaintext with mode 0600.
+            io::stdout().write_all(&input).map_err(|_| "cannot write output")?;
+            return Ok(());
+        }
+        plaintext
     };
     io::stdout().write_all(&result).map_err(|_| "cannot write output")?;
     Ok(())
+}
+
+/// Whether files Git creates now are private to this user. Git creates
+/// worktree files with mode `0666 & !umask`, and its filters inherit its
+/// umask, so the smudge filter sees exactly the mask Git will apply.
+fn umask_is_private() -> bool {
+    // SAFETY: umask cannot fail; this process is single-threaded here and
+    // restores the previous mask immediately.
+    let previous = unsafe { libc::umask(0o077) };
+    unsafe { libc::umask(previous) };
+    previous & 0o077 == 0o077
 }
 
 /// The content of one Git blob, named by an id the verified core accepted
@@ -1108,70 +1149,109 @@ fn staging_dir(root: &Path) -> Result<Staging, String> {
     Ok(Staging { dir })
 }
 
+/// Run from the post-checkout, post-merge and post-rewrite hooks: hydrate
+/// if unlocked, and never fail the Git command that already finished.
+fn auto_hydrate(root: &Path) -> Result<(), String> {
+    let Ok(config) = load_config(root) else { return Ok(()) };
+    if session::request(root, &config, Operation::Ping, &[], &[]).is_err() {
+        return Ok(());
+    }
+    if let Err(e) = hydrate(root) {
+        eprintln!("transcrypt-v3: automatic hydration skipped: {e}\n\
+            Inspect with `transcrypt-v3 status`, then run `transcrypt-v3 hydrate`.");
+    }
+    Ok(())
+}
+
+/// Decrypt, with mode 0600, every protected worktree file that is an
+/// authentic record for its own path: the staged ciphertext of a fresh
+/// checkout, or another genuine record that Git wrote (a restored or
+/// stash-popped version). Every other file (plaintext, edited or not) is
+/// left as it is, only made private. Nothing but an authentic record is ever
+/// replaced, so no edit can be lost, and replacing a record by its plaintext
+/// loses nothing (clean seals it back to the same record).
 fn hydrate(root: &Path) -> Result<(), String> {
     let staging = staging_dir(root)?;
     let config = load_config(root)?;
-    // Authenticate ALL staged protected objects and the staged metadata
-    // before exposing any plaintext in the checkout. Everything below uses
-    // the object ids of this verified snapshot.
+    // Authenticate ALL staged protected objects, the staged metadata and the
+    // effective filter before exposing any plaintext in the checkout.
     let verified = verify_index(root)?;
+    let id = transcrypt_v3::config_id(&config);
     let mut pending = Vec::new();
+    let mut refresh = Vec::new();
     let mut kept = Vec::new();
 
-    // Validate the complete worktree first. A checkout may contain a mixture
-    // of ciphertext and already-hydrated plaintext after an interrupted run.
-    // Neither an unexpected third value nor a protected symlink is replaced.
+    // Decide for every file before writing any. A protected symlink or
+    // unreadable file aborts the whole operation.
     for staged in &verified.protected {
-        let object = git_blob(root, &staged.oid)?;
-        let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &object)?;
         let relative = indexed_path(&staged.path)?;
         let (worktree, stamp) = open_protected(root, &relative)?.read()?;
-        match hydrate_action(&worktree, &object, &plaintext) {
-            Ok(HydrateAction::Publish) => pending.push((staged, relative, stamp)),
-            Ok(HydrateAction::Keep) => kept.push(relative),
-            Err(_) => return Err("protected worktree differs from staged ciphertext and authenticated plaintext; refusing overwrite".into()),
+        let object = git_blob(root, &staged.oid)?;
+        // The record this file holds, if any: the staged one, or another
+        // that authenticates at this path.
+        let is_staged = *worktree == object;
+        let record: Option<&[u8]> = if is_staged {
+            Some(&object)
+        } else if record_envelope_ok(&worktree, &id) {
+            Some(&worktree)
+        } else {
+            None
+        };
+        if let Some(record) = record {
+            let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, record)
+                .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
+            if hydrate_action(&worktree, record, &plaintext) == Ok(HydrateAction::Publish) {
+                pending.push((staged, relative, stamp, record.to_vec(), is_staged));
+                continue;
+            }
         }
+        let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &object)?;
+        if hydrate_action(&worktree, &object, &plaintext) == Ok(HydrateAction::Keep) {
+            refresh.push(staged.path.clone());
+        }
+        kept.push(relative);
     }
     // Detect a changed index or public configuration between validation and
     // publication.
     if git(root, &["ls-files", "--stage", "-z"])? != verified.listing || load_config(root)? != config {
         return Err("index or public configuration changed during hydration".into());
     }
-
-    for (i, (staged, relative, stamp)) in pending.into_iter().enumerate() {
-        // Same object id, hence the same bytes that were authenticated above.
-        let object = git_blob(root, &staged.oid)?;
-        let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &object)?;
-        // `replace` refuses unless the file is still the ciphertext checked above.
+    let published = pending.len();
+    for (i, (staged, relative, stamp, record, is_staged)) in pending.into_iter().enumerate() {
+        let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &record)?;
+        // `replace` refuses unless the file is still the record checked above.
         open_protected(root, &relative)?.replace(&staging, &plaintext, i, &stamp)?;
+        if is_staged { refresh.push(staged.path.clone()); }
     }
-    // Plaintext that Git's checkout (smudge) wrote follows the umask and may
-    // be readable by other users; published files are already 0600.
+    // Plaintext that Git's checkout wrote follows the umask and may be
+    // readable by other users; published files are already 0600.
     for relative in &kept {
         open_protected(root, relative)?.make_private()?;
     }
     // Git's index still caches the size/mtime of the encrypted checkout, and
-    // `update-index --refresh` skips files whose size changed. Re-index
-    // exactly the protected paths through the clean filter instead:
+    // `update-index --refresh` skips files whose size changed. Re-index the
+    // files that now hold exactly the staged plaintext (never an edit or a
+    // different version, which would stage it) through the clean filter:
     // `update-index -z --stdin` takes raw path bytes, never pathspecs (a
     // tracked `[a].secret` must not select an untracked `a.secret`), and
     // without `--add` cannot stage an untracked file. `reindex` verifies that
     // no staged blob or mode changed, even when index != HEAD.
-    reindex(root, &verified)?;
-    eprintln!("Hydration complete.");
+    reindex(root, &verified.listing, &refresh)?;
+    eprintln!("Hydration complete: {published} file(s) decrypted.");
     Ok(())
 }
 
-/// Re-index exactly the verified protected paths through the clean filter
-/// and check that no staged blob or mode changed.
-fn reindex(root: &Path, verified: &Verified) -> Result<(), String> {
-    let mut paths = Vec::new();
-    for staged in &verified.protected {
-        paths.extend_from_slice(&staged.path);
-        paths.push(0);
+/// Re-index exactly `paths`, whose worktree content cleans to the staged
+/// blob, and check that no staged blob or mode changed from `listing`.
+fn reindex(root: &Path, listing: &[u8], paths: &[Vec<u8>]) -> Result<(), String> {
+    if paths.is_empty() { return Ok(()); }
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path);
+        input.push(0);
     }
-    git_with_input(root, &["update-index", "-z", "--stdin"], &paths)?;
-    if git(root, &["ls-files", "--stage", "-z"])? != verified.listing {
+    git_with_input(root, &["update-index", "-z", "--stdin"], &input)?;
+    if git(root, &["ls-files", "--stage", "-z"])? != listing {
         return Err("staged Git objects changed while refreshing the index; inspect `git diff --cached`".into());
     }
     Ok(())

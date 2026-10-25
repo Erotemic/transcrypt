@@ -372,14 +372,27 @@ fn unlock_hydrates_by_default_and_reports_refusals() {
     assert_eq!(fs::read(clone.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
     run(&clone, bin(), &["lock"], None);
-    // An unexpected local edit: unlock succeeds, hydration changes nothing.
+    // A local edit made while locked survives unlock untouched (and stays
+    // unstaged); every other file is decrypted.
     fs::write(clone.join("dir/b.secret"), b"local edit\n").unwrap();
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    assert_eq!(fs::read(clone.join("dir/b.secret")).unwrap(), b"local edit\n");
+    let status = run(&clone, "git", &["status", "--porcelain"], None);
+    assert_eq!(status, b" M dir/b.secret\n", "{}", String::from_utf8_lossy(&status));
+    fs::write(clone.join("dir/b.secret"), b"beta plaintext\n").unwrap();
+    run(&clone, bin(), &["lock"], None);
+    // A refusal (a protected file replaced by a symlink) leaves everything
+    // unchanged, and unlock still succeeds and says so.
+    let record = fs::read(clone.join("a.secret")).unwrap();
+    fs::remove_file(clone.join("dir/b.secret")).unwrap();
+    std::os::unix::fs::symlink("../a.secret", clone.join("dir/b.secret")).unwrap();
     let out = exec(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("hydration changed nothing"));
-    assert_ne!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
-    assert_eq!(fs::read(clone.join("dir/b.secret")).unwrap(), b"local edit\n");
-    fs::write(clone.join("dir/b.secret"), run(&clone, "git", &["show", ":dir/b.secret"], None)).unwrap();
+    assert_eq!(fs::read(clone.join("a.secret")).unwrap(), record);
+    fs::remove_file(clone.join("dir/b.secret")).unwrap();
+    run(&clone, "git", &["checkout", "--", "dir/b.secret"], None);
 }
 
 /// Regression: hydration refreshed the index with `git add -- <path>`, which
@@ -728,4 +741,80 @@ fn server_pre_receive_hook_refuses_plaintext_pushes() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && err.contains("leak.secret"), "{err}");
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+}
+
+/// Run `git` under an explicit umask, as a user's shell would.
+fn git_with_umask(dir: &Path, mask: &str, args: &[&str]) {
+    let script = format!("umask {mask} && exec git \"$@\"");
+    let mut full = vec!["-c", script.as_str(), "git"];
+    full.extend_from_slice(args);
+    run(dir, "sh", &full, None);
+}
+
+/// No protected worktree file holds plaintext while readable by others.
+fn assert_no_exposed_plaintext(repo: &Path, step: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    for path in worktree_files(repo) {
+        if !path.to_str().unwrap().ends_with(".secret") { continue; }
+        let full = repo.join(&path);
+        let bytes = fs::read(&full).unwrap();
+        let ciphertext = bytes.starts_with(b"TV3F\0\x01");
+        let mode = fs::metadata(&full).unwrap().permissions().mode();
+        assert!(ciphertext || mode & 0o077 == 0, "{step}: {path:?} is plaintext with mode {:o}", mode & 0o777);
+    }
+}
+
+/// Regression: with `umask 022`, Git wrote smudged plaintext with mode
+/// 0644, readable by every local user. Smudge now releases plaintext only
+/// when Git's umask makes the file private; otherwise Git writes the
+/// authenticated ciphertext and the post-checkout/post-merge/post-rewrite
+/// hooks (or `hydrate`) publish the plaintext with mode 0600.
+#[test]
+fn git_never_writes_plaintext_readable_by_others() {
+    let mut scratch = Scratch::new("umask");
+    let repo = scratch.repo("repo");
+    run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
+    fs::write(repo.join("a.secret"), b"alpha on side\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "side change"], None);
+    run(&repo, "git", &["checkout", "-q", "-"], None);
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    let main = main.trim();
+    // Switching branches: the hook decrypts privately.
+    git_with_umask(&repo, "022", &["checkout", "-q", "side"]);
+    assert_no_exposed_plaintext(&repo, "checkout");
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha on side\n");
+    git_with_umask(&repo, "022", &["checkout", "-q", main]);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    // Merge (post-merge) and rebase (post-checkout/post-rewrite).
+    fs::write(repo.join("dir/b.secret"), b"beta on main\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "main change"], None);
+    git_with_umask(&repo, "022", &["merge", "-q", "--no-edit", "side"]);
+    assert_no_exposed_plaintext(&repo, "merge");
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha on side\n");
+    git_with_umask(&repo, "022", &["checkout", "-q", "side"]);
+    git_with_umask(&repo, "022", &["rebase", "-q", main]);
+    assert_no_exposed_plaintext(&repo, "rebase");
+    assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), b"beta on main\n");
+    git_with_umask(&repo, "022", &["checkout", "-q", main]);
+    // Restore and stash run no hook: ciphertext stays until `hydrate`, which
+    // also decrypts a stash-popped edit without staging it.
+    fs::write(repo.join("a.secret"), b"uncommitted edit\n").unwrap();
+    git_with_umask(&repo, "022", &["stash", "-q"]);
+    assert_no_exposed_plaintext(&repo, "stash");
+    git_with_umask(&repo, "022", &["stash", "pop", "-q"]);
+    assert_no_exposed_plaintext(&repo, "stash pop");
+    run(&repo, bin(), &["hydrate"], None);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"uncommitted edit\n");
+    assert_no_exposed_plaintext(&repo, "hydrate after stash pop");
+    assert!(run(&repo, "git", &["diff", "--cached", "--name-only"], None).is_empty());
+    git_with_umask(&repo, "022", &["restore", "a.secret"]);
+    assert_no_exposed_plaintext(&repo, "restore");
+    run(&repo, bin(), &["hydrate"], None);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha on side\n");
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    // With a private umask, smudge writes plaintext directly (mode 0600).
+    git_with_umask(&repo, "077", &["checkout", "-q", "HEAD~1"]);
+    assert_no_exposed_plaintext(&repo, "private umask");
+    git_with_umask(&repo, "077", &["checkout", "-q", main]);
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
 }

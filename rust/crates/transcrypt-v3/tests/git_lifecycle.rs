@@ -107,11 +107,13 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     fs::write(&metadata_path, altered_metadata).unwrap();
     run_fails(&clone, bin, &["clean", "account.secret"], Some(b"must not encrypt under changed metadata"));
     fs::write(&metadata_path, authentic_metadata).unwrap();
-    // If any protected path is unexpected, preflight must refuse to touch
-    // every path. Previously restoring one at a time risked partial writes.
+    // Hydrate replaces only authentic records. Unexpected local bytes in
+    // another protected file are never overwritten (nor staged).
     fs::write(clone.join("ledger.secret"), b"unexpected local worktree data\n").unwrap();
-    run_fails(&clone, bin, &["hydrate"], None);
-    assert_eq!(fs::read(clone.join("account.secret")).unwrap(), object);
+    run(&clone, bin, &["hydrate"], None);
+    assert_eq!(fs::read(clone.join("account.secret")).unwrap(), b"private content\n");
+    assert_eq!(fs::read(clone.join("ledger.secret")).unwrap(), b"unexpected local worktree data\n");
+    assert_eq!(run(&clone, "git", &["diff", "--cached", "--name-only"], None), b"");
     fs::write(clone.join("ledger.secret"), &ledger_object).unwrap();
     run(&clone, bin, &["hydrate"], None);
     assert_eq!(fs::read(clone.join("account.secret")).unwrap(), b"private content\n");
