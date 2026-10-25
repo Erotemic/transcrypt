@@ -168,7 +168,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify code provenance and snapshot regression tests
         run: |
-          python3 -m unittest discover -s proofs/aeneas/tests -p 'test_v3_snapshot.py' -v
+          python3 -m unittest discover -s proofs/aeneas/tests -p 'test_v3_*.py' -v
           python3 proofs/aeneas/v3_snapshot.py verify
           python3 proofs/aeneas/v3_snapshot.py stage
       - name: Lean build of actual generated code and refinement theorems
@@ -177,6 +177,8 @@ jobs:
           lake-package-directory: proofs/aeneas/v3
           test: false
           use-mathlib-cache: true
+      - name: Axiom audit of headline refinement theorems
+        run: bash proofs/aeneas/check-v3-axioms.sh
 
   v3-aeneas-regeneration:
     # No synthetic model: rerun the pinned real translator, diff the exact
