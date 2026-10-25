@@ -4,17 +4,18 @@ This correspondence table refers to the independent
 [`V3-AUTHENTICATED-P0.md`](../specs/V3-AUTHENTICATED-P0.md). Rust code
 must be changed to comply with that contract, not vice versa.
 
-| Protocol clause | Production Rust | Independent conformance evidence | Planned Lean obligation |
+| Protocol clause | Production Rust | Independent conformance evidence | Lean theorem (proved) |
 |---|---|---|---|
-| Config bytes 0..54, magic, salt, verifier | `transcrypt-v3-core::{encode_config_prefix,encode_config,parse_config}` | core unit tests, `vectors.tsv` | Extracted parser/encoder roundtrip under canonical sizes |
-| File header bytes 0..21, minimum 38 | `transcrypt-v3-core::{encode_file_header,parse_file_header}` | core unit tests, Rust negative tests | Header construction/parse refinement |
-| Argon2id v19 fixed params/64B key | `transcrypt-v3::derive_key` | Python argon2-cffi vector | External Argon2id semantics assumption |
-| Deterministic, pathname-bound AES-SIV authentication | `transcrypt-v3::{validate_protected_path,encrypt_file,decrypt_file}` | Python OpenSSL-backed 3-element-AAD vectors, Rust negative cross-path tests, real-Git index-object swap test | External AES-SIV correctness, canonical-path input and unforgeability assumptions |
-| Metadata binding and fail closed | `authenticate_config`, `config_id`, `decrypt_file` | config tampering and wrong password tests | No successful open with invalid authentication |
-| Credential authorization | `main::unlock` and `session::{start,serve}` | Git wrong-password no-agent test and no-disk-key assertion | Preflight-before-persistent-effects adapter relation |
-| Staged tree safety | `main::verify_index`, Git hook | forged raw Git object regression | Index truth, symlink, and ciphertext-refinement effect contract |
-| Clone hydration | `main::{hydrate,publish_plaintext}` | Git clone, staged-only index, multi-file preflight, and repeated hydration tests | No destructive action before all inputs pass; worktree bytes equal authenticated ciphertext or plaintext |
-| Lock | `main::lock` and `session::stop` | full lifecycle and dirty-file rejection test (to expand) | Credential removal only after full encrypted flush |
+| Config bytes 0..54, magic, salt, verifier | `transcrypt-v3-core::{encode_config_prefix,encode_config,decode_config_exact,parse_config}` | core unit tests, `vectors.tsv` | `encode_config_refines`, `decode_config_exact_spec`, `parse_config_spec`, `parse_config_encode_config` |
+| File header bytes 0..21, minimum 38 | `transcrypt-v3-core::{encode_file_header,decode_file_header_exact,parse_file_header}` | core unit tests, Rust negative tests | `encode_file_header_refines`, `decode_file_header_exact_spec`, `parse_file_header_spec` |
+| Argon2id v19 fixed params/64B key | `transcrypt-v3::derive_key` | Python argon2-cffi vector | External assumption (A9/A10) |
+| Canonical protected path | `transcrypt-v3-core::{is_protected_path,is_canonical_protected_path}` | Rust path tests, raw `%f` Git test | `is_canonical_protected_path_spec` |
+| Deterministic, path-bound AES-SIV sealing | `transcrypt-v3-core::seal_record` via `Keyed` | OpenSSL-backed vectors, `keyed_satisfies_the_realizes_contract` | `seal_record_spec` (relative to `Realizes`) |
+| Metadata binding and fail closed | `transcrypt-v3-core::{authenticate_config,open_record}` | tampering, wrong password, cross-path and foreign-record tests | `authenticate_config_spec`, `open_record_spec`, `open_record_complete` |
+| Credential authorization | `transcrypt-v3-core::authorize_agent_request`, `session::{start,serve,transaction}` | hostile-client and stale-socket tests | `authorize_agent_request_spec` |
+| Staged tree safety | `transcrypt-v3-core::check_attr_response_ok`, `main::verify_index`, Git hook | attribute-precedence, forged object, blob-swap tests | `check_attr_response_ok_spec`, `check_attr_paths`, `verifyPlan_spec` |
+| Clone hydration | `transcrypt-v3-core::hydrate_action`, `main::hydrate` | clone, staged-only index, preflight, interruption, crash-leftover tests | `hydrate_action_spec`, `hydratePlan_spec` |
+| Lock | `transcrypt-v3-core::lock_action`, `main::lock`, `session::stop` | unstaged-edit refusal, interrupted-lock resume | `lock_action_spec`, `lockEntry_spec` |
 
 ## Trusted computation boundaries
 
@@ -108,12 +109,12 @@ tracked external assumptions, toolchain pins, and `SNAPSHOT.json` source
 hashes. The code is Aeneas-generated from the production crate, not an
 alternative manually authored Rust model.
 
-The file `V3Wire/Verification/Refinement.lean` currently states direct
-correspondence of the extracted Rust magic/version byte constants with the
-independent `Transcrypt.V3Wire` specification, plus their disjointness.
-The full extracted Rust encoder/decoder loops, errors, length checks, and
-cryptographic authentication remain separate open obligations. Do not
-interpret the snapshot-integrity test as verification of those obligations.
+As of 2026-10-25 the verification modules under `V3Wire/Verification/`
+prove the full extracted encoder/decoder loops, errors and length checks, and
+every protocol decision of the core, relative to the explicit primitive
+contract `Realizes` (see the table above and `PROOF-STATUS.md`). The
+cryptographic primitives themselves remain external assumptions. The
+snapshot-integrity test alone is still not verification.
 
 ## Experimental v3 pathname binding (no wire-core changes)
 
@@ -128,5 +129,6 @@ headers, and the Aeneas-tracked pure wire codec, are byte-for-byte unchanged.
 
 This is a *cryptographic profile incompatibility* with the earlier v3 P0
 prototype. Old ciphertext must be exported before upgrading/reinitializing.
-No unproven fallback or multi-version complexity was added. Full formal
-verification of the AES-SIV adapter and Git path-to-AD mapping remains open.
+No unproven fallback or multi-version complexity was added. The path policy
+and the AD-carrying seal/open control flow are now proved in the core; the
+AES-SIV implementation remains an external assumption (A5/A9).

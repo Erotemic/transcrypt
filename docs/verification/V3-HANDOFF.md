@@ -1,105 +1,89 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
-**Last reconciled:** 2026-10-24, after the path-bound v3 Rust compilation fix.
-**Branch:** `work/m2-nul-safe-path-enumeration` (user reported the tracked
-Aeneas foundation pushed to this branch and the subsequent compile fix works).
-Always begin by checking the actual working tree and the latest commits;
-this file is a continuity aid, not a claim to have inspected future changes.
+**Last reconciled:** 2026-10-25. **Branch:** `work/m2-nul-safe-path-enumeration`.
+Always begin by checking the working tree and latest commits; this file is a
+continuity aid, not a claim about later changes.
 
 ## Goal / anti-goals
 
-Deliver the **smallest secure-first Rust v3 lifecycle with meaningful
-source-derived Lean refinement**. V3 uses Argon2id and AES-256-CMAC-SIV,
+Deliver the smallest secure-first Rust v3 lifecycle with meaningful
+source-derived Lean refinement. V3 uses Argon2id and AES-256-CMAC-SIV,
 canonical Git pathname authentication, one context and `*.secret` files.
-Do not spend the next round on legacy-v2 parity, Bash CLI porting, more
-standalone SMT, broad migration, proof-certificate mechanics, or full Git/OS
-formalization. Keep the independent byte spec authoritative.
+Do not spend effort on legacy-v2 parity, Bash CLI porting, standalone SMT,
+broad migration or full Git/OS formalization. Keep the independent spec
+authoritative: Rust is changed to meet it, never the reverse.
 
-## Key entrypoints
+## Where things are
 
-| Concern | Canonical code or document |
+| Concern | Canonical location |
 | --- | --- |
-| Active milestones and stop conditions | `docs/verification/V3-ROADMAP.md` |
-| Verification obligations and status | `docs/verification/V3-PROOF-COVERAGE.md` |
-| Precise v3 wire/AAD/Git behavior | `docs/verification/specs/V3-AUTHENTICATED-P0.md` |
-| Actual pure Rust codec | `rust/crates/transcrypt-v3-core/src/lib.rs` |
-| Actual encrypted adapter and Git lifecycle | `rust/crates/transcrypt-v3/src/{lib,main,session}.rs` |
-| Independent Lean codec model | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec}.lean` |
-| Tracked generated Rust semantics | `proofs/aeneas/v3/V3Wire/Extraction/Funs.lean` |
-| Current real-source correspondence theorems | `proofs/aeneas/v3/V3Wire/Verification/Refinement.lean` |
-| Source hash and translator pins | `proofs/aeneas/v3/SNAPSHOT.json` |
-| Snapshot/update procedure | `proofs/aeneas/v3/README.md` |
-| Git/adversarial tests | `rust/crates/transcrypt-v3/tests/` |
-| Independent crypto/path vectors | `tests/v3/reference/` |
-| CI | `.github/workflows/run-bats-core-tests.yml` |
+| Roadmap, stage status, remaining work | `docs/verification/V3-ROADMAP.md` |
+| Evidence per requirement | `docs/verification/V3-PROOF-COVERAGE.md` |
+| Trust-ordered assumptions, adapter call-site table | `docs/verification/V3-ASSUMPTIONS.md` |
+| Internal security review (V6) | `docs/verification/V3-SECURITY-REVIEW.md` |
+| User documentation | `docs/verification/V3-USER-GUIDE.md` |
+| Wire/AAD/Git behavior | `docs/verification/specs/V3-AUTHENTICATED-P0.md` |
+| Verified pure core (codec + every decision) | `rust/crates/transcrypt-v3-core/src/lib.rs` |
+| Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-v3/src/lib.rs` |
+| Git adapter, agent, fd-relative FS | `rust/crates/transcrypt-v3/src/{main,session,fsat}.rs` |
+| Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` |
+| Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
+| Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Protocol,Lifecycle}.lean` |
+| Theorem ledger | `proofs/aeneas/v3/PROOF-STATUS.md` |
+| Tests | `rust/crates/transcrypt-v3/tests/{git_lifecycle,adversarial,v3_vectors}.rs`, `tests/v3/reference/` |
 
-## Verified current state and gaps
+## Verified state
 
-- The user confirmed the Rust build/tests and latest path-bound compile fix
-  work; do not downgrade that to "unreported" absent contrary evidence.
-- The tracked Aeneas-generated Lean code matches the Rust codec source and
-  the imported magic/version correspondence theorems compile. Snapshot
-  consistency is checked in CI.
-- The four generated codec operations exist, but **full-field functional
-  refinement of their RustM loops is open**. No theorem currently establishes
-  the entire live authenticated Git lifecycle.
-- The AES-SIV library, KDF, entropy, filesystem, socket and Git operations
-  remain external security/functional assumptions. This is an experimental
-  prototype, not a production-safe secret store.
+- Every function of the core is translated by the pinned cargo-hax 0.4.2
+  (Charon + Aeneas) toolchain and proved against the independent spec,
+  covering full outputs, every error outcome and the absence of panics.
+  Protocol theorems are relative to the explicit primitive contract
+  `Realizes`. Lifecycle theorems are about Lean models of the adapter's
+  loops.
+- `bash proofs/aeneas/build-v3-tracked.sh` builds everything;
+  `bash proofs/aeneas/check-v3-axioms.sh` shows only standard axioms.
+- Rust: `cargo test --workspace` (lifecycle, adversarial, vectors, contract
+  test). Python: `tests/v3/reference/*.py` need `cryptography>=42` (Ubuntu's
+  41.x rejects empty AES-SIV plaintexts) and `argon2-cffi`; CI pins them.
 
-## Immediate next task (vertical proof step)
-
-Prove **`encode_file_header`** against the independent 22-byte header
-serializer using the actual generated function. Begin by reading the function
-and its two generated loops in `V3Wire/Extraction/Funs.lean`. Determine its
-`RustM` success representation and exact array-to-list projection. Build a
-small theorem that returns all bytes (including arbitrary 16-byte config ID),
-then generalize reusable array-loop lemmas for config encoding and decoders.
-
-A proof only about `FILE_MAGIC`, reflexivity, a manually written copy of the
-Rust function, or unconnected SMT models does not complete the task. If
-Aeneas loop structure causes avoidable proof debt, refactor the **production
-Rust** byte-copy loop to an Aeneas-friendly safe expression and regenerate
-before proving; preserve canonical Rust/vector/Git tests and public bytes.
-
-Run normally:
+## Commands
 
 ```bash
 cd ~/code/transcrypt
-cd rust && cargo test --offline --workspace && cd ..
-python3 tests/v3/reference/check_vectors.py -v
-python3 proofs/aeneas/v3_snapshot.py verify
+cd rust && cargo test --workspace && cd ..
+python3 tests/v3/reference/check_vectors.py -v      # in a venv with the pinned deps
+python3 -m unittest discover -s proofs/aeneas/tests -p 'test_v3_*.py'
 bash proofs/aeneas/build-v3-tracked.sh
+bash proofs/aeneas/check-v3-axioms.sh
 ```
 
-If the Rust core changes, run the pinned translator, inspect the diff,
-compare then explicitly refresh the snapshot as described in
-`proofs/aeneas/v3/README.md`. Avoid regenerating for proof-only edits.
+When the core changes: `bash proofs/aeneas/translate-v3-core.sh`, then
+`python3 proofs/aeneas/v3_snapshot.py compare` (expected to fail), review
+the regenerated `Funs.lean`, then run `refresh` and rebuild. Existing proofs
+name generated loops (`*_loop0.body`, …); appending functions keeps them
+stable, but reordering loops inside a proved function renames them.
 
-## Update protocol for each merged step
+## Proof engineering notes (hard-won)
 
-1. Land actual code and/or a theorem, with the ordinary focused build gate.
-2. Add a row or update the evidence in `V3-PROOF-COVERAGE.md`, including
-   accepted assumptions; update the short status note in
-   `proofs/aeneas/v3/PROOF-STATUS.md` if the proof boundary moved.
-3. Mark one milestone acceptance item in `V3-ROADMAP.md`; add a **dated,
-   append-only** note to `implementation-progress.md` for why the milestone
-   moved, not another full replacement roadmap.
-4. If an incompatible experimental cryptographic profile is changed,
-   update the independent spec, vectors, Git tests and compatibility note;
-   do not silently reinterpret ciphertext under a public released marker.
-5. Keep artifacts limited to destination paths in a single ZIP overlay; use
-   normal tests, then exact `git add` and one `git commit` with attribution.
+- Generic whole-loop lemmas: `copy_loop` / `compare_loop` in `Copy.lean`
+  (via `loop.spec_decr_nat`), and the pointwise `Copied` invariant.
+- In loop bodies: `simp only [CoreModels.core.slice.Slice.len,
+  CoreModels.rust_primitives.slice.slice_length]`, put length/constant facts
+  and `have := usize_max_ge` in context **before** `step*`; it then
+  discharges bounds and exit cases itself. Inspect leftovers with
+  `trace_state`. Goal order after `step*` can surprise you.
+- `rw` on dependent `getElem` indices fails; convert with `getElem!_pos`.
+- `subst` on the result of a dependent `match` fails; rewrite the equation
+  and `simp only [..., WP.spec_ok]`.
+- Unnamed hypotheses: refer by type with `‹_›` instead of `rename_i` where
+  possible.
 
-**Decision rule:** spend effort on meaningful proofs connected to shipped
-Rust or exploitable lifecycle failures, not on increasing theorem counts.
+## Next tasks (trust order)
 
-### Next source-derived codec proof target
+1. Extract the `ls-files --stage -z` entry parser and agent frame parsing
+   into the core and prove them (A4 reduction).
+2. External review R-01.
+3. Bash v7 only after a dependency-policy decision.
 
-After applying the staged-attribute hardening, run the focused workbench build
-`bash proofs/aeneas/build-v3-codec-steps.sh`. On success, lift the per-step
-write/extract facts into termination and content invariants for both generated
-file-header loops, then prove the *complete* `encode_file_header` function
-refines the independent 22-byte format. Do not claim whole-codec refinement
-from the per-step lemmas alone. The normal tracked build is deliberately not
-dependent on the new workbench until its proofs are confirmed.
+**Decision rule:** spend effort on proofs connected to shipped Rust or on
+exploitable lifecycle failures, not on theorem counts.

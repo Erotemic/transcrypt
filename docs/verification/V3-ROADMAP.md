@@ -1,6 +1,6 @@
 # Transcrypt v3: active roadmap and stopping criteria
 
-**Active as of 2026-10-24.** This is the primary execution plan for the
+**Active as of 2026-10-24; statuses reconciled 2026-10-25.** This is the primary execution plan for the
 secure-first Rust v3 proof of concept on `work/m2-nul-safe-path-enumeration`.
 The older [08 roadmap](08-roadmap-and-pr-plan.md) covers the *larger upstream
 Bash/Rust and legacy-migration campaign*, not the critical path here.
@@ -23,14 +23,14 @@ what is and is not established.
 
 | Stage | Result and definition of done | Current status | Critical path? |
 | --- | --- | --- | --- |
-| V0 — narrow format | One suite (Argon2id + AES-256-CMAC-SIV), exact metadata/record bytes, path AAD, explicit failure/rename behavior and independent vectors | **Implemented as experimental candidate**; external review/freeze outstanding | Yes, freeze before release |
-| V1 — Rust lifecycle | `init`, `unlock`, `clean`, `smudge`, `verify-index`, `hydrate`, `lock` operate on real Git repos; negative tests for tampering, incorrect password and stage divergence | **Implemented and tested**; user confirmed latest Rust build/fix works | Achieved for POC |
-| V2 — source-derived Lean | Pin actual Rust codec source, translate through Charon/Aeneas, commit generated definitions, reproduce exact output and compile in Lean | **Achieved**; snapshot and initial constant theorems compile; CI gates present | Achieved |
-| V3 — functional refinement | The *actual generated* config and file-header encoders/decoders match the independent Lean codec specification on success and errors; public slice-length checks covered | **Open**; only extracted magic/version claims proved | **Next** |
-| V4 — authenticated-operation contracts | Production Rust calls a small pure core of decisions for config/key/path/index/authorization; that core is translated and proved to prevent plaintext release or staging outside stated preconditions; crypto treated as an explicit trusted primitive | **Open**; adapters and cryptographic-library behavior not verified | Yes for meaningful formal claims |
-| V5 — lifecycle/failure assurance | Real Git/FS/agent tests cover malicious paths, dirty/staged conflicts, interruptions, recovery and cross-path transplants; remaining transactions either hardened or explicitly declared unsupported | **Partial**; substantial happy/negative-path tests, no full multi-file crash transaction | Yes for credible POC / release gate |
-| V6 — freeze, review, distribution | Crypto/OS/Git threat review, reproducible tests on advertised platforms, version/profile compatibility decision, honest security and proof claims | **Open** | Required before security-sensitive release |
-| V7 — Bash v3 conformance | Bash implements exactly the approved v3 wire/profile; independently test same vectors and lifecycle semantics, with no new Bash runtime dependency unless explicitly renegotiated | **Deferred** | No, for Rust-first POC |
+| V0 — narrow format | One suite (Argon2id + AES-256-CMAC-SIV), exact metadata/record bytes, path AAD, explicit failure/rename behavior and independent vectors | **Frozen as v3 profile 1** (decision in [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md)); external review outstanding | Done for POC |
+| V1 — Rust lifecycle | `init`, `unlock`, `clean`, `smudge`, `verify-index`, `hydrate`, `lock` (+ `status`, `help`) on real Git repos; negative tests | **Achieved** | Done |
+| V2 — source-derived Lean | Pin actual Rust core, translate through Charon/Aeneas, commit generated definitions, compile in Lean | **Achieved**; regeneration reproduced byte-for-byte locally and in CI | Done |
+| V3 — functional refinement | All four codec functions and the public slice parsers, full-field and failure behavior | **Achieved** (`Codec.lean`) | Done |
+| V4 — authenticated-operation contracts | Production Rust calls a pure core for every decision; the core is translated and proved; crypto is an explicit contract | **Achieved**: the core owns seal/open/authenticate/authorize/attribute/hydrate/lock decisions (`Protocol.lean`, `Bytes.lean`, `Path.lean`) relative to `Realizes` | Done |
+| V5 — lifecycle/failure assurance | Malicious paths, staged conflicts, interruptions, recovery, transplants; transactions hardened or declared | **Achieved for the stated threat model**: Lean lifecycle models (`Lifecycle.lean`), adversarial suite, private staging, dirfd resolution, resumable lock/hydrate; multi-file atomicity is explicitly not claimed | Done |
+| V6 — freeze, review, distribution | Threat review, reproducible tests, profile decision, honest claims | **Internal review done** ([V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md), [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md), [user guide](V3-USER-GUIDE.md)); Linux+macOS CI; **external review (R-01) outstanding** | Release blocker |
+| V7 — Bash v3 conformance | Bash implements exactly the approved v3 wire/profile | **Deferred** by policy: no reviewed Bash-feasible AES-SIV under the current dependency contract | No |
 
 **Interpretation:** stages are deliverable-based, not percentages. A passing
 snapshot hash check is not V3. Passing `lake build` of magic constants is not
@@ -67,49 +67,34 @@ independent specification, assuming the documented cryptographic and Git/OS
 adapter contracts." **Disallowed claim:** "Transcrypt v3 is fully formally
 verified" or "cryptographic security has been proved from first principles."
 
-## Immediate work sequence (prefer sequential, vertical slices)
+## Work sequence
 
-### Next: V3 — proof of actual generated codec
+### Completed (2026-10-25)
 
-- [ ] First choose the smallest generated loop, preferably
-      `encode_file_header`, and state a theorem about its *returned bytes*.
-      It must quantify over arbitrary valid config IDs, not only fixed magic.
-      A provisional step-level workbench is in
-      `proofs/aeneas/v3/V3Wire/Verification/CodecSteps.lean`; its compilation
-      and then the *whole-loop* theorem are still required.
-- [ ] Establish a reusable Aeneas array/`RustM` correspondence lemma. Reuse
-      that lemma for `encode_config` and each decoder; do not build separate
-      near-duplicate proof frameworks.
-- [ ] Prove decoder acceptance/rejection and the exact slice-parser length
-      boundary. If an Aeneas loop is intractable, refactor the **actual Rust
-      production function** to simpler safe-Rust operations, rerun Rust tests,
-      regenerate the tracked snapshot, and prove the new generated code.
-- [ ] Build with `bash proofs/aeneas/build-v3-tracked.sh` and keep CI's
-      regeneration gate matching the exact source. Update
-      `proofs/aeneas/v3/PROOF-STATUS.md` with theorem names and coverage.
+- [x] Whole-function refinement of every codec function, including the
+      public slice parsers (V3).
+- [x] Every security decision moved into the extracted core, with the
+      adapter reduced to primitives and effects, and each decision proved
+      against the independent spec `V3Policy.lean` (V4).
+- [x] Lifecycle sequencing proved in Lean models; adversarial real-Git
+      suite; crash-safe private staging; dirfd resolution; agent hardening
+      (V5).
+- [x] Internal security review, trust-ordered assumption register, user
+      guide, axiom audit and CI gates (V6, internal part).
 
-**V3 acceptance:** Lean theorem(s) use the generated `encode_*/decode_*`
-functions in their propositions; all four core functions have full-field and
-failure behavior proved under an explicit representation mapping; the
-production public slice boundaries are handled (by proof or a justified
-separate tested-contract boundary). Neither self-equality nor a theorem
-only about `CONFIG_MAGIC`/`FILE_MAGIC` meets this gate.
+### Remaining, in trust order (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md))
 
-### After V3: V4 → V5 → V6
-
-- V4: move any essential gating currently embedded in effectful Rust into
-  the *invoked* pure Rust core; prove the small resulting functions; keep
-  Argon2id/AES-SIV as contract boundaries. Avoid proof work on unrelated v2
-  Base64, old policy prototypes, migration and CLI parity.
-- V5: target safety-critical state transitions, especially index-versus-HEAD,
-  partial hydration, crash during multi-file `lock`, symlink/race exposure,
-  agent lifetime, and staged ciphertext substitution. Use adversarial real-
-  Git/fault-injection tests; only formalize transition plans if they control
-  actual effects. A local pre-commit hook is not a remote trust boundary.
-- V6: review the cryptographic dependency and parameters, equality leakage,
-  key handling, same-UID socket access, malicious Git checkout behavior, and
-  format discriminator. Keep rollback of old valid Git history an explicit
-  non-goal unless new trusted freshness state is introduced.
+1. **A4 — adapter correspondence.** Keep the call-site table current. The
+   next reduction is extracting the `ls-files --stage -z` entry parser and
+   the agent frame parser into the core and proving them.
+2. **A3 — translator trust.** Track Aeneas/hax releases; consider
+   differential testing of extracted definitions once they can be made
+   computable.
+3. **A8 — same-UID content races** are accepted; revisit only if the threat
+   model admits hostile same-UID processes.
+4. **R-01 — external review** of the construction, `aes-siv`, and the
+   adapter before any security-sensitive release.
+5. **V7 — Bash** only after a dependency-policy decision for AES-SIV.
 
 ## Scope discipline and risk decisions
 

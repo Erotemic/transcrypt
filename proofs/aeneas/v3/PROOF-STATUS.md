@@ -1,40 +1,55 @@
-# Formal verification ledger — production v3 codec
+# Formal verification ledger — production v3 core
 
-**Reconciled 2026-10-24:** The user confirmed the tracked Lean/Aeneas build
-works and pushed it to `work/m2-nul-safe-path-enumeration`. The three
-constant/disjointness theorems are compiled; no encoder/decoder behavior has
-yet been proved. For the active cross-component roadmap and exact criteria,
-see [`docs/verification/V3-ROADMAP.md`](../../../docs/verification/V3-ROADMAP.md)
-and [`V3-PROOF-COVERAGE.md`](../../../docs/verification/V3-PROOF-COVERAGE.md).
+**Reconciled 2026-10-25.** Every theorem below is about the Charon/Aeneas
+translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
+(pinned by `SNAPSHOT.json`), stated against the independent specification in
+`proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All are `WP.spec`
+triples, so they also exclude panics (index, overflow) and divergence. The
+default `V3Wire` target builds all of them;
+`bash proofs/aeneas/check-v3-axioms.sh` confirms the headline theorems use
+only `propext`, `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
+`axiom` or `native_decide` occurs in any verification module (enforced by
+`v3_snapshot.py verify`).
 
-| Obligation | Status | Evidence / boundary |
-| --- | --- | --- |
-| Aeneas translates the four production fixed-width functions | Translated | Checked-in `V3Wire/Extraction/Funs.lean`, pinned toolchain and exact source digests |
-| Lean imports actual generated function definitions | Implemented | `V3Wire/Extraction.lean` imported by `V3Wire.lean` |
-| Generated config magic refines independent spec | Compiled theorem (user-verified) | `V3Wire/Verification/Refinement.lean` |
-| Generated file magic refines independent spec | Compiled theorem (user-verified) | Same |
-| Generated formats are disjoint | Compiled theorem (user-verified) | Same |
-| Generated config encoder builds exact magic/salt/tag | Open | Requires `encode_config_*` RustM loop invariant |
-| Generated config decoder accepts exactly correct 55-byte records | Open | Requires loop termination/bounds and error proof |
-| Generated file-header encoder/decoder exactly match spec | Open | Requires `encode_file_header_*` and `decode_file_header_exact_*` proofs |
-| Public Rust slice parsers enforce truncation and length | Open | Not among the current four extracted functions |
-| AES-SIV and Argon2id crypto | External security assumption | In-process audited implementations/cryptographic assumptions, not v3 wire-codec proofs |
-| Git and socket lifecycle | Open | Requires an effect/state transition refinement |
+For the cross-component picture see
+[`V3-PROOF-COVERAGE.md`](../../../docs/verification/V3-PROOF-COVERAGE.md) and
+the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTIONS.md).
 
-No axiom dumps or routine theorem check inventories are part of normal builds.
+| Module | Production function(s) | Theorem(s) | Statement (informal) |
+| --- | --- | --- | --- |
+| `Refinement` | constants | `extracted_{config,file}_magic_matches_spec`, `extracted_magic_disjoint` | Version markers equal the spec and differ |
+| `Codec` | `encode_config_prefix`, `encode_config`, `encode_file_header` | `encode_config_prefix_bytes`, `encode_config_bytes`, `encode_file_header_bytes`, `encode_{config,file_header}_refines` | Every output byte, for arbitrary salt/tag/id |
+| `Codec` | `decode_config_exact`, `decode_file_header_exact` | `decode_{config,file_header}_exact_spec` | `Ok` iff magic matches, with exact fields; `Err Magic` iff magic differs; never `Err Length` |
+| `Codec` | `parse_config`, `parse_file_header` (public slice boundary) | `parse_config_spec`, `parse_file_header_spec` | Exactly the spec's `decodeConfigShape` / `decodeFileHeaderShape`, with `Length` vs `Magic` classified |
+| `Codec` | roundtrips | `decode_config_exact_encode_config`, `decode_file_header_exact_encode_file_header`, `parse_config_encode_config` | Decoding an encoding returns the input |
+| `Bytes` | `bytes_eq`, `filter_suffix_at`, `check_attr_response_ok` | `bytes_eq_spec`, `filter_suffix_at_spec`, `check_attr_response_ok_spec` | Equality decision; Git `check-attr` response accepted iff it equals `expectedAttrResponse request` |
+| `Bytes` | `hydrate_action`, `lock_action` | `hydrate_action_spec`, `lock_action_spec` | Exactly `hydrateSpec` / `lockSpec` |
+| `Path` | `is_protected_path`, `component_ok`, `is_canonical_protected_path` | `is_protected_path_spec`, `component_ok_spec`, `is_canonical_protected_path_spec` | Exactly the spec's `Protected` / `CanonicalProtectedPath` (defined with `List.splitOn`) |
+| `Protocol` | `initialize_config` | `initialize_config_spec` | Output is the spec layout and authenticates |
+| `Protocol` | `authenticate_config` | `authenticate_config_spec` | `Ok` iff `ConfigAuthentic`; refusals classified |
+| `Protocol` | `seal_record` | `seal_record_spec` | `Ok` ⇒ `MaySeal` and output = `sealedRecord`; every refusal names a violated precondition or primitive failure |
+| `Protocol` | `open_record` | `open_record_spec`, `open_record_complete` | `Ok` ⇒ `OpensTo` for exactly the released bytes; authentication failure ⇒ zeroed buffer and no genuine record exists; other refusals leave the buffer untouched; genuine right-sized records always open to their plaintext |
+| `Protocol` | `authorize_agent_request` | `authorize_agent_request_spec` | Exactly `authorizeSpec` |
+| `Lifecycle` | adapter sequencing models over the above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec`, `check_attr_paths` | Hydrate only replaces exact staged ciphertext by its authentic plaintext (all-or-nothing); lock only discards plaintext the record restores; verify-index success ⇒ every staged record opens at its own path; accepted check-attr ⇒ filter reported for every path |
+| spec (`V3Policy`) | — | `opensTo_unique`, `seal_opens`, `lock_flush_recoverable`, `expectedAttrResponse_paths` | Spec-level consequences used above |
 
-### Focused codec loop-body workbench — pending Lean compilation
+## Explicit assumptions in the statements
 
-`V3Wire/Verification/CodecSteps.lean` contains three candidate WP
-specifications naming the actual extracted Rust magic-writing, ID-writing,
-and ID-decoding loop bodies. These are *per-iteration* claims, not complete
-22-byte encoding/decoding refinement. They are intentionally not imported
-into the normal `V3Wire.lean` until the following gate passes:
+- **`Realizes inst prims σ`** (Protocol, Lifecycle): the `V3Primitives`
+  instance computes the abstract suite's deterministic SIV with the spec's
+  domain strings and AD order, preserves `&mut` slice lengths, never claims
+  success wrongly, opens genuine right-sized records, and computes the
+  truncated digest. Production instance `transcrypt_v3::Keyed` is checked by
+  independent vectors and `keyed_satisfies_the_realizes_contract` (A5).
+- **`Suite`** fields: SIV output length, injectivity per AD (true of any
+  deterministic AE), digest length. Unforgeability/confidentiality are
+  computational assumptions (A10), not Lean theorems.
+- **Lifecycle models** follow the adapter's call order (A4, reviewed in
+  `V3-ASSUMPTIONS.md`).
 
-```
-bash proofs/aeneas/build-v3-codec-steps.sh
-```
+## Not covered by Lean
 
-Do not upgrade this row to compiled or change W-04/W-05 to PROVED merely
-because the new file exists. After the focused build, prove whole-loop
-correctness, then the top-level generated encoder and decoder.
+AES-SIV/Argon2id/SHA-256 implementations and security, the Unix credential
+agent's IPC and process isolation, Git's attribute/index semantics, and
+filesystem atomicity. See the assumption register for evidence and residual
+risk of each.

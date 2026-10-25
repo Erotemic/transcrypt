@@ -151,23 +151,23 @@ bash proofs/aeneas/build-v3-tracked.sh
 ```
 
 The build stages the one authoritative spec from `proofs/lean/`, imports the
-actual extracted Rust codec definitions, and compiles the **first direct
-source-derived refinement claims** (version-marker correspondence/disjointness).
-Complete encoder/decoder, authentication and Git lifecycle refinement is still
-open. See `proofs/aeneas/v3/PROOF-STATUS.md` for the precise proof boundary.
+actual extracted Rust core definitions, and compiles the complete
+source-derived refinement proofs: the wire codec, every protocol decision of
+the core relative to the explicit primitive contract `Realizes`, and Lean
+models of the adapter's lifecycle loops. See `proofs/aeneas/v3/PROOF-STATUS.md`
+for every theorem and its precise statement.
 
 On verified Rust changes, run `translate-v3-core.sh`, then
 `python3 proofs/aeneas/v3_snapshot.py compare`; update the snapshot only
 with the explicit reviewed `refresh` command. CI both builds the checked-in
 proof package and independently regenerates/compares the extracted Lean.
 
-### Experimental source-derived codec step obligations
+### Axiom audit
 
 ```
-bash proofs/aeneas/build-v3-codec-steps.sh
+bash proofs/aeneas/check-v3-axioms.sh
 ```
 
-This separate, opt-in Lean 4.31 target checks proofs directly about the
-Aeneas-generated loop *bodies*. It is not part of the proven tracked
-`V3Wire` library until successfully compiled, and is **not** sufficient
-for complete encoder/decoder functional refinement.
+Prints `#print axioms` for the headline theorems and fails unless each uses
+only `propext`, `Classical.choice` and `Quot.sound`. It is a separate CI step,
+not part of the normal build.

@@ -435,3 +435,26 @@ path is rejected rather than releasing another file's plaintext.
   whole-function refinement and are pending compilation on Lean 4.31.0.
 - No v3 wire-format, Aeneas-generated snapshot, algorithm or password
   derivation changes. Crypto and Git effects remain stated trusted boundaries.
+
+### 2026-10-25 — V3–V6 for the Rust-first proof of concept
+
+- **Build fixed.** The `CodecSteps` workbench left two goals unsolved; the
+  snapshot tests copied the untracked `.lake` cache. Both fixed, then the
+  workbench was retired as subsumed.
+- **V4 seam.** Every security decision moved into `transcrypt-v3-core` behind
+  the `V3Primitives` trait: config authentication (by opening the tag with
+  AES-SIV), `seal_record`/`open_record` (path policy, config binding,
+  envelope, double-encryption refusal, size bounds, zeroing on failure),
+  agent authorization, `check-attr` verdict, hydrate/lock actions. Wire
+  bytes are unchanged; independent vectors still match.
+- **V3/V4 proofs.** Whole-function Aeneas refinement of the entire core
+  against a new independent spec (`V3Policy.lean`), plus Lean models of the
+  adapter's lifecycle loops. Axiom audit: standard axioms only. Codec,
+  byte-decision and path proofs were developed with parallel subagents.
+- **V5.** Private 0700 staging for replacements (a crash previously left
+  plaintext temporaries outside the `*.secret` filter); dirfd-relative
+  resolution and `renameat`; adversarial real-Git suite; deep-path socket
+  fix; init rollback; `status`/`help`.
+- **V6 (internal).** Security review, trust-ordered assumption register,
+  profile-1 freeze decision, agent hardening (no core dumps, non-dumpable,
+  `mlock`), key-schedule zeroization, user guide. External review remains.

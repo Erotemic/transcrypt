@@ -10,7 +10,7 @@ reference for a future Bash implementation and Lean refinement proofs.
 
 One context, one protected filename policy (`*.secret`), one fixed crypto
 suite, and these actions: `init`, `unlock`, `clean`, `smudge`, `verify-index`,
-`hydrate`, `lock`. No migration, rekey, nested contexts, GPG, merge driver,
+`hydrate`, `lock`, plus the read-only `status` and `help`. No migration, rekey, nested contexts, GPG, merge driver,
 streaming files larger than 16 MiB, or implicit plaintext fallbacks.
 
 ## Constants and primitives
@@ -67,6 +67,12 @@ No Unicode normalization, case folding, absolute paths or filesystem-based
 canonicalization is performed: Git path bytes are the authoritative identity.
 The credential agent rejects missing or noncanonical path input.
 
+**Profile freeze (2026-10-25).** The bytes specified here are frozen as
+*v3 profile 1*, identified by `TCFG3 00 01` and `TV3F 00 01`. Any future
+change to the associated data, KDF parameters or suite MUST change the
+version byte of the affected magic, so that no released record is ever
+reinterpreted under a different profile.
+
 This **path-bound v3 experimental profile supersedes** the earlier v3 P0
 ciphertext profile that used only two associated-data components. Existing
 old-profile ciphertext is NOT decryptable by this implementation. To avoid
@@ -121,7 +127,12 @@ trusted state and is outside this POC.
   authenticated plaintext of that ciphertext. Unexpected bytes or symlinks
   are rejected without modifying any file. For ciphertext-backed files,
   decrypt the staged object and publish plaintext through mode-0600 exclusive
-  temporary files and rename. Do **not** invoke `git restore` or `git checkout`
+  temporary files created in the private staging directory
+  `.git/transcrypt-v3-staging` (a real mode-0700 directory; never the
+  worktree, so a crash cannot leave plaintext where `git add` would commit
+  it) and renamed with `renameat` into the protected file's parent directory,
+  which was resolved once with `O_NOFOLLOW` per component. Stale staging
+  files from an interrupted run are deleted. Do **not** invoke `git restore` or `git checkout`
   on ciphertext worktrees: those Git operations may invoke `clean` on the
   ciphertext, which correctly refuses double encryption. Already-hydrated
   paths are left untouched, allowing retries after interrupted hydration.
@@ -133,25 +144,38 @@ trusted state and is outside this POC.
   vulnerable to concurrent same-UID path/index races and does not claim
   atomicity across multiple files.
 - `lock`: preflight no dirty or untracked protected files; overwrite tracked
-  plaintext working files with the exact ciphertext in the index and then
-  terminate the credential agent. No derived-key file is written. This is NOT
+  plaintext working files with the exact ciphertext in the index (only when
+  resealing the worktree reproduces that ciphertext byte for byte, through
+  the same private staging directory) and then terminate the credential
+  agent. An interrupted `lock` is resumed by rerunning it. No derived-key file is written. This is NOT
   certified secure deletion, atomic across multiple files, or protection
   against plaintext in Git textconv notes, caches, process memory dumps,
   swap, snapshots, or backups.
 
-For production hardening, the trusted OS/Git adapter should also eliminate
-agent memory hardening (swap and core dumps), make unlock/lock
-crash-transactional, close path races with dirfd-based operations, address
-very large files, and add explicit rollback protection if required by the
-threat model. The socket is accessible to programs with the same Unix UID;
-that UID is inside the prototype's trust boundary. These obligations are **not** discharged by
-correctness proofs for the pure Rust format parser.
+Process and filesystem hardening: every v3 process disables core dumps and,
+on Linux, is non-dumpable (no same-UID `ptrace` or `/proc/PID/mem` access to
+the agent); the agent `mlock`s its key page where permitted. Protected paths
+are resolved with `openat(O_NOFOLLOW)` per component and replaced with
+`renameat` relative to the held directory descriptors. The agent socket is
+bound and connected through the relative address
+`.git/transcrypt-v3/session.sock` from the repository root, so deep
+repository paths do not exceed the `sun_path` limit. Remaining limits: the
+socket is usable by programs running as the same Unix UID (inside the trust
+boundary), same-UID processes can race on file *contents*, multi-file
+operations are resumable rather than atomic, files above 16 MiB are refused,
+and rollback of Git history is not detected.
 
 ## Machine checkability and implementation correspondence
 
 - `rust/crates/transcrypt-v3-core/src/lib.rs`: pure `no_std` implementation
-  of fixed-length encoders and strict envelope parsers. Intended Aeneas
-  extraction target; no RustCrypto dependencies in this crate.
+  of the encoders, strict parsers **and every protocol decision**: path
+  policy, configuration authentication, record sealing (including refusing
+  inputs that already are v3 records) and opening (zeroing the output on
+  authentication failure), agent request authorization, the `check-attr`
+  verdict and the hydrate/lock actions. Cryptography enters only through the
+  `V3Primitives` trait. Translated by Charon/Aeneas and proved against
+  `proofs/lean/Transcrypt/V3Policy.lean`; see
+  `proofs/aeneas/v3/PROOF-STATUS.md`.
 - `rust/crates/transcrypt-v3/src/lib.rs`: KDF and AES-SIV adapter invoking
   external cryptographic libraries. Their algorithmic correctness and
   constant-time behavior are separate trusted assumptions.
@@ -160,9 +184,8 @@ correctness proofs for the pure Rust format parser.
 - `tests/v3/reference/check_vectors.py`: independent Python reference using
   argon2-cffi and OpenSSL-backed `cryptography.AESSIV`; generates committed
   hex vectors in `vectors.tsv`, also consumed by Rust tests.
-- `proofs/aeneas/translate-v3-core.sh`: reproducible translation entrypoint.
-  No claims of Aeneas-generated Lean refinement until code is actually
-  extracted, built, and proved against an independent Lean specification.
+- `proofs/aeneas/translate-v3-core.sh`: reproducible translation entrypoint;
+  the tracked extraction and its refinement proofs build in CI.
 
 Bash correspondence: the released Bash 2.x and draft v3 script have **not**
 been changed to support this format. They must implement exactly the same
