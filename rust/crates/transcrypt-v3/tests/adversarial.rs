@@ -1284,3 +1284,33 @@ fn staging_a_new_secret_makes_it_private() {
     assert_eq!(fs::metadata(repo.join("new.secret")).unwrap().permissions().mode() & 0o777, 0o600);
     run(&repo, "git", &["commit", "-qm", "new secret"], None);
 }
+
+/// After pulling a collaborator's rekey, the agent still holding the old key
+/// retires itself: `unlock` with the new passphrase works, and `lock` leaves
+/// no agent behind.
+#[test]
+fn pulled_rekey_retires_the_stale_agent() {
+    const NEW: &[u8] = b"a completely different long passphrase\n";
+    let mut scratch = Scratch::new("pulledrekey");
+    let origin = scratch.repo("origin");
+    let clone = scratch.root.join("clone");
+    run(&scratch.root, "git", &["clone", "-q", "origin", "clone"], None);
+    scratch.repos.push(clone.clone());
+    run(&clone, "git", &["config", "user.name", "Example"], None);
+    run(&clone, "git", &["config", "user.email", "example@example.test"], None);
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&origin, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    run(&origin, "git", &["commit", "-qm", "rekey"], None);
+    run(&clone, "git", &["pull", "-q", "--no-rebase"], None);
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(NEW));
+    assert_eq!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    run(&clone, bin(), &["lock"], None);
+    assert!(!socket(&clone).exists(), "an agent survived lock");
+    // Without unlocking again, lock alone also retires a stale agent.
+    run(&clone, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&clone, "git", &["pull", "-q", "--no-rebase"], None);
+    run(&clone, bin(), &["lock"], None);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!socket(&clone).exists(), "a stale agent survived lock");
+}

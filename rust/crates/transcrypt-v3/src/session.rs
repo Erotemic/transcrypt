@@ -194,7 +194,21 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), S
         Ok(meta) => {
             if !meta.file_type().is_socket() { return Err("unsafe existing session socket path".into()); }
             if at_socket(root, |p| UnixStream::connect(p))?.is_ok() {
-                return Err("already unlocked: an agent is running".into());
+                // An agent whose worktree config has changed (a pulled rekey)
+                // stops when it refuses this request; give it a moment.
+                let _ = request(root, config, Operation::Ping, &[], &[]);
+                let stale = (0..40).any(|_| {
+                    thread::sleep(Duration::from_millis(25));
+                    fs::symlink_metadata(&path).is_err()
+                        || at_socket(root, |p| UnixStream::connect(p)).is_ok_and(|r| r.is_err())
+                });
+                if !stale {
+                    return Err("an agent for another .transcrypt/config is running (another worktree?); \
+                        lock it there first".into());
+                }
+                if fs::symlink_metadata(&path).is_err() {
+                    return start_agent(root, config, key);
+                }
             }
             // A dead process may leave its socket inode; our 0700 parent is
             // owned by this checkout's user. Refuse non-socket substitutes.
@@ -203,6 +217,10 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), S
         Err(e) if e.kind() == io::ErrorKind::NotFound => {},
         Err(_) => return Err("cannot examine session socket".into()),
     }
+    start_agent(root, config, key)
+}
+
+fn start_agent(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|_| "cannot locate executable for credential agent")?;
     let mut child = Command::new(executable)
         .arg("serve")
@@ -335,7 +353,15 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
         if same_user(&stream).is_err() { continue; }
         match transaction(&mut stream, config, &key) {
             Ok(stop) => stopping = stop,
-            Err(message) => { let _ = reply(&mut stream, Err(message)); },
+            Err(message) => {
+                let _ = reply(&mut stream, Err(message));
+                // A refused request may come from a checkout whose config has
+                // since changed (a pulled rekey). If this agent's own
+                // worktree no longer has its config, its key is obsolete.
+                if fs::read(root.join(".transcrypt/config")).ok().as_deref() != Some(&config[..]) {
+                    break;
+                }
+            },
         }
         if stopping { break; }
     }

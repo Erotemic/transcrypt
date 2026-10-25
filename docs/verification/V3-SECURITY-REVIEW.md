@@ -107,6 +107,8 @@ regression test that fails on the old implementation.
 
 | H-26 | Medium (usability) | `git worktree add` in a v3 repository failed outright (the filter refused linked worktrees, so Git aborted). `unlock`/`lock` were not idempotent: a second `unlock` failed, and `lock` without an agent failed even with no plaintext left. | Worktree support. In a multi-worktree repository, `lock` refuses while any worktree holds an edit, and stops the agent only after flushing all of them. Idempotent `unlock`/`lock`. Tests `linked_worktrees_share_one_unlocked_session`, `unlock_and_lock_are_idempotent`. |
 
+| H-27 | Medium (stale key in memory) | After pulling a collaborator's `rekey`, the agent kept the obsolete key indefinitely: `unlock` with the new passphrase refused ("an agent is running"), and `lock` reported "Already locked" while that agent kept running, since a stop must carry the agent's own config. | An agent that refuses a request while its own worktree config has changed knows its key is obsolete and exits. `unlock` gives such an agent a moment to exit before reporting a genuine conflict (another worktree's config). Test `pulled_rekey_retires_the_stale_agent`. |
+
 Re-attacking the earlier fixes found no further exploit:
 - **Pathspec staging:** only `update-index -z --stdin` paths remain, and they come from the verified snapshot.
 - **difftool/mergetool temporaries:** written through smudge, so the umask rule now covers them.

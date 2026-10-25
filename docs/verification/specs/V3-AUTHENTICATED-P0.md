@@ -112,6 +112,9 @@ trusted state and is outside this POC.
   Git filters send operation, exact public config, canonical Git-relative
   pathname bytes, and plaintext/ciphertext bytes over the socket; the raw key is **never returned to clients**.
   The agent authenticates the supplied public config on every operation.
+  When it refuses a request and its own worktree's `.transcrypt/config` no
+  longer equals the config it was started with (a pulled `rekey`), its key
+  is obsolete and it exits.
   Stale sockets left by dead processes may be reclaimed only after verifying
   the socket type and that it has no listening peer. Missing/dead agents fail
   closed. Earlier prototype on-disk keys must be removed or locked using the
