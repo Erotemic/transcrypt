@@ -1,0 +1,128 @@
+# The narrated story; plans/*.py controls visual states and per-beat captions.
+# This is an explanation of a source snapshot, not a formal security certificate.
+[deck]
+title = "Transcrypt v3: from ordinary files to a public Git history"
+subtitle = "Where plaintext moves, which production functions are proved, and which assumptions remain"
+source_baseline = "861975ad954a954aac8a89dea6687c6e7dbc3d0d (2026-10-25)"
+reference_visual_style = "aivm-secrets/visualizations: editable beats, role colors, honest evidence levels"
+
+[[scene]]
+id = "legend"
+file = "tvis/scenes/legend.py"
+class = "VisualLegend"
+plan = "tvis.plans.legend"
+status = "architecture"
+claim = "The unlocked worktree and public Git history hold different representations. Lean covers the production pure core, not every native effect."
+narration = "Start with one ordinary file. A developer edits it locally as plaintext. Git is free to be public, because the object intended for Git history is an authenticated encrypted record. Between these two representations sits a Rust clean filter. The pure security-decision core is extracted from the actual Rust implementation and checked in Lean against an independent specification. Git, the operating system, and cryptographic libraries still perform important trusted operations. Green labels in this animation mean a specifically named theorem, not a certificate for the entire executable."
+sources = ["docs/verification/V3-PROOF-COVERAGE.md", "docs/verification/V3-ASSUMPTIONS.md", "docs/verification/specs/V3-AUTHENTICATED-P0.md"]
+
+[[scene]]
+id = "selection"
+file = "tvis/scenes/selection.py"
+class = "ProtectedSelection"
+plan = "tvis.plans.selection"
+status = "design-goal"
+claim = "Git attribute selection is distinct from cryptographic path binding; arbitrary patterns are a future target, not a completed v3 guarantee in this snapshot."
+narration = "Encryption should be an explicit choice about which files to protect. The implementation in the audited snapshot still uses names ending in dot secret. The intended design is more general: let a developer write familiar Git attributes for dot env files, a configuration directory, or any other chosen pattern. We should not build a second glob language in Rust. Git decides which file enters the filter. The verified core should receive the exact Git relative path as bytes and bind it cryptographically. The difference between what Git selects and what the core authenticates is an important trust boundary."
+sources = ["docs/verification/V3-USER-GUIDE.md", "docs/verification/V3-BASH-CORRESPONDENCE.md", "proofs/aeneas/v3/V3Wire/Verification/Path.lean", "rust/crates/transcrypt-v3-core/src/lib.rs"]
+optional_sources = ["docs/verification/V3-PRODUCT-CHARTER.md"]
+proof_anchors = ["is_canonical_protected_path_spec"]
+
+[[scene]]
+id = "clean"
+file = "tvis/scenes/clean.py"
+class = "GitCleanFlow"
+plan = "tvis.plans.clean"
+status = "source-derived-proof"
+claim = "The production seal_record decision core refines the independent spec under Realizes; the real Git filter invocation is not part of that theorem."
+narration = "Here is the everyday operation. A developer edits account dot secret in a normal text editor. When Git stages that selected path, Git invokes the clean filter with the file bytes and name. The Rust adapter obtains the committed public configuration and asks the protocol core to seal the content. Lean proves that the extracted core respects the exact preconditions and produces the specified record whenever its cryptographic primitive contract holds. The actual Argon2id and AES SIV routines, and Git's invocation of the filter, are outside the theorem. Once the filter succeeds, the Git object is ciphertext, while the original local file can remain plaintext."
+sources = ["rust/crates/transcrypt-v3/src/main.rs", "rust/crates/transcrypt-v3/src/lib.rs", "rust/crates/transcrypt-v3-core/src/lib.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-PROOF-COVERAGE.md"]
+proof_anchors = ["seal_record_spec"]
+
+[[scene]]
+id = "record"
+file = "tvis/scenes/record.py"
+class = "V3RecordAnatomy"
+plan = "tvis.plans.record"
+status = "source-derived-proof"
+claim = "The 22-byte record header has a proved serializer/parser correspondence; the AES-SIV tag and ciphertext depend on the trusted primitive implementation."
+narration = "Zoom into one public Git blob. The fixed file header is twenty two bytes: a six byte version marker followed by a sixteen byte identifier of the authenticated repository configuration. A sixteen byte synthetic initialization vector tag comes next, followed by ciphertext of the file's content. The configuration itself is a separate fifty five byte committed object. The cryptographic associated data contains the domain, full public configuration, and exact Git pathname as separate components. This is an explanatory exploded view; the fields are concatenated bytes, not a series of nested encrypted containers. The formal wire codec proofs cover the header and field decisions. The cryptographic strength of the tag is an external assumption."
+sources = ["docs/verification/specs/V3-AUTHENTICATED-P0.md", "proofs/aeneas/v3/V3Wire/Verification/Codec.lean", "rust/crates/transcrypt-v3-core/src/lib.rs"]
+proof_anchors = ["encode_file_header_refines", "parse_file_header_spec"]
+
+[[scene]]
+id = "clone"
+file = "tvis/scenes/clone.py"
+class = "UnlockAndHydrate"
+plan = "tvis.plans.clone"
+status = "source-derived-proof"
+claim = "open_record has a source-derived conditional correctness proof; credential-agent custody and filesystem publication remain native operations."
+narration = "Imagine cloning this repository on another laptop. The public Git objects arrive, but the secret is still encrypted. The developer unlocks the repository with a passphrase. In the implementation snapshot illustrated here, Argon2id derives a key that lives in a local credential-agent process. The protocol core will release content only if the record authenticates for the committed configuration and expected pathname. The native adapter writes those bytes into the worktree and Git goes back to looking like ordinary files. This is precisely the product experience we want, but a proof about open record does not itself prove the atomicity or permissions of the file write. A future persistent local-unlock mode is a separate design goal."
+sources = ["rust/crates/transcrypt-v3/src/session.rs", "rust/crates/transcrypt-v3/src/worktree.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-PROOF-COVERAGE.md"]
+proof_anchors = ["open_record_spec", "open_record_complete"]
+
+[[scene]]
+id = "attack"
+file = "tvis/scenes/attack.py"
+class = "AuthenticationRejection"
+plan = "tvis.plans.attack"
+status = "source-derived-proof"
+claim = "The verified open_record gate does not release untrusted bytes on a failed authentication; cryptographic unforgeability is assumed, not proved in Lean."
+narration = "A public history can be copied and edited by an offline adversary. Suppose someone changes a ciphertext byte, swaps the object from another path, or copies it from another repository. The decoder accepts only a record that authenticates under the expected configuration and exact pathname. The Lean theorem connects the production open record decision to this precise specification. Under the assumption that the AES SIV library implements the intended primitive, failed authentication releases no plaintext; the core zeroes the affected output buffer. The mathematical theorem proves the core's control logic, not the computational hardness of forging the tag."
+sources = ["proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-ASSUMPTIONS.md", "tests/v3/reference/check_vectors.py", "rust/crates/transcrypt-v3/src/lib.rs"]
+proof_anchors = ["open_record_spec", "open_record_complete"]
+
+[[scene]]
+id = "proof"
+file = "tvis/scenes/proof.py"
+class = "RustLeanRefinement"
+plan = "tvis.plans.proof"
+status = "source-derived-proof"
+claim = "Theorems mention real Aeneas-translated production functions and an independently maintained Lean spec; translation soundness is a separate assumption."
+narration = "This is the key difference between a verified implementation and an unrelated model. There are two inputs to the theorem. One comes from the production Rust core, through pinned Charon and Aeneas translation into Lean computations. The other is the independent mathematical description of the file format and security decisions. Lean proves a proposition relating those two. For example encode file header refines says exactly which bytes that encoder writes. Open record spec says what success and failure mean. Such proofs cover every input admitted by the proposition, not just examples. But correctness of the translator, the primitive contract called Realizes, and the way the larger executable uses this function still sit outside the theorem."
+sources = ["proofs/aeneas/v3/V3Wire/Verification/Codec.lean", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "proofs/aeneas/v3/PROOF-STATUS.md", "proofs/aeneas/v3/SNAPSHOT.json", "proofs/lean/Transcrypt/V3Policy.lean"]
+proof_anchors = ["encode_file_header_refines", "parse_config_spec", "open_record_spec"]
+
+[[scene]]
+id = "lifecycle"
+file = "tvis/scenes/lifecycle.py"
+class = "LifecycleModelBoundary"
+plan = "tvis.plans.lifecycle"
+status = "model-proof"
+claim = "Hydrate, lock, and index-verification sequencing are proved about a Lean model that invokes generated core functions; the real Git/OS writer is not itself formally refined."
+narration = "There is one more important kind of proof, and it would be misleading to call it an end to end proof of Git. Aeneas extracts real functions from the security decision core, and Lean also proves a model of how hydration, locking and index verification should use those decisions. The model establishes useful properties: it describes preconditions for writing plaintext, the relationship between a staged record and the content released, and when locking may discard recoverable data. This is much stronger than a diagram or a set of anecdotes, but it is not the same as extracting and verifying the actual file writes. The native adapter must follow the plan on the same objects; Git object addressing, file stamps and operating system effects remain assumptions. Keeping source derived, model proved, and externally trusted behavior visually distinct is a core requirement of this explanation."
+sources = ["proofs/aeneas/v3/V3Wire/Verification/Lifecycle.lean", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-PROOF-COVERAGE.md", "docs/verification/V3-ASSUMPTIONS.md"]
+proof_anchors = ["hydratePlan_spec", "lockEntry_spec", "verifyPlan_spec"]
+
+[[scene]]
+id = "assumptions"
+file = "tvis/scenes/assumptions.py"
+class = "TrustBoundary"
+plan = "tvis.plans.assumptions"
+status = "external-assumption"
+claim = "Formal theorems cover the production core, while translation, RustCrypto, effectful Git/OS adapter behavior, and remote hook deployment remain separate premises."
+narration = "Now draw a line around what is actually machine checked. The source-derived codec and security decision core is the green component. To interpret its proof as a claim about Rust source, we assume that Charon and Aeneas translate correctly. We also assume that the RustCrypto instance realizes the stated AES SIV and hash contracts, and that the algorithms are secure. Outside the core, Git attribute selection, object reads, filesystem effects, and credential-agent behavior are exercised by tests and modeled theorems, not completely extracted and proved. Finally, a keyless server audit can detect malformed records and accidental plaintext only if someone deploys it; recognizing a record shape does not authenticate its tag."
+sources = ["docs/verification/V3-ASSUMPTIONS.md", "docs/verification/V3-PROOF-COVERAGE.md", "proofs/aeneas/v3/PROOF-STATUS.md", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean"]
+proof_anchors = ["authenticate_config_spec"]
+
+[[scene]]
+id = "offline"
+file = "tvis/scenes/offline.py"
+class = "OfflineThreatModel"
+plan = "tvis.plans.offline"
+status = "external-assumption"
+claim = "The primary promise is protection of explicitly selected content in public history against offline readers, not secrecy on an already-unlocked workstation."
+narration = "The public repository is the boundary that matters. Everyone can download the committed encrypted record, its salt, path, tag, length and history. Deterministic encryption can reveal whether the same plaintext was committed again under the same context. None of this is encryption of the developer's local disk. An offline attacker can always guess passphrases against public metadata, so the strength of the passphrase and the cost of Argon2id matter. An attacker may also copy older valid Git history. These are documented information leaks and assumptions, not bugs in the serializer or reasons to make ordinary local editing unnecessarily difficult."
+sources = ["docs/verification/V3-ASSUMPTIONS.md", "docs/verification/specs/V3-AUTHENTICATED-P0.md", "docs/verification/V3-SECURITY-REVIEW.md"]
+optional_sources = ["docs/verification/V3-PRODUCT-CHARTER.md"]
+
+[[scene]]
+id = "roadmap"
+file = "tvis/scenes/roadmap.py"
+class = "ProductNorthStar"
+plan = "tvis.plans.roadmap"
+status = "design-goal"
+claim = "Arbitrary Git-attribute selection, persistent local unlock by default, and a one-time v2 transition are product goals, not current proven features in the baseline."
+narration = "The destination is a product that disappears into normal Git use. Select the files to protect with the patterns Git already understands. Unlock the repository once, with a persistent local credential by default, and edit normally. A paranoid user may choose a memory-only credential agent and tighter local permissions, but that complexity should be optional. For an old Bash repository, give the user a safe one-time transition into modern authenticated v3 ciphertext without dragging legacy cryptography into the verified core. Every substantial change to the source-derived security decisions must regenerate the checked-in Aeneas extraction, rebuild the Lean theorems, and update the assumption register. The goal is dependable correctness at the public Git boundary, with a small and transparent trusted base."
+sources = ["docs/verification/V3-ROADMAP.md", "docs/verification/V3-BASH-CORRESPONDENCE.md", "docs/verification/V3-HANDOFF.md"]
+optional_sources = ["docs/verification/V3-PRODUCT-CHARTER.md"]

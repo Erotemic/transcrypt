@@ -1,0 +1,15 @@
+[project]
+name = "transcrypt-visualizations"
+version = "0.1.0"
+description = "Manim and offline SVG walkthrough of Transcrypt v3 and its Lean proof boundaries"
+requires-python = ">=3.11,<3.15"
+dependencies = []
+
+[project.optional-dependencies]
+manim = ["manim>=0.19,<0.20"]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"

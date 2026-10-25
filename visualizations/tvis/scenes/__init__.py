@@ -1,0 +1,1 @@
+"""Small Manim scene entrypoints."""
