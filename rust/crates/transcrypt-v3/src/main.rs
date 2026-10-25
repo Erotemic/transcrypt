@@ -40,7 +40,7 @@ mod session;
 mod setup;
 mod worktree;
 use credential::{Key, State};
-use transcrypt_v3_core::{record_envelope_ok, smudge_action, Refusal, SmudgeAction, MAX_RECORD};
+use transcrypt_v3_core::{parse_file_header, record_envelope_ok, smudge_action, Refusal, SmudgeAction, MAX_RECORD};
 use audit::*;
 use git::*;
 use lifecycle::*;
@@ -112,7 +112,7 @@ fn run() -> Result<(), String> {
     match action {
         "status" => { no_args(action)?; status(&root) },
         "doctor" => { no_args(action)?; doctor(&root) },
-        "init" | "unlock" | "rekey" | "migrate" => {
+        "init" | "unlock" | "rekey" | "migrate" | "reencrypt" => {
             let mut options = Options { password_stdin: false, private: false, hydrate: true, patterns: Vec::new() };
             for arg in &args[1..] {
                 match (arg.to_str(), action) {
@@ -128,6 +128,7 @@ fn run() -> Result<(), String> {
                 "init" => init(&root, &options),
                 "rekey" => rekey(&root, &options),
                 "migrate" => migrate::migrate(&root, &options),
+                "reencrypt" => reencrypt(&root, &options),
                 _ => unlock(&root, &options),
             }
         },
@@ -170,11 +171,12 @@ fn run() -> Result<(), String> {
             pre_push(&root, args.get(1).map(OsString::as_os_str))
         },
         "hydrate" if args.len() == 2 && args[1] == "--auto" => auto_hydrate(&root),
-        "lock" | "verify-index" | "pre-commit" | "hydrate" | "serve" | "uninstall" | "flush" => {
+        "lock" | "verify-index" | "pre-commit" | "hydrate" | "serve" | "uninstall" | "flush" | "check-encrypted" => {
             no_args(action)?;
             match action {
                 "lock" => lock(&root),
                 "flush" => flush(&root),
+                "check-encrypted" => worktree_encrypted(&root, &load_config(&root)?),
                 "verify-index" => verify_index_command(&root),
                 "pre-commit" => pre_commit(&root),
                 "hydrate" => hydrate(&root).map(|n| eprintln!("Decrypted {n} file(s).")),
@@ -212,6 +214,8 @@ Typical workflow
                             refuses if any protected file has uncommitted changes
   transcrypt-v3 rekey       change the passphrase: a new config and every protected file
                             re-encrypted, staged for you to commit
+  transcrypt-v3 reencrypt   re-encrypt staged files still encrypted under an earlier config
+                            (cherry-picked or rebased across a rekey); asks for its passphrase
   transcrypt-v3 audit [<rev-list args>]
                             check, without the key, that every protected file in the given
                             commits (default HEAD) is v3 ciphertext; authenticates them when
@@ -222,7 +226,7 @@ Typical workflow
                             where Bash transcrypt has decrypted the files; keeps your patterns
 
 Options
-  --password-stdin          (init, unlock, rekey, migrate) read the passphrase from stdin
+  --password-stdin          (init, unlock, rekey, migrate, reencrypt) read the passphrase from stdin
                             instead of the terminal (where a new one is asked for twice)
   --private                 (init, unlock, migrate) keep the key only in memory (a background
                             agent, until lock or logout) and decrypted files private (0600)
@@ -237,16 +241,18 @@ plaintexts at the same path give equal ciphertexts. Filenames, sizes and
 history structure are public. See docs/verification/V3-USER-GUIDE.md.";
 
 /// The clean and smudge filters of one Git process (one file, or every file
-/// of a Git command for `filter-process`): the worktree config and the key
-/// are loaded at the first conversion.
+/// of a Git command for `filter-process`). The worktree config is re-read
+/// for every file (a checkout or rebase can change it mid-command) and the
+/// key reloaded when it changes.
 pub(crate) struct Filters<'a> {
     root: &'a Path,
-    loaded: Option<(Vec<u8>, Option<Key>)>,
+    current: Option<(Vec<u8>, Option<Key>)>,
+    stored: Option<Option<Key>>,
 }
 
 impl<'a> Filters<'a> {
     pub(crate) fn new(root: &'a Path) -> Filters<'a> {
-        Filters { root, loaded: None }
+        Filters { root, current: None, stored: None }
     }
 
     /// One clean or smudge conversion of the file at `git_path`.
@@ -259,14 +265,19 @@ impl<'a> Filters<'a> {
                 String::from_utf8_lossy(git_path)));
         }
         transcrypt_v3::validate_protected_path(git_path)?;
-        if self.loaded.is_none() {
-            let config = load_config(self.root)?;
+        let config = load_config(self.root)?;
+        if self.current.as_ref().map(|(c, _)| c) != Some(&config) {
             let key = Key::load(self.root, &config)?;
-            self.loaded = Some((config, key));
+            self.current = Some((config, key));
         }
-        let Some((config, key)) = &self.loaded else { unreachable!() };
+        let Some((config, key)) = &self.current else { unreachable!() };
         let id = transcrypt_v3::config_id(config);
+        let found = parse_file_header(&input).ok();
         if clean {
+            // A record of another config (from before a rekey) cannot be
+            // re-encrypted here; it passes through unchanged so Git keeps
+            // working, and verification refuses to commit it.
+            if found.is_some_and(|found| found != id) { return Ok(input); }
             let Some(key) = key else {
                 // Locked: without the key nothing can be encrypted, but Git
                 // re-cleans worktree files (a locked checkout holds
@@ -288,12 +299,29 @@ impl<'a> Filters<'a> {
             }
             return Ok(record);
         }
+        // The key for the config the record names: the worktree's, or the
+        // stored key's own (Git may smudge files of a checkout before it
+        // writes the new `.transcrypt/config`).
+        if self.stored.is_none() { self.stored = Some(Key::stored(self.root)?); }
+        let key = match found {
+            Some(found) if found == id => key.as_ref(),
+            Some(found) => self.stored.as_ref().and_then(Option::as_ref).filter(|k| k.config_id() == found),
+            None => None,
+        };
+        let decided = key.map_or(id, Key::config_id);
         // The verified core decides: bytes that are no v3 record are refused,
-        // a record of another configuration (or any record while locked)
-        // stays encrypted, and only a record of this configuration is opened,
-        // which authenticates it at this exact path or fails.
-        match smudge_action(&input, &id, key.is_some()) {
-            Ok(SmudgeAction::Keep) => Ok(input),
+        // a record without a key here stays encrypted, and a record of the
+        // key's config is opened, which authenticates it at this exact path
+        // or fails.
+        match smudge_action(&input, &decided, key.is_some()) {
+            Ok(SmudgeAction::Keep) => {
+                if found.is_some_and(|found| found != id) && self.current.as_ref().is_some_and(|(_, k)| k.is_some()) {
+                    eprintln!("transcrypt-v3: {} is encrypted for another config (from before a rekey?) and \
+                        stays encrypted; if it belongs to the current version, run `transcrypt-v3 reencrypt`",
+                        String::from_utf8_lossy(git_path));
+                }
+                Ok(input)
+            },
             Ok(SmudgeAction::Open) => {
                 let Some(key) = key else { unreachable!() };
                 let plaintext = key.open(git_path, &input).map_err(|_| {
@@ -358,7 +386,9 @@ fn status(root: &Path) -> Result<(), String> {
         let state = (|| -> Result<&str, String> {
             if !staged.regular { return Ok("unsupported mode"); }
             let object = git_blob(root, &staged.oid)?;
-            if !record_envelope_ok(&object, &id) { return Ok("staged unencrypted"); }
+            if !record_envelope_ok(&object, &id) {
+                return Ok(if parse_file_header(&object).is_ok() { "other config (reencrypt)" } else { "staged unencrypted" });
+            }
             let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? else {
                 return Ok("deleted");
             };
@@ -377,7 +407,9 @@ fn status(root: &Path) -> Result<(), String> {
     println!("protected:  {} ciphertext, {} plaintext, {} modified, {} other",
         counts[0], counts[1], counts[2], counts[3]);
     if counts[3] > 0 && key.is_some() {
-        println!("note:       the pre-commit hook encrypts files staged unencrypted and re-encrypts renamed ones");
+        println!("note:       the pre-commit hook encrypts files you staged unencrypted and re-encrypts files you \
+            renamed; files encrypted under an earlier config (cherry-picked or rebased across a rekey) need \
+            `transcrypt-v3 reencrypt`");
     }
     let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     let untracked: Vec<&[u8]> = untracked.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();

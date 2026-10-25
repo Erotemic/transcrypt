@@ -2,7 +2,8 @@
 //! filter and command uses to encrypt and decrypt with it.
 //!
 //! - **Stored** (the default): `unlock` writes the derived key, never the
-//!   passphrase, to `.git/transcrypt-v3/key` (mode 0600 in a 0700 directory
+//!   passphrase, with the public config it unlocks, to
+//!   `.git/transcrypt-v3/key` (mode 0600 in a 0700 directory
 //!   shared by all worktrees, never committed and not in `git config`). Git
 //!   commands then work without prompting, across shells and reboots, with
 //!   no background process. Whoever can read that file can decrypt this
@@ -21,6 +22,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 use transcrypt_v3::{authenticate_config, clean_file, decrypt_file, SecretKey, KEY_SIZE};
+use transcrypt_v3_core::{CONFIG_LEN, ID_LEN};
 use crate::{fsat, session::{self, Operation}};
 
 const KEY_FILE: &str = "key";
@@ -46,8 +48,8 @@ pub(crate) enum State {
 impl Key {
     /// The key for `config`, if this checkout is unlocked for it.
     pub(crate) fn load(root: &Path, config: &[u8]) -> Result<Option<Key>, String> {
-        if let Some(key) = read_stored(root)? {
-            if authenticate_config(config, &key).is_ok() {
+        if let Some((stored_config, key)) = read_stored(root)? {
+            if stored_config == config && authenticate_config(config, &key).is_ok() {
                 return Ok(Some(Key { root: root.to_owned(), config: config.to_vec(), stored: Some(key) }));
             }
             return Ok(None);
@@ -68,6 +70,20 @@ impl Key {
                 _ => "this checkout is locked; run `transcrypt-v3 unlock`".into(),
             }),
         }
+    }
+
+    /// The stored key with the config it was unlocked for, whatever the
+    /// worktree's config is now (during a checkout, Git may write files
+    /// before it writes `.transcrypt/config`).
+    pub(crate) fn stored(root: &Path) -> Result<Option<Key>, String> {
+        let Some((config, key)) = read_stored(root)? else { return Ok(None) };
+        if authenticate_config(&config, &key).is_err() { return Ok(None); }
+        Ok(Some(Key { root: root.to_owned(), config, stored: Some(key) }))
+    }
+
+    /// The public identifier of this key's config (records name it).
+    pub(crate) fn config_id(&self) -> [u8; ID_LEN] {
+        transcrypt_v3::config_id(&self.config)
     }
 
     /// Whether this is the private mode (in-memory agent, private files).
@@ -95,8 +111,8 @@ impl Key {
 
 /// How this checkout is unlocked for `config`.
 pub(crate) fn state(root: &Path, config: &[u8]) -> Result<State, String> {
-    if let Some(key) = read_stored(root)? {
-        return Ok(if authenticate_config(config, &key).is_ok() {
+    if let Some((stored_config, key)) = read_stored(root)? {
+        return Ok(if stored_config == config && authenticate_config(config, &key).is_ok() {
             State::Unlocked { private: false }
         } else {
             State::Stale
@@ -108,9 +124,10 @@ pub(crate) fn state(root: &Path, config: &[u8]) -> Result<State, String> {
     Ok(State::Locked)
 }
 
-/// The stored key, if there is one. A key file that is not a regular file
-/// of exactly the key size, in the checked private directory, is an error.
-fn read_stored(root: &Path) -> Result<Option<SecretKey>, String> {
+/// The stored config and key, if there are any. A key file that is not a
+/// regular file of exactly that size, in the checked private directory, is
+/// an error.
+fn read_stored(root: &Path) -> Result<Option<(Vec<u8>, SecretKey)>, String> {
     let Some(dir) = session::existing_directory(root)? else { return Ok(None) };
     let dir = fsat::Dir::open(&dir).map_err(|_| "cannot open the local v3 credential directory")?;
     let mut file = match dir.open_regular(OsStr::new(KEY_FILE)) {
@@ -118,24 +135,29 @@ fn read_stored(root: &Path) -> Result<Option<SecretKey>, String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("unsafe .git/transcrypt-v3/key: expected a regular file".into()),
     };
+    let mut config = vec![0u8; CONFIG_LEN];
     let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
     let mut extra = [0u8; 1];
-    if file.read_exact(&mut key[..]).is_err() || !matches!(file.read(&mut extra), Ok(0)) {
+    if file.read_exact(&mut config).is_err() || file.read_exact(&mut key[..]).is_err()
+        || !matches!(file.read(&mut extra), Ok(0))
+    {
         return Err("damaged .git/transcrypt-v3/key; run `transcrypt-v3 unlock` again".into());
     }
-    Ok(Some(key))
+    Ok(Some((config, key)))
 }
 
-/// Store `key` for later commands: an exclusive 0600 temporary in the
-/// private directory, synced, then renamed over any previous key.
-pub(crate) fn store(root: &Path, key: &SecretKey) -> Result<(), String> {
+/// Store `key`, with the public `config` it unlocks, for later commands: an
+/// exclusive 0600 temporary in the private directory, synced, then renamed
+/// over any previous key.
+pub(crate) fn store(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), String> {
+    if config.len() != CONFIG_LEN { return Err("invalid public v3 configuration".into()); }
     let dir = fsat::Dir::open(&session::prepare_directory(root)?)
         .map_err(|_| "cannot open the local v3 credential directory")?;
     let temp = format!("{KEY_FILE}.{}.tmp", std::process::id());
     let temp = OsStr::new(&temp);
     let _ = dir.unlink(temp);
     let mut file = dir.create_new(temp, 0o600).map_err(|e| format!("cannot create the key file: {e}"))?;
-    let written = file.write_all(&key[..]).and_then(|_| file.sync_all());
+    let written = file.write_all(config).and_then(|_| file.write_all(&key[..])).and_then(|_| file.sync_all());
     drop(file);
     if let Err(e) = written.and_then(|_| dir.rename_to(temp, &dir, OsStr::new(KEY_FILE))) {
         let _ = dir.unlink(temp);

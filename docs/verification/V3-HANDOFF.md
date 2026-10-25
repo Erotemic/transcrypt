@@ -159,7 +159,7 @@ or `tests/git_lifecycle.rs`.
 `lock` flushes all of them), submodules, bare repositories (audit).
 
 **Gates at this checkpoint.**
-- Rust: 125 tests across the workspace.
+- Rust: 127 tests across the workspace.
 - Bash: 218 bats tests.
 - Python vectors, the differential corpus and the Git transport tests.
 - Snapshot verify/compare.

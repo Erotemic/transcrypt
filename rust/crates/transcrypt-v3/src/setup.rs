@@ -11,7 +11,7 @@ use std::{
 };
 use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 use transcrypt_v3::{initialize_config, unlock_config, SecretKey};
-use transcrypt_v3_core::SALT_LEN;
+use transcrypt_v3_core::{parse_file_header, SALT_LEN};
 use crate::{
     credential::{self, Key, State},
     git::*,
@@ -175,7 +175,7 @@ fn activate(root: &Path, config: &[u8], key: &SecretKey, private: bool) -> Resul
             session::start(root, config, key)?;
         }
     } else {
-        credential::store(root, key)?;
+        credential::store(root, config, key)?;
         let _ = session::stop(root, config);
     }
     Ok(())
@@ -375,6 +375,12 @@ fn check_selects(root: &Path, patterns: &[Vec<u8>]) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether an attribute line defines the `transcrypt` macro.
+fn defines_macro(line: &[u8]) -> bool {
+    line.trim_ascii().strip_prefix(b"[attr]transcrypt")
+        .is_some_and(|rest| rest.is_empty() || rest[0].is_ascii_whitespace())
+}
+
 /// One `.gitattributes` line, as bytes, without its newline.
 type Line = Vec<u8>;
 
@@ -387,6 +393,12 @@ fn edit_attributes(root: &Path, staging: &Staging, edit: impl FnOnce(&mut Vec<Li
         .map(|f| f.read().map(|(bytes, _)| bytes.to_vec())).transpose()?.unwrap_or_default();
     let mut lines: Vec<Line> = existing.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
     if lines.last().is_some_and(Vec::is_empty) { lines.pop(); }
+    // Another definition of the macro would silently replace ours (Git uses
+    // the last one), and `PATTERN transcrypt` would select nothing.
+    if let Some(other) = lines.iter().find(|l| defines_macro(l) && *l != MACRO) {
+        return Err(format!(".gitattributes already defines the `transcrypt` macro differently (`{}`); \
+            remove or rename that definition first", String::from_utf8_lossy(other)));
+    }
     if !lines.iter().any(|l| l == MACRO) {
         // Macros may only be defined in the top-level file; put it first.
         lines.splice(0..0, [MACRO_COMMENT.to_vec(), MACRO.to_vec()]);
@@ -567,11 +579,13 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     let mut plaintexts = Vec::new();
     for staged in &verified.protected {
         let plaintext = old_key.open(&staged.path, &git_blob(root, &staged.oid)?)?;
-        if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
-            if *target.read()?.0 != *plaintext {
-                return Err(format!("{} has uncommitted changes; commit or discard them before rekeying",
-                    String::from_utf8_lossy(&staged.path)));
-            }
+        let unchanged = match find_protected(root, &indexed_path(&staged.path)?)? {
+            Some(target) => *target.read()?.0 == *plaintext,
+            None => false,
+        };
+        if !unchanged {
+            return Err(format!("{} has uncommitted changes (or was deleted); commit or discard them before \
+                rekeying", String::from_utf8_lossy(&staged.path)));
         }
         plaintexts.push((staged, plaintext));
     }
@@ -608,6 +622,69 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `reencrypt`: staged protected files still encrypted under an earlier
+/// config (a commit cherry-picked or rebased across a `rekey` brings its
+/// records unchanged) are opened under that config, found in history and
+/// authenticated with its passphrase, at their own path, and re-sealed under
+/// the current config. Nothing else changes; the result is staged.
+pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
+    let config = load_config(root)?;
+    let key = Key::require(root, &config)?;
+    let id = transcrypt_v3::config_id(&config);
+    let mut stale: Vec<(Staged, Vec<u8>, [u8; transcrypt_v3_core::ID_LEN])> = Vec::new();
+    for staged in staged_protected(root, indexed_files(root)?)? {
+        let record = git_blob(root, &staged.oid)?;
+        if let Ok(found) = parse_file_header(&record) {
+            if found != id { stale.push((staged, record, found)); }
+        }
+    }
+    if stale.is_empty() {
+        eprintln!("Every staged protected file is encrypted under the current config.");
+        return Ok(());
+    }
+    // The earlier configs, from the history of .transcrypt/config.
+    let mut configs: Vec<Vec<u8>> = Vec::new();
+    let log = git(root, &["log", "--all", "--format=%H", "--", ".transcrypt/config"])?;
+    for commit in String::from_utf8_lossy(&log).lines() {
+        if stale.iter().all(|(_, _, found)| configs.iter().any(|c| transcrypt_v3::config_id(c) == *found)) { break; }
+        if let Some(oid) = config_blob(root, commit)? {
+            let bytes = git_blob(root, &oid)?;
+            if transcrypt_v3_core::parse_config(&bytes).is_ok() && !configs.contains(&bytes) { configs.push(bytes); }
+        }
+    }
+    if let Some((staged, _, _)) = stale.iter().find(|(_, _, f)| !configs.iter().any(|c| transcrypt_v3::config_id(c) == *f)) {
+        return Err(format!("{} is encrypted under a config that is not in this repository's history",
+            String::from_utf8_lossy(&staged.path)));
+    }
+    let mut index_info = Vec::new();
+    let staging = staging_dir(root)?;
+    for old in configs.iter().filter(|c| stale.iter().any(|(_, _, f)| *f == transcrypt_v3::config_id(c))) {
+        let old_id = transcrypt_v3::config_id(old);
+        let names: Vec<String> = stale.iter().filter(|(_, _, f)| *f == old_id)
+            .map(|(s, _, _)| String::from_utf8_lossy(&s.path).into_owned()).collect();
+        eprintln!("{} encrypted under an earlier config: {}", names.len(), names.join(", "));
+        let password = passphrase(options.password_stdin, false)?;
+        let old_key = unlock_config(&password, old)?;
+        for (staged, record, _) in stale.iter().filter(|(_, _, f)| *f == old_id) {
+            let plaintext = transcrypt_v3::decrypt_file(old, &old_key, &staged.path, record)
+                .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
+            let sealed = key.clean(&staged.path, &plaintext)?;
+            index_info.extend_from_slice(format!("{} {}\t", staged.mode, hash_object(root, &sealed)?).as_bytes());
+            index_info.extend_from_slice(&staged.path);
+            index_info.push(0);
+            if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
+                let (worktree, stamp) = target.read()?;
+                if *worktree == *record {
+                    target.replace(&staging, &plaintext, &stamp, key.private())?;
+                }
+            }
+        }
+    }
+    git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
+    eprintln!("Re-encrypted {} file(s) under the current config; they are staged. Commit them.", stale.len());
+    Ok(())
+}
+
 /// Remove v3 from this checkout. The worktree must be (or is first made, by
 /// `lock`) ciphertext only, since without the filter Git would store any
 /// plaintext as is. Then the filter configuration, the hooks v3 installed
@@ -621,6 +698,7 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
     }
     worktree_encrypted(root, &config)
         .map_err(|e| format!("{e}; unlock, commit or discard it, and lock before uninstalling"))?;
+    others_encrypted(root)?;
     credential::forget(root)?;
     remove_filters(root);
     remove_hooks(root)?;
@@ -659,10 +737,12 @@ fn local_attribute_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// The local attribute files that mention `filter`.
+/// The local attribute files that mention `filter` or redefine the
+/// `transcrypt` macro.
 pub(crate) fn filter_overrides(root: &Path) -> Vec<String> {
     local_attribute_files(root).into_iter().filter(|file| fs::read(file)
-        .is_ok_and(|text| text.split(|b| *b == b'\n').any(|line| line.windows(6).any(|w| w == b"filter"))))
+        .is_ok_and(|text| text.split(|b| *b == b'\n')
+            .any(|line| line.windows(6).any(|w| w == b"filter") || defines_macro(line))))
         .map(|file| file.display().to_string()).collect()
 }
 
@@ -709,6 +789,12 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         report(installed, &format!("{name} hook installed"));
     }
     report(!hooks_bypassed(root), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
+    let foreign_macro = fs::read(root.join(".gitattributes")).ok().and_then(|text| text.split(|b| *b == b'\n')
+        .find(|l| defines_macro(l) && *l != MACRO).map(|l| String::from_utf8_lossy(l).into_owned()));
+    report(foreign_macro.is_none(), &match &foreign_macro {
+        None => "the `transcrypt` macro is not redefined in .gitattributes".to_owned(),
+        Some(line) => format!("the `transcrypt` macro is not redefined in .gitattributes (found `{line}`)"),
+    });
     // Attribute files outside the repository apply only here, and could
     // silently unprotect files that the committed .gitattributes protect.
     let overrides = filter_overrides(root);

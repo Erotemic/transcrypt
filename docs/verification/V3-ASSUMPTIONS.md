@@ -408,11 +408,14 @@ one.
 ### A17 — Stored key (the default unlock)
 
 - **Claim:** `unlock` stores the Argon2id-derived key, never the
-  passphrase, only in `$GIT_COMMON_DIR/transcrypt-v3/key` (a regular 64-byte
-  file, mode 0600, in a 0700 directory owned by the user, outside `git
-  config`). Every use authenticates the current `.transcrypt/config` with
-  it first; a key that does not authenticate (a pulled rekey) is treated as
-  locked. The ciphertext does not depend on the mode.
+  passphrase, only in `$GIT_COMMON_DIR/transcrypt-v3/key`. That is a regular
+  file of the public config it unlocks followed by the key (119 bytes), mode
+  0600, in a 0700 directory owned by the user, outside `git config`. The key
+  is used for the worktree config only if that config equals the stored one
+  and authenticates with it; otherwise (a pulled rekey) the worktree counts
+  as locked. Smudge also opens records that name the stored config (a
+  checkout writes files before the config). The ciphertext does not depend
+  on the mode.
 - **Trust boundary:** our `credential.rs`; the local file system; Git's
   common directory for worktrees.
 - **Consequence if false:** a key in public or shared state; a key used for

@@ -159,13 +159,16 @@ trusted state and is outside this POC.
     selected, and lists them.
 - `unlock [--private]`: derive from a terminal passphrase or opt-in stdin,
   and authenticate the config **first**.
-  - **Default (stored key):** the 64-byte derived key, never the
-    passphrase, is written to `$GIT_COMMON_DIR/transcrypt-v3/key`. This is a
+  - **Default (stored key):** the 55-byte config it unlocks followed by the
+    64-byte derived key, never the passphrase, is written to
+    `$GIT_COMMON_DIR/transcrypt-v3/key`. This is a
     regular file, mode 0600, created exclusively and renamed into place in a
     mode-0700 directory owned by the user. It is not in `git config`.
-    Every use reads it with `O_NOFOLLOW`, requires exactly 64 bytes, and
-    authenticates the current worktree config with it. A key that does not
-    authenticate the config (a pulled `rekey`) is treated as locked.
+    Every use reads it with `O_NOFOLLOW` and requires exactly 119 bytes.
+    The key is used for the worktree config only if that config equals the
+    stored one and authenticates with it; otherwise (a pulled `rekey`) the
+    worktree counts as locked. Smudge may also open a record that names the
+    stored config, which a checkout writes before `.transcrypt/config`.
   - **Private mode:** the key goes over a private one-way stdin pipe to a
     dedicated credential process that keeps it in memory. Its only
     persistent endpoint is a mode-`0600` Unix-domain socket at
@@ -185,14 +188,19 @@ trusted state and is outside this POC.
   - Clean is **idempotent**, as Git expects of filters: input that already
     opens as a record at this path under this config is returned unchanged
     (by determinism, exactly the record that sealing its plaintext gives).
-  - Any other recognizable v3 record is refused (no double encryption);
-    everything else is sealed.
+  - A record of another configuration (cherry-picked or rebased across a
+    rekey) passes through unchanged; verification refuses to commit it, and
+    `reencrypt` re-seals it. Any other record of this configuration that
+    does not open here is refused (no double encryption); everything else
+    is sealed.
   - In private mode, clean also makes the worktree file private when it
     seals plaintext (`fchmod` through the symlink-refusing resolution); a
     failure fails the filter.
 - `smudge`: the verified `smudge_action` decides.
   - Bytes without the v3 envelope are refused: plaintext committed without
     the filter is never presented as a protected file.
+  - The key used is the one whose config the record names: the worktree's,
+    or the stored key's own. The worktree config is re-read for every file.
   - A record of another configuration (history before a rekey), or any
     record while locked, is kept unchanged.
   - A record of this configuration is opened, authenticated at the `%f`

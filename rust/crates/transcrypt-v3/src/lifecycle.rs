@@ -84,6 +84,10 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
             return Err(format!("staged {name} is not encrypted (was it staged before it was protected?); \
                 run `transcrypt-v3 protect` or `git add --renormalize -- {name}`"));
         }
+        if parse_file_header(&record).is_ok_and(|found| found != id) {
+            return Err(format!("staged {name} is encrypted under another config (cherry-picked or rebased \
+                across a rekey?); run `transcrypt-v3 reencrypt` with that config's passphrase"));
+        }
         match key {
             Some(key) => { key.open(&staged.path, &record).map_err(|e| format!("staged {name}: {e}; if it \
                 was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
@@ -408,18 +412,28 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
 pub(crate) fn lock(root: &Path) -> Result<(), String> {
     let config = load_config(root)?;
     let Some(key) = Key::load(root, &config)? else {
-        // No usable key: nothing can be flushed. Locked means no plaintext is left.
+        // No usable key here: nothing can be flushed. Locked means no
+        // plaintext is left in any worktree; another worktree on another
+        // config may still need the stored key to lock.
+        worktree_encrypted(root, &config)
+            .map_err(|e| format!("{e}, but there is no key to encrypt it: unlock, then lock"))?;
+        others_encrypted(root)?;
         crate::credential::forget(root)?;
-        return worktree_encrypted(root, &config)
-            .map(|_| eprintln!("Already locked."))
-            .map_err(|e| format!("{e}, but there is no key to encrypt it: unlock, then lock"));
+        eprintln!("Already locked.");
+        return Ok(());
     };
     let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
     for other in other_worktrees(root)? {
-        let status = std::process::Command::new(&bin).arg("flush").current_dir(&other).status()
-            .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?;
-        if !status.success() {
-            return Err(format!("worktree {} could not be locked; the key is kept", other.display()));
+        let flushed = std::process::Command::new(&bin).arg("flush").current_dir(&other)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()
+            .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?.success();
+        // A worktree on another config cannot be flushed with this key; it
+        // is fine if it holds no plaintext.
+        let encrypted = || std::process::Command::new(&bin).arg("check-encrypted").current_dir(&other)
+            .output().is_ok_and(|out| out.status.success());
+        if !flushed && !encrypted() {
+            return Err(format!("worktree {} could not be locked (uncommitted changes, or plaintext under \
+                another config); the key is kept", other.display()));
         }
     }
     flush(root)?;
@@ -430,6 +444,21 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
     }
     eprintln!("Locked: protected files replaced by their ciphertext and the key forgotten. \
         This does not securely erase earlier plaintext copies.");
+    Ok(())
+}
+
+/// Refuse unless every other worktree holds no plaintext (each checked in
+/// its own process, with its own config).
+pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
+    let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
+    for other in other_worktrees(root)? {
+        let out = std::process::Command::new(&bin).arg("check-encrypted").current_dir(&other).output()
+            .map_err(|e| format!("cannot check worktree {}: {e}", other.display()))?;
+        if !out.status.success() {
+            return Err(format!("worktree {} still holds plaintext ({}); lock it there first",
+                other.display(), String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("transcrypt-v3: ")));
+        }
+    }
     Ok(())
 }
 

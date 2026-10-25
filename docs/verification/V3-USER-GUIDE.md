@@ -168,6 +168,23 @@ key. Adding a plaintext protected file fails until you unlock.
 encrypted, `status` says so, and `git add` refuses plaintext until you run
 `transcrypt-v3 unlock` with the new passphrase.
 
+**Work from before a rekey.** A commit cherry-picked or rebased onto a
+`rekey` keeps the records it was made with, under the earlier config. Git
+keeps working, and smudge and `status` say which files are affected. Then:
+
+```bash
+transcrypt-v3 reencrypt        # asks for the earlier passphrase
+git commit --amend --no-edit
+```
+
+Each such record is authenticated under the earlier config, at its own
+path, and re-encrypted under the current one; the pre-commit hook and the
+pre-push audit refuse to publish it until then.
+
+All worktrees of a clone share one stored key. Unlocking a worktree that
+is on a commit from before a rekey replaces it, and the other worktrees
+then need `unlock` again.
+
 ## Merging
 
 Protected files merge like ordinary text. The `transcrypt` macro selects a
@@ -293,6 +310,8 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 | `the stored key does not match .transcrypt/config (it was rekeyed?)` | Someone changed the passphrase: `transcrypt-v3 unlock` with the new one |
 | `this record does not open at PATH` | A file you moved with `git mv`: `git add PATH` (or commit). Otherwise a commit moved or altered the record (broken or hostile); do not merge it, or restore the file from a good commit |
 | `PATH holds the encrypted OTHER: a renamed or copied protected file must be committed while unlocked` | Unlock, then commit; the hook re-encrypts it |
+| `PATH is encrypted for another config (from before a rekey?)` / `other config (reencrypt)` | `transcrypt-v3 reencrypt` with that config's passphrase, then commit |
+| `.gitattributes already defines the transcrypt macro differently` | Remove or rename that `[attr]transcrypt` line; v3 needs the macro to set the filter |
 | `moved here without re-encryption` (audit) | A commit moved a record without the hook (`--no-verify`, or locked): redo the move while unlocked |
 | `the committed file is not v3 ciphertext` | Plaintext was committed at a protected path without the filter: rewrite that commit, and change the secret if it was pushed |
 | `refusing double encryption` | You tried to add a file that is already a v3 record; restore the plaintext instead |

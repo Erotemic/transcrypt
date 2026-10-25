@@ -22,7 +22,8 @@ fn assert_unlocked(root: &Path, expected: bool) {
     let key = dir.join("key");
     if expected {
         let meta = fs::symlink_metadata(&key).expect("unlocked checkout must store its key");
-        assert!(meta.file_type().is_file() && meta.len() == 64, "the key file holds the 64-byte derived key");
+        assert!(meta.file_type().is_file() && meta.len() == 55 + 64,
+            "the key file holds the public config it unlocks and the 64-byte derived key");
         assert_eq!(meta.permissions().mode() & 0o077, 0, "key file must be private");
         assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o077, 0);
         let items: Vec<_> = fs::read_dir(&dir).unwrap().map(|f| f.unwrap().file_name()).collect();

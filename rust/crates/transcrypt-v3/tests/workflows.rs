@@ -724,3 +724,105 @@ fn migrate_converts_quoted_rules_and_refuses_local_ones() {
         .contains("\"my secret.txt\" transcrypt"));
     assert!(is_record(&staged(&repo, "my secret.txt")));
 }
+
+/// Second review F1/F2: a commit cherry-picked or rebased across a rekey
+/// keeps records of the earlier config. Git keeps working (status, the
+/// commit is never dropped), v3 says what happened, and `reencrypt` with the
+/// earlier passphrase fixes it. Switching branches across the rekey decrypts
+/// with the key that matches each file, whatever order Git writes them in.
+#[test]
+fn work_across_a_rekey_is_kept_and_reencrypted() {
+    let mut scratch = Scratch::new("acrossrekey");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env", "*.key"], Some(PASS));
+    fs::write(repo.join(".env"), b"dot env\n").unwrap();
+    fs::write(repo.join("z.key"), b"zed\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    let main = main.trim().to_owned();
+    run(&repo, "git", &["checkout", "-q", "-b", "feature"], None);
+    fs::write(repo.join("b.env"), b"feature secret\n").unwrap();
+    run(&repo, "git", &["add", "b.env"], None);
+    run(&repo, "git", &["commit", "-qm", "addb"], None);
+    run(&repo, "git", &["checkout", "-q", &main], None);
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    // Back and forth across the rekey: each side decrypts with its key.
+    run(&repo, "git", &["checkout", "-q", "HEAD~1"], None);
+    run(&repo, "git", &["checkout", "-q", &main], None);
+    assert_eq!(fs::read(repo.join(".env")).unwrap(), b"dot env\n");
+    assert_eq!(fs::read(repo.join("z.key")).unwrap(), b"zed\n");
+    // Cherry-pick across the rekey: Git keeps working, v3 explains.
+    let err = String::from_utf8_lossy(&exec(&repo, "git", &["cherry-pick", "feature"], None).stderr).into_owned();
+    assert!(err.contains("b.env is encrypted for another config"), "{err}");
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    assert!(status.contains("other config (reencrypt)"), "{status}");
+    let err = run_fails(&repo, bin(), &["verify-index"], None);
+    assert!(err.contains("transcrypt-v3 reencrypt"), "{err}");
+    run(&repo, bin(), &["reencrypt", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(repo.join("b.env")).unwrap(), b"feature secret\n");
+    run(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
+    run(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+    // Rebasing the branch onto the rekey keeps its commit.
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    run(&repo, "git", &["checkout", "-q", "feature"], None);
+    run(&repo, "git", &["rebase", "-q", &main], None);
+    let log = String::from_utf8(run(&repo, "git", &["log", "--format=%s"], None)).unwrap();
+    assert!(log.starts_with("addb\nrekey\n"), "{log}");
+    run(&repo, bin(), &["reencrypt", "--password-stdin"], Some(PASS));
+    run(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
+    run(&repo, bin(), &["verify-index"], None);
+}
+
+/// Second review F3/F4/F5: an existing `transcrypt` macro definition is
+/// refused instead of silently disabling protection; `lock` keeps the key
+/// while another worktree holds plaintext; `rekey` refuses a deleted file
+/// before changing anything.
+#[test]
+fn macro_conflicts_other_worktrees_and_deleted_files_are_refused() {
+    let mut scratch = Scratch::new("review2");
+    let repo = scratch.git_repo("macro");
+    fs::write(repo.join(".gitattributes"), b"[attr]transcrypt -diff\n*.txt text\n").unwrap();
+    run(&repo, "git", &["add", ".gitattributes"], None);
+    run(&repo, "git", &["commit", "-qm", "attributes"], None);
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin", "secrets/**"], Some(PASS));
+    assert!(err.contains("already defines the `transcrypt` macro"), "{err}");
+    assert!(!repo.join(".transcrypt").exists());
+    assert_eq!(fs::read(repo.join(".gitattributes")).unwrap(), b"[attr]transcrypt -diff\n*.txt text\n");
+
+    let repo = scratch.git_repo("worktrees");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"s1\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    run(&repo, "git", &["branch", "old"], None);
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    let linked = scratch.root.join("linked");
+    run(&repo, "git", &["worktree", "add", "-q", linked.to_str().unwrap(), "old"], None);
+    run(&linked, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(linked.join("a.env")).unwrap(), b"s1\n");
+    fs::remove_file(repo.join("a.env")).unwrap();
+    run(&repo, "git", &["checkout", "--", "a.env"], None);
+    let err = run_fails(&repo, bin(), &["lock"], None);
+    assert!(err.contains("still holds plaintext"), "{err}");
+    assert!(repo.join(".git/transcrypt-v3/key").exists(), "the key must be kept");
+    let err = run_fails(&repo, bin(), &["uninstall"], None);
+    assert!(err.contains("still holds plaintext"), "{err}");
+    run(&linked, bin(), &["lock"], None);
+    scratch.repos.push(linked);
+
+    let repo = scratch.git_repo("deleted");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"a\n").unwrap();
+    fs::write(repo.join("b.env"), b"b\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    let config = fs::read(repo.join(".transcrypt/config")).unwrap();
+    fs::remove_file(repo.join("b.env")).unwrap();
+    let err = run_fails(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    assert!(err.contains("b.env has uncommitted changes (or was deleted)"), "{err}");
+    assert_eq!(fs::read(repo.join(".transcrypt/config")).unwrap(), config, "nothing changed");
+}

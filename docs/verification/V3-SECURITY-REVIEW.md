@@ -176,6 +176,17 @@ repositories) found:
 | H-38 | Medium (usability) | Renames were refused during any merge or rebase stop, and when a new file replaced the moved one (secret rotation). | An entry is local unless it equals a file of an incoming commit (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`). Rename sources include `HEAD` paths whose index entry was replaced. Test `renames_during_rotation_and_rebase_stops_work`. |
 | H-39 | Low (usability) | A rule added by hand for a file tracked in plaintext left the user stuck: the commit failed and `protect` did nothing. | The hook's error suggests `transcrypt-v3 protect` or `git add --renormalize`, and `protect` seals every selected plaintext entry (never re-encrypting a record). |
 
+A second adversarial agent review, of those fixes and of rekey, worktrees
+and the long-running filter, reproduced five more:
+
+| ID | Severity | Finding | Fix and evidence |
+| --- | --- | --- | --- |
+| H-40 | Medium–High (undecryptable commit, broken `git status`) | `git cherry-pick`/`rebase` of a commit made before a `rekey` committed its records under the old config. Clean then refused them, so `git status` failed; `status` mislabeled them as "staged unencrypted". | Clean passes another config's record through unchanged (verification still refuses to commit it). `status`, `verify-index` and smudge name the case. New `reencrypt` opens such records under the earlier config (found in history, with its passphrase, at their own path) and re-seals them under the current one. Test `work_across_a_rekey_is_kept_and_reencrypted`. |
+| H-41 | Medium (usability; a rebase dropped a commit) | The long-running filter cached the config and key for the whole Git command. A checkout across a rekey left files encrypted, and `git rebase --continue` after the resulting failure dropped the commit. | The config is re-read for every file. The stored key now records the config it unlocks, and smudge opens each record with the key whose config the record names, whatever order Git writes files in. Same test. |
+| H-42 | High (plaintext committed) | An existing `[attr]transcrypt` definition in `.gitattributes` silently overrode the macro, so `init`/`protect` selected nothing. | `init`/`protect` refuse a different definition. `doctor` fails on one, and the hook warns about one in local attribute files. Test `macro_conflicts_other_worktrees_and_deleted_files_are_refused`. |
+| H-43 | Medium (plaintext committed after uninstall) | With a stale key in this worktree, `lock` and `uninstall` ignored plaintext in other worktrees. They then deleted the shared key or removed the filters. | Both check every other worktree (`check-encrypted`) first. `lock` also no longer fails on a worktree that holds only another config's ciphertext. Same test. |
+| H-44 | Low (truthfulness) | `rekey` with a deleted protected file completed, then reported failure. | A deleted file counts as an uncommitted change and is refused before anything changes. Same test. |
+
 Attack review of the new surface:
 - **Selection.** v3 never matches patterns. Git's answers are parsed by
   `parse_attr_record`, which is proved to accept exactly the requested
