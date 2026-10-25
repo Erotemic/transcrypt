@@ -182,12 +182,13 @@ const HELP: &str = "\
 transcrypt-v3: authenticated, path-bound encryption of *.secret files in Git.
 
 Typical workflow
-  transcrypt-v3 init        create .transcrypt/config, filters and hook; then commit
-                            .transcrypt/config and .gitattributes
+  transcrypt-v3 init        create .transcrypt/config and .gitattributes, install the filters
+                            and hooks; then commit the two files
   transcrypt-v3 unlock      authenticate the passphrase, start the in-memory key agent and
                             decrypt the staged *.secret files (skip with --no-hydrate)
-  transcrypt-v3 hydrate     decrypt the staged *.secret files into the worktree
-                            (only needed after `unlock --no-hydrate` or a refused hydration)
+  transcrypt-v3 hydrate     decrypt (mode 0600) every *.secret that holds ciphertext; hooks do
+                            this after checkout, merge and rebase, run it yourself after
+                            `git restore`, `git reset --hard` or `git stash pop`
   transcrypt-v3 status      show lock state and each protected file's worktree state
   transcrypt-v3 doctor      verify that filters, attributes, hooks and the staged index
                             protect this checkout (non-zero exit if anything is missing)
@@ -215,8 +216,9 @@ Options
 
 Files matching *.secret are encrypted with AES-256-SIV under a key derived by
 Argon2id; each record is bound to the repository config and its exact Git path.
-Renaming a protected file re-encrypts it. Equal plaintexts at the same path give
-equal ciphertexts. See docs/verification/V3-USER-GUIDE.md.";
+While unlocked, `git diff` shows decrypted changes and merges of secrets work like
+text. Renaming a protected file re-encrypts it. Equal plaintexts at the same path
+give equal ciphertexts. See docs/verification/V3-USER-GUIDE.md.";
 
 /// Read-only summary for users. Never decrypts unless the agent is live,
 /// and never writes to the worktree, index or credential directory.
@@ -265,7 +267,7 @@ fn status(root: &Path) -> Result<(), String> {
         counts[0], counts[1], counts[2], counts[3]);
     if exposed > 0 {
         println!("warning:    {exposed} decrypted *.secret file(s) are readable by other users; \
-            run `chmod go-rwx` on them and use `umask 077` in this checkout");
+            `transcrypt-v3 hydrate` makes them private");
     }
     let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     let loose = untracked.split(|b| *b == 0).filter(|p| protected_path(p)).count();

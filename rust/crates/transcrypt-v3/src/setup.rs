@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use transcrypt_v3::{initialize_config, unlock_config};
 use crate::{
     check_index,
-    git::{git, indexed_files, tree_files},
+    git::{common_dir, git, indexed_files, tree_files},
     hydrate, load_config, protected_path,
     session::{self, Operation},
     umask_is_private, ATTRS,
@@ -99,7 +99,8 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         .map(|v| String::from_utf8_lossy(&v).trim_end().to_owned());
     match expected_filters() {
         Ok(filters) => for (key, value) in filters {
-            report(effective(key).as_deref() == Some(value.as_str()), &format!("{key} runs this transcrypt-v3"));
+            let what = if value == "true" { format!("{key} is true") } else { format!("{key} runs this transcrypt-v3") };
+            report(effective(key).as_deref() == Some(value.as_str()), &what);
         },
         Err(e) => report(false, &e),
     }
@@ -125,6 +126,11 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         }
     }
     report(!hooks_bypassed(root), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
+    let drivers = expected_merge_driver().is_ok_and(|d| d.iter().all(|(k, v)| effective(k).as_deref() == Some(v.as_str())))
+        && fs::read_to_string(common_dir(root).join("info/attributes")).is_ok_and(|a| a.lines().any(|l| l == MERGE_ATTRIBUTE));
+    if !drivers {
+        println!("note diff and merge drivers not installed (run `transcrypt-v3 unlock`): diffs and merges of secrets are binary");
+    }
     println!("note session {}", if unlocked { "unlocked" } else { "locked" });
     println!("note {}", if umask_is_private() {
         "umask is private: Git checkouts write plaintext directly (mode 0600)"
@@ -266,7 +272,8 @@ pub(crate) fn init(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), Stri
         rollback_init(root, &config, hook_preexisted);
         return Err(format!("{e}; initialization rolled back"));
     }
-    eprintln!("Initialized v3; commit public metadata. Key lives only in the private credential agent until lock.");
+    eprintln!("Initialized v3 (unlocked). Commit the public metadata now:\n  \
+        git commit -m 'Enable transcrypt-v3' .transcrypt/config .gitattributes");
     Ok(())
 }
 
