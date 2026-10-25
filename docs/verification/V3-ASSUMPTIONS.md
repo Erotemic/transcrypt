@@ -103,11 +103,11 @@ one.
     pathspec-magic and revision-syntax filenames, and SIGKILL fault
     injection.
 - **Residual:** the adapter Rust itself is not proved. The oid slice
-  `entry[7..path_start-3]` is justified by the parser's spec, not proved in
-  the adapter.
-- **Next reduction:** move the oid offset into `IndexEntry` (a proved field).
-  Then batch object reads through one `git cat-file --batch` with proved
-  header parsing.
+  `entry[7..path_start-3]` is proved to extract the object id of every
+  accepted record (`indexRecord_oid`), but the Rust slice expression itself
+  is reviewed, not extracted.
+- **Next reduction:** batch object reads through one `git cat-file --batch`
+  with a proved header parser (also a performance gain for `audit`).
 - **Status:** narrowed; PROVED (model) + REVIEWED + TESTED.
 
 ### A5 — `Keyed` realizes the primitive contract
@@ -179,7 +179,8 @@ one.
   - Attributes that transform stored bytes (`text`, `eol`, `ident`,
     `working-tree-encoding`) corrupt records; this fails closed but blocks
     use.
-- **Next reduction:** a CI matrix over Git versions; check those attributes
+- **Next reduction:** CI now runs the suite on Git 2.34 (Ubuntu 22.04),
+  2.43 (Ubuntu 24.04) and Apple Git (macOS); check transforming attributes
   in `check-attr` for a clearer error.
 - **Status:** TESTED (one Git version), ASSUMED otherwise.
 
@@ -322,8 +323,8 @@ by cost.
 4. **Plaintext permissions from Git checkout (A8).** Smudge output follows
    the umask. *Action:* hydrate could tighten kept plaintext files; the
    guide requires `umask 077`.
-5. **Unverified adapter remainder (A4).** *Action:* move the oid offset into
-   the proved parser and batch object reads.
+5. **Unverified adapter remainder (A4).** *Action:* batch object reads
+   through a proved `cat-file --batch` header parser.
 6. **Git-version drift (A7).** *Action:* CI matrix over Git versions.
 7. **Rollback and equality leakage (A10).** Protocol limits, accepted.
 
@@ -344,7 +345,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
 | Effective filter attribute check | `check_attr_response_ok_spec`, `check_attr_paths` |
 | Index record parsing | `parse_index_entry_spec` |
-| Object ids passed to Git are plain hex names | `is_object_id_spec`, `objectId_plain` |
+| Object ids passed to Git are plain hex names, taken from the right bytes | `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` |
 | Keyless envelope check | `record_envelope_ok_spec`, `opensTo_envelopeOk` |
 | Hydrate/lock never lose data; verify-index soundness | `hydrate_action_spec`, `lock_action_spec`, `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` |
 

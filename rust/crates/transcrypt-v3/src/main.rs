@@ -702,7 +702,8 @@ struct Staged {
 /// (`parse_index_entry`): the flag says whether the mode is exactly 100644,
 /// and the path is everything after the first TAB. Its specification fixes
 /// the record as `mode(6) SP oid SP "0" TAB path`, so the object id is
-/// `entry[7..path_start - 3]`, which must also pass `is_object_id`.
+/// `entry[7..path_start - 3]` (Lean `indexRecord_oid`), which must also pass
+/// `is_object_id`.
 /// Unmerged and malformed records are refused.
 fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
     let mut entries = Vec::new();

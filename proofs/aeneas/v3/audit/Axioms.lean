@@ -36,3 +36,4 @@ open Transcrypt.V3Verification
 #print axioms is_object_id_spec
 #print axioms record_envelope_ok_spec
 #print axioms Transcrypt.V3Policy.opensTo_envelopeOk
+#print axioms Transcrypt.V3Policy.indexRecord_oid

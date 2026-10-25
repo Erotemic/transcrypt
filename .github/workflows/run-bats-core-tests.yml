@@ -87,10 +87,15 @@ jobs:
       matrix:
         os:
           - ubuntu-24.04
+          # Git 2.34: the oldest Git the adapter (and its pre-push audit) is tested on.
+          - ubuntu-22.04
           - macos-latest
 
     steps:
       - uses: actions/checkout@v2
+
+      - name: Print Git version
+        run: git --version
 
       - name: Print rustc version
         run: rustc --version
@@ -105,10 +110,10 @@ jobs:
         working-directory: rust
         run: cargo test --workspace
       - name: Check dependencies against the RustSec advisory database
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: rust
         run: |
-          cargo install --locked --version 0.22.1 cargo-audit
+          cargo install --locked --version 0.22.2 cargo-audit
           cargo audit --deny warnings
 
   v3-reference:

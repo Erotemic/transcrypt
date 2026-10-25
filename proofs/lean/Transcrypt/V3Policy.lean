@@ -209,6 +209,22 @@ def IndexRecord (entry : List Nat) (regular : Bool) (path : List Nat) : Prop :=
     mode.length = 6 ∧ oid ≠ [] ∧ 9 ∉ mode ∧ 9 ∉ oid ∧ path ≠ [] ∧
     (regular = true ↔ mode = regularMode)
 
+/-- The adapter takes the object id of an accepted record as the bytes from
+    offset 7 up to 3 bytes before the path, i.e. `entry[7..path_start-3]`.
+    For every record of the spec's shape that is exactly its object id. -/
+theorem indexRecord_oid {entry : List Nat} {regular : Bool} {path : List Nat}
+    (h : IndexRecord entry regular path) :
+    ∃ mode oid, entry = mode ++ [32] ++ oid ++ [32, 48, 9] ++ path ∧
+      ((entry.take (entry.length - path.length - 3)).drop 7) = oid := by
+  obtain ⟨mode, oid, rfl, hm, _⟩ := h
+  refine ⟨mode, oid, rfl, ?_⟩
+  have hlen : (mode ++ [32] ++ oid ++ [32, 48, 9] ++ path).length - path.length - 3 =
+      (mode ++ [32] ++ oid).length := by simp; omega
+  rw [hlen, show mode ++ [32] ++ oid ++ [32, 48, 9] ++ path =
+      (mode ++ [32] ++ oid) ++ ([32, 48, 9] ++ path) by simp, List.take_left]
+  rw [show mode ++ [32] ++ oid = (mode ++ [32]) ++ oid by simp]
+  exact List.drop_left' (by simp [hm])
+
 /-! ## Credential-agent framing (local IPC) -/
 
 /-- Big-endian 4-byte encoding of a natural number below 2^32. -/
