@@ -548,3 +548,48 @@ fn rename_and_edit_on_two_branches_conflict_in_plaintext() {
     assert!(is_record(&committed(&repo, "b.secret")));
     run(&repo, bin(), &["audit"], None);
 }
+
+/// Ordinary Git commands need no Transcrypt step in the default mode:
+/// cherry-pick, revert, restore from another commit, reset, switch, an
+/// interactive rebase and stash all leave decrypted files and a clean,
+/// verified, auditable repository.
+#[test]
+fn everyday_git_commands_just_work() {
+    let mut scratch = Scratch::new("everyday");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
+    fs::write(repo.join("x.secret"), b"v1\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "v1"], None);
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    let main = main.trim();
+    run(&repo, "git", &["switch", "-q", "-c", "side"], None);
+    fs::write(repo.join("x.secret"), b"v2\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "v2"], None);
+    let side = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD"], None)).unwrap();
+    let side = side.trim();
+    run(&repo, "git", &["switch", "-q", main], None);
+    let read = || fs::read(repo.join("x.secret")).unwrap();
+    for (args, expected) in [
+        (vec!["cherry-pick", side], &b"v2\n"[..]),
+        (vec!["revert", "--no-edit", "HEAD"], b"v1\n"),
+        (vec!["restore", "--source", side, "x.secret"], b"v2\n"),
+        (vec!["reset", "-q", "--hard"], b"v1\n"),
+        (vec!["switch", "-q", "side"], b"v2\n"),
+        (vec!["switch", "-q", main], b"v1\n"),
+        (vec!["stash", "-q"], b"v1\n"),
+    ] {
+        if args[0] == "stash" { fs::write(repo.join("x.secret"), b"work in progress\n").unwrap(); }
+        run(&repo, "git", &args, None);
+        assert_eq!(read(), expected, "after git {args:?}");
+    }
+    run(&repo, "git", &["stash", "pop", "-q"], None);
+    assert_eq!(read(), b"work in progress\n");
+    run(&repo, "git", &["checkout", "-q", "--", "x.secret"], None);
+    run(&repo, "sh", &["-c", "GIT_SEQUENCE_EDITOR=true exec git rebase -q -i HEAD~2"], None);
+    assert_eq!(read(), b"v1\n");
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    run(&repo, bin(), &["verify-index"], None);
+    let out = String::from_utf8(run(&repo, bin(), &["audit", "--all"], None)).unwrap();
+    assert!(out.contains("all authenticated"), "{out}");
+}

@@ -280,6 +280,9 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 - **Old history.** Checking out a commit encrypted under an earlier config
   (before a `rekey`) leaves its protected files encrypted, unless you unlock
   with that config's passphrase.
+- **Hunk selection treats protected files as binary.** `git add -p`,
+  `git checkout -p` and `git stash -p` work on Git's internal form of a
+  file, which is the ciphertext. Stage protected files whole.
 - Files larger than 16 MiB are refused.
 
 ## Troubleshooting
