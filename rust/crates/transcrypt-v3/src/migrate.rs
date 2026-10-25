@@ -24,20 +24,37 @@ fn v2_token(token: &[u8]) -> bool {
         .is_some_and(|value| value == b"crypt" || value.starts_with(b"crypt-")))
 }
 
+/// Split an attribute line into its pattern and the rest. A pattern that
+/// starts with `"` is C-quoted (it may contain blanks) and ends at the
+/// closing unescaped quote; otherwise it ends at the first blank.
+fn split_pattern(line: &[u8]) -> (&[u8], &[u8]) {
+    let start = line.len() - line.trim_ascii_start().len();
+    let body = &line[start..];
+    let end = if body.starts_with(b"\"") {
+        let mut i = 1;
+        while i < body.len() && body[i] != b'"' {
+            i += if body[i] == b'\\' { 2 } else { 1 };
+        }
+        (i + 1).min(body.len())
+    } else {
+        body.iter().position(|b| b.is_ascii_whitespace()).unwrap_or(body.len())
+    };
+    (&line[..start + end], &body[end..])
+}
+
 /// Rewrite one `.gitattributes` text: every rule with v2 tokens keeps its
 /// pattern and other attributes and gets `transcrypt` instead. Returns the
 /// new text if anything changed.
 fn rewrite_attributes(text: &[u8]) -> Option<Vec<u8>> {
     let mut changed = false;
     let lines: Vec<Vec<u8>> = text.split(|b| *b == b'\n').map(|line| {
-        let trimmed = line.trim_ascii_start();
-        if trimmed.starts_with(b"#") || trimmed.starts_with(b"\"") || !line.split(|b| b.is_ascii_whitespace()).skip(1).any(v2_token) {
-            return line.to_vec();
-        }
+        if line.trim_ascii_start().starts_with(b"#") { return line.to_vec(); }
+        let (pattern, rest) = split_pattern(line);
+        let tokens: Vec<&[u8]> = rest.split(|b| b.is_ascii_whitespace()).filter(|t| !t.is_empty()).collect();
+        if !tokens.iter().any(|t| v2_token(t)) { return line.to_vec(); }
         changed = true;
-        let mut tokens = line.split(|b| b.is_ascii_whitespace()).filter(|t| !t.is_empty());
-        let mut out = tokens.next().unwrap_or_default().to_vec();
-        for token in tokens.filter(|t| !v2_token(t)) {
+        let mut out = pattern.to_vec();
+        for token in tokens.into_iter().filter(|t| !v2_token(t)) {
             out.push(b' ');
             out.extend_from_slice(token);
         }
@@ -55,6 +72,15 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     if git(root, &["config", "--get", "filter.crypt.clean"]).is_err() {
         return Err("Bash transcrypt is not set up in this checkout: install it and unlock with the v2 \
             password first (`transcrypt -c <cipher> -p <password>`), so the worktree holds plaintext".into());
+    }
+    // Rules outside the repository's own files cannot be converted for
+    // everyone; files they select would silently stay unprotected.
+    let info = common_dir(root).join("info/attributes");
+    if fs::read(&info).is_ok_and(|text| text.split(|b| *b == b'\n')
+        .any(|line| !line.trim_ascii_start().starts_with(b"#") && split_pattern(line).1
+            .split(|b| b.is_ascii_whitespace()).any(v2_token))) {
+        return Err(format!("{} has Bash transcrypt rules; move them to .gitattributes (and commit) \
+            first, so that the conversion keeps them for everyone", info.display()));
     }
     if !git(root, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
         return Err("commit or discard your changes first; the conversion must start from a committed state".into());
@@ -130,6 +156,12 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
                 paths.push(0);
             }
             git_with_input(root, &["add", "--renormalize", "--pathspec-from-file=-", "--pathspec-file-nul"], &paths)?;
+            // Every file v2 protected must now be protected by v3.
+            let refs: Vec<&[u8]> = selected.iter().map(Vec::as_slice).collect();
+            if let Some((path, _)) = refs.iter().zip(protected_flags(root, &refs, Attributes::Staged)?).find(|(_, p)| !*p) {
+                return Err(format!("{} would no longer be protected after the conversion (an attribute \
+                    rule could not be converted); convert it in .gitattributes by hand", String::from_utf8_lossy(path)));
+            }
             crate::lifecycle::verify_index_command(root)
         })();
         if converted.is_err() { rollback.run(); }
@@ -169,6 +201,8 @@ mod tests {
         let text = b"# comment filter=crypt\n*.key  filter=crypt diff=crypt merge=crypt\nsecret/** filter=crypt-ops diff=crypt-ops merge=crypt-ops -text\n*.png binary\n";
         let out = rewrite_attributes(text).unwrap();
         assert_eq!(out, b"# comment filter=crypt\n*.key transcrypt\nsecret/** -text transcrypt\n*.png binary\n");
+        let quoted = b"\"my secret.txt\" filter=crypt diff=crypt merge=crypt\n\"a\\\"b c\" filter=crypt\n";
+        assert_eq!(rewrite_attributes(quoted).unwrap(), b"\"my secret.txt\" transcrypt\n\"a\\\"b c\" transcrypt\n");
         assert_eq!(rewrite_attributes(b"*.png binary\n"), None);
         assert!(!v2_token(b"filter=cryptic") && v2_token(b"merge=crypt-a"));
     }

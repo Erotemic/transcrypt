@@ -593,3 +593,134 @@ fn everyday_git_commands_just_work() {
     let out = String::from_utf8(run(&repo, bin(), &["audit", "--all"], None)).unwrap();
     assert!(out.contains("all authenticated"), "{out}");
 }
+
+/// Review F1: `protect` refuses patterns that would select nothing (a
+/// directory, a negation, a name Git reads as a glob), accepts `./x`, and
+/// leaves `.gitattributes` unchanged when it refuses.
+#[test]
+fn protect_refuses_patterns_that_select_nothing() {
+    let mut scratch = Scratch::new("patterncheck");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    fs::create_dir(repo.join("secrets")).unwrap();
+    fs::write(repo.join("secrets/key.txt"), b"TOPSECRET\n").unwrap();
+    fs::write(repo.join("back\\slash.txt"), b"SLASHED\n").unwrap();
+    fs::write(repo.join("x.env"), b"X\n").unwrap();
+    let before = fs::read(repo.join(".gitattributes")).unwrap();
+    for (pattern, says) in [("secrets/", "secrets/**"), ("secrets", "secrets/**"), ("!x.env", "no negative"),
+                            ("back\\slash.txt", "glob characters")] {
+        let err = run_fails(&repo, bin(), &["protect", pattern], None);
+        assert!(err.contains(says), "{pattern}: {err}");
+        assert_eq!(fs::read(repo.join(".gitattributes")).unwrap(), before, "{pattern} left an edit");
+        assert!(run(&repo, "git", &["diff", "--cached", "--name-only"], None).is_empty(), "{pattern} staged");
+    }
+    run(&repo, bin(), &["protect", "./x.env", "secrets/**"], None);
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "protected"], None);
+    assert!(is_record(&committed(&repo, "x.env")) && is_record(&committed(&repo, "secrets/key.txt")));
+}
+
+/// Review F2: moving a protected file to an unprotected name would commit a
+/// record that nothing decrypts there; the hook and the audit refuse it.
+#[test]
+fn records_moved_to_unprotected_names_are_refused() {
+    let mut scratch = Scratch::new("unprotectedmove");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("prod.env"), b"PROD_SECRET\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "secret"], None);
+    run(&repo, "git", &["mv", "prod.env", "prod.env.bak"], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "backup"], None);
+    assert!(err.contains("prod.env.bak holds an encrypted record but is not protected"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "backup"], None);
+    let err = run_fails(&repo, bin(), &["audit"], None);
+    assert!(err.contains("moved to this unprotected name"), "{err}");
+}
+
+/// Review F3: `unprotect` decrypts a staged rename at its source path, and
+/// commits the plaintext; review F6: protecting by hand-editing
+/// `.gitattributes` is completed by `protect`, as the hook's error says.
+#[test]
+fn unprotect_follows_renames_and_protect_finishes_manual_rules() {
+    let mut scratch = Scratch::new("unprotectmv");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"PROD\n").unwrap();
+    fs::write(repo.join("config.ini"), b"pw=1\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "files"], None);
+    run(&repo, "git", &["mv", "a.env", "b.env"], None);
+    run(&repo, bin(), &["unprotect", "*.env"], None);
+    assert_eq!(staged(&repo, "b.env"), b"PROD\n");
+    run(&repo, "git", &["commit", "-qm", "unprotect"], None);
+    run(&repo, bin(), &["audit"], None);
+    // A rule added by hand to a file tracked in plaintext.
+    let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    attributes.extend_from_slice(b"config.ini transcrypt\n");
+    fs::write(repo.join(".gitattributes"), attributes).unwrap();
+    run(&repo, "git", &["add", ".gitattributes"], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "manual rule"], None);
+    assert!(err.contains("config.ini is not encrypted") && err.contains("transcrypt-v3 protect"), "{err}");
+    run(&repo, bin(), &["protect", "config.ini"], None);
+    run(&repo, "git", &["commit", "-qm", "manual rule"], None);
+    assert!(is_record(&committed(&repo, "config.ini")));
+}
+
+/// Review F5: renaming while a secret is rotated (a new file at the old
+/// name), and renaming during a stopped interactive rebase, are local
+/// changes and are re-encrypted.
+#[test]
+fn renames_during_rotation_and_rebase_stops_work() {
+    let mut scratch = Scratch::new("rotation");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("prod.env"), b"OLD\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "v1"], None);
+    run(&repo, "git", &["mv", "prod.env", "old.env"], None);
+    fs::write(repo.join("prod.env"), b"NEW\n").unwrap();
+    run(&repo, "git", &["add", "prod.env"], None);
+    run(&repo, "git", &["commit", "-qm", "rotate"], None);
+    run(&repo, bin(), &["audit"], None);
+    // Stop at a commit during an interactive rebase and rename there.
+    run(&repo, "sh", &["-c", "GIT_SEQUENCE_EDITOR='sed -i s/^pick/edit/' exec git rebase -q -i HEAD~1"], None);
+    run(&repo, "git", &["mv", "old.env", "older.env"], None);
+    run(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
+    run(&repo, "git", &["rebase", "--continue"], None);
+    run(&repo, bin(), &["verify-index"], None);
+    run(&repo, bin(), &["audit"], None);
+    let clone = scratch.clone("repo", "clone");
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(clone.join("older.env")).unwrap(), b"OLD\n");
+    assert_eq!(fs::read(clone.join("prod.env")).unwrap(), b"NEW\n");
+}
+
+/// Review F4: quoted v2 patterns are converted, and v2 rules in
+/// `.git/info/attributes` are refused instead of silently dropped.
+#[test]
+fn migrate_converts_quoted_rules_and_refuses_local_ones() {
+    let mut scratch = Scratch::new("migratequoted");
+    let repo = scratch.git_repo("repo");
+    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    fs::write(repo.join(".gitattributes"), b"\"my secret.txt\" filter=crypt diff=crypt merge=crypt\n").unwrap();
+    fs::write(repo.join("my secret.txt"), b"quoted v2 secret\n").unwrap();
+    fs::write(repo.join("local.key"), b"local rule secret\n").unwrap();
+    fs::write(repo.join(".git/info/attributes"), b"local.key filter=crypt diff=crypt merge=crypt\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    let err = run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
+    assert!(err.contains("info/attributes") && err.contains("move them"), "{err}");
+    // As the message says: move the rule into .gitattributes and commit it.
+    fs::write(repo.join(".gitattributes"),
+        b"\"my secret.txt\" filter=crypt diff=crypt merge=crypt\nlocal.key filter=crypt diff=crypt merge=crypt\n").unwrap();
+    fs::write(repo.join(".git/info/attributes"), b"").unwrap();
+    run(&repo, "git", &["commit", "-qam", "rule moved"], None);
+    run(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
+    assert!(is_record(&staged(&repo, "local.key")));
+    assert!(String::from_utf8(fs::read(repo.join(".gitattributes")).unwrap()).unwrap()
+        .contains("\"my secret.txt\" transcrypt"));
+    assert!(is_record(&staged(&repo, "my secret.txt")));
+}

@@ -104,7 +104,7 @@ structure AttrRecord where
   next : Std.Usize
 
 /-- [transcrypt_v3_core::FrameHeader]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 587:0-591:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 620:0-624:1
     Visibility: public -/
 structure FrameHeader where
   opcode : Std.U8
@@ -112,14 +112,14 @@ structure FrameHeader where
   path_len : Std.U32
 
 /-- [transcrypt_v3_core::IndexEntry]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 621:0-627:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 654:0-660:1
     Visibility: public -/
 structure IndexEntry where
   regular : Bool
   path_start : Std.Usize
 
 /-- [transcrypt_v3_core::SmudgeAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 701:0-707:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 734:0-740:1
     Visibility: public -/
 @[discriminant isize]
 inductive SmudgeAction where
@@ -127,7 +127,7 @@ inductive SmudgeAction where
 | Keep : SmudgeAction
 
 /-- [transcrypt_v3_core::SealAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 732:0-741:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 765:0-774:1
     Visibility: public -/
 @[discriminant isize]
 inductive SealAction where

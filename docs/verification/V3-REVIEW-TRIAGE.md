@@ -29,6 +29,18 @@ users is *not* a default requirement. Real adapter bugs still count.
 | **L-01**: keyless audit accepts forged v3 envelope | Source-confirmed, accepted A14 | **Explicit external/deployment limitation**; not a valid proof of authenticity | Document that keyless audit detects obvious plaintext/structure, not a valid AES-SIV tag. Do not claim malicious-committer resistance without a keyed/signature-enforcing service | **Accepted conditional guarantee** |
 | **L-02**: v2 CBC; v3 same-UID access, weak-password guessing, equality, rollback, hook deployment | Review of documented design | Split: v2 legacy issue; v3 offline-guessing guidance essential; same-UID/equality/rollback are intentional bounds; remote hook is an optional policy/deployment contract | Keep caveats prominent and accurate, and make strict local and server policy features optional; do not expand formalization scope to promise impossible guarantees | **Bounded/accepted; not a blanket security clearance** |
 
+## Second review: adversarial agent review of the new code (2026-10-25)
+
+An independent agent reviewed the product-charter implementation (selection,
+stored key, rebind, migration) and reproduced six findings with the
+compiled binary: four category-1 (patterns selecting nothing, records moved
+to unprotected names, a non-atomic `unprotect`, `migrate` skipping quoted or
+local rules) and two usability gaps. All are fixed with regression tests;
+see H-34 to H-39 in [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md). Its list of
+tested non-problems (laundering via `cherry-pick -n`, temporary-index
+commits, quoting, symlinked metadata, audit coverage) is kept in the agent
+transcript summary there.
+
 ## Reviewer instructions and severity rubric
 
 A genuine defect is not waived by calling it outside the original audit's

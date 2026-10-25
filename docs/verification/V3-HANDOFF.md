@@ -159,7 +159,7 @@ or `tests/git_lifecycle.rs`.
 `lock` flushes all of them), submodules, bare repositories (audit).
 
 **Gates at this checkpoint.**
-- Rust: 118 tests in `transcrypt-v3`, plus the workspace.
+- Rust: 125 tests across the workspace.
 - Bash: 218 bats tests.
 - Python vectors, the differential corpus and the Git transport tests.
 - Snapshot verify/compare.
@@ -180,8 +180,9 @@ The branch is unpushed: push needs the owner's credentials.
    (tested, documented). A rename-aware merge driver cannot help, since Git
    never calls it. A future option is a `status`/`hydrate` hint that pairs
    the deleted and added files by decrypted content.
-4. **Prove `protected_flags` follows `attrFlagsModel`** (A4 narrowing), and
-   model the stored-key load (authenticate before use).
+4. **Done:** selection parsing is the verified `parse_attr_response`. Next
+   A4 narrowings: the inputs of `seal_action` and the stored-key load
+   (authenticate before use).
 5. **Optional:** an idle timeout for the private-mode agent.
 
 Remote enforcement is an **optional organizational control** (A13), not a

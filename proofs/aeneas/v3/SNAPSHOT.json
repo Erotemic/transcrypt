@@ -3,10 +3,10 @@
   "generated": {
     "V3Wire/Assumptions/FunsExternal.lean": "64053f683eedf8dadb8268c2c143996dd8e86d3eb6af74cc95d7f2ea152c24fd",
     "V3Wire/Extraction.lean": "0b3238ef0d9482c14de3debc5334af60a9628ddd1ae37839f5faec14eb62e21d",
-    "V3Wire/Extraction/Funs.lean": "534067a25b77e3b483dae0b7563594f4c80c3aa1c5025b5b02845cd5b44de635",
+    "V3Wire/Extraction/Funs.lean": "c706afa848481248bebadd0122d8d5407ccd18a73f98c50335ec120abd1514f9",
     "V3Wire/Extraction/FunsExternal.lean": "8b2b1665885a66ad131c1f4614b4cc1256896849a83db3f136fb40583599a202",
     "V3Wire/Extraction/FunsExternal_Template.lean": "1e1c62cbc9c8d0f35aa25d8a4002280804dd2ae3c1e54d79aae4a1143aa1031d",
-    "V3Wire/Extraction/Types.lean": "dab2f235795acfea9bab0e873cc952bd967700599e6dad96cffce227f23605ef",
+    "V3Wire/Extraction/Types.lean": "946e053307134445595724f2f2342960eb7f3dc4e3c4385300dc833c6d9abdf7",
     "lake-manifest.json": "e2d94b27225ba3ed9a4156d96d49d4d59a08f44d659b576f3765084f9859718d",
     "lakefile.toml": "e32a498814261b1e1cce0e907583152ca8ac853103297a7f4a6b4e8a27d53a8c",
     "lean-toolchain": "e0a7032ab1976a37a3e1e823816b4f490d462c1e864b21e1999c33cdac76e263"
@@ -21,7 +21,7 @@
   "purpose": "Production Rust v3 wire-codec generated Lean, not a crypto proof",
   "sources": {
     "rust/crates/transcrypt-v3-core/Cargo.toml": "f868248d2434268e7d6aebac4c5aa9dcd3489acf8b1e0515865f99e9c9688255",
-    "rust/crates/transcrypt-v3-core/hax.toml": "c73109407b6c7905afe5f5279c2f884947fd45286ad97a1751645d5ef7888815",
-    "rust/crates/transcrypt-v3-core/src/lib.rs": "8c0ddd207f871f894fa03709d1fec5a28aff0efc95c9c0145b80ba444083f2d2"
+    "rust/crates/transcrypt-v3-core/hax.toml": "fc966250207b8d6f635c5fc64c1f93330f1bbcbf5ab7b50cc5ffaf22194cbb28",
+    "rust/crates/transcrypt-v3-core/src/lib.rs": "e5223333b8ec89dd829c6ef871a163fdda5f88cabf534ce5e7300c54c7517380"
   }
 }

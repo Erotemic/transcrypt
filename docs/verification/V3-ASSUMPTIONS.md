@@ -395,9 +395,13 @@ one.
   verification, while `git add` applies the worktree policy; an unstaged
   `.gitattributes` edit can differ until it is staged (`protect` stages it).
   Local override files (A19).
-- **Next reduction:** the adapter's record loop is now a proved model
-  (`attrFlagsModel_sound`/`_complete`); what remains is that
-  `protected_flags` follows it (A4).
+- **Evidence (selection loop):** the whole answer is parsed by the
+  verified `parse_attr_response` (`parse_attr_response_spec`,
+  `parse_attr_response_complete`); the adapter only builds the request
+  (NUL-free paths, each NUL-terminated) and runs Git.
+- **Pattern hygiene:** `protect` refuses patterns that select nothing
+  (directories, `./`, negation) and requires a pattern naming an existing
+  file to select it.
 - **Status:** parsing and path policy PROVED; Git's evaluation ASSUMED (A19);
   TESTED end to end.
 
@@ -444,9 +448,14 @@ one.
 - **Consequence if false:** an undecryptable record at the new path (data
   needs recovery from the old path), or a hostile move accepted as genuine.
 - **Evidence:**
-  - Rebinding requires: no merge, cherry-pick, revert or rebase in progress;
-    the staged blob differs from `HEAD`'s at that path; the source path is
-    in `HEAD`, no longer in the index, and the record opens there.
+  - Rebinding requires a local change: the staged blob differs from
+    `HEAD`'s at that path and is not a file of an incoming commit
+    (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`); during
+    a rebase or `am` without a known commit nothing is repaired. The source
+    is a `HEAD` path whose index entry is gone or replaced, and the record
+    must open there.
+  - A record moved to an *unprotected* name is refused by `check_index` and
+    the keyless audit (it would never be decrypted there).
   - TESTED: files, directories, unprotected→protected
     (`renames_are_re_encrypted_for_their_new_path`); locked move refused at
     commit and unbound move refused by keyless audit
@@ -532,7 +541,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Clean never emits anything but a correct record, never double-encrypts | `seal_record_spec` |
 | Smudge/verify release only authentic plaintext for this config and path | `open_record_spec`, `open_record_complete`, `opensTo_unique` |
 | Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
-| Parsing Git's attribute answers (what is protected) | `parse_attr_record_spec` (both directions), `attrResponse_recordAt`, `attrFlagsModel_sound`, `attrFlagsModel_complete` |
+| Parsing Git's attribute answers (what is protected) | `parse_attr_record_spec` (both directions), `parse_attr_response_spec`, `parse_attr_response_complete`, `attrResponse_recordAt` |
 | Smudge keeps only genuine envelopes; opens only its own config | `smudge_action_spec`, `smudgeSpec_keep_envelope`, `smudgeModel_spec` |
 | The pre-commit hook repairs only local changes | `seal_action_spec`, `sealSpec_repairs_only_local` |
 | Index record parsing | `parse_index_entry_spec` |
@@ -553,7 +562,7 @@ verified decision that gates it:
 | `smudge` filter output | `smudge_action` (no envelope ⇒ refuse; other config or locked ⇒ keep the record; own config ⇒ open), then `open_record`; private mode: `umask_is_private` chooses plaintext or the authenticated record | same config; `%f`; blob from stdin | `Ok` |
 | `clean` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
 | Key loading | `authenticate_config` with the stored key (else locked), or agent `Ping` | stored 64-byte key; current config | `Ok` |
-| Protected-file selection | `parse_attr_record` per path, in order, response consumed exactly; `is_reserved_path` | raw paths sent to `check-attr -z --stdin filter` (`--cached`, worktree, or a commit's temporary index) | `protected = true` |
+| Protected-file selection | `parse_attr_response` over the whole answer (one record per requested path, in order, nothing else); `is_reserved_path` | raw paths sent to `check-attr -z --stdin filter` (`--cached`, worktree, or a commit's temporary index) | `protected = true` |
 | Pre-commit re-encryption (`seal_staged`) | `seal_action` on (`open_record` at its path, local change, `parse_file_header`, `open_record` at the `HEAD` source path of a local move), then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` listing; sequencing state | `Seal` or `Rebind` only |
 | Agent framing | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, lengths | proved roundtrip |
 | Git filter-process framing | `decode_pkt_len` for every packet; then the same conversion as the per-file filters | 4-byte pkt-line headers from Git; `command=`/`pathname=` values | `Ok` (else the process ends and Git fails) |

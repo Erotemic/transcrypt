@@ -8,7 +8,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    is_object_id, parse_attr_record, parse_index_entry, MAX_RECORD,
+    is_object_id, parse_attr_response, parse_index_entry, MAX_RECORD,
 };
 
 /// The most any Git subprocess may print to us. Listings of a hostile index
@@ -167,6 +167,16 @@ pub(crate) fn read_limited<R: Read>(read: R, limit: usize) -> Result<Vec<u8>, St
 /// blob is refused without being loaded. All reads of one process share a
 /// single `git cat-file --batch`.
 pub(crate) fn git_blob(root: &Path, oid: &str) -> Result<Vec<u8>, String> {
+    read_blob(root, oid, false)?.ok_or_else(|| "input exceeds the 16 MiB v3 size limit".into())
+}
+
+/// Like `git_blob`, but `None` for a blob larger than any v3 record (an
+/// ordinary large file, which cannot be a record), skipped unread.
+pub(crate) fn git_blob_if_record_sized(root: &Path, oid: &str) -> Result<Option<Vec<u8>>, String> {
+    read_blob(root, oid, true)
+}
+
+fn read_blob(root: &Path, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
     if !is_object_id(oid.as_bytes()) {
         return Err("invalid Git object id".into());
     }
@@ -176,7 +186,7 @@ pub(crate) fn git_blob(root: &Path, oid: &str) -> Result<Vec<u8>, String> {
             *slot = Some(Objects::open(root)?);
         }
         let objects = slot.as_mut().ok_or("Git object reader unavailable")?;
-        let result = objects.blob(oid);
+        let result = objects.blob(oid, skip_large);
         if result.is_err() {
             // The stream may be out of step; never reuse it.
             *slot = None;
@@ -211,7 +221,7 @@ impl Objects {
         Ok(Objects { child, input: Some(input), output: io::BufReader::new(output) })
     }
 
-    fn blob(&mut self, oid: &str) -> Result<Vec<u8>, String> {
+    fn blob(&mut self, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
         use io::BufRead;
         let input = self.input.as_mut().ok_or("Git object reader closed")?;
         input.write_all(format!("{oid}\n").as_bytes())
@@ -222,14 +232,23 @@ impl Objects {
         let size = batch_blob_size(&header, oid)
             .ok_or_else(|| format!("Git object {oid} is missing or not a blob"))?;
         if size > MAX_RECORD {
-            return Err("input exceeds the 16 MiB v3 size limit".into());
+            if !skip_large {
+                return Err("input exceeds the 16 MiB v3 size limit".into());
+            }
+            // Skip the content (and its LF) without keeping it.
+            let skipped = io::copy(&mut (&mut self.output).take(size as u64 + 1), &mut io::sink())
+                .map_err(|_| "truncated git cat-file reply")?;
+            if skipped != size as u64 + 1 {
+                return Err("truncated git cat-file reply".into());
+            }
+            return Ok(None);
         }
         let mut data = vec![0u8; size + 1];
         self.output.read_exact(&mut data).map_err(|_| "truncated git cat-file reply")?;
         if data.pop() != Some(b'\n') {
             return Err("malformed git cat-file reply".into());
         }
-        Ok(data)
+        Ok(Some(data))
     }
 }
 
@@ -364,8 +383,8 @@ pub(crate) enum Attributes<'a> {
 
 /// For each path, whether Git's effective `filter` attribute is
 /// `transcrypt-v3`. Git evaluates its own attribute rules (patterns, nested
-/// files, macros, `.git/info/attributes`); every answer record is parsed by
-/// the verified core (`parse_attr_record`), which requires the records to
+/// files, macros, `.git/info/attributes`); the whole answer is parsed by the
+/// verified core (`parse_attr_response`), which requires the records to
 /// name exactly the requested paths, in order, and nothing else. Paths go to
 /// Git as raw bytes (`-z --stdin`), so any valid Unix name works.
 pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<bool>, String> {
@@ -386,16 +405,11 @@ pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) ->
         Attributes::Index(file) => { command.arg("--cached").env("GIT_INDEX_FILE", file); },
     }
     command.args(["-z", "--stdin", "filter"]);
-    let response = run_bounded(command, Some(request), GIT_OUTPUT_LIMIT)?;
-    let mut flags = Vec::with_capacity(paths.len());
-    let mut at = 0;
-    for path in paths {
-        let record = parse_attr_record(&response, at, path)
-            .map_err(|_| "unexpected git check-attr output")?;
-        flags.push(record.protected);
-        at = record.next;
-    }
-    if at != response.len() {
+    let response = run_bounded(command, Some(request.clone()), GIT_OUTPUT_LIMIT)?;
+    // The verified core requires one record per requested path, in order,
+    // and nothing else (`parse_attr_response_spec`).
+    let mut flags = vec![false; paths.len()];
+    if !parse_attr_response(&request, &response, &mut flags) {
         return Err("unexpected git check-attr output".into());
     }
     Ok(flags)
