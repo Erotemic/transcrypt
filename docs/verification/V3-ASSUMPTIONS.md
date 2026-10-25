@@ -34,6 +34,7 @@ one.
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
 | A13 | History is audited before it reaches others (deployment) | REVIEWED; depends on deployment |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
+| A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git) |
 
 ## Detailed register
 
@@ -207,10 +208,11 @@ one.
     `renameat`.
   - Hard links to a plaintext file survive `lock`.
   - Root; hibernation and swap of non-key buffers.
-  - Files written by Git's checkout follow the umask.
+  - Files the user creates follow their umask until `hydrate` makes them
+    private (Git itself no longer writes readable plaintext: A15).
   - All ACCEPTED RISK.
-- **Next reduction:** warn on `nlink > 1` at lock; tighten modes of
-  plaintext files `hydrate` keeps.
+- **Next reduction:** done: `lock` warns on `nlink > 1`; `hydrate` makes
+  kept plaintext private. Remaining: none cheap.
 - **Status:** narrowed + TESTED; same-UID ACCEPTED RISK.
 
 ### A9 — RustCrypto implementations
@@ -292,10 +294,12 @@ one.
   under other names: the well-known editor and merge copy names are
   excluded locally and refused by `audit`, but any other name is not
   recognized.
-- **Next reduction:** done in this campaign: a CI snippet (user guide) and a
-  server hook `contrib/v3/pre-receive` (TESTED against a bare repository
-  with a client that skipped its own hook). What remains is deploying them,
-  which is the repository owner's decision.
+- **Next reduction:** done in these campaigns: a CI snippet (user guide); a
+  server hook `contrib/v3/pre-receive` with a work budget (TESTED against a
+  bare repository with a client that skipped its own hook); `doctor` for
+  local gaps; and `contrib/v3/check-remote-enforcement` to confirm that a
+  remote rejects plaintext. What remains is deploying them, which is the
+  repository owner's decision.
 - **Status:** REVIEWED + TESTED; enforcement depends on deployment.
 
 ### A14 — Keyless checks are envelope checks (new, by design)
@@ -313,6 +317,28 @@ one.
   that would need the 6-byte magic plus 16 bytes of the config's SHA-256.
 - **Status:** ACCEPTED RISK (forgery detection deferred to unlocked checks).
 
+### A15 — Git applies its filters' umask to new worktree files (new)
+
+- **Claim:** the umask a smudge filter inherits is the umask Git applies
+  when it creates the worktree file (`0666 & ~umask`, or `0777` for
+  executables). So a filter that sees a private umask knows Git will write a
+  private file.
+- **Trust boundary:** Git's checkout code (`entry.c`) and POSIX `open`.
+- **Consequence if false:** plaintext written by Git could be readable by
+  other local users (H-16 would reopen).
+- **Evidence:** TESTED against real Git:
+  - `git_never_writes_plaintext_readable_by_others` checks every protected
+    file after checkout, merge, rebase, stash, stash pop and restore, under
+    `umask 022` and `077`;
+  - the assumption is consistent with Git's documented checkout behavior.
+- **Residual:**
+  - a Git that writes worktree files with a mode independent of the umask
+    (no known version);
+  - plaintext a user creates themselves (A8).
+- **Next reduction:** none needed unless a Git version behaves differently;
+  the test runs on every CI platform.
+- **Status:** TESTED.
+
 ## Ranked unresolved risks
 
 Ranked by exploitability × impact under the threat model (a non-root
@@ -329,9 +355,9 @@ by cost.
 3. **Same-UID processes (A6, A8).** Any program running as the user can use
    the unlocked agent or race file contents. Requires a privilege boundary
    to fix. *Action:* document; optional idle timeout.
-4. **Plaintext permissions from Git checkout (A8).** Smudge output follows
-   the umask. *Action:* hydrate could tighten kept plaintext files; the
-   guide requires `umask 077`.
+4. **Plaintext permissions.** Fixed structurally for everything Git writes
+   (H-16, A15); only files a user creates under a permissive umask remain
+   readable until `hydrate`. *Action:* none cheap.
 5. **Unverified adapter remainder (A4).** *Action:* move the `cat-file
    --batch` header check into the proved core; replace per-file filter
    spawns with Git's long-running filter protocol (performance, so that

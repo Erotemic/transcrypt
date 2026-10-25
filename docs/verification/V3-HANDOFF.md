@@ -96,6 +96,13 @@ has a regression test in `tests/adversarial.rs`.
   `flock`).
 - Release plaintext only through the agent's `open_record`. While locked,
   filters may only pass through inputs accepted by `record_envelope_ok`.
+- Smudge may emit plaintext only when `umask_is_private()`; otherwise Git
+  must receive the (authenticated) record. Plaintext files are otherwise
+  written only by `hydrate` (0600).
+- `hydrate` replaces only files that are authentic records for their path,
+  and re-indexes only files holding the staged plaintext.
+- Run every subprocess through `run_bounded` (directly or via `git`,
+  `git_with_input`, `output`); never `Command::output()`.
 
 ## Next tasks
 

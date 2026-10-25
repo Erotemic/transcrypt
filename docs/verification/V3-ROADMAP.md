@@ -96,6 +96,14 @@ verified" or "cryptographic security has been proved from first principles."
       - added SIGKILL fault injection.
       New proved core functions: `is_object_id`, `record_envelope_ok`.
 
+- [x] Third pass:
+      - Git never writes plaintext readable by others (H-16; umask-aware
+        smudge plus auto-hydrating hooks);
+      - hydrate decrypts exactly the authentic records and never touches
+        edits (H-17; Lean model re-proved);
+      - bounded subprocess output and an incremental, budgeted audit (H-18);
+      - `doctor` and the remote-enforcement check (H-19).
+
 ### Remaining, ranked by security value (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md#ranked-unresolved-risks))
 
 1. **A13 — server-side enforcement.** Plaintext from checkouts that never

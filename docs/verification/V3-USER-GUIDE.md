@@ -48,18 +48,29 @@ transcrypt-v3 unlock
 
 `unlock` authenticates the passphrase against the committed config **before**
 changing anything. A wrong passphrase or a tampered config is rejected and no
-key agent is started. It then hydrates: it authenticates every staged
-protected file and replaces each ciphertext copy with its plaintext. If a
-worktree file is neither the staged ciphertext nor its plaintext, hydration
-refuses and changes nothing (unlock still succeeds and tells you); fix the
-file and run `transcrypt-v3 hydrate`, which is safe to rerun after an
-interruption. `unlock --no-hydrate` leaves ciphertext in place.
+key agent is started. It then hydrates: every protected file that holds an
+authentic v3 record for its path is replaced by its plaintext, written with
+mode 0600. Anything else (your own edits, for example) is left exactly as
+it is. If hydration cannot run (say, a protected file is a symlink), it
+changes nothing and unlock still succeeds and tells you; fix the cause and
+run `transcrypt-v3 hydrate`, which is safe to rerun at any time.
+`unlock --no-hydrate` leaves ciphertext in place.
+
+**Decrypted files are never readable by other users.** Git writes checked
+out files with your umask. When it is private (`umask 077`), Git writes
+plaintext directly. Otherwise Git writes the ciphertext, and the
+`post-checkout`, `post-merge` and `post-rewrite` hooks decrypt it with mode
+0600 right after `git checkout`, `git switch`, `git pull`, `git merge` or
+`git rebase`. After `git restore`, `git reset --hard` or `git stash pop`,
+which run no hook, run `transcrypt-v3 hydrate` (`status` reminds you).
 
 ## Day to day
 
 | Task | Command |
 | --- | --- |
 | See what is locked, decrypted or modified | `transcrypt-v3 status` |
+| Check that this checkout is protected | `transcrypt-v3 doctor` (non-zero exit if something is missing) |
+| Check that a remote refuses plaintext | `contrib/v3/check-remote-enforcement origin` |
 | Edit and commit secrets | edit, `git add`, `git commit` (encryption is automatic) |
 | Check the staged secrets before committing | `transcrypt-v3 verify-index` (also the pre-commit hook) |
 | Check commits before pushing | `transcrypt-v3 audit origin/main..HEAD` (the pre-push hook does this) |
@@ -100,6 +111,13 @@ For example, in GitHub Actions (any CI works the same way):
 - run: transcrypt-v3 audit --all     # every commit on every branch; no key needed
 ```
 
+After deploying either, confirm it with
+`contrib/v3/check-remote-enforcement <remote>`. It pushes a harmless
+plaintext canary to a throwaway branch and reports `ok` only if the remote
+rejects it with the audit's message. The pre-receive hook refuses pushes of
+more than 20000 commits per ref (`TRANSCRYPT_V3_MAX_COMMITS`), so one push
+cannot occupy the server indefinitely.
+
 On a self-hosted server, install
 [`contrib/v3/pre-receive`](../../contrib/v3/pre-receive) as the bare
 repository's `hooks/pre-receive`, with `transcrypt-v3` on its `PATH` (or
@@ -127,10 +145,11 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
   `unlock`, or a server without `transcrypt-v3 audit` is not checked. The
   clean filter still encrypts everything it processes. If `core.hooksPath`
   is set, Git ignores `.git/hooks`; `status` warns about this.
-- **Use `umask 077` in protected checkouts.** `hydrate` writes plaintext
-  with mode 0600, but files Git writes on checkout (through the smudge
-  filter) and files you create get your umask, often readable by other
-  local users. `transcrypt-v3 status` warns about such files.
+- **Files you create follow your umask.** Transcrypt never lets Git write
+  plaintext readable by others, and `hydrate` makes protected plaintext
+  files private, but a new file you create with `umask 022` is readable by
+  other local users until then. `status` warns about such files; `umask 077`
+  avoids the window.
 - Files larger than 16 MiB are refused.
 - **Editor and merge copies are plaintext.** `a.secret~`, `.a.secret.swp`
   or `a.secret.orig` do not end in `.secret` and are not encrypted. `unlock`

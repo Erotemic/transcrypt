@@ -99,7 +99,9 @@ trusted state and is outside this POC.
   `*.secret` path in the index or the `HEAD` tree (those are plaintext in
   history; enabling v3 would only appear to protect them).
   Generate metadata, install Git filters, install the local `pre-commit`
-  (`verify-index`) and `pre-push` (`audit` of the pushed commits) hooks, and
+  (`verify-index`) and `pre-push` (`audit` of the pushed commits) hooks and,
+  where no foreign hook of that name exists, `post-checkout`, `post-merge`
+  and `post-rewrite` (`hydrate --auto`), and
   stage the public config and
   `*.secret` attributes with `-diff` (no textconv cache). Explicitly committing those files is required.
 - `unlock`: derive from a terminal passphrase or opt-in stdin, authenticate
@@ -120,8 +122,14 @@ trusted state and is outside this POC.
   this config is returned unchanged (by determinism, exactly the record that
   sealing its plaintext gives); any other recognizable v3 record is refused
   (no double encryption); everything else is sealed.
-- `smudge`: authenticate including the Git-provided `%f` path and then
-  release plaintext; reject all other bytes.
+- `smudge`: authenticate including the Git-provided `%f` path; reject all
+  other bytes. Release the plaintext only if the umask inherited from Git
+  (which Git applies when it creates the worktree file, `0666 & ~umask`) has
+  all group and other bits set; otherwise emit the authenticated record
+  unchanged, so Git never writes plaintext readable by other users. The
+  `post-checkout`, `post-merge` and `post-rewrite` hooks run
+  `hydrate --auto` (a no-op while locked that never fails the finished Git
+  command), which decrypts with mode 0600.
   Git diffs are disabled for protected files rather than invoking textconv.
 - **Locked filters.** When no agent serves the worktree config, neither
   filter has the key, so neither can change a record: both output input that
@@ -157,38 +165,54 @@ trusted state and is outside this POC.
   pushed commits not already on the remote's tracking branches (merges,
   rebases, cherry-picks and `--no-verify` commits never ran `pre-commit`).
   A keyless audit cannot detect forged records that merely carry a valid
-  envelope. As a heuristic backstop it also refuses commits containing
+  envelope. Commits are streamed from `rev-list` and each is checked for
+  what it changes relative to its first parent (its whole tree for a root
+  commit or a config change); a parent outside the selected range is trusted
+  as already published. `--max-commits=N` bounds the work. Every Git
+  subprocess's output is capped at 256 MiB (the process is killed beyond
+  that) and its error output is drained and capped.
+- `doctor`: report, and exit non-zero unless all hold:
+  - the effective `filter.transcrypt-v3.{clean,smudge,required}` are this
+    binary's, and no `process` filter overrides them;
+  - a new `*.secret` file would get the filter;
+  - the staged index verifies;
+  - the `pre-commit` and `pre-push` hooks are installed, and
+    `core.hooksPath` is unset. As a heuristic backstop it also refuses commits containing
   well-known editor or merge copies of protected files (`*.secret~`,
   `*.secret.sw[pox]`, `*.secret.orig`, `.bak`, `.tmp`, `.rej`, `.save`,
   `*.secret#`), which hold plaintext; `init`/`unlock` add these patterns to
   `.git/info/exclude`.
-- `hydrate`: authenticate **every staged protected object** and confirm the
-  staged metadata matches the worktree before exposing plaintext. Each
-  protected worktree file must equal either its staged ciphertext or the
-  authenticated plaintext of that ciphertext. Unexpected bytes or symlinks
-  are rejected without modifying any file. For ciphertext-backed files,
-  decrypt the staged object and publish plaintext through mode-0600 exclusive
-  temporary files created in the private staging directory
-  `.git/transcrypt-v3-staging` (a real mode-0700 directory; never the
-  worktree, so a crash cannot leave plaintext where `git add` would commit
-  it) and renamed with `renameat` into the protected file's parent directory,
-  which was resolved once with `O_NOFOLLOW` per component. Stale staging
-  files from an interrupted run are deleted. Do **not** invoke `git restore` or `git checkout`
-  to hydrate: they would publish files one at a time through the smudge
-  filter, outside this all-or-nothing preflight. Already-hydrated
-  paths are left untouched, allowing retries after interrupted hydration.
-  Compare the staged index snapshot before publication, and replace a file
-  only if its stamp (device, inode, size, mtime, ctime) still equals the one
-  read when it was checked. Afterwards re-index exactly the protected paths
-  with `git update-index -z --stdin` (raw paths, never pathspecs, and never
-  `--add`; `git add -- <path>` would read a tracked `[a].secret` as a glob
-  and stage an untracked `a.secret`) so the clean filter refreshes the stat
-  cache, and verify that the staged blob IDs and modes have not changed.
-  Without that refresh, Git can report hydrated files as dirty because cached
-  size and mtime still describe ciphertext. `hydrate` and `lock` hold an
-  exclusive lock on the staging directory for their whole run. A same-UID
-  writer can still race the final stamp check and the rename; multi-file
-  atomicity is not claimed.
+- `hydrate`: authenticate **every staged protected object**, the staged
+  metadata and the effective filter attributes first. Then, for every
+  protected index entry, the worktree file is replaced by plaintext **only
+  if it is exactly an authentic record for its path**: the staged record, or
+  another record that authenticates there (a version restored or
+  stash-popped while smudge emitted ciphertext). It is replaced by exactly
+  the plaintext that record opens to. Every other file (unchanged or edited
+  plaintext) is left untouched and only made private (mode `& 0700`), so no
+  edit is ever overwritten; replacing a record by its plaintext loses
+  nothing, since clean seals it back to the same record. Decisions for all
+  files are made before any write; a protected symlink or unreadable file
+  aborts the whole run.
+
+  Plaintext is published through mode-0600 exclusive temporary files in the
+  private staging directory `.git/transcrypt-v3-staging` (a real mode-0700
+  directory, never the worktree, so a crash cannot leave plaintext where
+  `git add` would commit it). They are renamed with `renameat` into the
+  protected file's parent directory, which was resolved once with
+  `O_NOFOLLOW` per component; stale staging files are deleted. A file is
+  replaced only if its stamp (device, inode, size, mtime, ctime) still
+  equals the one read when it was checked.
+
+  Afterwards, re-index exactly the files that now hold the staged plaintext
+  (never an edited or different version, which would stage it) with
+  `git update-index -z --stdin`: raw paths, never pathspecs, and never
+  `--add` (`git add -- <path>` would read a tracked `[a].secret` as a glob
+  and stage an untracked `a.secret`). Then verify that the staged blob IDs
+  and modes have not changed. `hydrate` and `lock` hold an exclusive lock on
+  the staging directory for their whole run. A same-UID writer can still
+  race the final stamp check and the rename; multi-file atomicity is not
+  claimed.
 - `lock`: preflight no dirty or untracked protected files; overwrite tracked
   plaintext working files with the exact ciphertext in the index (only when
   resealing the worktree reproduces that ciphertext byte for byte, through
