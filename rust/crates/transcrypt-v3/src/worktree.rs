@@ -174,6 +174,65 @@ pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
     Ok(Staging { dir })
 }
 
+/// `.git/transcrypt-v3-scratch`: a real mode-0700 directory for plaintext
+/// that another program must read as a file (the merge and diff drivers'
+/// inputs). Files are exclusive and mode 0600, named after this process, and
+/// removed when the `Scratch` is dropped. Files of processes that no longer
+/// run (a crash) are removed on the next use. No secure-erasure claim.
+pub(crate) struct Scratch {
+    dir: fsat::Dir,
+    prefix: String,
+    written: std::cell::RefCell<Vec<OsString>>,
+}
+
+impl Scratch {
+    const NAME: &'static str = "transcrypt-v3-scratch";
+
+    pub(crate) fn create(root: &Path) -> Result<Scratch, String> {
+        let git_dir = fsat::Dir::open(root).and_then(|r| r.subdir(OsStr::new(".git")))
+            .map_err(|_| "cannot open .git directory")?;
+        let name = OsStr::new(Self::NAME);
+        match git_dir.mkdir(name, 0o700) {
+            Ok(()) => {},
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(format!("cannot create private scratch directory: {e}")),
+        }
+        let dir = git_dir.subdir(name).map_err(|_| "unsafe .git/transcrypt-v3-scratch")?;
+        if dir.mode().map_err(|_| "cannot examine private scratch directory")? & 0o077 != 0 {
+            return Err("unsafe .git/transcrypt-v3-scratch; require a real 0700 directory".into());
+        }
+        for entry in dir.entries().map_err(|_| "cannot list private scratch directory")? {
+            let owner = entry.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<i32>().ok());
+            // SAFETY: kill with signal 0 only checks whether the process exists.
+            let running = owner.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0
+                || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
+            if !running {
+                let _ = dir.unlink(&entry);
+            }
+        }
+        Ok(Scratch { dir, prefix: std::process::id().to_string(), written: Default::default() })
+    }
+
+    /// Write `contents` to a new private file; returns its path relative to
+    /// the repository root.
+    pub(crate) fn write(&self, name: &str, contents: &[u8]) -> Result<PathBuf, String> {
+        let file_name = OsString::from(format!("{}-{name}", self.prefix));
+        let mut file = self.dir.create_new(&file_name, 0o600)
+            .map_err(|e| format!("cannot create private scratch file: {e}"))?;
+        self.written.borrow_mut().push(file_name.clone());
+        file.write_all(contents).map_err(|e| format!("cannot write private scratch file: {e}"))?;
+        Ok(Path::new(".git").join(Self::NAME).join(file_name))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        for name in self.written.borrow().iter() {
+            let _ = self.dir.unlink(name);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

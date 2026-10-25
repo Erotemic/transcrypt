@@ -130,7 +130,13 @@ trusted state and is outside this POC.
   `post-checkout`, `post-merge` and `post-rewrite` hooks run
   `hydrate --auto` (a no-op while locked that never fails the finished Git
   command), which decrypts with mode 0600.
-  Git diffs are disabled for protected files rather than invoking textconv.
+  The committed policy says `-diff` (no textconv, so no textconv cache). A
+  local `diff=transcrypt-v3` (in `.git/info/attributes`) selects an external
+  diff driver (`<bin> diff`). Git passes it the full path of each side. It
+  authenticates each record side at that path (plaintext sides, i.e. the
+  worktree, are shown as is), writes both plaintexts as exclusive 0600 files
+  in the private scratch directory, runs `diff -u`, and removes them. While
+  locked it prints only that the files differ.
 - **Filter transport.** Git runs the filters through its long-running
   protocol (`filter.transcrypt-v3.process = <bin> filter-process`, protocol
   version 2): one process per Git command, advertising `clean` and `smudge`
@@ -203,7 +209,8 @@ trusted state and is outside this POC.
   - Open ours and theirs at the path `%P`; both must authenticate. A base
     that does not open there (a rename) is replaced by an empty base.
   - Write the three plaintexts as exclusive mode-0600 files in
-    `.git/transcrypt-v3-merge` (a real 0700 directory), run
+    `.git/transcrypt-v3-scratch` (a real 0700 directory; files of crashed
+  processes are removed on next use), run
     `git merge-file -p`, then remove the files.
   - Store the result (conflict markers included) through clean, and exit
     non-zero on conflicts.

@@ -46,16 +46,18 @@ fn expected_filters() -> Result<[(&'static str, String); 4], String> {
     ])
 }
 
-/// The merge driver configuration and the local attribute that selects it
-/// (in `.git/info/attributes`, so the committed policy stays unchanged).
-const MERGE_ATTRIBUTE: &str = "*.secret merge=transcrypt-v3";
+/// The merge and diff driver configuration and the local attribute that
+/// selects them (in `.git/info/attributes`, so the committed policy, which
+/// says `-diff`, stays unchanged).
+const MERGE_ATTRIBUTE: &str = "*.secret diff=transcrypt-v3 merge=transcrypt-v3";
 
-fn expected_merge_driver() -> Result<[(&'static str, String); 2], String> {
+fn expected_merge_driver() -> Result<[(&'static str, String); 3], String> {
     let bin = env::current_exe().map_err(|_| "cannot resolve current executable")?;
     let program = shell_quote(bin.to_str().ok_or("executable path must be UTF-8")?);
     Ok([
         ("merge.transcrypt-v3.name", "transcrypt-v3: merge decrypted *.secret files".into()),
         ("merge.transcrypt-v3.driver", format!("{program} merge %O %A %B %P")),
+        ("diff.transcrypt-v3.command", format!("{program} diff")),
     ])
 }
 
@@ -484,6 +486,7 @@ pub(crate) fn rekey(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), Str
 /// Remove the merge driver configuration and its local attribute line.
 fn remove_merge_driver(root: &Path) {
     let _ = git(root, &["config", "--local", "--remove-section", "merge.transcrypt-v3"]);
+    let _ = git(root, &["config", "--local", "--remove-section", "diff.transcrypt-v3"]);
     let attributes = root.join(".git/info/attributes");
     if let Ok(text) = fs::read_to_string(&attributes) {
         let kept: Vec<&str> = text.lines().filter(|line| *line != MERGE_ATTRIBUTE).collect();

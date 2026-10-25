@@ -146,8 +146,11 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
   filter and works normally.
 - **Equal plaintexts leak equality** at the same path in the same repository
   (deterministic encryption keeps Git diffs and merges stable).
-- **Git diffs of `*.secret` files are disabled.** No plaintext is cached by
-  textconv.
+- **`git diff` shows decrypted changes while unlocked** (use `--ext-diff`
+  with `git log -p` and `git show`). Each version is authenticated at its
+  path, and nothing is cached: unlike Bash transcrypt's textconv cache, no
+  plaintext is kept in `refs/notes`. While locked, Git only reports that the
+  files differ.
 - **Rollback is not detected.** Someone who controls your Git history can
   restore an older valid version of a secret.
 - **The key lives in a local agent process** reachable through a mode-0600

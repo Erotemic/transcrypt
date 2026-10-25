@@ -1162,7 +1162,7 @@ fn crashed_merge_inputs_are_purged() {
     use std::os::unix::fs::PermissionsExt;
     let mut scratch = Scratch::new("mergecrash");
     let repo = scratch.repo("repo");
-    let dir = repo.join(".git/transcrypt-v3-merge");
+    let dir = repo.join(".git/transcrypt-v3-scratch");
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(dir.join("2147483646-ours"), b"LEFTOVER PLAINTEXT\n").unwrap();
@@ -1176,4 +1176,25 @@ fn crashed_merge_inputs_are_purged() {
     let _ = exec(&repo, "git", &["merge", "-q", "--no-edit", "side"], None);
     assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "merge inputs left behind");
     run(&repo, "git", &["merge", "--abort"], None);
+}
+
+/// `git diff` shows decrypted diffs of secrets while unlocked (worktree and
+/// history alike), leaves no plaintext behind, and while locked only says
+/// that the files differ.
+#[test]
+fn git_diff_shows_decrypted_changes() {
+    let mut scratch = Scratch::new("diff");
+    let repo = scratch.repo("repo");
+    fs::write(repo.join("a.secret"), b"alpha edited\n").unwrap();
+    let diff = String::from_utf8(run(&repo, "git", &["diff"], None)).unwrap();
+    assert!(diff.contains("-alpha plaintext") && diff.contains("+alpha edited") && diff.contains("a/a.secret"), "{diff}");
+    run(&repo, "git", &["commit", "-qam", "edit"], None);
+    let diff = String::from_utf8(run(&repo, "git", &["diff", "HEAD~1", "HEAD"], None)).unwrap();
+    assert!(diff.contains("-alpha plaintext") && diff.contains("+alpha edited"), "{diff}");
+    let log = String::from_utf8(run(&repo, "git", &["log", "-p", "--ext-diff", "-1"], None)).unwrap();
+    assert!(log.contains("+alpha edited"), "{log}");
+    assert_eq!(fs::read_dir(repo.join(".git/transcrypt-v3-scratch")).unwrap().count(), 0);
+    run(&repo, bin(), &["lock"], None);
+    let diff = String::from_utf8(run(&repo, "git", &["diff", "HEAD~1", "HEAD"], None)).unwrap();
+    assert!(diff.contains("unlock to see the decrypted diff") && !diff.contains("alpha"), "{diff}");
 }

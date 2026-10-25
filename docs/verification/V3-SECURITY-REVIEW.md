@@ -103,6 +103,8 @@ regression test that fails on the old implementation.
 
 | H-24 | Medium (usability) | **Secrets could not be merged.** Concurrent edits produced a binary conflict with only "ours" visible. A deleted or sparse protected file, or an unmerged index, made `hydrate`, `unlock`, `lock` and `status` fail for every file. | A merge driver (decrypts authenticated inputs, merges in a private directory, re-encrypts); conflict-aware `hydrate`/`status`; missing files skipped. Tests `secrets_merge_as_plaintext` (clean and conflicting merges under umask 022 and 077) and `deleted_protected_files_do_not_block_lock_or_hydrate`. |
 
+| H-25 | Low (usability) | `git diff` of a secret showed only "Binary files differ". The Bash approach (a textconv cache) keeps plaintext in `refs/notes`, and textconv cannot authenticate path-bound records (it gets no full path). | An external diff driver: each side is authenticated at its own path, plaintext stays in the private scratch directory only while `diff` runs, and nothing is cached. Test `git_diff_shows_decrypted_changes`. |
+
 Re-attacking the earlier fixes found no further exploit:
 - **Pathspec staging:** only `update-index -z --stdin` paths remain, and they come from the verified snapshot.
 - **difftool/mergetool temporaries:** written through smudge, so the umask rule now covers them.

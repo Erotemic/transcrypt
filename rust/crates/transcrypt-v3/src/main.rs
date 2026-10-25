@@ -10,7 +10,8 @@
 //! - `setup.rs`: init, unlock, filters, hooks, ignore rules, `doctor`.
 //! - `audit.rs`: keyless history audit and the pre-push hook.
 //! - `process.rs`: Git's long-running filter protocol (one filter process
-//!   per Git command); `merge.rs`: the merge driver for protected files.
+//!   per Git command); `merge.rs` and `diff.rs`: the merge and diff drivers
+//!   for protected files.
 //! - `session.rs`: the in-memory credential agent; `fsat.rs`: dirfd I/O.
 #[cfg(not(unix))]
 compile_error!("transcrypt-v3 POC requires Unix for 0600/0700 local credential permissions");
@@ -26,6 +27,7 @@ use std::{
 use std::os::unix::ffi::OsStrExt;
 use zeroize::Zeroizing;
 mod audit;
+mod diff;
 mod fsat;
 mod git;
 mod merge;
@@ -115,6 +117,18 @@ fn run() -> Result<(), String> {
                 "init" => init(&root, password),
                 "rekey" => rekey(&root, password),
                 _ => unlock(&root, password, auto_hydrate),
+            }
+        },
+        "diff" => {
+            // Git's external diff interface: path old-file old-hex old-mode
+            // new-file new-hex new-mode [new-path rename-message].
+            let file = |arg: &OsString| invoked_in.join(arg);
+            match &args[1..] {
+                [path, old, _, _, new, _, _] => diff::diff(&root, path.as_bytes(), &file(old), path.as_bytes(), &file(new)),
+                [path, old, _, _, new, _, _, new_path, _] =>
+                    diff::diff(&root, path.as_bytes(), &file(old), new_path.as_bytes(), &file(new)),
+                [path] => { println!("* Unmerged path {}", path.to_string_lossy()); Ok(()) },
+                _ => Err("unexpected external diff arguments".into()),
             }
         },
         "merge" => {

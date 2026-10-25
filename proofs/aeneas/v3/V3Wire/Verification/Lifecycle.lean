@@ -14,13 +14,17 @@ not proved). Given the models, the theorems below are unconditional apart
 from the primitive contract `Realizes` (A5).
 
 Hydrate, per protected entry: the *candidate* record is the staged record if
-the worktree is exactly it, otherwise the worktree itself if it has the v3
-record envelope for this checkout (`record_envelope_ok`), otherwise there is
-none. A candidate is authenticated at the entry's path (`open_record`) and the
-core decides (`hydrate_action`); on `Publish` the worktree is replaced by the
+the entry has one and the worktree is exactly it, otherwise the worktree
+itself if it has the v3 record envelope for this checkout
+(`record_envelope_ok`), otherwise there is none. An *unmerged* entry (during a
+merge) has no staged record, so its only possible candidate is the worktree.
+A candidate is authenticated at the entry's path (`open_record`) and the core
+decides (`hydrate_action`); on `Publish` the worktree is replaced by the
 plaintext. Without a candidate, or without `Publish`, the file is left
-untouched (the adapter may re-index it; that is not modeled here). Any
-refusal aborts the whole operation before anything is written.
+untouched (the adapter may re-index it; that is not modeled here); for an
+entry with a staged record the adapter first decrypts that record, for an
+unmerged entry it does not. Any refusal aborts the whole operation before
+anything is written.
 `hydratePlan_spec`: every planned write replaces a worktree that is exactly an
 authentic record at its own path, by exactly the plaintext it opens to.
 -/
@@ -36,38 +40,53 @@ open transcrypt_v3_core
 
 variable {P : Type} {inst : V3Primitives P} {prims : P} {σ : Suite}
 
-/-- One staged protected entry as seen by `hydrate`: its Git path, staged
-    record, current worktree bytes, and a plaintext buffer. -/
+/-- One protected entry as seen by `hydrate`: its Git path, staged record
+    (`none` for an *unmerged* path during a merge, which has no staged record
+    of its own), current worktree bytes, and a plaintext buffer. -/
 structure HydrateEntry where
   path : Slice U8
-  record : Slice U8
+  record : Option (Slice U8)
   worktree : Slice U8
   buffer : Slice U8
 
-/-- The record a worktree file holds, if any: the staged record when the
-    worktree is exactly it, otherwise the worktree itself when it has the v3
-    record envelope for this checkout (`id` is the config id), otherwise
-    none. -/
-def hydrateCandidate (id : Std.Array U8 16#usize) (e : HydrateEntry) :
+/-- The worktree itself when it has the v3 record envelope for this checkout
+    (`id` is the config id), otherwise none. -/
+def hydrateEnvelope (id : Std.Array U8 16#usize) (e : HydrateEntry) :
     RustM (Option (Slice U8)) := do
-  let s ← bytes_eq e.worktree e.record
-  if s then ok (some e.record)
-  else
-    let env ← record_envelope_ok e.worktree id
-    if env then ok (some e.worktree) else ok none
+  let env ← record_envelope_ok e.worktree id
+  if env then ok (some e.worktree) else ok none
+
+/-- The record a worktree file holds, if any: the staged record when the
+    entry has one and the worktree is exactly it, otherwise the worktree
+    itself when it has the v3 record envelope (`hydrateEnvelope`), otherwise
+    none. For an unmerged entry only the envelope check applies. -/
+def hydrateCandidate (id : Std.Array U8 16#usize) (e : HydrateEntry) :
+    RustM (Option (Slice U8)) :=
+  match e.record with
+  | some r => do
+    let s ← bytes_eq e.worktree r
+    if s then ok (some r) else hydrateEnvelope id e
+  | none => hydrateEnvelope id e
+
+theorem hydrateEnvelope_spec (id : Std.Array U8 16#usize) (e : HydrateEntry) :
+    hydrateEnvelope id e ⦃ c => ∀ cand, c = some cand → sliceBytes cand = sliceBytes e.worktree ⦄ := by
+  unfold hydrateEnvelope
+  step with record_envelope_ok_spec as ⟨ env, _ ⟩
+  split <;> simp
 
 /-- A candidate record is always byte-for-byte the worktree. -/
 theorem hydrateCandidate_spec (id : Std.Array U8 16#usize) (e : HydrateEntry) :
     hydrateCandidate id e ⦃ c => ∀ cand, c = some cand → sliceBytes cand = sliceBytes e.worktree ⦄ := by
   unfold hydrateCandidate
-  step with bytes_eq_spec as ⟨ s, hs ⟩
   split
-  · rename_i hst
-    simp only [WP.spec_ok, Option.some.injEq]
-    rintro cand rfl
-    simp only [sliceBytes, hs.1 hst]
-  · step with record_envelope_ok_spec as ⟨ env, _ ⟩
-    split <;> simp
+  · step with bytes_eq_spec as ⟨ s, hs ⟩
+    split
+    · rename_i hst
+      simp only [WP.spec_ok, Option.some.injEq]
+      rintro cand rfl
+      simp only [sliceBytes, hs.1 hst]
+    · exact hydrateEnvelope_spec id e
+  · exact hydrateEnvelope_spec id e
 
 /-- Authenticate a candidate record at the entry's path (`open_record`; a
     refusal aborts) and let the core decide (`hydrate_action`).
@@ -86,8 +105,9 @@ def hydrateOpen (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#us
 
 /-- Per-entry hydrate step. If the worktree holds a candidate record, it is
     authenticated and the core decides (`hydrateOpen`). Otherwise (or if the
-    core does not publish) the file is left untouched; the adapter still
-    decrypts the staged record, and a refusal there also aborts. -/
+    core does not publish) the file is left untouched; for an entry with a
+    staged record the adapter still decrypts that record, and a refusal there
+    also aborts. An unmerged entry (no staged record) is simply kept. -/
 def hydrateEntry (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
     (id : Std.Array U8 16#usize) (e : HydrateEntry) :
     RustM (core.result.Result (Option (Slice U8)) Refusal) := do
@@ -99,10 +119,13 @@ def hydrateEntry (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#u
   | core.result.Result.Err x => ok (core.result.Result.Err x)
   | core.result.Result.Ok (Option.some pt) => ok (core.result.Result.Ok (some pt))
   | core.result.Result.Ok Option.none =>
-    let (r, _) ← open_record inst prims config e.path e.record e.buffer
-    match r with
-    | core.result.Result.Err x => ok (core.result.Result.Err x)
-    | core.result.Result.Ok _ => ok (core.result.Result.Ok none)
+    match e.record with
+    | Option.none => ok (core.result.Result.Ok none)
+    | Option.some record =>
+      let (r, _) ← open_record inst prims config e.path record e.buffer
+      match r with
+      | core.result.Result.Err x => ok (core.result.Result.Err x)
+      | core.result.Result.Ok _ => ok (core.result.Result.Ok none)
 
 /-- The adapter validates *every* entry before publishing anything: one
     refusal aborts the whole operation (all-or-nothing preflight). -/
@@ -172,8 +195,11 @@ theorem hydrateEntry_spec (h : Realizes inst prims σ) (config : Std.Array U8 55
   step with hpub as ⟨ p, hp ⟩
   rcases p with (_ | pt) | x
   · simp only
-    step with open_record_spec h config e.path e.record e.buffer as ⟨ r, _, _ ⟩
-    rcases r with u | x <;> simp [HydrateSafe]
+    split
+    · simp [HydrateSafe]
+    · rename_i record _
+      step with open_record_spec h config e.path record e.buffer as ⟨ r, _, _ ⟩
+      rcases r with u | x <;> simp [HydrateSafe]
   · simp only [WP.spec_ok, HydrateSafe]
     exact hp pt rfl
   · simp
@@ -181,7 +207,8 @@ theorem hydrateEntry_spec (h : Realizes inst prims σ) (config : Std.Array U8 55
 /-- **Hydrate safety.** If hydrate's preflight succeeds, every planned write
     replaces a worktree that is exactly an authentic record at its own path
     with exactly the plaintext that record opens to; all other files are left
-    untouched. Any refusal aborts the whole operation, so nothing is planned
+    untouched. This covers unmerged entries (no staged record) too: one is
+    replaced only if its worktree itself is an authentic record at its path. Any refusal aborts the whole operation, so nothing is planned
     (and the adapter writes nothing). -/
 theorem hydratePlan_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
     (id : Std.Array U8 16#usize) (es : List HydrateEntry) :
@@ -268,10 +295,17 @@ theorem lockEntry_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#us
         · rw [if_neg h2] at ha
           simp [ha, lockResult]
 
+/-- One staged protected entry as seen by `verify-index`: its Git path,
+    staged record, and a plaintext buffer. -/
+structure VerifyEntry where
+  path : Slice U8
+  record : Slice U8
+  buffer : Slice U8
+
 /-- `verify-index` for the staged protected entries: every staged record
     must open at its own path under the checkout's config. -/
 def verifyPlan (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize) :
-    List HydrateEntry → RustM Bool
+    List VerifyEntry → RustM Bool
   | [] => ok true
   | e :: es => do
     let (r, _) ← open_record inst prims config e.path e.record e.buffer
@@ -284,7 +318,7 @@ def verifyPlan (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usi
     the authenticated config: no staged plaintext, no record transplanted
     from another path or repository, no forged record (under A10). -/
 theorem verifyPlan_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
-    (es : List HydrateEntry) :
+    (es : List VerifyEntry) :
     verifyPlan inst prims config es ⦃ b => b = true →
       ∀ e ∈ es, ∃ pt, OpensTo σ (wireBytes config) (sliceBytes e.path) (sliceBytes e.record) pt ⦄ := by
   induction es with
