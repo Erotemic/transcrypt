@@ -91,3 +91,59 @@ fn argon2id_matches_the_reference_implementation() {
         assert_eq!(&derive_key(&hex(c[1]), &salt).unwrap()[..], &hex(c[3])[..], "{}", c[0]);
     }
 }
+
+#[test]
+fn size_bounds_are_exact_at_every_layer() {
+    use transcrypt_v3::{MAX_FILE, MAX_RECORD};
+    let case = &cases()[0];
+    let config = &case.config;
+    let path = b"big.secret";
+    // The largest plaintext seals and opens; one more byte is refused.
+    let max = vec![0x5au8; MAX_FILE];
+    let record = encrypt_file(config, &case.key, path, &max).unwrap();
+    assert_eq!(record.len(), MAX_RECORD);
+    assert_eq!(&decrypt_file(config, &case.key, path, &record).unwrap()[..], &max[..]);
+    assert!(encrypt_file(config, &case.key, path, &vec![0u8; MAX_FILE + 1]).is_err());
+    let mut long = record.clone();
+    long.push(0);
+    assert!(decrypt_file(config, &case.key, path, &long).is_err());
+    // Every record shorter than header + tag is refused, including empty.
+    for len in 0..(FILE_HEADER_LEN + TAG_LEN) {
+        assert!(decrypt_file(config, &case.key, path, &case.record[..len.min(case.record.len())]).is_err(), "{len}");
+    }
+    // A header-only record with a forged all-zero tag is refused.
+    let mut forged = case.record[..FILE_HEADER_LEN].to_vec();
+    forged.extend_from_slice(&[0u8; TAG_LEN]);
+    assert!(decrypt_file(config, &case.key, path, &forged).is_err());
+}
+
+/// Randomized mutation testing (deterministic seed): inserting, deleting,
+/// replacing or swapping bytes anywhere in a genuine record never yields an
+/// accepted record, and random bodies behind a genuine header never open.
+#[test]
+fn random_mutations_never_authenticate() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+    for case in cases().iter().filter(|c| c.record.len() < 400) {
+        let (config, key, path) = (&case.config, &case.key, &case.path);
+        for _ in 0..300 {
+            let mut bad = case.record.clone();
+            for _ in 0..(1 + next() % 3) {
+                let at = (next() as usize) % (bad.len() + 1);
+                match next() % 4 {
+                    0 => bad.insert(at, next() as u8),
+                    1 if !bad.is_empty() => { bad.remove(at.min(bad.len() - 1)); },
+                    2 if at < bad.len() => bad[at] ^= 1 + (next() % 255) as u8,
+                    _ if bad.len() > 1 => { let (n, j) = (bad.len(), next() as usize); bad.swap(at.min(n - 1), j % n); },
+                    _ => {},
+                }
+            }
+            if bad != case.record {
+                assert!(decrypt_file(config, key, path, &bad).is_err(), "{}: accepted a mutation", case.name);
+            }
+            let mut random = case.record[..FILE_HEADER_LEN].to_vec();
+            random.extend((0..(TAG_LEN + (next() % 64) as usize)).map(|_| next() as u8));
+            assert!(decrypt_file(config, key, path, &random).is_err(), "{}: accepted random body", case.name);
+        }
+    }
+}
