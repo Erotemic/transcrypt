@@ -196,6 +196,24 @@ trusted state and is outside this POC.
   and config stay; without the filter, Git would store a new `*.secret` as
   plaintext, which the command warns about.
 - A new passphrase typed on a terminal (`init`, `rekey`) is asked for twice.
+- **Merge driver.** `init`/`unlock` configure `merge.transcrypt-v3.driver =
+  <bin> merge %O %A %B %P` and add `*.secret merge=transcrypt-v3` to
+  `.git/info/attributes` (local; the committed policy is unchanged). Steps:
+  - Require the unlocked agent.
+  - Open ours and theirs at the path `%P`; both must authenticate. A base
+    that does not open there (a rename) is replaced by an empty base.
+  - Write the three plaintexts as exclusive mode-0600 files in
+    `.git/transcrypt-v3-merge` (a real 0700 directory), run
+    `git merge-file -p`, then remove the files.
+  - Store the result (conflict markers included) through clean, and exit
+    non-zero on conflicts.
+
+  During a merge, `hydrate` (and `status`) accept unmerged index entries:
+  - with unmerged protected paths, the staged-record verification is
+    replaced by the agent and effective-filter checks for every protected
+    path;
+  - an unmerged file is decrypted when it is an authentic record for its
+    path (the driver's result).
 - `doctor`: report, and exit non-zero unless all hold:
   - the effective `filter.transcrypt-v3.{clean,smudge,required}` are this
     binary's, and no `process` filter overrides them;

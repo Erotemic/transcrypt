@@ -11,7 +11,7 @@ use std::{
 };
 use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD};
 use zeroize::Zeroizing;
-use crate::convert;
+use crate::{convert, git::append_wiped};
 
 /// The most data one packet carries.
 const MAX_DATA: usize = MAX_PKT_LEN - 4;
@@ -61,16 +61,6 @@ fn write_flush(out: &mut impl Write) -> io::Result<()> {
     out.write_all(b"0000")
 }
 
-/// Append without leaving an unwiped copy behind when the buffer grows.
-fn append(buffer: &mut Zeroizing<Vec<u8>>, data: &[u8]) {
-    if buffer.len() + data.len() > buffer.capacity() {
-        let mut bigger = Zeroizing::new(Vec::with_capacity((buffer.len() + data.len()).max(2 * buffer.capacity())));
-        bigger.extend_from_slice(buffer);
-        *buffer = bigger;
-    }
-    buffer.extend_from_slice(data);
-}
-
 pub(crate) fn serve(root: &Path) -> Result<(), String> {
     let mut input = io::stdin().lock();
     let mut output = io::BufWriter::new(io::stdout().lock());
@@ -100,7 +90,7 @@ pub(crate) fn serve(root: &Path) -> Result<(), String> {
         let mut too_large = false;
         while let Some(data) = read_packet(&mut input)? {
             too_large |= content.len() + data.len() > MAX_RECORD;
-            if !too_large { append(&mut content, &data); }
+            if !too_large { append_wiped(&mut content, &data); }
         }
         let result = match (command.as_deref(), &path) {
             _ if too_large => Err("input exceeds the 16 MiB v3 size limit".into()),

@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use zeroize::Zeroizing;
 use transcrypt_v3_core::{
     check_attr_response_ok, is_object_id, parse_index_entry, MAX_RECORD,
 };
@@ -22,7 +23,20 @@ fn output(command: Command) -> Result<Vec<u8>, String> {
 /// Run a subprocess with `input` (if any) fed from another thread, at most
 /// `limit` bytes of output accepted (beyond that it is killed), and at most
 /// 64 KiB of its error output kept (the rest is drained so it never blocks).
-fn run_bounded(mut command: Command, input: Option<Vec<u8>>, limit: usize) -> Result<Vec<u8>, String> {
+fn run_bounded(command: Command, input: Option<Vec<u8>>, limit: usize) -> Result<Vec<u8>, String> {
+    let desc = format!("{:?}", command);
+    let (status, data, errors) = run_bounded_status(command, input, limit)?;
+    if !status.success() {
+        return Err(format!("Git command failed ({desc}): {}", String::from_utf8_lossy(&errors)));
+    }
+    Ok(data.to_vec())
+}
+
+/// `run_bounded`, returning the exit status (and output, which may be
+/// plaintext, kept in wiped memory) instead of failing on a non-zero exit.
+pub(crate) fn run_bounded_status(mut command: Command, input: Option<Vec<u8>>, limit: usize)
+    -> Result<(std::process::ExitStatus, Zeroizing<Vec<u8>>, Vec<u8>), String>
+{
     let desc = format!("{:?}", command);
     command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -38,17 +52,43 @@ fn run_bounded(mut command: Command, input: Option<Vec<u8>>, limit: usize) -> Re
         let _ = io::copy(&mut stderr, &mut io::sink());
         kept
     });
-    let stdout = child.stdout.take().ok_or("subprocess output pipe missing")?;
-    let data = read_limited(stdout, limit);
+    let mut stdout = child.stdout.take().ok_or("subprocess output pipe missing")?;
+    let data = read_wiped(&mut stdout, limit);
+    // Close our end first: a producer (or its children) still writing then
+    // gets EPIPE instead of blocking with the error pipe open.
+    drop(stdout);
     if data.is_err() { let _ = child.kill(); }
     let status = child.wait().map_err(|_| format!("cannot wait for {desc}"))?;
     let written = writer.map(|w| w.join().map_err(|_| ()).and_then(|r| r.map_err(|_| ())));
     let errors = errors.join().unwrap_or_default();
     let data = data.map_err(|_| format!("output of {desc} exceeds the {} MiB limit", limit >> 20))?;
-    if !status.success() || matches!(written, Some(Err(()))) {
-        return Err(format!("Git command failed ({desc}): {}", String::from_utf8_lossy(&errors)));
+    if matches!(written, Some(Err(()))) {
+        return Err(format!("cannot send input to {desc}: {}", String::from_utf8_lossy(&errors)));
     }
-    Ok(data)
+    Ok((status, data, errors))
+}
+
+/// Read at most `limit` bytes into memory that is wiped when dropped,
+/// including every smaller buffer it outgrows.
+pub(crate) fn read_wiped(read: &mut impl Read, limit: usize) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut out = Zeroizing::new(Vec::new());
+    let mut chunk = Zeroizing::new([0u8; 64 * 1024]);
+    loop {
+        let n = read.read(&mut chunk[..]).map_err(|_| "cannot read input")?;
+        if n == 0 { return Ok(out); }
+        if out.len() + n > limit { return Err("input exceeds its size limit".into()); }
+        append_wiped(&mut out, &chunk[..n]);
+    }
+}
+
+/// Append without leaving an unwiped copy behind when the buffer grows.
+pub(crate) fn append_wiped(buffer: &mut Zeroizing<Vec<u8>>, data: &[u8]) {
+    if buffer.len() + data.len() > buffer.capacity() {
+        let mut bigger = Zeroizing::new(Vec::with_capacity((buffer.len() + data.len()).max(2 * buffer.capacity())));
+        bigger.extend_from_slice(buffer);
+        *buffer = bigger;
+    }
+    buffer.extend_from_slice(data);
 }
 
 /// Every Git subprocess. Pathspecs are literal, so a tracked file named
@@ -247,6 +287,36 @@ fn tree_record(entry: &[u8]) -> Result<Vec<u8>, String> {
     let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
     let [mode, _kind, oid] = fields[..] else { return Err("malformed git ls-tree record".into()) };
     Ok([mode, b" ", oid, b" 0", &entry[tab..]].concat())
+}
+
+/// The index during a merge: its exact listing, the stage-0 entries (parsed
+/// by the verified core) and, once each, the paths of unmerged entries
+/// (`<mode> SP <oid> SP <1|2|3> TAB <path>`; Git lists stages of a path
+/// together).
+pub(crate) struct Index {
+    pub(crate) listing: Vec<u8>,
+    pub(crate) merged: Vec<Staged>,
+    pub(crate) conflicted: Vec<Vec<u8>>,
+}
+
+pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
+    let listing = git(root, &["ls-files", "--stage", "-z"])?;
+    if !listing.is_empty() && listing.last() != Some(&0) {
+        return Err("truncated Git listing".into());
+    }
+    let mut merged = Vec::new();
+    let mut conflicted: Vec<Vec<u8>> = Vec::new();
+    for entry in listing.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed Git index entry")?;
+        if tab >= 2 && entry[tab - 2] == b' ' && matches!(entry[tab - 1], b'1'..=b'3') {
+            let path = entry[tab + 1..].to_vec();
+            if conflicted.last() != Some(&path) { conflicted.push(path); }
+        } else {
+            merged.extend_from_slice(entry);
+            merged.push(0);
+        }
+    }
+    Ok(Index { merged: parse_listing(&merged)?, listing, conflicted })
 }
 
 pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {

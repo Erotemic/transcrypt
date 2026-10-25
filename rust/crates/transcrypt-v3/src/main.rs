@@ -10,7 +10,7 @@
 //! - `setup.rs`: init, unlock, filters, hooks, ignore rules, `doctor`.
 //! - `audit.rs`: keyless history audit and the pre-push hook.
 //! - `process.rs`: Git's long-running filter protocol (one filter process
-//!   per Git command).
+//!   per Git command); `merge.rs`: the merge driver for protected files.
 //! - `session.rs`: the in-memory credential agent; `fsat.rs`: dirfd I/O.
 #[cfg(not(unix))]
 compile_error!("transcrypt-v3 POC requires Unix for 0600/0700 local credential permissions");
@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 mod audit;
 mod fsat;
 mod git;
+mod merge;
 mod process;
 mod session;
 mod setup;
@@ -85,6 +86,8 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let root = repo_root()?;
+    // File arguments (the merge driver's) are relative to where Git ran us.
+    let invoked_in = env::current_dir().map_err(|_| "cannot read working directory")?;
     // All v3 paths, including the agent's short relative socket address,
     // are interpreted from the repository root.
     env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
@@ -112,6 +115,17 @@ fn run() -> Result<(), String> {
                 "init" => init(&root, password),
                 "rekey" => rekey(&root, password),
                 _ => unlock(&root, password, auto_hydrate),
+            }
+        },
+        "merge" => {
+            let [_, base, ours, theirs, path] = &args[..] else {
+                return Err("merge driver takes %O %A %B %P".into());
+            };
+            let file = |arg: &OsString| invoked_in.join(arg);
+            if merge::merge(&root, &file(base), &file(ours), &file(theirs), path.as_bytes())? {
+                Ok(())
+            } else {
+                Err(format!("merge conflict in {}: resolve it in the decrypted file", path.to_string_lossy()))
             }
         },
         "filter-process" => {
@@ -200,7 +214,16 @@ fn status(root: &Path) -> Result<(), String> {
     println!("session:    {}", if unlocked { "unlocked (in-memory key agent running)" } else { "locked" });
     let mut counts = [0usize; 4];
     let mut exposed = 0usize;
-    for staged in indexed_files(root)? {
+    let index = index_with_conflicts(root)?;
+    for path in index.conflicted.iter().filter(|p| protected_path(p)) {
+        let decrypted = find_protected(root, &indexed_path(path)?).ok().flatten()
+            .and_then(|t| t.read().ok())
+            .is_some_and(|(bytes, _)| !record_envelope_ok(&bytes, &transcrypt_v3::config_id(&config)));
+        counts[2] += 1;
+        println!("  {:<22} {}", if decrypted { "conflicted" } else { "conflicted (encrypted)" },
+            String::from_utf8_lossy(path));
+    }
+    for staged in index.merged {
         if !protected_path(&staged.path) { continue; }
         let name = String::from_utf8_lossy(&staged.path).into_owned();
         let state = (|| -> Result<&str, String> {
@@ -516,25 +539,50 @@ fn hydrate(root: &Path) -> Result<usize, String> {
 /// `hydrate` for a caller that already holds the staging lock.
 fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, String> {
     let config = load_config(root)?;
-    // Authenticate ALL staged protected objects, the staged metadata and the
-    // effective filter before exposing any plaintext in the checkout.
-    let verified = verify_index(root)?;
+    let index = index_with_conflicts(root)?;
+    let conflicted: Vec<&[u8]> = index.conflicted.iter().map(Vec::as_slice).filter(|p| protected_path(p)).collect();
+    let protected: Vec<&Staged> = if conflicted.is_empty() {
+        // Authenticate ALL staged protected objects, the staged metadata and
+        // the effective filter before exposing any plaintext in the checkout.
+        let verified = verify_index(root)?;
+        if verified.listing != index.listing {
+            return Err("index changed during hydration".into());
+        }
+        index.merged.iter().filter(|e| protected_path(&e.path)).collect()
+    } else {
+        // A merge is in progress: the stages of an unmerged path are the
+        // merge's inputs, not a snapshot to verify. Still require the agent
+        // and the effective filter for every protected path, so plaintext
+        // published here is encrypted again by `git add`.
+        session::request(root, &config, Operation::Ping, &[], &[])?;
+        let protected: Vec<&Staged> = index.merged.iter().filter(|e| protected_path(&e.path)).collect();
+        if protected.iter().any(|e| !e.regular) {
+            return Err("protected path is not a regular file in staged index".into());
+        }
+        let paths: Vec<&[u8]> = protected.iter().map(|e| e.path.as_slice()).chain(conflicted.iter().copied()).collect();
+        verify_staged_filter_attributes(root, &paths)?;
+        protected
+    };
     let id = transcrypt_v3::config_id(&config);
     let mut pending = Vec::new();
     let mut refresh = Vec::new();
     let mut kept = Vec::new();
 
     // Decide for every file before writing any. A protected symlink or
-    // unreadable file aborts the whole operation.
-    for staged in &verified.protected {
-        let relative = indexed_path(&staged.path)?;
+    // unreadable file aborts the whole operation. Unmerged files have no
+    // staged record of their own; they are decrypted when they hold a
+    // record that authenticates at their path (the merge driver's result).
+    let targets = protected.iter().map(|e| (e.path.as_slice(), Some(e.oid.as_str())))
+        .chain(conflicted.iter().map(|p| (*p, None)));
+    for (path, oid) in targets {
+        let relative = indexed_path(path)?;
         // A deleted (or sparse) file holds nothing to decrypt.
         let Some(target) = find_protected(root, &relative)? else { continue };
         let (worktree, stamp) = target.read()?;
-        let object = git_blob(root, &staged.oid)?;
+        let object = match oid { Some(oid) => git_blob(root, oid)?, None => Vec::new() };
         // The record this file holds, if any: the staged one, or another
         // that authenticates at this path.
-        let is_staged = *worktree == object;
+        let is_staged = oid.is_some() && *worktree == object;
         let record: Option<&[u8]> = if is_staged {
             Some(&object)
         } else if record_envelope_ok(&worktree, &id) {
@@ -543,30 +591,32 @@ fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, String> {
             None
         };
         if let Some(record) = record {
-            let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, record)
-                .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
+            let plaintext = session::request(root, &config, Operation::Decrypt, path, record)
+                .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(path)))?;
             if hydrate_action(&worktree, record, &plaintext) == Ok(HydrateAction::Publish) {
-                pending.push((staged, relative, stamp, record.to_vec(), is_staged));
+                pending.push((path, relative, stamp, record.to_vec(), is_staged));
                 continue;
             }
         }
-        let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &object)?;
-        if hydrate_action(&worktree, &object, &plaintext) == Ok(HydrateAction::Keep) {
-            refresh.push(staged.path.clone());
+        if oid.is_some() {
+            let plaintext = session::request(root, &config, Operation::Decrypt, path, &object)?;
+            if hydrate_action(&worktree, &object, &plaintext) == Ok(HydrateAction::Keep) {
+                refresh.push(path.to_vec());
+            }
         }
         kept.push(relative);
     }
     // Detect a changed index or public configuration between validation and
     // publication.
-    if git(root, &["ls-files", "--stage", "-z"])? != verified.listing || load_config(root)? != config {
+    if git(root, &["ls-files", "--stage", "-z"])? != index.listing || load_config(root)? != config {
         return Err("index or public configuration changed during hydration".into());
     }
     let published = pending.len();
-    for (i, (staged, relative, stamp, record, is_staged)) in pending.into_iter().enumerate() {
-        let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &record)?;
+    for (i, (path, relative, stamp, record, is_staged)) in pending.into_iter().enumerate() {
+        let plaintext = session::request(root, &config, Operation::Decrypt, path, &record)?;
         // `replace` refuses unless the file is still the record checked above.
         open_protected(root, &relative)?.replace(staging, &plaintext, i, &stamp)?;
-        if is_staged { refresh.push(staged.path.clone()); }
+        if is_staged { refresh.push(path.to_vec()); }
     }
     // Plaintext that Git's checkout wrote follows the umask and may be
     // readable by other users; published files are already 0600.
@@ -581,6 +631,6 @@ fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, String> {
     // tracked `[a].secret` must not select an untracked `a.secret`), and
     // without `--add` cannot stage an untracked file. `reindex` verifies that
     // no staged blob or mode changed, even when index != HEAD.
-    reindex(root, &verified.listing, &refresh)?;
+    reindex(root, &index.listing, &refresh)?;
     Ok(published)
 }

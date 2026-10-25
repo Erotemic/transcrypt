@@ -38,7 +38,8 @@ allows (see [V3-ROADMAP](V3-ROADMAP.md), stage V7).
 | Determinism (needed by Git) | Per-file salt = HMAC-SHA256(file name + password), truncated | SIV is deterministic; associated data = `[domain, config, exact Git path]` |
 | Where the secret lives | Password in plaintext in `.git/config` (`transcrypt.password`) | Nowhere on disk: a derived key in a memory-only agent (0600 socket in a 0700 directory, non-dumpable) until `lock` |
 | Public metadata | Cipher in `.git/config` (local, not committed) | `.transcrypt/config` (committed, authenticated by the key) |
-| Git integration | `filter=crypt diff=crypt merge=crypt`, textconv with `cachetextconv` (plaintext in `refs/notes/textconv`) | `filter=transcrypt-v3 -diff`: no textconv cache and no merge driver (protected files merge as binary) |
+| Git integration | `filter=crypt diff=crypt merge=crypt`, textconv with `cachetextconv` (plaintext in `refs/notes/textconv`) | `filter=transcrypt-v3 -diff` committed; `merge=transcrypt-v3` set locally (`.git/info/attributes`). No textconv cache. |
+| Merging | `merge=crypt` driver: decrypt, `git merge-file`, re-encrypt | Same idea: authenticated decryption of all three versions, merged in a private 0700 directory, the result re-encrypted |
 | Filter process | One Bash process per file | Git's long-running filter protocol: one process per Git command |
 | Plaintext permissions | Git's umask (often world-readable) | Never readable by others when written by Git or transcrypt (`umask`-aware smudge and 0600 hydration) |
 | Failure behavior | A failed decryption silently passes the input through (`git_smudge` falls back to the raw bytes) | Fail closed: a required filter fails the Git command; nothing unauthenticated is released |

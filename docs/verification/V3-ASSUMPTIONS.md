@@ -417,6 +417,8 @@ verified decision that gates it:
 | `rekey` staging | agent `Decrypt` of each staged record, equality with the worktree, then `seal_record` under the new config (`encrypt_file`); `initialize_config` for the new config | staged blobs by oid, worktree bytes, fresh salt | all `Ok`, before any index or agent change |
 | `uninstall` | `lock` (above), then `record_envelope_ok` for every protected worktree file | worktree bytes | all `true` before removing filters |
 | `doctor` | none (read-only checks of Git config, attributes, hooks, `check_index`) | — | reports only |
+| Merge driver | agent `Decrypt` (`open_record`) of ours and theirs at `%P` (base: empty if it does not open), `git merge-file`, agent `Encrypt` (`clean_file`) of the result | Git's `%O %A %B` files, `%P` path | both `Ok` (else `ours` is left unchanged and Git records a conflict) |
+| `hydrate` during a merge | unmerged paths: `record_envelope_ok`, agent `Decrypt`, `hydrate_action`; effective filter checked for every protected path | worktree bytes | `Ok(Publish)` |
 | Protected file selection | `is_protected_path` | index/tree path bytes | — |
 
 The Lean lifecycle models (`Lifecycle.lean`) reproduce the hydrate, lock and

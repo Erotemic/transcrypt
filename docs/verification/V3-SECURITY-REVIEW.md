@@ -101,6 +101,8 @@ regression test that fails on the old implementation.
 | H-22 | Medium (data loss) | `init` read a terminal passphrase once: a typo encrypted everything under a passphrase nobody knows, unrecoverable after `lock`. | A new passphrase is asked for twice on a terminal (`init`, `rekey`). |
 | H-23 | Medium (product gap) | No way to rotate a passphrase (a suspected leak left users stuck) and no safe uninstall. | `rekey` (one staged change, refuses uncommitted edits, agent switched only after staging; test `rekey_rotates_the_passphrase`) and `uninstall` (locks first, leaves ciphertext, removes only what v3 installed; test `uninstall_removes_v3_and_leaves_only_ciphertext`). |
 
+| H-24 | Medium (usability) | **Secrets could not be merged.** Concurrent edits produced a binary conflict with only "ours" visible. A deleted or sparse protected file, or an unmerged index, made `hydrate`, `unlock`, `lock` and `status` fail for every file. | A merge driver (decrypts authenticated inputs, merges in a private directory, re-encrypts); conflict-aware `hydrate`/`status`; missing files skipped. Tests `secrets_merge_as_plaintext` (clean and conflicting merges under umask 022 and 077) and `deleted_protected_files_do_not_block_lock_or_hydrate`. |
+
 Re-attacking the earlier fixes found no further exploit:
 - **Pathspec staging:** only `update-index -z --stdin` paths remain, and they come from the verified snapshot.
 - **difftool/mergetool temporaries:** written through smudge, so the umask rule now covers them.

@@ -1099,3 +1099,58 @@ fn deleted_protected_files_do_not_block_lock_or_hydrate() {
     run(&repo, bin(), &["hydrate"], None);
     assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
 }
+
+/// Concurrent edits of one secret merge like plaintext: non-overlapping
+/// edits merge automatically, and a conflict shows decrypted conflict
+/// markers (mode 0600, after `hydrate` under a permissive umask) that are
+/// resolved and committed as usual. The merged record stays encrypted.
+#[test]
+fn secrets_merge_as_plaintext() {
+    let mut scratch = Scratch::new("merge");
+    let repo = scratch.repo("repo");
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    let main = main.trim().to_owned();
+    fs::write(repo.join("a.secret"), b"one\ntwo\nthree\nfour\nfive\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "base"], None);
+    run(&repo, "git", &["branch", "side"], None);
+    // Non-overlapping edits merge cleanly.
+    fs::write(repo.join("a.secret"), b"ONE\ntwo\nthree\nfour\nfive\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "main edit"], None);
+    git_with_umask(&repo, "022", &["checkout", "-q", "side"]);
+    fs::write(repo.join("a.secret"), b"one\ntwo\nthree\nfour\nFIVE\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "side edit"], None);
+    git_with_umask(&repo, "022", &["checkout", "-q", &main]);
+    git_with_umask(&repo, "022", &["merge", "-q", "--no-edit", "side"]);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"ONE\ntwo\nthree\nfour\nFIVE\n");
+    assert!(staged(&repo, "a.secret").starts_with(b"TV3F\0\x01"));
+    assert_no_exposed_plaintext(&repo, "clean merge");
+    // Overlapping edits conflict; the markers are decrypted for resolution.
+    for (mask, needs_hydrate) in [("022", true), ("077", false)] {
+        fs::write(repo.join("a.secret"), b"ONE\nmain two\n").unwrap();
+        run(&repo, "git", &["commit", "-qam", "main conflict"], None);
+        git_with_umask(&repo, mask, &["checkout", "-q", "side"]);
+        fs::write(repo.join("a.secret"), b"ONE\nside two\n").unwrap();
+        run(&repo, "git", &["commit", "-qam", "side conflict"], None);
+        git_with_umask(&repo, mask, &["checkout", "-q", &main]);
+        let out = exec(&repo, "sh", &["-c", &format!("umask {mask} && exec git merge -q --no-edit side")], None);
+        assert!(!out.status.success(), "conflicting merge succeeded");
+        assert_no_exposed_plaintext(&repo, "conflicted merge");
+        let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+        assert!(status.contains("conflicted"), "{status}");
+        if needs_hydrate { run(&repo, bin(), &["hydrate"], None); }
+        let conflicted = String::from_utf8(fs::read(repo.join("a.secret")).unwrap()).unwrap();
+        assert!(conflicted.contains("<<<<<<< ours") && conflicted.contains("main two")
+            && conflicted.contains("side two") && conflicted.contains(">>>>>>> theirs"), "{conflicted}");
+        assert_no_exposed_plaintext(&repo, "hydrated conflict");
+        fs::write(repo.join("a.secret"), b"ONE\nresolved two\n").unwrap();
+        run(&repo, "git", &["add", "a.secret"], None);
+        run(&repo, "git", &["commit", "-qm", "resolved"], None);
+        assert!(staged(&repo, "a.secret").starts_with(b"TV3F\0\x01"));
+        run(&repo, bin(), &["verify-index"], None);
+        // Make side match main again for the next round.
+        git_with_umask(&repo, mask, &["checkout", "-q", "side"]);
+        git_with_umask(&repo, mask, &["merge", "-q", "--no-edit", &main]);
+        git_with_umask(&repo, mask, &["checkout", "-q", &main]);
+    }
+    run(&repo, bin(), &["audit"], None);
+}

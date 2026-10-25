@@ -88,6 +88,17 @@ While locked, the worktree holds ciphertext and Git keeps working:
 `git status`, `git checkout`, `git pull` and commits of other files need no
 key. Adding a plaintext `*.secret` fails until you unlock.
 
+## Merging secrets
+
+Protected files merge like ordinary text. `unlock` installs a merge driver
+(locally, in `.git/info/attributes`) that decrypts both sides and their
+base, merges the plaintexts, and stores the result encrypted.
+Non-overlapping edits merge automatically. On a conflict, the file shows the
+usual `<<<<<<< ours` / `>>>>>>> theirs` markers in plaintext (run
+`transcrypt-v3 hydrate` first if `status` says `conflicted (encrypted)`).
+Edit it, then `git add` and commit as usual. Merging needs the repository
+unlocked.
+
 ## Keep plaintext out of the remote
 
 A `*.secret` file only gets encrypted in a checkout where `transcrypt-v3

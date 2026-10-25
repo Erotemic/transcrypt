@@ -46,9 +46,36 @@ fn expected_filters() -> Result<[(&'static str, String); 4], String> {
     ])
 }
 
+/// The merge driver configuration and the local attribute that selects it
+/// (in `.git/info/attributes`, so the committed policy stays unchanged).
+const MERGE_ATTRIBUTE: &str = "*.secret merge=transcrypt-v3";
+
+fn expected_merge_driver() -> Result<[(&'static str, String); 2], String> {
+    let bin = env::current_exe().map_err(|_| "cannot resolve current executable")?;
+    let program = shell_quote(bin.to_str().ok_or("executable path must be UTF-8")?);
+    Ok([
+        ("merge.transcrypt-v3.name", "transcrypt-v3: merge decrypted *.secret files".into()),
+        ("merge.transcrypt-v3.driver", format!("{program} merge %O %A %B %P")),
+    ])
+}
+
 fn install_filters(root: &Path) -> Result<(), String> {
-    for (k, value) in expected_filters()? {
+    for (k, value) in expected_filters()?.into_iter().chain(expected_merge_driver()?) {
         git(root, &["config", "--local", k, &value])?;
+    }
+    let attributes = root.join(".git/info/attributes");
+    if let Ok(meta) = fs::symlink_metadata(&attributes) {
+        if !meta.is_file() { return Err("unsafe .git/info/attributes".into()); }
+    }
+    let existing = fs::read_to_string(&attributes).unwrap_or_default();
+    if !existing.lines().any(|line| line == MERGE_ATTRIBUTE) {
+        if fs::symlink_metadata(root.join(".git/info")).is_err() {
+            fs::create_dir(root.join(".git/info")).map_err(|e| format!("cannot create .git/info: {e}"))?;
+        }
+        let separator = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+        fs::OpenOptions::new().append(true).create(true).open(&attributes)
+            .and_then(|mut f| f.write_all(format!("{separator}{MERGE_ATTRIBUTE}\n").as_bytes()))
+            .map_err(|e| format!("cannot update .git/info/attributes: {e}"))?;
     }
     Ok(())
 }
@@ -259,6 +286,7 @@ fn rollback_init(root: &Path, config: &[u8], hook_preexisted: [bool; HOOKS.len()
         }
     }
     let _ = git(root, &["config", "--local", "--remove-section", "filter.transcrypt-v3"]);
+    remove_merge_driver(root);
 }
 
 pub(crate) fn unlock(root: &Path, password: Zeroizing<Vec<u8>>, auto_hydrate: bool) -> Result<(), String> {
@@ -353,6 +381,7 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
         return Err("untracked *.secret files exist; remove them before uninstalling".into());
     }
     let _ = git(root, &["config", "--local", "--remove-section", "filter.transcrypt-v3"]);
+    remove_merge_driver(root);
     for (name, command) in HOOKS {
         let path = hook_path(root, name);
         if fs::read_to_string(&path).ok() == expected_hook(command).ok() {
@@ -450,4 +479,16 @@ pub(crate) fn rekey(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), Str
         Earlier commits stay readable with the old passphrase: if it was exposed, rotate the secrets themselves.",
         plaintexts.len());
     Ok(())
+}
+
+/// Remove the merge driver configuration and its local attribute line.
+fn remove_merge_driver(root: &Path) {
+    let _ = git(root, &["config", "--local", "--remove-section", "merge.transcrypt-v3"]);
+    let attributes = root.join(".git/info/attributes");
+    if let Ok(text) = fs::read_to_string(&attributes) {
+        let kept: Vec<&str> = text.lines().filter(|line| *line != MERGE_ATTRIBUTE).collect();
+        let mut rewritten = kept.join("\n");
+        if !rewritten.is_empty() { rewritten.push('\n'); }
+        let _ = fs::write(&attributes, rewritten);
+    }
 }
