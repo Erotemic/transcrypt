@@ -818,3 +818,44 @@ fn git_never_writes_plaintext_readable_by_others() {
     git_with_umask(&repo, "077", &["checkout", "-q", main]);
     assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
 }
+
+/// The incremental audit (each commit against its first parent) still sees
+/// plaintext that enters through a merge's second parent, and a config
+/// change re-checks every record against the new config.
+#[test]
+fn incremental_audit_covers_merges_and_config_changes() {
+    let mut scratch = Scratch::new("auditmerge");
+    let repo = scratch.repo("repo");
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    let main = main.trim().to_owned();
+    run(&repo, "git", &["tag", "published"], None);
+    // A side branch commits plaintext without hooks; main merges it.
+    run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
+    let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
+        Some(b"MERGED PLAINTEXT\n"))).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "side.secret"], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "plaintext on side"], None);
+    run(&repo, "git", &["checkout", "-q", &main], None);
+    fs::write(repo.join("README"), b"main moves on\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "main"], None);
+    // (Checking the merge out would fail: smudge refuses the plaintext.
+    // Build it with plumbing, as a remote attacker could.)
+    let tree = String::from_utf8(run(&repo, "git", &["rev-parse", "side^{tree}"], None)).unwrap();
+    let merge = String::from_utf8(run(&repo, "git", &["commit-tree", tree.trim(), "-p", "HEAD", "-p", "side", "-m", "merge"], None)).unwrap();
+    // Only the merge itself is selected; its first parent is "published".
+    let err = run_fails(&repo, bin(), &["audit", merge.trim(), "--not", "HEAD", "side"], None);
+    assert!(err.contains("side.secret"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", "published"], None);
+    // A commit that replaces the config orphans every existing record.
+    let mut config = fs::read(repo.join(".transcrypt/config")).unwrap();
+    config[10] ^= 1;
+    let oid = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(&config))).unwrap();
+    run(&repo, "git", &["update-index", "--cacheinfo", "100644", oid.trim(), ".transcrypt/config"], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "swap config"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD", "--not", "published"], None);
+    assert!(err.contains("not v3 ciphertext for its configuration"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", "published"], None);
+    // A work budget refuses oversized audits instead of running unbounded.
+    let err = run_fails(&repo, bin(), &["audit", "--max-commits=1", "HEAD"], None);
+    assert!(err.contains("more than 1 commits"), "{err}");
+}

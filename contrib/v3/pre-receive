@@ -9,6 +9,9 @@
 # docs/verification/V3-USER-GUIDE.md ("Keep plaintext out of the remote").
 set -eu
 bin=${TRANSCRYPT_V3:-transcrypt-v3}
+# Work budget per pushed ref: a push that adds more commits is refused
+# rather than letting one push occupy the server indefinitely.
+max_commits=${TRANSCRYPT_V3_MAX_COMMITS:-20000}
 status=0
 while read -r old new ref; do
   case $new in
@@ -16,7 +19,7 @@ while read -r old new ref; do
     *) continue ;;      # a deletion publishes nothing
   esac
   # Commits reachable from the new tip that no existing ref already has.
-  if ! "$bin" audit "$new" --not --all; then
+  if ! "$bin" audit --max-commits="$max_commits" "$new" --not --all; then
     echo "pre-receive: refusing $ref" >&2
     status=1
   fi

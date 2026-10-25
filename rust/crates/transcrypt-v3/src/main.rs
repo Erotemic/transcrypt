@@ -53,7 +53,13 @@ fn run() -> Result<(), String> {
             Err(_) => (env::current_dir().map_err(|_| "cannot read working directory")?, false),
         };
         env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
-        let audited = audit(&root, &args[1..], keyed)?;
+        let mut revs = &args[1..];
+        let mut max_commits = None;
+        if let Some(limit) = revs.first().and_then(|a| a.to_str()).and_then(|a| a.strip_prefix("--max-commits=")) {
+            max_commits = Some(limit.parse::<usize>().map_err(|_| "--max-commits takes a number")?);
+            revs = &revs[1..];
+        }
+        let audited = audit(&root, revs, keyed, max_commits)?;
         println!("audit: {} protected record(s) checked{}", audited.records,
             if audited.authenticated { ", all authenticated by the unlocked agent" }
             else { " (envelopes only: unlock to authenticate them)" });
@@ -213,13 +219,44 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn output(mut command: Command) -> Result<Vec<u8>, String> {
+/// The most any Git subprocess may print to us. Listings of a hostile index
+/// or tree beyond this are refused (and the process killed), not buffered.
+const GIT_OUTPUT_LIMIT: usize = 256 * 1024 * 1024;
+
+fn output(command: Command) -> Result<Vec<u8>, String> {
+    run_bounded(command, None, GIT_OUTPUT_LIMIT)
+}
+
+/// Run a subprocess with `input` (if any) fed from another thread, at most
+/// `limit` bytes of output accepted (beyond that it is killed), and at most
+/// 64 KiB of its error output kept (the rest is drained so it never blocks).
+fn run_bounded(mut command: Command, input: Option<Vec<u8>>, limit: usize) -> Result<Vec<u8>, String> {
     let desc = format!("{:?}", command);
-    let result = command.output().map_err(|e| format!("cannot run {desc}: {e}"))?;
-    if !result.status.success() {
-        return Err(format!("Git command failed ({desc}): {}", String::from_utf8_lossy(&result.stderr)));
+    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| format!("cannot run {desc}: {e}"))?;
+    let writer = match (input, child.stdin.take()) {
+        (Some(bytes), Some(mut stdin)) => Some(std::thread::spawn(move || stdin.write_all(&bytes))),
+        _ => None,
+    };
+    let mut stderr = child.stderr.take().ok_or("subprocess error pipe missing")?;
+    let errors = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut kept);
+        let _ = io::copy(&mut stderr, &mut io::sink());
+        kept
+    });
+    let stdout = child.stdout.take().ok_or("subprocess output pipe missing")?;
+    let data = read_limited(stdout, limit);
+    if data.is_err() { let _ = child.kill(); }
+    let status = child.wait().map_err(|_| format!("cannot wait for {desc}"))?;
+    let written = writer.map(|w| w.join().map_err(|_| ()).and_then(|r| r.map_err(|_| ())));
+    let errors = errors.join().unwrap_or_default();
+    let data = data.map_err(|_| format!("output of {desc} exceeds the {} MiB limit", limit >> 20))?;
+    if !status.success() || matches!(written, Some(Err(()))) {
+        return Err(format!("Git command failed ({desc}): {}", String::from_utf8_lossy(&errors)));
     }
-    Ok(result.stdout)
+    Ok(data)
 }
 
 /// Every Git subprocess. Pathspecs are literal, so a tracked file named
@@ -239,22 +276,9 @@ fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
 }
 
 fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
-    let mut child = git_command(Some(root))
-        .args(arguments)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|e| format!("cannot run git {}: {e}", arguments.join(" ")))?;
-    // Feed the input from another thread: Git may fill its output pipe
-    // before it has read all of a large input.
-    let mut stdin = child.stdin.take().ok_or("Git input pipe missing")?;
-    let input = input.to_vec();
-    let writer = std::thread::spawn(move || stdin.write_all(&input));
-    let result = child.wait_with_output().map_err(|_| "cannot wait for Git")?;
-    let written = writer.join().map_err(|_| "Git input writer failed")?;
-    if written.is_err() || !result.status.success() {
-        return Err(format!("Git command failed (git {}): {}", arguments.join(" "),
-            String::from_utf8_lossy(&result.stderr)));
-    }
-    Ok(result.stdout)
+    let mut command = git_command(Some(root));
+    command.args(arguments);
+    run_bounded(command, Some(input.to_vec()), GIT_OUTPUT_LIMIT)
 }
 
 fn repo_root() -> Result<PathBuf, String> {
@@ -854,17 +878,18 @@ fn tree_files(root: &Path, commit: &str) -> Result<Vec<Staged>, String> {
     let data = git(root, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
     let mut listing = Vec::with_capacity(data.len());
     for entry in data.split(|b| *b == 0).filter(|item| !item.is_empty()) {
-        let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed git ls-tree record")?;
-        let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
-        let [mode, _kind, oid] = fields[..] else { return Err("malformed git ls-tree record".into()) };
-        listing.extend_from_slice(mode);
-        listing.push(b' ');
-        listing.extend_from_slice(oid);
-        listing.extend_from_slice(b" 0");
-        listing.extend_from_slice(&entry[tab..]);
+        listing.extend_from_slice(&tree_record(entry)?);
         listing.push(0);
     }
     parse_listing(&listing)
+}
+
+/// Rewrite one `ls-tree` record as `<mode> SP <oid> SP 0 TAB <path>`.
+fn tree_record(entry: &[u8]) -> Result<Vec<u8>, String> {
+    let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed git ls-tree record")?;
+    let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
+    let [mode, _kind, oid] = fields[..] else { return Err("malformed git ls-tree record".into()) };
+    Ok([mode, b" ", oid, b" 0", &entry[tab..]].concat())
 }
 
 fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
@@ -1020,60 +1045,162 @@ struct Audited {
 /// needs no key, so it also runs in CI or a server-side hook. When the agent
 /// is unlocked for that configuration, each record is also authenticated at
 /// its path.
-fn audit(root: &Path, revs: &[OsString], keyed: bool) -> Result<Audited, String> {
+///
+/// Each commit is checked for what it changes relative to its first parent
+/// (its whole tree for a root commit or when it changes the config). A
+/// parent outside the selected range is trusted: it is already published
+/// (the pre-push and pre-receive ranges) or deliberately excluded. Commits
+/// are streamed from `rev-list`, and `max_commits` bounds the work a hostile
+/// push can demand of a server hook.
+fn audit(root: &Path, revs: &[OsString], keyed: bool, max_commits: Option<usize>) -> Result<Audited, String> {
     let mut command = git_command(Some(root));
-    command.arg("rev-list");
+    command.args(["rev-list", "--reverse", "--parents"]);
     if revs.is_empty() { command.arg("HEAD"); } else { command.args(revs); }
-    let commits = output(command)?;
-    // Per committed config blob: its bytes, id and whether the agent serves it.
-    let mut configs: HashMap<String, (Vec<u8>, [u8; transcrypt_v3_core::ID_LEN], bool)> = HashMap::new();
-    let mut checked: HashSet<(String, String, Vec<u8>)> = HashSet::new();
-    let mut audited = Audited { records: 0, authenticated: true };
-    for commit in commits.split(|b| *b == b'\n').filter(|c| !c.is_empty()) {
-        if !is_object_id(commit) {
-            return Err("unexpected git rev-list output".into());
-        }
-        let commit = String::from_utf8_lossy(commit).into_owned();
-        let entries = tree_files(root, &commit)?;
-        let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));
-        if let Some(copy) = entries.iter().find(|e| plaintext_copy_name(&e.path)) {
-            return Err(format!("{}: looks like an unencrypted editor or merge copy of a secret; \
-                remove it from the commit", at(&copy.path)));
-        }
-        let protected: Vec<&Staged> = entries.iter().filter(|e| protected_path(&e.path)).collect();
-        if protected.is_empty() { continue; }
-        let Some(config_entry) = entries.iter().find(|e| e.path == b".transcrypt/config" && e.regular) else {
-            return Err(format!("{}: *.secret file in a commit without a v3 configuration (plaintext?)",
-                at(&protected[0].path)));
-        };
-        if !configs.contains_key(&config_entry.oid) {
-            let bytes = git_blob(root, &config_entry.oid)?;
-            transcrypt_v3_core::parse_config(&bytes)
-                .map_err(|_| format!("commit {commit}: invalid v3 configuration"))?;
-            let id = transcrypt_v3::config_id(&bytes);
-            let live = keyed && session::request(root, &bytes, Operation::Ping, &[], &[]).is_ok();
-            configs.insert(config_entry.oid.clone(), (bytes, id, live));
-        }
-        let (config, id, live) = &configs[&config_entry.oid];
-        for entry in protected {
-            if !entry.regular {
-                return Err(format!("{}: protected path is not a regular file", at(&entry.path)));
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|e| format!("cannot run git rev-list: {e}"))?;
+    let stdout = child.stdout.take().ok_or("git rev-list output pipe missing")?;
+    let mut lines = io::BufReader::new(stdout);
+    let mut state = AuditState { authenticated: true, ..AuditState::default() };
+    let result = (|| -> Result<(), String> {
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            use io::BufRead;
+            (&mut lines).take(4096).read_until(b'\n', &mut line).map_err(|_| "cannot read git rev-list")?;
+            if line.is_empty() { return Ok(()); }
+            let ids: Vec<&[u8]> = line.strip_suffix(b"\n").ok_or("malformed git rev-list output")?
+                .split(|b| *b == b' ').collect();
+            if !ids.iter().all(|id| is_object_id(id)) {
+                return Err("malformed git rev-list output".into());
             }
-            if !checked.insert((entry.oid.clone(), config_entry.oid.clone(), entry.path.clone())) { continue; }
-            let record = git_blob(root, &entry.oid).map_err(|e| format!("{}: {e}", at(&entry.path)))?;
-            if !record_envelope_ok(&record, id) {
-                return Err(format!("{}: not v3 ciphertext for its configuration (plaintext?)", at(&entry.path)));
+            state.commits += 1;
+            if max_commits.is_some_and(|max| state.commits > max) {
+                return Err(format!("more than {} commits to audit; refusing (raise --max-commits)",
+                    max_commits.unwrap_or(0)));
             }
-            if *live {
-                session::request(root, config, Operation::Decrypt, &entry.path, &record)
-                    .map_err(|e| format!("{}: {e}", at(&entry.path)))?;
-            } else {
-                audited.authenticated = false;
-            }
-            audited.records += 1;
+            let text = |id: &[u8]| String::from_utf8_lossy(id).into_owned();
+            audit_commit(root, keyed, &mut state, &text(ids[0]), ids.get(1).map(|p| text(p)))?;
         }
+    })();
+    if result.is_err() { let _ = child.kill(); }
+    let status = child.wait().map_err(|_| "cannot wait for git rev-list")?;
+    result?;
+    if !status.success() {
+        return Err("git rev-list failed; check the revision arguments".into());
     }
-    Ok(audited)
+    Ok(Audited { records: state.records, authenticated: state.authenticated })
+}
+
+#[derive(Default)]
+struct AuditState {
+    commits: usize,
+    records: usize,
+    authenticated: bool,
+    /// Per committed config blob: its bytes, id and whether the agent serves it.
+    configs: HashMap<String, (Vec<u8>, [u8; transcrypt_v3_core::ID_LEN], bool)>,
+    /// The config blob of every commit audited so far (`None`: no config).
+    commit_configs: HashMap<String, Option<String>>,
+    checked: HashSet<(String, String, Vec<u8>)>,
+}
+
+/// The entries a commit adds or changes relative to `parent` (all of its
+/// entries for a root commit), from `diff-tree -r -z --raw` between the two
+/// trees, rewritten to the index-record shape and parsed by the verified core.
+fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Vec<Staged>, String> {
+    let Some(parent) = parent else { return tree_files(root, commit) };
+    let data = git(root, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
+    // Records are `:<old mode> <new mode> <old oid> <new oid> <status> NUL <path> NUL`.
+    let mut fields = data.split(|b| *b == 0);
+    let mut listing = Vec::new();
+    while let Some(header) = fields.next() {
+        if header.is_empty() { break; }
+        let path = fields.next().ok_or("malformed git diff-tree output")?;
+        let parts: Vec<&[u8]> = header.strip_prefix(b":").ok_or("malformed git diff-tree output")?
+            .split(|b| *b == b' ').collect();
+        let [_, mode, _, oid, status] = parts[..] else { return Err("malformed git diff-tree output".into()) };
+        if status == b"D" { continue; }
+        listing.extend_from_slice(mode);
+        listing.push(b' ');
+        listing.extend_from_slice(oid);
+        listing.extend_from_slice(b" 0\t");
+        listing.extend_from_slice(path);
+        listing.push(0);
+    }
+    parse_listing(&listing)
+}
+
+fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, parent: Option<String>)
+    -> Result<(), String>
+{
+    let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));
+    let mut entries = match parent {
+        Some(ref parent) => changed_files(root, commit, Some(parent))?,
+        None => tree_files(root, commit)?,
+    };
+    let config_changed = parent.is_none() || entries.iter().any(|e| e.path == b".transcrypt/config");
+    if config_changed && parent.is_some() {
+        // A new config re-binds every record in the tree: check them all.
+        entries = tree_files(root, commit)?;
+    }
+    // The commit's config blob: from its tree when it changed, else the
+    // parent's (looked up directly if the parent was not audited).
+    let config_oid = if config_changed {
+        entries.iter().find(|e| e.path == b".transcrypt/config" && e.regular).map(|e| e.oid.clone())
+    } else {
+        let parent = parent.unwrap_or_default();
+        match state.commit_configs.get(&parent) {
+            Some(known) => known.clone(),
+            None => config_blob(root, &parent)?,
+        }
+    };
+    state.commit_configs.insert(commit.to_owned(), config_oid.clone());
+    if let Some(copy) = entries.iter().find(|e| plaintext_copy_name(&e.path)) {
+        return Err(format!("{}: looks like an unencrypted editor or merge copy of a secret; \
+            remove it from the commit", at(&copy.path)));
+    }
+    let protected: Vec<&Staged> = entries.iter().filter(|e| protected_path(&e.path)).collect();
+    if protected.is_empty() { return Ok(()); }
+    let Some(config_oid) = config_oid else {
+        return Err(format!("{}: *.secret file in a commit without a v3 configuration (plaintext?)",
+            at(&protected[0].path)));
+    };
+    if !state.configs.contains_key(&config_oid) {
+        let bytes = git_blob(root, &config_oid)?;
+        transcrypt_v3_core::parse_config(&bytes)
+            .map_err(|_| format!("commit {commit}: invalid v3 configuration"))?;
+        let id = transcrypt_v3::config_id(&bytes);
+        let live = keyed && session::request(root, &bytes, Operation::Ping, &[], &[]).is_ok();
+        state.configs.insert(config_oid.clone(), (bytes, id, live));
+    }
+    let (config, id, live) = state.configs[&config_oid].clone();
+    for entry in protected {
+        if !entry.regular {
+            return Err(format!("{}: protected path is not a regular file", at(&entry.path)));
+        }
+        if !state.checked.insert((entry.oid.clone(), config_oid.clone(), entry.path.clone())) { continue; }
+        let record = git_blob(root, &entry.oid).map_err(|e| format!("{}: {e}", at(&entry.path)))?;
+        if !record_envelope_ok(&record, &id) {
+            return Err(format!("{}: not v3 ciphertext for its configuration (plaintext?)", at(&entry.path)));
+        }
+        if live {
+            session::request(root, &config, Operation::Decrypt, &entry.path, &record)
+                .map_err(|e| format!("{}: {e}", at(&entry.path)))?;
+        }
+        state.records += 1;
+    }
+    if !live { state.authenticated = false; }
+    Ok(())
+}
+
+/// The `.transcrypt/config` blob of a commit, if it has one.
+fn config_blob(root: &Path, commit: &str) -> Result<Option<String>, String> {
+    let data = git(root, &["ls-tree", "-z", "--full-tree", commit, "--", ".transcrypt/config"])?;
+    let mut listing = Vec::new();
+    for entry in data.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        listing.extend_from_slice(&tree_record(entry)?);
+        listing.push(0);
+    }
+    Ok(parse_listing(&listing)?.into_iter().find(|e| e.path == b".transcrypt/config" && e.regular).map(|e| e.oid))
 }
 
 /// The pre-push hook: audit every commit being pushed that the remote does
@@ -1109,7 +1236,7 @@ fn pre_push(root: &Path, remote: Option<&OsStr>) -> Result<(), String> {
             revs.push(format!("--remotes={name}").into());
         }
     }
-    audit(root, &revs, true).map(|_| ())
+    audit(root, &revs, true, None).map(|_| ())
         .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-v3 audit`"))
 }
 
@@ -1296,6 +1423,22 @@ mod local_path_tests {
         fs::set_permissions(&sdir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(staging_dir(&tmp).is_err());
         fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn subprocess_output_is_bounded_and_the_producer_killed() {
+        // An endless producer: refused at the limit instead of buffered, and
+        // killed rather than waited for forever.
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes transcrypt; echo noise >&2"]);
+        let started = std::time::Instant::now();
+        let err = run_bounded(command, None, 1 << 20).unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        // Endless error output is drained, never blocking the child.
+        let mut command = Command::new("sh");
+        command.args(["-c", "head -c 5000000 /dev/zero >&2; echo done"]);
+        assert_eq!(run_bounded(command, None, 1 << 20).unwrap(), b"done\n");
     }
 
     #[test]

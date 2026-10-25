@@ -12,6 +12,17 @@ the same order as the adapter. That the Rust adapter follows these models is
 assumption A4 of `docs/verification/V3-ASSUMPTIONS.md` (reviewed and tested,
 not proved). Given the models, the theorems below are unconditional apart
 from the primitive contract `Realizes` (A5).
+
+Hydrate, per protected entry: the *candidate* record is the staged record if
+the worktree is exactly it, otherwise the worktree itself if it has the v3
+record envelope for this checkout (`record_envelope_ok`), otherwise there is
+none. A candidate is authenticated at the entry's path (`open_record`) and the
+core decides (`hydrate_action`); on `Publish` the worktree is replaced by the
+plaintext. Without a candidate, or without `Publish`, the file is left
+untouched (the adapter may re-index it; that is not modeled here). Any
+refusal aborts the whole operation before anything is written.
+`hydratePlan_spec`: every planned write replaces a worktree that is exactly an
+authentic record at its own path, by exactly the plaintext it opens to.
 -/
 
 open CoreModels Aeneas
@@ -33,82 +44,155 @@ structure HydrateEntry where
   worktree : Slice U8
   buffer : Slice U8
 
-/-- Per-entry hydrate step: authenticate the staged record (`open_record`),
-    then let the core decide (`hydrate_action`). `some pt` = publish `pt`. -/
-def hydrateEntry (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
-    (e : HydrateEntry) : RustM (core.result.Result (Option (Slice U8)) Refusal) := do
-  let (r, pt) ← open_record inst prims config e.path e.record e.buffer
+/-- The record a worktree file holds, if any: the staged record when the
+    worktree is exactly it, otherwise the worktree itself when it has the v3
+    record envelope for this checkout (`id` is the config id), otherwise
+    none. -/
+def hydrateCandidate (id : Std.Array U8 16#usize) (e : HydrateEntry) :
+    RustM (Option (Slice U8)) := do
+  let s ← bytes_eq e.worktree e.record
+  if s then ok (some e.record)
+  else
+    let env ← record_envelope_ok e.worktree id
+    if env then ok (some e.worktree) else ok none
+
+/-- A candidate record is always byte-for-byte the worktree. -/
+theorem hydrateCandidate_spec (id : Std.Array U8 16#usize) (e : HydrateEntry) :
+    hydrateCandidate id e ⦃ c => ∀ cand, c = some cand → sliceBytes cand = sliceBytes e.worktree ⦄ := by
+  unfold hydrateCandidate
+  step with bytes_eq_spec as ⟨ s, hs ⟩
+  split
+  · rename_i hst
+    simp only [WP.spec_ok, Option.some.injEq]
+    rintro cand rfl
+    simp only [sliceBytes, hs.1 hst]
+  · step with record_envelope_ok_spec as ⟨ env, _ ⟩
+    split <;> simp
+
+/-- Authenticate a candidate record at the entry's path (`open_record`; a
+    refusal aborts) and let the core decide (`hydrate_action`).
+    `some pt` = replace the worktree by `pt`. -/
+def hydrateOpen (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
+    (e : HydrateEntry) (cand : Slice U8) :
+    RustM (core.result.Result (Option (Slice U8)) Refusal) := do
+  let (r, pt) ← open_record inst prims config e.path cand e.buffer
   match r with
   | core.result.Result.Err x => ok (core.result.Result.Err x)
   | core.result.Result.Ok _ =>
-    let a ← hydrate_action e.worktree e.record pt
+    let a ← hydrate_action e.worktree cand pt
     match a with
     | core.result.Result.Ok HydrateAction.Publish => ok (core.result.Result.Ok (some pt))
-    | core.result.Result.Ok HydrateAction.Keep => ok (core.result.Result.Ok none)
+    | _ => ok (core.result.Result.Ok none)
+
+/-- Per-entry hydrate step. If the worktree holds a candidate record, it is
+    authenticated and the core decides (`hydrateOpen`). Otherwise (or if the
+    core does not publish) the file is left untouched; the adapter still
+    decrypts the staged record, and a refusal there also aborts. -/
+def hydrateEntry (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
+    (id : Std.Array U8 16#usize) (e : HydrateEntry) :
+    RustM (core.result.Result (Option (Slice U8)) Refusal) := do
+  let c ← hydrateCandidate id e
+  let published ← match c with
+    | Option.none => ok (core.result.Result.Ok Option.none)
+    | Option.some cand => hydrateOpen inst prims config e cand
+  match published with
+  | core.result.Result.Err x => ok (core.result.Result.Err x)
+  | core.result.Result.Ok (Option.some pt) => ok (core.result.Result.Ok (some pt))
+  | core.result.Result.Ok Option.none =>
+    let (r, _) ← open_record inst prims config e.path e.record e.buffer
+    match r with
     | core.result.Result.Err x => ok (core.result.Result.Err x)
+    | core.result.Result.Ok _ => ok (core.result.Result.Ok none)
 
 /-- The adapter validates *every* entry before publishing anything: one
     refusal aborts the whole operation (all-or-nothing preflight). -/
-def hydratePlan (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize) :
+def hydratePlan (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
+    (id : Std.Array U8 16#usize) :
     List HydrateEntry → RustM (core.result.Result (List (Option (Slice U8))) Refusal)
   | [] => ok (core.result.Result.Ok [])
   | e :: es => do
-    let r ← hydrateEntry inst prims config e
+    let r ← hydrateEntry inst prims config id e
     match r with
     | core.result.Result.Err x => ok (core.result.Result.Err x)
     | core.result.Result.Ok w =>
-      let rs ← hydratePlan inst prims config es
+      let rs ← hydratePlan inst prims config id es
       match rs with
       | core.result.Result.Ok ws => ok (core.result.Result.Ok (w :: ws))
       | core.result.Result.Err x => ok (core.result.Result.Err x)
 
-/-- What a successful hydrate may do to one entry: either replace a worktree
-    that is *exactly* the staged record by the plaintext that record
-    authentically opens to at this path, or leave a worktree that already
-    *is* that authentic plaintext. Nothing else is ever overwritten. -/
+/-- What a successful hydrate may do to one entry: replace a worktree that is
+    *exactly* an authentic record at this path by the plaintext it opens to
+    (unique by `opensTo_unique`), or write nothing. -/
 def HydrateSafe (σ : Suite) (config : List Nat) (e : HydrateEntry) : Option (Slice U8) → Prop
-  | some pt => sliceBytes e.worktree = sliceBytes e.record ∧
-      OpensTo σ config (sliceBytes e.path) (sliceBytes e.record) (sliceBytes pt)
-  | none => ∃ pt, OpensTo σ config (sliceBytes e.path) (sliceBytes e.record) pt ∧
-      sliceBytes e.worktree = pt
+  | some pt => OpensTo σ config (sliceBytes e.path) (sliceBytes e.worktree) (sliceBytes pt)
+  | none => True
 
-theorem hydrateEntry_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
-    (e : HydrateEntry) :
-    hydrateEntry inst prims config e ⦃ r => match r with
-      | core.result.Result.Ok w => HydrateSafe σ (wireBytes config) e w
-      | core.result.Result.Err _ => True ⦄ := by
-  unfold hydrateEntry
-  step with open_record_spec h config e.path e.record e.buffer as ⟨ r, pt, hr ⟩
+/-- A published plaintext is exactly what the worktree authentically opens
+    to at this path: `hydrate_action` publishes only when the worktree *is*
+    the candidate record. -/
+theorem hydrateOpen_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
+    (e : HydrateEntry) (cand : Slice U8) :
+    hydrateOpen inst prims config e cand ⦃ p => ∀ pt,
+      p = core.result.Result.Ok (some pt) →
+        sliceBytes e.worktree = sliceBytes cand ∧
+        OpensTo σ (wireBytes config) (sliceBytes e.path) (sliceBytes e.worktree) (sliceBytes pt) ⦄ := by
+  unfold hydrateOpen
+  step with open_record_spec h config e.path cand e.buffer as ⟨ r, pt, hr ⟩
   rcases r with u | x
   · simp only at hr ⊢
     step with hydrate_action_spec as ⟨ a, ha ⟩
     unfold hydrateSpec at ha
-    by_cases h1 : sliceBytes e.worktree = sliceBytes e.record
+    by_cases h1 : sliceBytes e.worktree = sliceBytes cand
     · rw [if_pos h1] at ha
-      simp only [ha, hydrateResult, WP.spec_ok]
-      exact ⟨h1, hr⟩
+      simp only [ha, hydrateResult, WP.spec_ok, core.result.Result.Ok.injEq, Option.some.injEq]
+      rintro _ rfl
+      exact ⟨h1, h1 ▸ hr⟩
     · rw [if_neg h1] at ha
-      by_cases h2 : sliceBytes e.worktree = sliceBytes pt
-      · rw [if_pos h2] at ha
-        simp only [ha, hydrateResult, WP.spec_ok]
-        exact ⟨sliceBytes pt, hr, h2⟩
-      · rw [if_neg h2] at ha
-        simp [ha, hydrateResult]
+      split at ha <;> simp [ha, hydrateResult]
   · simp
 
-/-- **Hydrate safety.** If hydrate's preflight succeeds, every entry's planned
-    action is safe; otherwise nothing is planned (and the adapter writes
-    nothing). -/
+theorem hydrateEntry_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
+    (id : Std.Array U8 16#usize) (e : HydrateEntry) :
+    hydrateEntry inst prims config id e ⦃ r => match r with
+      | core.result.Result.Ok w => HydrateSafe σ (wireBytes config) e w
+      | core.result.Result.Err _ => True ⦄ := by
+  unfold hydrateEntry
+  step with hydrateCandidate_spec id e as ⟨ c, _ ⟩
+  have hpub : (match c with
+      | Option.none => (ok (core.result.Result.Ok Option.none) :
+          RustM (core.result.Result (Option (Slice U8)) Refusal))
+      | Option.some cand => hydrateOpen inst prims config e cand) ⦃ p => ∀ pt,
+        p = core.result.Result.Ok (some pt) →
+          OpensTo σ (wireBytes config) (sliceBytes e.path) (sliceBytes e.worktree) (sliceBytes pt) ⦄ := by
+    rcases c with _ | cand
+    · simp
+    · apply WP.spec_mono (hydrateOpen_spec h config e cand)
+      intro p hp pt hpt
+      exact (hp pt hpt).2
+  step with hpub as ⟨ p, hp ⟩
+  rcases p with (_ | pt) | x
+  · simp only
+    step with open_record_spec h config e.path e.record e.buffer as ⟨ r, _, _ ⟩
+    rcases r with u | x <;> simp [HydrateSafe]
+  · simp only [WP.spec_ok, HydrateSafe]
+    exact hp pt rfl
+  · simp
+
+/-- **Hydrate safety.** If hydrate's preflight succeeds, every planned write
+    replaces a worktree that is exactly an authentic record at its own path
+    with exactly the plaintext that record opens to; all other files are left
+    untouched. Any refusal aborts the whole operation, so nothing is planned
+    (and the adapter writes nothing). -/
 theorem hydratePlan_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
-    (es : List HydrateEntry) :
-    hydratePlan inst prims config es ⦃ r => match r with
+    (id : Std.Array U8 16#usize) (es : List HydrateEntry) :
+    hydratePlan inst prims config id es ⦃ r => match r with
       | core.result.Result.Ok ws => List.Forall₂ (HydrateSafe σ (wireBytes config)) es ws
       | core.result.Result.Err _ => True ⦄ := by
   induction es with
   | nil => simp [hydratePlan]
   | cons e es ih =>
     unfold hydratePlan
-    step with hydrateEntry_spec h config e as ⟨ r, hr ⟩
+    step with hydrateEntry_spec h config id e as ⟨ r, hr ⟩
     rcases r with w | x
     · simp only at hr ⊢
       step with ih as ⟨ rs, hrs ⟩
