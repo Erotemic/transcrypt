@@ -94,8 +94,16 @@ inductive AgentOp where
 | Decrypt : AgentOp
 | Stop : AgentOp
 
+/-- [transcrypt_v3_core::FrameHeader]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 558:0-562:1
+    Visibility: public -/
+structure FrameHeader where
+  opcode : Std.U8
+  config : Array Std.U8 55#usize
+  path_len : Std.U32
+
 /-- [transcrypt_v3_core::IndexEntry]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 538:0-543:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 591:0-596:1
     Visibility: public -/
 structure IndexEntry where
   regular : Bool

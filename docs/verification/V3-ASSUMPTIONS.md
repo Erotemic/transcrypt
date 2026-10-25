@@ -39,7 +39,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Config authentication | `authenticate_config_spec`, `initialize_config_spec` |
 | Clean never emits anything but a correct record, never double-encrypts | `seal_record_spec` |
 | Smudge/verify release only authentic plaintext for this config and path; failure leaks nothing | `open_record_spec`, `open_record_complete`, `opensTo_unique` |
-| Agent authorization | `authorize_agent_request_spec` |
+| Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
 | Effective filter attribute check | `check_attr_response_ok_spec`, `check_attr_paths` |
 | Index record parsing | `parse_index_entry_spec` |
 | Hydrate/lock never lose data; verify-index soundness | `hydrate_action_spec`, `lock_action_spec`, `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` |
@@ -53,6 +53,7 @@ verified decision that gates it:
 | --- | --- | --- | --- |
 | `clean` filter output | agent `Encrypt` → `seal_record` | config bytes read from `.transcrypt/config`; Git `%f` bytes (argv, raw); stdin | `Ok` (else the filter fails and Git aborts) |
 | `smudge` filter output | agent `Decrypt` → `open_record` | same config; Git `%f`; staged blob from stdin | `Ok` |
+| Agent request framing (client and server) | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, path and body lengths | proved roundtrip |
 | Agent request dispatch | `authorize_agent_request` before reading the body | opcode, supplied config, config authenticated at startup, path, length | `Ok(op)` |
 | Agent startup | `authenticate_config` | config bytes and the piped key | `Ok` |
 | `unlock` / `init` | `authenticate_config` / `initialize_config` (via `Keyed`) | config bytes / fresh salt | `Ok`, before any persistent effect |

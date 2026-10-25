@@ -28,7 +28,7 @@ authoritative: Rust is changed to meet it, never the reverse.
 | Git adapter, agent, fd-relative FS | `rust/crates/transcrypt-v3/src/{main,session,fsat}.rs` |
 | Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
-| Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Index,Protocol,Lifecycle}.lean` |
+| Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Index,Frame,Protocol,Lifecycle}.lean` |
 | Theorem ledger | `proofs/aeneas/v3/PROOF-STATUS.md` |
 | Tests | `rust/crates/transcrypt-v3/tests/{git_lifecycle,adversarial,v3_vectors}.rs`, `tests/v3/reference/` |
 
@@ -80,8 +80,8 @@ stable, but reordering loops inside a proved function renames them.
 
 ## Next tasks (trust order)
 
-1. Optionally move agent frame parsing into the core and prove it (A4
-   reduction; the index-record parser is already done).
+1. Keep the adapter call-site table in `V3-ASSUMPTIONS.md` current; every
+   parser and decision is now in the proved core.
 2. External review R-01.
 3. Bash v7 only after a dependency-policy decision.
 

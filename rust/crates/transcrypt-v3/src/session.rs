@@ -19,7 +19,10 @@ use std::{
 };
 
 use transcrypt_v3::{authenticate_config, config_array, decrypt_file, encrypt_file, SecretKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
-use transcrypt_v3_core::{authorize_agent_request, AgentOp, CONFIG_LEN};
+use transcrypt_v3_core::{
+    authorize_agent_request, decode_be_u32, decode_frame_header, encode_be_u32, encode_frame_header, AgentOp,
+    CONFIG_LEN, FRAME_HEADER_LEN,
+};
 use zeroize::Zeroizing;
 
 const SOCK: &str = "session.sock";
@@ -98,7 +101,7 @@ fn reply(stream: &mut UnixStream, response: Result<Vec<u8>, String>) -> io::Resu
     let data = Zeroizing::new(data);
     let length = u32::try_from(data.len()).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "oversized response"))?;
     stream.write_all(&[status])?;
-    stream.write_all(&length.to_be_bytes())?;
+    stream.write_all(&encode_be_u32(length))?;
     stream.write_all(&data)?;
     stream.flush()
 }
@@ -118,15 +121,16 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
         .map_err(|_| "cannot set agent read timeout")?;
     stream.set_write_timeout(Some(Duration::from_secs(120)))
         .map_err(|_| "cannot set agent write timeout")?;
-    stream.write_all(&[op as u8]).map_err(|_| "cannot send agent operation")?;
-    stream.write_all(config).map_err(|_| "cannot send public config")?;
-    stream.write_all(&(path_bytes.len() as u32).to_be_bytes()).map_err(|_| "cannot send path length")?;
+    let config: &[u8; CONFIG_LEN] = config.try_into().map_err(|_| "invalid v3 agent request length")?;
+    // Frame layout is defined (and proved to roundtrip) by the verified core.
+    stream.write_all(&encode_frame_header(op as u8, config, path_bytes.len() as u32))
+        .map_err(|_| "cannot send agent request header")?;
     stream.write_all(path_bytes).map_err(|_| "cannot send protected Git pathname")?;
-    stream.write_all(&(body.len() as u32).to_be_bytes()).map_err(|_| "cannot send body length")?;
+    stream.write_all(&encode_be_u32(body.len() as u32)).map_err(|_| "cannot send body length")?;
     stream.write_all(body).map_err(|_| "cannot send agent input")?;
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).map_err(|_| "credential agent failed before replying")?;
-    let size = u32::from_be_bytes(header[1..5].try_into().map_err(|_| "malformed agent response")?) as usize;
+    let size = decode_be_u32(header[1..5].try_into().map_err(|_| "malformed agent response")?) as usize;
     if size > MAX_RESPONSE { return Err("credential agent response exceeds limit".into()); }
     let mut value = vec![0u8; size];
     stream.read_exact(&mut value).map_err(|_| "incomplete credential agent response")?;
@@ -199,22 +203,19 @@ pub(crate) fn stop(root: &Path, config: &[u8]) -> Result<(), String> {
 }
 
 fn transaction(stream: &mut UnixStream, config: &[u8; CONFIG_LEN], key: &SecretKey) -> Result<bool, String> {
-    let mut op = [0u8; 1];
-    stream.read_exact(&mut op).map_err(|_| "incomplete agent operation")?;
-    let mut supplied_config = [0u8; CONFIG_LEN];
-    stream.read_exact(&mut supplied_config).map_err(|_| "incomplete agent config")?;
-    let mut path_len_bytes = [0u8; 4];
-    stream.read_exact(&mut path_len_bytes).map_err(|_| "incomplete agent path length")?;
-    let path_len = u32::from_be_bytes(path_len_bytes) as usize;
+    let mut raw = [0u8; FRAME_HEADER_LEN];
+    stream.read_exact(&mut raw).map_err(|_| "incomplete agent request header")?;
+    let header = decode_frame_header(&raw);
+    let path_len = header.path_len as usize;
     if path_len > MAX_PATH { return Err("oversized agent Git pathname".into()); }
     let mut path_bytes = vec![0u8; path_len];
     stream.read_exact(&mut path_bytes).map_err(|_| "incomplete agent pathname")?;
     let mut size_bytes = [0u8; 4];
     stream.read_exact(&mut size_bytes).map_err(|_| "incomplete agent length")?;
-    let size = u32::from_be_bytes(size_bytes) as usize;
+    let size = decode_be_u32(&size_bytes) as usize;
     // The verified core decides, before the body is read, whether this
     // request is permitted under the configuration authenticated at startup.
-    let action = authorize_agent_request(op[0], &supplied_config, config, &path_bytes, size)
+    let action = authorize_agent_request(header.opcode, &header.config, config, &path_bytes, size)
         .map_err(|_| "agent request refused: config, path, size or opcode not permitted")?;
     let mut body = Zeroizing::new(vec![0u8; size]);
     stream.read_exact(&mut body).map_err(|_| "incomplete agent body")?;

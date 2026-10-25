@@ -40,15 +40,17 @@ pre-commit hook already exists. It leaves the repository **unlocked**.
 ```bash
 git clone <url> my-repo && cd my-repo   # *.secret files arrive as ciphertext
 transcrypt-v3 unlock
-transcrypt-v3 hydrate                    # decrypt staged *.secret files into the worktree
+                                         # also decrypts the staged *.secret files
 ```
 
 `unlock` authenticates the passphrase against the committed config **before**
 changing anything. A wrong passphrase or a tampered config is rejected and no
-key agent is started. `hydrate` first authenticates every staged protected
-file, then replaces each ciphertext copy with its plaintext. If a worktree
-file is neither the staged ciphertext nor its plaintext, `hydrate` refuses
-and changes nothing. It is safe to rerun after an interruption.
+key agent is started. It then hydrates: it authenticates every staged
+protected file and replaces each ciphertext copy with its plaintext. If a
+worktree file is neither the staged ciphertext nor its plaintext, hydration
+refuses and changes nothing (unlock still succeeds and tells you); fix the
+file and run `transcrypt-v3 hydrate`, which is safe to rerun after an
+interruption. `unlock --no-hydrate` leaves ciphertext in place.
 
 ## Day to day
 

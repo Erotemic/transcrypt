@@ -26,6 +26,9 @@ include = [
   "transcrypt_v3_core::authorize_agent_request",
   "transcrypt_v3_core::check_attr_response_ok",
   "transcrypt_v3_core::parse_index_entry",
+  "transcrypt_v3_core::encode_frame_header",
+  "transcrypt_v3_core::decode_frame_header",
+  "transcrypt_v3_core::decode_be_u32",
 ]
 # hax 0.4.2 requires scenario outputs to remain *inside* the Rust workspace.
 # Two levels above this crate is rust/, the workspace root.

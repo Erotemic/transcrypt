@@ -85,9 +85,9 @@ verified" or "cryptographic security has been proved from first principles."
 ### Remaining, in trust order (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md))
 
 1. **A4 — adapter correspondence.** Keep the call-site table current. The
-   `ls-files --stage -z` record parser is now in the core and proved
-   (`parse_index_entry_spec`); the remaining candidate is the agent frame
-   parser (lengths are already bounded by `authorize_agent_request`).
+   index-record parser and the agent request framing are now in the core
+   and proved; what remains in the adapter is I/O sequencing (modeled in
+   `Lifecycle.lean`) and OS calls.
 2. **A3 — translator trust.** Track Aeneas/hax releases; consider
    differential testing of extracted definitions once they can be made
    computable.

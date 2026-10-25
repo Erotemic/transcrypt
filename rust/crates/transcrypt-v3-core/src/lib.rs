@@ -530,6 +530,59 @@ pub fn check_attr_response_ok(request: &[u8], response: &[u8]) -> bool {
     ok && j == response.len()
 }
 
+/// Length of a credential-agent request header: opcode, the 55-byte public
+/// config and the big-endian path length. The path and a big-endian body
+/// length follow (local IPC only, not part of the committed wire format).
+pub const FRAME_HEADER_LEN: usize = 1 + CONFIG_LEN + 4;
+
+/// Encode an agent request header.
+pub fn encode_frame_header(opcode: u8, config: &[u8; CONFIG_LEN], path_len: u32) -> [u8; FRAME_HEADER_LEN] {
+    let mut out = [0u8; FRAME_HEADER_LEN];
+    out[0] = opcode;
+    let mut i = 0;
+    while i < CONFIG_LEN {
+        out[1 + i] = config[i];
+        i += 1;
+    }
+    let len = encode_be_u32(path_len);
+    let mut k = 0;
+    while k < 4 {
+        out[1 + CONFIG_LEN + k] = len[k];
+        k += 1;
+    }
+    out
+}
+
+/// Decoded agent request header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameHeader {
+    pub opcode: u8,
+    pub config: [u8; CONFIG_LEN],
+    pub path_len: u32,
+}
+
+/// Decode an agent request header (every byte string of this length is a
+/// header; authorization is `authorize_agent_request`'s job).
+pub fn decode_frame_header(input: &[u8; FRAME_HEADER_LEN]) -> FrameHeader {
+    let mut config = [0u8; CONFIG_LEN];
+    let mut i = 0;
+    while i < CONFIG_LEN {
+        config[i] = input[1 + i];
+        i += 1;
+    }
+    let len = [input[1 + CONFIG_LEN], input[2 + CONFIG_LEN], input[3 + CONFIG_LEN], input[4 + CONFIG_LEN]];
+    FrameHeader { opcode: input[0], config, path_len: decode_be_u32(&len) }
+}
+
+/// Big-endian `u32` encoding used for agent frame lengths.
+pub fn encode_be_u32(x: u32) -> [u8; 4] {
+    [(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8]
+}
+
+pub fn decode_be_u32(b: &[u8; 4]) -> u32 {
+    ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
+}
+
 /// Git mode of a regular, non-executable file.
 pub const REGULAR_MODE: [u8; 6] = *b"100644";
 
@@ -835,6 +888,17 @@ mod tests {
             std::vec::Vec::new(),
         ] {
             assert_eq!(parse_index_entry(&bad), Err(Refusal::Index), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn agent_frames_roundtrip() {
+        let config = core::array::from_fn(|i| (i * 7) as u8);
+        for len in [0u32, 1, 255, 256, 4096, 0x0102_0304, u32::MAX] {
+            let h = encode_frame_header(b'D', &config, len);
+            assert_eq!(decode_frame_header(&h), FrameHeader { opcode: b'D', config, path_len: len });
+            assert_eq!(&h[1 + CONFIG_LEN..], &len.to_be_bytes());
+            assert_eq!(decode_be_u32(&encode_be_u32(len)), len);
         }
     }
 }

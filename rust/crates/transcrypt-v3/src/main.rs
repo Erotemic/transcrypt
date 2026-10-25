@@ -54,11 +54,17 @@ fn run() -> Result<(), String> {
             status(&root)
         },
         "init" | "unlock" => {
-            if args.len() > 2 || (args.len() == 2 && args[1].to_str() != Some("--password-stdin")) {
-                return Err("init/unlock accept only optional --password-stdin".into());
+            let mut stdin = false;
+            let mut auto_hydrate = true;
+            for arg in &args[1..] {
+                match arg.to_str() {
+                    Some("--password-stdin") if !stdin => stdin = true,
+                    Some("--no-hydrate") if action == "unlock" && auto_hydrate => auto_hydrate = false,
+                    _ => return Err("init accepts --password-stdin; unlock accepts --password-stdin and --no-hydrate".into()),
+                }
             }
-            let password = passphrase(args.len() == 2)?;
-            if action == "init" { init(&root, password) } else { unlock(&root, password) }
+            let password = passphrase(stdin)?;
+            if action == "init" { init(&root, password) } else { unlock(&root, password, auto_hydrate) }
         },
         "clean" | "smudge" => {
             if args.len() != 2 { return Err("Git filter requires exactly one %f pathname".into()); }
@@ -87,9 +93,10 @@ transcrypt-v3: authenticated, path-bound encryption of *.secret files in Git.
 Typical workflow
   transcrypt-v3 init        create .transcrypt/config, filters and hook; then commit
                             .transcrypt/config and .gitattributes
-  transcrypt-v3 unlock      authenticate the passphrase and start the in-memory key agent
+  transcrypt-v3 unlock      authenticate the passphrase, start the in-memory key agent and
+                            decrypt the staged *.secret files (skip with --no-hydrate)
   transcrypt-v3 hydrate     decrypt the staged *.secret files into the worktree
-                            (needed once after cloning or unlocking a locked checkout)
+                            (only needed after `unlock --no-hydrate` or a refused hydration)
   transcrypt-v3 status      show lock state and each protected file's worktree state
   transcrypt-v3 verify-index
                             check every staged *.secret is ciphertext for its own path
@@ -99,6 +106,7 @@ Typical workflow
 
 Options
   --password-stdin          (init, unlock) read the passphrase from stdin instead of the terminal
+  --no-hydrate              (unlock) leave ciphertext in the worktree
 
 Files matching *.secret are encrypted with AES-256-SIV under a key derived by
 Argon2id; each record is bound to the repository config and its exact Git path.
@@ -347,12 +355,22 @@ fn rollback_init(root: &Path, config: &[u8], hook_preexisted: bool) {
     let _ = git(root, &["config", "--local", "--remove-section", "filter.transcrypt-v3"]);
 }
 
-fn unlock(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
+fn unlock(root: &Path, password: Zeroizing<Vec<u8>>, auto_hydrate: bool) -> Result<(), String> {
     let config = load_config(root)?;
     let key = unlock_config(&password, &config)?; // Authenticate BEFORE any persistent writes.
     check_hook_available(root)?;
     activate_session(root, &config, &key, false)?;
-    eprintln!("Unlocked v3 via a private in-memory credential agent. For fresh clones run `transcrypt-v3 hydrate`.");
+    if !auto_hydrate {
+        eprintln!("Unlocked v3 via a private in-memory credential agent. Run `transcrypt-v3 hydrate` to decrypt the worktree.");
+        return Ok(());
+    }
+    // Unlocking is complete; hydration is a separate, all-or-nothing step
+    // whose refusal must not hide the fact that the agent is now running.
+    match hydrate(root) {
+        Ok(()) => eprintln!("Unlocked v3 and decrypted the protected worktree files."),
+        Err(e) => eprintln!("Unlocked v3, but hydration changed nothing: {e}\n\
+            Inspect with `transcrypt-v3 status`, then run `transcrypt-v3 hydrate`."),
+    }
     Ok(())
 }
 

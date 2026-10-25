@@ -50,6 +50,7 @@ ENTRYPOINTS = (
     'is_canonical_protected_path', 'initialize_config', 'authenticate_config',
     'seal_record', 'open_record', 'hydrate_action', 'lock_action',
     'authorize_agent_request', 'check_attr_response_ok', 'parse_index_entry',
+    'encode_frame_header', 'decode_frame_header',
 )
 BAD = re.compile(r'\b(?:sorry|admit|axiom|native_decide)\b')
 

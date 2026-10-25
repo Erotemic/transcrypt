@@ -209,4 +209,20 @@ def IndexRecord (entry : List Nat) (regular : Bool) (path : List Nat) : Prop :=
     mode.length = 6 ∧ oid ≠ [] ∧ 9 ∉ mode ∧ 9 ∉ oid ∧ path ≠ [] ∧
     (regular = true ↔ mode = regularMode)
 
+/-! ## Credential-agent framing (local IPC) -/
+
+/-- Big-endian 4-byte encoding of a natural number below 2^32. -/
+def be32 (n : Nat) : List Nat := [n / 2^24 % 256, n / 2^16 % 256, n / 2^8 % 256, n % 256]
+
+/-- Request header: opcode, the 55-byte public config, path length. -/
+def frameHeader (opcode : Nat) (config : List Nat) (pathLen : Nat) : List Nat :=
+  [opcode] ++ config ++ be32 pathLen
+
+theorem be32_length (n : Nat) : (be32 n).length = 4 := rfl
+
+/-- Decoding big-endian bytes inverts `be32` below 2^32. -/
+theorem be32_decode (n : Nat) (h : n < 2^32) :
+    (n / 2^24 % 256) * 2^24 + (n / 2^16 % 256) * 2^16 + (n / 2^8 % 256) * 2^8 + n % 256 = n := by
+  omega
+
 end Transcrypt.V3Policy

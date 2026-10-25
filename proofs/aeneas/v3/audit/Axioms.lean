@@ -30,3 +30,6 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.opensTo_unique
 #print axioms Transcrypt.V3Policy.lock_flush_recoverable
 #print axioms parse_index_entry_spec
+#print axioms encode_frame_header_spec
+#print axioms decode_frame_header_spec
+#print axioms decode_frame_header_encode

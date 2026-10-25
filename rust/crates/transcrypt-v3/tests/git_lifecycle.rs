@@ -95,8 +95,9 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     assert_in_memory_session(&clone, false);
     run_fails(&clone, bin, &["unlock", "--password-stdin"], Some(b"wrong password with enough characters\n"));
     assert_in_memory_session(&clone, false);
-    run(&clone, bin, &["unlock", "--password-stdin"], Some(pass));
+    run(&clone, bin, &["unlock", "--password-stdin", "--no-hydrate"], Some(pass));
     assert_in_memory_session(&clone, true);
+    assert_eq!(fs::read(clone.join("account.secret")).unwrap(), object, "--no-hydrate keeps ciphertext");
     // Altered but correctly sized public metadata must not be accepted by
     // the agent that authenticated the original bytes at unlock.
     let metadata_path = clone.join(".transcrypt/config");

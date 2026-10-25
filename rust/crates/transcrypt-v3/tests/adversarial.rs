@@ -356,3 +356,26 @@ fn failed_init_rolls_back_so_it_can_be_rerun() {
     run(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
     run(&repo, bin(), &["lock"], None);
 }
+
+#[test]
+fn unlock_hydrates_by_default_and_reports_refusals() {
+    let mut scratch = Scratch::new("autohydrate");
+    let repo = scratch.repo("repo");
+    run(&repo, bin(), &["lock"], None);
+    let clone = scratch.root.join("clone");
+    run(&scratch.root, "git", &["clone", "-q", "repo", "clone"], None);
+    scratch.repos.push(clone.clone());
+    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    assert_eq!(fs::read(clone.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
+    assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
+    run(&clone, bin(), &["lock"], None);
+    // An unexpected local edit: unlock succeeds, hydration changes nothing.
+    fs::write(clone.join("dir/b.secret"), b"local edit\n").unwrap();
+    let out = exec(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("hydration changed nothing"));
+    assert_ne!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    assert_eq!(fs::read(clone.join("dir/b.secret")).unwrap(), b"local edit\n");
+    fs::write(clone.join("dir/b.secret"), run(&clone, "git", &["show", ":dir/b.secret"], None)).unwrap();
+}

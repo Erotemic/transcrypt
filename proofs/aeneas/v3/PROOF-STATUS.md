@@ -26,6 +26,7 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
 | `Bytes` | `hydrate_action`, `lock_action` | `hydrate_action_spec`, `lock_action_spec` | Exactly `hydrateSpec` / `lockSpec` |
 | `Path` | `is_protected_path`, `component_ok`, `is_canonical_protected_path` | `is_protected_path_spec`, `component_ok_spec`, `is_canonical_protected_path_spec` | Exactly the spec's `Protected` / `CanonicalProtectedPath` (defined with `List.splitOn`) |
 | `Index` | `parse_index_entry` | `parse_index_entry_spec` | Accepts exactly the spec's `IndexRecord` (stage 0, path after the first TAB, `100644` flag) and returns that path |
+| `Frame` | `encode_be_u32`, `decode_be_u32`, `encode_frame_header`, `decode_frame_header` | `encode_be_u32_spec`, `decode_be_u32_spec`, `encode_frame_header_spec`, `decode_frame_header_spec`, `decode_frame_header_encode` | Agent request header is exactly the spec's `frameHeader`; decoding inverts encoding |
 | `Protocol` | `initialize_config` | `initialize_config_spec` | Output is the spec layout and authenticates |
 | `Protocol` | `authenticate_config` | `authenticate_config_spec` | `Ok` iff `ConfigAuthentic`; refusals classified |
 | `Protocol` | `seal_record` | `seal_record_spec` | `Ok` ⇒ `MaySeal` and output = `sealedRecord`; every refusal names a violated precondition or primitive failure |
