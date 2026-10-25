@@ -267,21 +267,13 @@ fn lock(root: &Path) -> Result<(), String> {
             Err(_) => return Err("protected worktree has uncommitted plaintext changes; refusing lock".into()),
         }
     }
-    // Write only ciphertext using exclusive temporary files and atomic rename.
-    // A filesystem crash can still leave a partially flushed worktree; keep the
-    // key until all renames succeed, and do not claim secure disk erasure.
+    // Write only ciphertext via private staged files and atomic rename. A
+    // crash can leave some files flushed and others plaintext; the key stays
+    // in the agent until every rename succeeds, and rerunning `lock` resumes
+    // (already-flushed files are `LockAction::Keep`). No secure erasure claim.
+    let staging = staging_dir(root)?;
     for (i, (dest, object)) in to_flush.iter().enumerate() {
-        let temp = dest.with_file_name(format!(".transcrypt-v3-lock-{}-{i}.tmp", std::process::id()));
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        opts.mode(0o600);
-        let mut f = opts.open(&temp).map_err(|e| format!("cannot create encrypted temporary file: {e}"))?;
-        if let Err(e) = f.write_all(object).and_then(|_| f.sync_all()) {
-            let _ = fs::remove_file(&temp);
-            return Err(format!("cannot write encrypted temporary file: {e}"));
-        }
-        fs::rename(&temp, dest).map_err(|e| format!("cannot replace protected file: {e}"))?;
+        replace_file(&staging, dest, object, i)?;
     }
     session::stop(root, &config)?;
     eprintln!("Locked: tracked *.secret files flushed and the in-memory credential agent stopped. This does not securely erase historical plaintext backups.");
@@ -452,33 +444,63 @@ fn verify_index(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Write a decoded protected file without routing its encrypted worktree
-/// contents through Git's clean filter. Git checkout/restore may invoke
-/// `clean` while refreshing the index; raw ciphertext in a locked clone is
-/// deliberately rejected by that filter.
-///
-/// An exclusive temporary file avoids publishing partially written plaintext.
-/// This is not a race-free or multi-file transactional filesystem operation:
-/// the public spec documents that stronger dirfd/fsync guarantees are pending.
-fn publish_plaintext(dest: &Path, plaintext: &[u8], slot: usize) -> Result<(), String> {
-    let temp = dest.with_file_name(format!(
-        ".transcrypt-v3-hydrate-{}-{slot}.tmp", std::process::id()
-    ));
+/// Private staging directory for whole-file replacements:
+/// `.git/transcrypt-v3-staging`, a real mode-0700 directory. Temporaries never
+/// live in the worktree, so a crash cannot leave plaintext where `git add`
+/// could commit it unencrypted, and Git never reads files under `.git`.
+/// Anything left there by an interrupted earlier run is ours and is removed.
+fn staging_dir(root: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let dir = root.join(".git/transcrypt-v3-staging");
+    match fs::symlink_metadata(&dir) {
+        Ok(_) => {},
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            fs::DirBuilder::new().mode(0o700).create(&dir)
+                .map_err(|e| format!("cannot create private staging directory: {e}"))?;
+        },
+        Err(e) => return Err(format!("cannot examine private staging directory: {e}")),
+    }
+    let meta = fs::symlink_metadata(&dir).map_err(|_| "cannot examine private staging directory")?;
+    if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 {
+        return Err("unsafe .git/transcrypt-v3-staging; require a real 0700 directory".into());
+    }
+    for entry in fs::read_dir(&dir).map_err(|_| "cannot list private staging directory")? {
+        let path = entry.map_err(|_| "cannot list private staging directory")?.path();
+        let kind = fs::symlink_metadata(&path).map_err(|_| "cannot examine stale staged file")?;
+        if !kind.is_file() || kind.file_type().is_symlink() {
+            return Err("unexpected entry in private staging directory".into());
+        }
+        fs::remove_file(&path).map_err(|e| format!("cannot remove stale staged file: {e}"))?;
+    }
+    Ok(dir)
+}
+
+/// Replace `dest` by `contents` through an exclusive mode-0600 file in the
+/// private staging directory, fsync, atomic rename, then fsync the parent.
+/// Rename across filesystems fails closed (EXDEV) without touching `dest`.
+/// This is not a race-free or multi-file transactional operation: the spec
+/// documents that dirfd-based guarantees against same-UID races are pending.
+fn replace_file(staging: &Path, dest: &Path, contents: &[u8], slot: usize) -> Result<(), String> {
+    let temp = staging.join(format!("{}-{slot}.tmp", std::process::id()));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(&temp)
-        .map_err(|e| format!("cannot create private hydration file: {e}"))?;
-    let result = file.write_all(plaintext).and_then(|_| file.sync_all());
+        .map_err(|e| format!("cannot create private staged file: {e}"))?;
+    let result = file.write_all(contents).and_then(|_| file.sync_all());
     drop(file);
     if let Err(e) = result {
         let _ = fs::remove_file(&temp);
-        return Err(format!("cannot write private hydration file: {e}"));
+        return Err(format!("cannot write private staged file: {e}"));
     }
     if let Err(e) = fs::rename(&temp, dest) {
         let _ = fs::remove_file(&temp);
-        return Err(format!("cannot publish hydrated plaintext: {e}"));
+        return Err(format!("cannot replace protected worktree file: {e}"));
+    }
+    if let Some(parent) = dest.parent() {
+        fs::File::open(parent).and_then(|d| d.sync_all())
+            .map_err(|e| format!("cannot sync protected file directory: {e}"))?;
     }
     Ok(())
 }
@@ -517,6 +539,7 @@ fn hydrate(root: &Path) -> Result<(), String> {
         return Err("index or public configuration changed during hydration".into());
     }
 
+    let staging = staging_dir(root)?;
     for (i, (path, relative)) in pending.into_iter().enumerate() {
         let object = git_show(root, &path)?;
         let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
@@ -526,7 +549,7 @@ fn hydrate(root: &Path) -> Result<(), String> {
         if worktree != object {
             return Err("protected worktree changed during hydration; refusing overwrite".into());
         }
-        publish_plaintext(&dest, &plaintext, i)?;
+        replace_file(&staging, &dest, &plaintext, i)?;
     }
     // Git's index still caches the size/mtime of the encrypted checkout.
     // `git add` is needed to refresh the worktree stat cache: merely having
@@ -555,19 +578,30 @@ mod local_path_tests {
     use super::*;
 
     #[test]
-    fn hydration_replacement_is_private_and_complete() {
+    fn replacement_is_private_and_leaves_no_worktree_temporaries() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = std::env::temp_dir().join(format!(
-            "transcrypt-v3-hydration-publish-{}", std::process::id()
+            "transcrypt-v3-replace-{}", std::process::id()
         ));
         let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir(&tmp).unwrap();
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+        let staging = staging_dir(&tmp).unwrap();
+        assert_eq!(fs::metadata(&staging).unwrap().permissions().mode() & 0o777, 0o700);
+        // A crash-leftover temporary is purged on the next use.
+        fs::write(staging.join("stale.tmp"), b"stale plaintext").unwrap();
+        let staging = staging_dir(&tmp).unwrap();
+        assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
         let path = tmp.join("item.secret");
         fs::write(&path, b"ciphertext placeholder").unwrap();
-        publish_plaintext(&path, b"authenticated plaintext", 0).unwrap();
+        replace_file(&staging, &path, b"authenticated plaintext", 0).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"authenticated plaintext");
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
-        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 2, "only .git and the file");
+        assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+        // A symlinked staging directory is refused.
+        fs::remove_dir(&staging).unwrap();
+        std::os::unix::fs::symlink(&tmp, &staging).unwrap();
+        assert!(staging_dir(&tmp).is_err());
         fs::remove_dir_all(&tmp).unwrap();
     }
 
