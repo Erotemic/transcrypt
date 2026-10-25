@@ -179,6 +179,9 @@ one.
     returns `status=error` or exits.
   - `GIT_LITERAL_PATHSPECS` and `GIT_NO_REPLACE_OBJECTS` are honored.
   - The pre-commit hook sees the index being committed (`GIT_INDEX_FILE`).
+  - `rev-parse --path-format=absolute --git-dir --git-common-dir` and
+    `worktree list --porcelain` identify a worktree's own and shared Git
+    directories and the repository's other worktrees.
 - **Consequence:** wrong bytes authenticated, or protected files not
   filtered.
 - **Evidence:** TESTED with real Git 2.43 (raw and non-UTF-8 paths, glob and

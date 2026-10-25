@@ -150,8 +150,7 @@ pub(crate) struct Staging {
 }
 
 pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
-    let git_dir = fsat::Dir::open(root).and_then(|r| r.subdir(OsStr::new(".git")))
-        .map_err(|_| "cannot open .git directory")?;
+    let git_dir = fsat::Dir::open(&crate::git::git_dir(root)).map_err(|_| "cannot open the Git directory")?;
     let name = OsStr::new("transcrypt-v3-staging");
     match git_dir.mkdir(name, 0o700) {
         Ok(()) => {},
@@ -181,6 +180,7 @@ pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
 /// run (a crash) are removed on the next use. No secure-erasure claim.
 pub(crate) struct Scratch {
     dir: fsat::Dir,
+    path: PathBuf,
     prefix: String,
     written: std::cell::RefCell<Vec<OsString>>,
 }
@@ -189,8 +189,8 @@ impl Scratch {
     const NAME: &'static str = "transcrypt-v3-scratch";
 
     pub(crate) fn create(root: &Path) -> Result<Scratch, String> {
-        let git_dir = fsat::Dir::open(root).and_then(|r| r.subdir(OsStr::new(".git")))
-            .map_err(|_| "cannot open .git directory")?;
+        let path = crate::git::git_dir(root).join(Self::NAME);
+        let git_dir = fsat::Dir::open(&crate::git::git_dir(root)).map_err(|_| "cannot open the Git directory")?;
         let name = OsStr::new(Self::NAME);
         match git_dir.mkdir(name, 0o700) {
             Ok(()) => {},
@@ -210,18 +210,17 @@ impl Scratch {
                 let _ = dir.unlink(&entry);
             }
         }
-        Ok(Scratch { dir, prefix: std::process::id().to_string(), written: Default::default() })
+        Ok(Scratch { dir, path, prefix: std::process::id().to_string(), written: Default::default() })
     }
 
-    /// Write `contents` to a new private file; returns its path relative to
-    /// the repository root.
+    /// Write `contents` to a new private file; returns its absolute path.
     pub(crate) fn write(&self, name: &str, contents: &[u8]) -> Result<PathBuf, String> {
         let file_name = OsString::from(format!("{}-{name}", self.prefix));
         let mut file = self.dir.create_new(&file_name, 0o600)
             .map_err(|e| format!("cannot create private scratch file: {e}"))?;
         self.written.borrow_mut().push(file_name.clone());
         file.write_all(contents).map_err(|e| format!("cannot write private scratch file: {e}"))?;
-        Ok(Path::new(".git").join(Self::NAME).join(file_name))
+        Ok(self.path.join(file_name))
     }
 }
 

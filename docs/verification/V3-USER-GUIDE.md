@@ -18,8 +18,10 @@ cargo build --release -p transcrypt-v3
 # put target/release/transcrypt-v3 on your PATH; Git filters record its absolute path
 ```
 
-Requirements: Unix (Linux or macOS), Git, and a normal checkout with a `.git`
-directory. Linked worktrees and submodules are not supported yet.
+Requirements: Unix (Linux or macOS) and Git 2.34 or newer. Linked worktrees
+(`git worktree add`) share one unlocked session: `unlock` in any worktree
+serves all of them, and `lock` flushes every worktree before stopping it.
+Submodules are not supported.
 
 ## Start protecting a repository
 

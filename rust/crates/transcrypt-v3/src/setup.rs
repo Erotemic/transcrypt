@@ -65,14 +65,15 @@ fn install_filters(root: &Path) -> Result<(), String> {
     for (k, value) in expected_filters()?.into_iter().chain(expected_merge_driver()?) {
         git(root, &["config", "--local", k, &value])?;
     }
-    let attributes = root.join(".git/info/attributes");
+    let attributes = crate::git::common_dir(root).join("info/attributes");
     if let Ok(meta) = fs::symlink_metadata(&attributes) {
         if !meta.is_file() { return Err("unsafe .git/info/attributes".into()); }
     }
     let existing = fs::read_to_string(&attributes).unwrap_or_default();
     if !existing.lines().any(|line| line == MERGE_ATTRIBUTE) {
-        if fs::symlink_metadata(root.join(".git/info")).is_err() {
-            fs::create_dir(root.join(".git/info")).map_err(|e| format!("cannot create .git/info: {e}"))?;
+        let info = crate::git::common_dir(root).join("info");
+        if fs::symlink_metadata(&info).is_err() {
+            fs::create_dir(&info).map_err(|e| format!("cannot create .git/info: {e}"))?;
         }
         let separator = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
         fs::OpenOptions::new().append(true).create(true).open(&attributes)
@@ -165,7 +166,7 @@ fn expected_hook(command: &str) -> Result<String, String> {
 }
 
 fn hook_path(root: &Path, name: &str) -> PathBuf {
-    root.join(".git/hooks").join(name)
+    crate::git::common_dir(root).join("hooks").join(name)
 }
 
 fn check_hook_available(root: &Path) -> Result<(), String> {
@@ -331,7 +332,7 @@ const EXCLUDE_PATTERNS: [&str; 9] = [
 
 fn exclude_plaintext_copies(root: &Path) -> Result<(), String> {
     const MARKER: &str = EXCLUDE_MARKER;
-    let info = root.join(".git/info");
+    let info = crate::git::common_dir(root).join("info");
     if fs::symlink_metadata(&info).is_err() {
         fs::create_dir(&info).map_err(|e| format!("cannot create .git/info: {e}"))?;
     }
@@ -376,7 +377,7 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
             fs::remove_file(&path).map_err(|e| format!("cannot remove {name} hook: {e}"))?;
         }
     }
-    let exclude = root.join(".git/info/exclude");
+    let exclude = crate::git::common_dir(root).join("info/exclude");
     if let Ok(text) = fs::read_to_string(&exclude) {
         let mut kept = Vec::new();
         let mut lines = text.lines().peekable();
@@ -391,8 +392,9 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
         if !rewritten.is_empty() { rewritten.push('\n'); }
         fs::write(&exclude, rewritten).map_err(|e| format!("cannot update .git/info/exclude: {e}"))?;
     }
-    for dir in [".git/transcrypt-v3", ".git/transcrypt-v3-staging"] {
-        let _ = fs::remove_dir(root.join(dir));
+    let _ = fs::remove_dir(crate::git::common_dir(root).join("transcrypt-v3"));
+    for dir in ["transcrypt-v3-staging", "transcrypt-v3-scratch"] {
+        let _ = fs::remove_dir(crate::git::git_dir(root).join(dir));
     }
     eprintln!("Removed transcrypt-v3 from this checkout; *.secret files stay encrypted.\n\
         WARNING: without the filter, a *.secret file you add now is committed as plaintext. To stop \
@@ -473,7 +475,7 @@ pub(crate) fn rekey(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), Str
 fn remove_merge_driver(root: &Path) {
     let _ = git(root, &["config", "--local", "--remove-section", "merge.transcrypt-v3"]);
     let _ = git(root, &["config", "--local", "--remove-section", "diff.transcrypt-v3"]);
-    let attributes = root.join(".git/info/attributes");
+    let attributes = crate::git::common_dir(root).join("info/attributes");
     if let Ok(text) = fs::read_to_string(&attributes) {
         let kept: Vec<&str> = text.lines().filter(|line| *line != MERGE_ATTRIBUTE).collect();
         let mut rewritten = kept.join("\n");

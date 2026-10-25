@@ -195,6 +195,15 @@ trusted state and is outside this POC.
   worktree config and the agent switched. Before the agent switch,
   `git reset` undoes it. Commits made before the rekey keep their records
   under the old config and passphrase.
+- **Worktrees.** The repository's shared Git directory
+  (`--git-common-dir`) holds the agent's session directory, the hooks and
+  `info/`. Each worktree's own Git directory holds its private staging and
+  scratch directories. The agent socket is bound and connected by its bare
+  name from inside the checked session directory, so deep paths never exceed
+  `sun_path`. `lock` first runs `flush` in every other existing worktree
+  (each in its own process). If any of them refuses, the agent keeps
+  running; otherwise `lock` flushes its own worktree and stops the agent.
+  Without an agent, `lock` succeeds only when no plaintext is left.
 - `uninstall`: `lock` if unlocked. Then refuse while any protected file
   holds anything but a v3 envelope, or an untracked `*.secret` exists.
   Remove `filter.transcrypt-v3.*`, the hooks v3 installed (if unchanged),

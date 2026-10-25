@@ -42,7 +42,7 @@ pub(crate) enum Operation {
 }
 
 fn directory(root: &Path) -> Result<PathBuf, String> {
-    let path = root.join(".git/transcrypt-v3");
+    let path = crate::git::common_dir(root).join("transcrypt-v3");
     let meta = fs::symlink_metadata(&path).map_err(|_| "no local v3 session directory; run unlock")?;
     if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 || meta.uid() != euid() {
         return Err("unsafe local v3 session directory; require a real 0700 directory owned by this user".into());
@@ -92,7 +92,7 @@ fn same_user(stream: &UnixStream) -> Result<(), String> {
 }
 
 fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
-    let path = root.join(".git/transcrypt-v3");
+    let path = crate::git::common_dir(root).join("transcrypt-v3");
     match fs::symlink_metadata(&path) {
         Ok(_) => {},
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -111,18 +111,17 @@ fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
 }
 
 /// Unix socket addresses are limited to ~104 (macOS) or 108 (Linux) bytes,
-/// which a deep repository path easily exceeds. Every v3 process runs with
-/// the repository root as its working directory, so the socket is bound and
-/// connected through this short relative address; ownership and permission
+/// which a deep repository path easily exceeds. The socket is bound and
+/// connected by its bare name from inside its (checked) directory; v3
+/// processes are single-threaded while they do so. Ownership and permission
 /// checks still use the absolute path.
-const SOCK_ADDR: &str = ".git/transcrypt-v3/session.sock";
-
-fn socket_addr(root: &Path) -> Result<&'static Path, String> {
-    let cwd = std::env::current_dir().map_err(|_| "cannot read working directory")?;
-    if cwd.canonicalize().ok() != root.canonicalize().ok() {
-        return Err("internal error: v3 must run from the repository root".into());
-    }
-    Ok(Path::new(SOCK_ADDR))
+fn at_socket<T>(root: &Path, f: impl FnOnce(&Path) -> io::Result<T>) -> Result<io::Result<T>, String> {
+    let dir = directory(root)?;
+    let previous = std::env::current_dir().map_err(|_| "cannot read working directory")?;
+    std::env::set_current_dir(&dir).map_err(|_| "cannot enter the session directory")?;
+    let result = f(Path::new(SOCK));
+    std::env::set_current_dir(&previous).map_err(|_| "cannot return to the repository root")?;
+    Ok(result)
 }
 
 fn socket(root: &Path) -> Result<PathBuf, String> {
@@ -159,7 +158,7 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
     }
     let path = socket(root)?;
     check_socket(&path)?;
-    let mut stream = UnixStream::connect(socket_addr(root)?).map_err(|_| "v3 credential agent is not running; run unlock")?;
+    let mut stream = at_socket(root, |p| UnixStream::connect(p))?.map_err(|_| "v3 credential agent is not running; run unlock")?;
     // Plaintext is about to be sent to, or accepted from, this peer.
     same_user(&stream)?;
     // Bound a broken local peer rather than hanging a Git operation forever.
@@ -194,7 +193,7 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), S
     match fs::symlink_metadata(&path) {
         Ok(meta) => {
             if !meta.file_type().is_socket() { return Err("unsafe existing session socket path".into()); }
-            if UnixStream::connect(socket_addr(root)?).is_ok() {
+            if at_socket(root, |p| UnixStream::connect(p))?.is_ok() {
                 return Err("already unlocked: an agent is running".into());
             }
             // A dead process may leave its socket inode; our 0700 parent is
@@ -322,7 +321,7 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
     io::stdin().read_exact(&mut key[..]).map_err(|_| "missing private startup key")?;
     authenticate_config(config, &key)?;
     let path = directory(root)?.join(SOCK);
-    let listener = UnixListener::bind(socket_addr(root)?).map_err(|e| format!("cannot bind private credential socket: {e}"))?;
+    let listener = at_socket(root, |p| UnixListener::bind(p))?.map_err(|e| format!("cannot bind private credential socket: {e}"))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .map_err(|_| "cannot secure session socket")?;
     let mut stopping = false;

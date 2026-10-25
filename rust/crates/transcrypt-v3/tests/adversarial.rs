@@ -1217,3 +1217,36 @@ fn unlock_and_lock_are_idempotent() {
     run(&repo, "git", &["checkout", "--", "a.secret"], None);
     run(&repo, bin(), &["lock"], None);
 }
+
+/// Linked worktrees share the repository's agent, hooks and drivers: one
+/// unlock decrypts every worktree, each with its own private staging, and
+/// commits made in a linked worktree are encrypted and verified.
+#[test]
+fn linked_worktrees_share_one_unlocked_session() {
+    let mut scratch = Scratch::new("worktree");
+    let repo = scratch.repo("repo");
+    let linked = scratch.root.join("linked");
+    git_with_umask(&repo, "022", &["worktree", "add", "-q", "-b", "feature", linked.to_str().unwrap()]);
+    assert_no_exposed_plaintext(&linked, "linked worktree checkout");
+    assert_eq!(fs::read(linked.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    fs::write(linked.join("dir/b.secret"), b"beta from the linked worktree\n").unwrap();
+    run(&linked, "git", &["commit", "-qam", "edit in linked worktree"], None);
+    assert!(staged(&linked, "dir/b.secret").starts_with(b"TV3F\0\x01"));
+    run(&linked, bin(), &["verify-index"], None);
+    run(&linked, bin(), &["status"], None);
+    // Locking from one worktree flushes every worktree, then stops the
+    // shared agent; a plaintext edit in any of them refuses the lock.
+    fs::write(linked.join("a.secret"), b"unsaved edit\n").unwrap();
+    run_fails(&repo, bin(), &["lock"], None);
+    assert_eq!(fs::read(linked.join("a.secret")).unwrap(), b"unsaved edit\n");
+    run(&linked, "git", &["checkout", "--", "a.secret"], None);
+    run(&repo, bin(), &["lock"], None);
+    assert!(fs::read(linked.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+    assert!(fs::read(repo.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+    run(&linked, bin(), &["lock"], None);
+    run(&linked, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(linked.join("dir/b.secret")).unwrap(), b"beta from the linked worktree\n");
+    run(&repo, bin(), &["hydrate"], None);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    scratch.repos.push(linked);
+}

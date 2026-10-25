@@ -2,7 +2,6 @@
 //! index, tree and diff listings parsed by the verified core.
 
 use std::{
-    fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -113,19 +112,41 @@ pub(crate) fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> R
     run_bounded(command, Some(input.to_vec()), GIT_OUTPUT_LIMIT)
 }
 
+/// This worktree's Git directory and the one shared by all worktrees of the
+/// repository (the same directory for an ordinary checkout).
+struct GitDirs {
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+}
+
+static GIT_DIRS: std::sync::OnceLock<GitDirs> = std::sync::OnceLock::new();
+
+/// This worktree's own Git directory (`.git`, or `.git/worktrees/<name>`
+/// for a linked worktree): private staging and scratch files go here.
+pub(crate) fn git_dir(root: &Path) -> PathBuf {
+    GIT_DIRS.get().map_or_else(|| root.join(".git"), |d| d.git_dir.clone())
+}
+
+/// The Git directory shared by all worktrees: hooks, `info/`, and the key
+/// agent, so one `unlock` serves every worktree.
+pub(crate) fn common_dir(root: &Path) -> PathBuf {
+    GIT_DIRS.get().map_or_else(|| root.join(".git"), |d| d.common_dir.clone())
+}
+
+/// The worktree root, after recording its Git directories.
 pub(crate) fn repo_root() -> Result<PathBuf, String> {
     let mut command = git_command(None);
-    command.args(["rev-parse", "--show-toplevel"]);
+    command.args(["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"]);
     let bytes = output(command)?;
-    let root = PathBuf::from(String::from_utf8(bytes).map_err(|_| "repository path is not UTF-8")?.trim());
-    if !root.is_dir() {
-        return Err("Git repository root is not a directory".into());
+    let text = String::from_utf8(bytes).map_err(|_| "repository path is not UTF-8")?;
+    let [root, git_dir, common_dir] = text.lines().collect::<Vec<_>>()[..] else {
+        return Err("not inside a Git worktree".into());
+    };
+    let (root, git_dir, common_dir) = (PathBuf::from(root), PathBuf::from(git_dir), PathBuf::from(common_dir));
+    if !root.is_dir() || !git_dir.is_dir() || !common_dir.is_dir() {
+        return Err("Git repository directories are missing".into());
     }
-    let git_dir = root.join(".git");
-    let meta = fs::symlink_metadata(&git_dir).map_err(|_| "only normal Git checkouts with a .git directory are supported")?;
-    if !meta.is_dir() || meta.file_type().is_symlink() {
-        return Err("linked worktrees and symlinked .git directories are not yet supported".into());
-    }
+    let _ = GIT_DIRS.set(GitDirs { git_dir, common_dir });
     Ok(root)
 }
 

@@ -59,7 +59,7 @@ threat model), **Fixed**, or **Open** (should be addressed before a release).
 | Plaintext file permissions | Git never writes plaintext readable by others: smudge releases plaintext only under a private umask and otherwise leaves ciphertext for the hooks/`hydrate` to publish at 0600 (H-16). Files the user creates follow their umask until `hydrate` makes them private; `status` warns. | Fixed (residual: user-created files) |
 | Hook bypass | `--no-verify` commits, merges and rebases are now caught by the `pre-push` audit; `git push --no-verify` and checkouts without hooks need a server-side `audit` (H-3). The clean filter (`filter.required=true`) still encrypts everything it processes. | Mitigated; residual A13 |
 | Rollback | An adversary controlling history can restore older valid records. No freshness state. | Accepted (non-goal) |
-| Linked worktrees, submodules, `.git` files | Refused (`repo_root`). | Accepted (unsupported) |
+| Linked worktrees, submodules, `.git` files | Linked worktrees are supported (H-26): one agent per repository, private staging per worktree, and `lock` flushes every worktree before stopping the agent. Submodules are unsupported. | Fixed (worktrees) |
 
 ## 5. Hardening campaign, second pass (2026-10-25)
 
@@ -104,6 +104,8 @@ regression test that fails on the old implementation.
 | H-24 | Medium (usability) | **Secrets could not be merged.** Concurrent edits produced a binary conflict with only "ours" visible. A deleted or sparse protected file, or an unmerged index, made `hydrate`, `unlock`, `lock` and `status` fail for every file. | A merge driver (decrypts authenticated inputs, merges in a private directory, re-encrypts); conflict-aware `hydrate`/`status`; missing files skipped. Tests `secrets_merge_as_plaintext` (clean and conflicting merges under umask 022 and 077) and `deleted_protected_files_do_not_block_lock_or_hydrate`. |
 
 | H-25 | Low (usability) | `git diff` of a secret showed only "Binary files differ". The Bash approach (a textconv cache) keeps plaintext in `refs/notes`, and textconv cannot authenticate path-bound records (it gets no full path). | An external diff driver: each side is authenticated at its own path, plaintext stays in the private scratch directory only while `diff` runs, and nothing is cached. Test `git_diff_shows_decrypted_changes`. |
+
+| H-26 | Medium (usability) | `git worktree add` in a v3 repository failed outright (the filter refused linked worktrees, so Git aborted). `unlock`/`lock` were not idempotent: a second `unlock` failed, and `lock` without an agent failed even with no plaintext left. | Worktree support. In a multi-worktree repository, `lock` refuses while any worktree holds an edit, and stops the agent only after flushing all of them. Idempotent `unlock`/`lock`. Tests `linked_worktrees_share_one_unlocked_session`, `unlock_and_lock_are_idempotent`. |
 
 Re-attacking the earlier fixes found no further exploit:
 - **Pathspec staging:** only `update-index -z --stdin` paths remain, and they come from the verified snapshot.

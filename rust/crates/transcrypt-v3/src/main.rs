@@ -159,10 +159,11 @@ fn run() -> Result<(), String> {
             pre_push(&root, args.get(1).map(OsString::as_os_str))
         },
         "hydrate" if args.len() == 2 && args[1] == "--auto" => auto_hydrate(&root),
-        "lock" | "verify-index" | "hydrate" | "serve" | "uninstall" => {
+        "lock" | "verify-index" | "hydrate" | "serve" | "uninstall" | "flush" => {
             if args.len() != 1 { return Err("unexpected operation arguments".into()); }
             match action {
                 "lock" => lock(&root),
+                "flush" => flush(&root),
                 "verify-index" => verify_index_command(&root),
                 "hydrate" => hydrate(&root).map(|n| eprintln!("Hydration complete: {n} file(s) decrypted.")),
                 "serve" => session::serve(&root, &load_config(&root)?),
@@ -349,6 +350,44 @@ fn lock(root: &Path) -> Result<(), String> {
             .map(|_| eprintln!("Already locked."))
             .map_err(|e| format!("{e}, but no agent runs: unlock, then lock"));
     }
+    // The agent serves every worktree of this repository: flush them all
+    // before stopping it. Any refusal leaves the agent running.
+    let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
+    for other in other_worktrees(root)? {
+        let status = std::process::Command::new(&bin).arg("flush").current_dir(&other).status()
+            .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?;
+        if !status.success() {
+            return Err(format!("worktree {} could not be locked; the agent keeps running", other.display()));
+        }
+    }
+    flush(root)?;
+    session::stop(root, &config)?;
+    eprintln!("Locked: tracked *.secret files flushed and the in-memory credential agent stopped. This does not securely erase historical plaintext backups.");
+    Ok(())
+}
+
+/// The other worktrees of this repository (from `git worktree list`), that
+/// still exist on disk.
+fn other_worktrees(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let listing = String::from_utf8(git(root, &["worktree", "list", "--porcelain"])?)
+        .map_err(|_| "worktree paths must be UTF-8")?;
+    let this = root.canonicalize().map_err(|_| "cannot resolve the repository root")?;
+    let mut others = Vec::new();
+    for block in listing.split("\n\n") {
+        let mut lines = block.lines();
+        let Some(path) = lines.next().and_then(|l| l.strip_prefix("worktree ")) else { continue };
+        if block.lines().any(|l| l == "bare") { continue; }
+        let path = PathBuf::from(path);
+        if path.canonicalize().is_ok_and(|p| p != this) {
+            others.push(path);
+        }
+    }
+    Ok(others)
+}
+
+/// Replace this worktree's plaintext secrets by their committed records,
+/// leaving the agent running (`lock` stops it once every worktree is done).
+fn flush(root: &Path) -> Result<(), String> {
     let staging = staging_dir(root)?;
     // Every tracked secret must match the encrypted index BEFORE any worktree rewrite.
     // If anything is dirty or untracked, do not remove credentials.
@@ -397,8 +436,6 @@ fn lock(root: &Path) -> Result<(), String> {
     // record unchanged), so a locked checkout is clean and `git commit -a`
     // does not need the key.
     reindex(root, &verified.listing, &present)?;
-    session::stop(root, &config)?;
-    eprintln!("Locked: tracked *.secret files flushed and the in-memory credential agent stopped. This does not securely erase historical plaintext backups.");
     Ok(())
 }
 
