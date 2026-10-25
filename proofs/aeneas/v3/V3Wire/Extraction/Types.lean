@@ -36,4 +36,61 @@ structure Config where
   salt : Array Std.U8 32#usize
   tag : Array Std.U8 16#usize
 
+/-- [transcrypt_v3_core::Refusal]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 177:0-200:1
+    Visibility: public -/
+@[discriminant isize]
+inductive Refusal where
+| Path : Refusal
+| Size : Refusal
+| Config : Refusal
+| ConfigAuthentication : Refusal
+| Envelope : Refusal
+| ConfigMismatch : Refusal
+| Authentication : Refusal
+| DoubleEncryption : Refusal
+| Primitive : Refusal
+| UnexpectedWorktree : Refusal
+| Request : Refusal
+
+/-- Trait declaration: [transcrypt_v3_core::V3Primitives]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 207:0-223:1
+    Visibility: public -/
+structure V3Primitives (Self : Type) where
+  seal_config : Self → Array Std.U8 39#usize → Array Std.U8 16#usize →
+    RustM (Bool × (Array Std.U8 16#usize))
+  open_config : Self → Array Std.U8 39#usize → Array Std.U8 16#usize →
+    RustM Bool
+  seal_file : Self → Array Std.U8 55#usize → Slice Std.U8 → Slice Std.U8
+    → Slice Std.U8 → RustM (Bool × (Slice Std.U8))
+  open_file : Self → Array Std.U8 55#usize → Slice Std.U8 → Slice Std.U8
+    → Slice Std.U8 → RustM (Bool × (Slice Std.U8))
+  config_id : Self → Array Std.U8 55#usize → RustM (Array Std.U8 16#usize)
+
+/-- [transcrypt_v3_core::HydrateAction]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 400:0-405:1
+    Visibility: public -/
+@[discriminant isize]
+inductive HydrateAction where
+| Publish : HydrateAction
+| Keep : HydrateAction
+
+/-- [transcrypt_v3_core::LockAction]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 421:0-426:1
+    Visibility: public -/
+@[discriminant isize]
+inductive LockAction where
+| Keep : LockAction
+| Flush : LockAction
+
+/-- [transcrypt_v3_core::AgentOp]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 446:0-451:1
+    Visibility: public -/
+@[discriminant isize]
+inductive AgentOp where
+| Ping : AgentOp
+| Encrypt : AgentOp
+| Decrypt : AgentOp
+| Stop : AgentOp
+
 end transcrypt_v3_core

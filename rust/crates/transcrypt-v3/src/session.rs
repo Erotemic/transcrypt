@@ -18,12 +18,12 @@ use std::{
     time::Duration,
 };
 
-use transcrypt_v3::{authenticate_config, decrypt_file, encrypt_file, validate_protected_path, SecretKey, KEY_SIZE, MAX_FILE, MAX_PATH};
-use transcrypt_v3_core::{CONFIG_LEN, FILE_MIN_LEN};
+use transcrypt_v3::{authenticate_config, config_array, decrypt_file, encrypt_file, SecretKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
+use transcrypt_v3_core::{authorize_agent_request, AgentOp, CONFIG_LEN};
 use zeroize::Zeroizing;
 
 const SOCK: &str = "session.sock";
-const WIRE_LIMIT: usize = MAX_FILE + FILE_MIN_LEN;
+const WIRE_LIMIT: usize = MAX_RECORD;
 const MAX_RESPONSE: usize = WIRE_LIMIT;
 
 #[derive(Clone, Copy)]
@@ -183,7 +183,7 @@ pub(crate) fn stop(root: &Path, config: &[u8]) -> Result<(), String> {
     Err("agent acknowledged shutdown but socket still exists".into())
 }
 
-fn transaction(stream: &mut UnixStream, config: &[u8], key: &SecretKey) -> Result<bool, String> {
+fn transaction(stream: &mut UnixStream, config: &[u8; CONFIG_LEN], key: &SecretKey) -> Result<bool, String> {
     let mut op = [0u8; 1];
     stream.read_exact(&mut op).map_err(|_| "incomplete agent operation")?;
     let mut supplied_config = [0u8; CONFIG_LEN];
@@ -197,25 +197,21 @@ fn transaction(stream: &mut UnixStream, config: &[u8], key: &SecretKey) -> Resul
     let mut size_bytes = [0u8; 4];
     stream.read_exact(&mut size_bytes).map_err(|_| "incomplete agent length")?;
     let size = u32::from_be_bytes(size_bytes) as usize;
-    if size > WIRE_LIMIT { return Err("oversized agent payload".into()); }
-    if supplied_config != config { return Err("active agent's public config differs from checkout".into()); }
+    // The verified core decides, before the body is read, whether this
+    // request is permitted under the configuration authenticated at startup.
+    let action = authorize_agent_request(op[0], &supplied_config, config, &path_bytes, size)
+        .map_err(|_| "agent request refused: config, path, size or opcode not permitted")?;
     let mut body = Zeroizing::new(vec![0u8; size]);
     stream.read_exact(&mut body).map_err(|_| "incomplete agent body")?;
-    let result = match op[0] {
-        b'P' if size == 0 && path_bytes.is_empty() => Ok(Vec::new()),
-        b'E' => {
-            validate_protected_path(&path_bytes)?;
-            encrypt_file(config, key, &path_bytes, &body)
-        },
-        b'D' => {
-            validate_protected_path(&path_bytes)?;
-            decrypt_file(config, key, &path_bytes, &body)
-        },
-        b'X' if size == 0 && path_bytes.is_empty() => {
+    let result = match action {
+        AgentOp::Ping => Ok(Vec::new()),
+        AgentOp::Encrypt => encrypt_file(config, key, &path_bytes, &body),
+        AgentOp::Decrypt => decrypt_file(config, key, &path_bytes, &body)
+            .map(|mut plaintext| std::mem::take(&mut *plaintext)),
+        AgentOp::Stop => {
             reply(stream, Ok(Vec::new())).map_err(|_| "cannot acknowledge agent shutdown")?;
             return Ok(true);
         },
-        _ => Err("unsupported agent operation".into()),
     };
     reply(stream, result).map_err(|_| "cannot send agent response")?;
     Ok(false)
@@ -223,6 +219,7 @@ fn transaction(stream: &mut UnixStream, config: &[u8], key: &SecretKey) -> Resul
 
 /// Internal child entrypoint. Runs until explicit lock or a process shutdown.
 pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
+    let config = config_array(config)?;
     let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
     io::stdin().read_exact(&mut key[..]).map_err(|_| "missing private startup key")?;
     authenticate_config(config, &key)?;

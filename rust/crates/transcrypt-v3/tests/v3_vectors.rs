@@ -25,7 +25,7 @@ fn authenticated_vectors_and_strict_parsing() {
         assert!(parse_file_header(&record).is_ok());
         let key = unlock_config(b"correct horse battery staple long secret", &config).unwrap();
         assert_eq!(encrypt_file(&config, &key, &path, &plaintext).unwrap(), record, "{}", columns[0]);
-        assert_eq!(decrypt_file(&config, &key, &path, &record).unwrap(), plaintext, "{}", columns[0]);
+        assert_eq!(decrypt_file(&config, &key, &path, &record).unwrap().to_vec(), plaintext, "{}", columns[0]);
         let mut forged = record.clone();
         let last = forged.len() - 1;
         forged[last] ^= 1;

@@ -1,37 +1,28 @@
-//! Exact v3 cryptographic operations: Argon2id and deterministic AES-256-CMAC-SIV.
-//! Assumes RustCrypto primitive correctness; protocol parsing lives in `transcrypt-v3-core`.
-//! This is a research prototype, not an audited security release.
+//! Exact v3 cryptographic primitives: Argon2id and deterministic AES-256-CMAC-SIV.
+//!
+//! This crate only *implements* the `V3Primitives` trait of
+//! `transcrypt-v3-core` and derives keys. Every protocol decision (path policy,
+//! configuration authentication, envelope, configuration binding, release of
+//! plaintext) is made by the Aeneas-extracted core functions it calls.
+//! Assumes RustCrypto primitive correctness. Research prototype, not audited.
 
 use aes_siv::{siv::Aes256Siv, KeyInit};
 use argon2::{Algorithm, Argon2, Params, Version};
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
+pub use transcrypt_v3_core::{MAX_FILE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
-    encode_config, encode_config_prefix, encode_file_header, parse_config, parse_file_header,
-    Config, CONFIG_LEN, FILE_HEADER_LEN, FILE_MIN_LEN, ID_LEN, SALT_LEN, TAG_LEN,
+    Refusal, V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_MIN_LEN, ID_LEN, SALT_LEN, TAG_LEN,
 };
 use zeroize::Zeroizing;
 
-pub const MAX_FILE: usize = 16 * 1024 * 1024;
-/// Maximum raw Git relative pathname length transported by the credential agent.
-pub const MAX_PATH: usize = 4096;
-
 /// A canonical Git-relative name is part of the authenticated cryptographic
-/// context. In particular, `foo/../bar.secret`, absolute paths, duplicate
-/// separators, NUL and paths without the configured protection suffix are
-/// rejected. Git's `%f` and NUL-delimited index entries use the *same* bytes.
-/// This policy deliberately has no Unicode normalization or filesystem lookup.
+/// context. The policy itself is `transcrypt_v3_core::is_canonical_protected_path`.
 pub fn validate_protected_path(path: &[u8]) -> Result<(), String> {
-    if path.is_empty() || path.len() > MAX_PATH || path.contains(&0) || path.starts_with(b"/") {
-        return Err("invalid protected Git-relative path".into());
+    if transcrypt_v3_core::is_canonical_protected_path(path) {
+        Ok(())
+    } else {
+        Err("v3 requires a canonical Git-relative *.secret path".into())
     }
-    if path.split(|b| *b == b'/').any(|part| part.is_empty() || part == b"." || part == b"..") {
-        return Err("noncanonical protected Git-relative path".into());
-    }
-    if !path.rsplit(|b| *b == b'/').next().unwrap_or(path).ends_with(b".secret") {
-        return Err("v3 requires a *.secret Git path".into());
-    }
-    Ok(())
 }
 pub const ARGON_MEMORY_KIB: u32 = 65_536;
 pub const ARGON_PASSES: u32 = 3;
@@ -55,37 +46,110 @@ pub fn derive_key(password: &[u8], salt: &[u8; SALT_LEN]) -> Result<SecretKey, S
     Ok(key)
 }
 
-fn siv(key: &[u8; KEY_SIZE]) -> Result<Aes256Siv, String> {
-    Aes256Siv::new_from_slice(key).map_err(|_| "AES-SIV key rejected".into())
+/// RustCrypto realization of the core's cryptographic contract under one key.
+pub struct Keyed<'a> {
+    key: &'a [u8; KEY_SIZE],
 }
 
-fn config_verifier(key: &[u8; KEY_SIZE], salt: &[u8; SALT_LEN]) -> Result<[u8; TAG_LEN], String> {
-    let prefix = encode_config_prefix(salt);
-    let headers: [&[u8]; 2] = [CONFIG_DOMAIN, &prefix];
-    let ciphertext = siv(key)?.encrypt(headers, &[])
-        .map_err(|_| "cannot compute configuration authenticator")?;
-    ciphertext.try_into().map_err(|_| "wrong AES-SIV tag size".into())
+impl<'a> Keyed<'a> {
+    pub fn new(key: &'a [u8; KEY_SIZE]) -> Self {
+        Keyed { key }
+    }
+
+    fn siv(&self) -> Option<Aes256Siv> {
+        Aes256Siv::new_from_slice(&self.key[..]).ok()
+    }
+}
+
+impl V3Primitives for Keyed<'_> {
+    fn seal_config(&self, prefix: &[u8; CONFIG_PREFIX_LEN], tag: &mut [u8; TAG_LEN]) -> bool {
+        let headers: [&[u8]; 2] = [CONFIG_DOMAIN, prefix];
+        match self.siv().map(|mut siv| siv.encrypt(headers, &[])) {
+            Some(Ok(sealed)) if sealed.len() == TAG_LEN => {
+                tag.copy_from_slice(&sealed);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn open_config(&self, prefix: &[u8; CONFIG_PREFIX_LEN], tag: &[u8; TAG_LEN]) -> bool {
+        // The tag is the AES-SIV encryption of the empty plaintext, so
+        // verifying it is opening it; the library compares in constant time.
+        let headers: [&[u8]; 2] = [CONFIG_DOMAIN, prefix];
+        matches!(self.siv().map(|mut siv| siv.decrypt(headers, tag)), Some(Ok(pt)) if pt.is_empty())
+    }
+
+    fn seal_file(&self, config: &[u8; CONFIG_LEN], path: &[u8], plaintext: &[u8], out: &mut [u8]) -> bool {
+        let headers: [&[u8]; 3] = [FILE_DOMAIN, config, path];
+        match self.siv().map(|mut siv| siv.encrypt(headers, plaintext)) {
+            Some(Ok(sealed)) if sealed.len() == out.len() => {
+                out.copy_from_slice(&sealed);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn open_file(&self, config: &[u8; CONFIG_LEN], path: &[u8], sealed: &[u8], out: &mut [u8]) -> bool {
+        let headers: [&[u8]; 3] = [FILE_DOMAIN, config, path];
+        match self.siv().map(|mut siv| siv.decrypt(headers, sealed)) {
+            Some(Ok(plaintext)) => {
+                let plaintext = Zeroizing::new(plaintext);
+                if plaintext.len() != out.len() {
+                    return false;
+                }
+                out.copy_from_slice(&plaintext);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn config_id(&self, config: &[u8; CONFIG_LEN]) -> [u8; ID_LEN] {
+        config_id(config)
+    }
+}
+
+fn refusal(r: Refusal) -> String {
+    match r {
+        Refusal::Path => "v3 requires a canonical Git-relative *.secret path",
+        Refusal::Size => "input exceeds the 16 MiB v3 limit or has an invalid length",
+        Refusal::Config => "invalid public v3 configuration",
+        Refusal::ConfigAuthentication => "incorrect credentials or tampered public v3 configuration",
+        Refusal::Envelope => "invalid v3 ciphertext envelope",
+        Refusal::ConfigMismatch => "v3 ciphertext belongs to different public configuration",
+        Refusal::Authentication => "v3 ciphertext authentication failed",
+        Refusal::DoubleEncryption => "input already is v3 ciphertext; refusing double encryption",
+        Refusal::Primitive => "AES-SIV primitive failed",
+        Refusal::UnexpectedWorktree => "protected worktree differs from staged ciphertext and its plaintext",
+        Refusal::Request => "unsupported agent request",
+    }
+    .into()
+}
+
+/// Exact fixed-length view of a public configuration.
+pub fn config_array(config_bytes: &[u8]) -> Result<&[u8; CONFIG_LEN], String> {
+    config_bytes.try_into().map_err(|_| "invalid public v3 configuration".into())
 }
 
 pub fn initialize_config(password: &[u8], salt: &[u8; SALT_LEN])
     -> Result<([u8; CONFIG_LEN], SecretKey), String>
 {
     let key = derive_key(password, salt)?;
-    let tag = config_verifier(&key, salt)?;
-    Ok((encode_config(&Config { salt: *salt, tag }), key))
+    let config = transcrypt_v3_core::initialize_config(&Keyed::new(&key), salt).map_err(refusal)?;
+    Ok((config, key))
 }
 
 pub fn authenticate_config(config_bytes: &[u8], key: &[u8; KEY_SIZE]) -> Result<(), String> {
-    let config = parse_config(config_bytes).map_err(|_| "invalid public v3 configuration")?;
-    let expect = config_verifier(key, &config.salt)?;
-    if !bool::from(expect.ct_eq(&config.tag)) {
-        return Err("incorrect credentials or tampered public v3 configuration".into());
-    }
-    Ok(())
+    transcrypt_v3_core::authenticate_config(&Keyed::new(key), config_array(config_bytes)?)
+        .map(|_| ())
+        .map_err(refusal)
 }
 
 pub fn unlock_config(password: &[u8], config_bytes: &[u8]) -> Result<SecretKey, String> {
-    let config = parse_config(config_bytes).map_err(|_| "invalid public v3 configuration")?;
+    let config = transcrypt_v3_core::parse_config(config_bytes)
+        .map_err(|_| "invalid public v3 configuration")?;
     let key = derive_key(password, &config.salt)?;
     authenticate_config(config_bytes, &key)?;
     Ok(key)
@@ -102,38 +166,24 @@ pub fn encrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], plai
     -> Result<Vec<u8>, String>
 {
     if plaintext.len() > MAX_FILE {
-        return Err("input exceeds 16 MiB limit".into());
+        return Err(refusal(Refusal::Size));
     }
-    validate_protected_path(path)?;
-    authenticate_config(config_bytes, key)?;
-    let headers: [&[u8]; 3] = [FILE_DOMAIN, config_bytes, path];
-    let encrypted = siv(key)?.encrypt(headers, plaintext)
-        .map_err(|_| "AES-SIV encryption failed")?;
-    let mut out = Vec::with_capacity(FILE_HEADER_LEN + encrypted.len());
-    out.extend_from_slice(&encode_file_header(&config_id(config_bytes)));
-    out.extend_from_slice(&encrypted);
+    let mut out = vec![0u8; plaintext.len() + FILE_MIN_LEN];
+    transcrypt_v3_core::seal_record(&Keyed::new(key), config_array(config_bytes)?, path, plaintext, &mut out)
+        .map_err(refusal)?;
     Ok(out)
 }
 
 pub fn decrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], record: &[u8])
-    -> Result<Vec<u8>, String>
+    -> Result<Zeroizing<Vec<u8>>, String>
 {
-    if record.len() > MAX_FILE + FILE_MIN_LEN {
-        return Err("ciphertext exceeds 16 MiB limit".into());
+    if record.len() > MAX_RECORD {
+        return Err(refusal(Refusal::Size));
     }
-    validate_protected_path(path)?;
-    authenticate_config(config_bytes, key)?;
-    let record_id = parse_file_header(record).map_err(|_| "invalid v3 ciphertext envelope")?;
-    if !bool::from(record_id.ct_eq(&config_id(config_bytes))) {
-        return Err("v3 ciphertext belongs to different public configuration".into());
-    }
-    let headers: [&[u8]; 3] = [FILE_DOMAIN, config_bytes, path];
-    let plaintext = siv(key)?.decrypt(headers, &record[FILE_HEADER_LEN..])
-        .map_err(|_| "v3 ciphertext authentication failed")?;
-    if plaintext.len() > MAX_FILE {
-        return Err("decrypted data exceeds 16 MiB limit".into());
-    }
-    Ok(plaintext)
+    let mut out = Zeroizing::new(vec![0u8; record.len().saturating_sub(FILE_MIN_LEN)]);
+    transcrypt_v3_core::open_record(&Keyed::new(key), config_array(config_bytes)?, path, record, &mut out)
+        .map_err(refusal)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -155,7 +205,7 @@ mod tests {
             let ct1 = encrypt_file(&config, &key, b"safe/item.secret", plaintext).unwrap();
             let ct2 = encrypt_file(&config, &key, b"safe/item.secret", plaintext).unwrap();
             assert_eq!(ct1, ct2);
-            assert_eq!(decrypt_file(&config, &key, b"safe/item.secret", &ct1).unwrap(), plaintext);
+            assert_eq!(&decrypt_file(&config, &key, b"safe/item.secret", &ct1).unwrap()[..], plaintext);
             let mut corrupt = ct1.clone();
             let last = corrupt.len() - 1;
             corrupt[last] ^= 1;
@@ -184,7 +234,7 @@ mod tests {
         let different = encrypt_file(&config, &key, b"vault/b.secret", b"identical").unwrap();
         assert_eq!(original, repeated, "Git determinism must be preserved within a path");
         assert_ne!(original, different, "distinct Git paths must use distinct SIV AD");
-        assert_eq!(decrypt_file(&config, &key, b"vault/a.secret", &original).unwrap(), b"identical");
+        assert_eq!(&decrypt_file(&config, &key, b"vault/a.secret", &original).unwrap()[..], b"identical");
         assert!(decrypt_file(&config, &key, b"vault/b.secret", &original).is_err());
         assert!(decrypt_file(&config, &key, b"a.secret", &original).is_err());
         assert!(decrypt_file(&config, &key, b"vault/a.secret", &different).is_err());
@@ -195,7 +245,7 @@ mod tests {
         let (config, key) = fixture();
         for path in [b"a b.secret".as_slice(), b"a'quote.secret", b"dir/new\nline.secret", b"raw/\xff.secret"] {
             let record = encrypt_file(&config, &key, path, b"payload").unwrap();
-            assert_eq!(decrypt_file(&config, &key, path, &record).unwrap(), b"payload");
+            assert_eq!(&decrypt_file(&config, &key, path, &record).unwrap()[..], b"payload");
         }
         for path in [b"".as_slice(), b"absolute", b"/root.secret", b"../bad.secret", b"x/../bad.secret", b"./x.secret", b"x//y.secret", b"x/./y.secret", b"x.secret/", b"evil\0.secret"] {
             assert!(validate_protected_path(path).is_err(), "accepted {:?}", path);

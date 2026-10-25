@@ -151,6 +151,383 @@ pub fn parse_file_header(input: &[u8]) -> Result<[u8; ID_LEN], FormatError> {
     decode_file_header_exact(&header)
 }
 
+// ---------------------------------------------------------------------------
+// Protocol decision core.
+//
+// Everything below is also extracted by Charon/Aeneas. The effectful adapter
+// (`transcrypt-v3`) supplies cryptographic primitives through `V3Primitives`
+// and performs Git/filesystem I/O; every *decision* about whether bytes may
+// be sealed, released, published or flushed is made here, so the adapter
+// cannot skip a gate. Loops are plain bounded `while` loops for extraction.
+// ---------------------------------------------------------------------------
+
+/// Largest plaintext accepted by any v3 operation (16 MiB).
+pub const MAX_FILE: usize = 16 * 1024 * 1024;
+/// Largest canonical Git-relative pathname accepted as associated data.
+pub const MAX_PATH: usize = 4096;
+/// Largest record or agent body: a maximal plaintext plus its envelope.
+pub const MAX_RECORD: usize = MAX_FILE + FILE_MIN_LEN;
+/// Protected Git paths are exactly those ending in this suffix.
+pub const PROTECTED_SUFFIX: [u8; 7] = *b".secret";
+/// Git `check-attr -z` output following each path: `NUL filter NUL transcrypt-v3 NUL`.
+pub const FILTER_ATTR_SUFFIX: [u8; 22] = *b"\0filter\0transcrypt-v3\0";
+
+/// Every reason the protocol core refuses an operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Path is not a canonical protected Git-relative pathname.
+    Path,
+    /// Input, output buffer or record exceeds or mismatches a size bound.
+    Size,
+    /// Public configuration is structurally malformed.
+    Config,
+    /// Configuration tag did not verify: wrong passphrase or tampering.
+    ConfigAuthentication,
+    /// Record envelope is malformed.
+    Envelope,
+    /// Record belongs to a different public configuration.
+    ConfigMismatch,
+    /// Record failed AES-SIV authentication under this config and path.
+    Authentication,
+    /// Clean input already is a v3 record; refuse double encryption.
+    DoubleEncryption,
+    /// The sealing primitive reported failure.
+    Primitive,
+    /// A worktree file is neither the staged record nor its plaintext.
+    UnexpectedWorktree,
+    /// Agent request is malformed or not permitted.
+    Request,
+}
+
+/// The cryptographic boundary. Implementations must realize exactly the
+/// primitives of `docs/verification/specs/V3-AUTHENTICATED-P0.md`:
+/// deterministic RFC 5297 AES-256-CMAC-SIV under one derived key, and a
+/// keyless SHA-256 truncation. Their correctness and security are trusted
+/// assumptions; the Lean development states them as an explicit contract.
+pub trait V3Primitives {
+    /// Write `AES-SIV(K).encrypt("", [CONFIG_DOMAIN, prefix])`, i.e. the
+    /// 16-byte tag, into `tag`.
+    fn seal_config(&self, prefix: &[u8; CONFIG_PREFIX_LEN], tag: &mut [u8; TAG_LEN]) -> bool;
+    /// Verify `tag` as the AES-SIV encryption of the empty plaintext under
+    /// `[CONFIG_DOMAIN, prefix]`.
+    fn open_config(&self, prefix: &[u8; CONFIG_PREFIX_LEN], tag: &[u8; TAG_LEN]) -> bool;
+    /// Write `AES-SIV(K).encrypt(plaintext, [FILE_DOMAIN, config, path])`
+    /// (tag then ciphertext) into `out`, whose length is `plaintext.len() + TAG_LEN`.
+    fn seal_file(&self, config: &[u8; CONFIG_LEN], path: &[u8], plaintext: &[u8], out: &mut [u8]) -> bool;
+    /// Authenticate and decrypt `sealed` under `[FILE_DOMAIN, config, path]`
+    /// into `out`, whose length is `sealed.len() - TAG_LEN`. Returns false,
+    /// and must not be trusted to leave `out` meaningful, on failure.
+    fn open_file(&self, config: &[u8; CONFIG_LEN], path: &[u8], sealed: &[u8], out: &mut [u8]) -> bool;
+    /// `SHA-256(config)[0..16]`; keyless public discriminator.
+    fn config_id(&self, config: &[u8; CONFIG_LEN]) -> [u8; ID_LEN];
+}
+
+/// Byte-string equality by explicit comparison of every position.
+pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// A Git path is protected iff it ends in `.secret`. Because the suffix has
+/// no `/`, this is the same as the basename ending in `.secret`, which is
+/// also what Git's `*.secret` attribute pattern matches.
+pub fn is_protected_path(path: &[u8]) -> bool {
+    let n = path.len();
+    if n < PROTECTED_SUFFIX.len() {
+        return false;
+    }
+    let start = n - PROTECTED_SUFFIX.len();
+    let mut k = 0;
+    while k < PROTECTED_SUFFIX.len() {
+        if path[start + k] != PROTECTED_SUFFIX[k] {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
+/// A path component `path[start..end]` is acceptable iff it is nonempty and
+/// neither `.` nor `..`.
+fn component_ok(path: &[u8], start: usize, end: usize) -> bool {
+    let len = end - start;
+    if len == 0 {
+        return false;
+    }
+    if len == 1 && path[start] == b'.' {
+        return false;
+    }
+    !(len == 2 && path[start] == b'.' && path[start + 1] == b'.')
+}
+
+/// The authenticated-path policy: nonempty, at most `MAX_PATH` bytes, no NUL,
+/// every `/`-separated component nonempty and neither `.` nor `..` (so no
+/// absolute paths, duplicate or trailing separators), and protected. Raw
+/// bytes are authoritative; there is no Unicode or filesystem normalization.
+pub fn is_canonical_protected_path(path: &[u8]) -> bool {
+    let n = path.len();
+    if n == 0 || n > MAX_PATH {
+        return false;
+    }
+    let mut ok = true;
+    let mut start = 0;
+    let mut i = 0;
+    while ok && i <= n {
+        if i == n || path[i] == b'/' {
+            ok = component_ok(path, start, i);
+            start = i + 1;
+        } else if path[i] == 0 {
+            ok = false;
+        }
+        i += 1;
+    }
+    ok && is_protected_path(path)
+}
+
+/// Create the public configuration for a freshly derived key and salt.
+pub fn initialize_config<P: V3Primitives>(primitives: &P, salt: &[u8; SALT_LEN]) -> Result<[u8; CONFIG_LEN], Refusal> {
+    let prefix = encode_config_prefix(salt);
+    let mut tag = [0u8; TAG_LEN];
+    if !primitives.seal_config(&prefix, &mut tag) {
+        return Err(Refusal::Primitive);
+    }
+    Ok(encode_config(&Config { salt: *salt, tag }))
+}
+
+/// Parse and authenticate the public configuration under the held key.
+pub fn authenticate_config<P: V3Primitives>(primitives: &P, config: &[u8; CONFIG_LEN]) -> Result<Config, Refusal> {
+    let parsed = match decode_config_exact(config) {
+        Ok(parsed) => parsed,
+        Err(_) => return Err(Refusal::Config),
+    };
+    let prefix = encode_config_prefix(&parsed.salt);
+    if !primitives.open_config(&prefix, &parsed.tag) {
+        return Err(Refusal::ConfigAuthentication);
+    }
+    Ok(parsed)
+}
+
+/// The clean direction. On success `out` holds the complete record
+/// `header(config_id(config)) || seal_file(config, path, plaintext)`.
+/// `out.len()` must equal `plaintext.len() + FILE_MIN_LEN`.
+pub fn seal_record<P: V3Primitives>(
+    primitives: &P,
+    config: &[u8; CONFIG_LEN],
+    path: &[u8],
+    plaintext: &[u8],
+    out: &mut [u8],
+) -> Result<(), Refusal> {
+    if plaintext.len() > MAX_FILE || out.len() != plaintext.len() + FILE_MIN_LEN {
+        return Err(Refusal::Size);
+    }
+    if !is_canonical_protected_path(path) {
+        return Err(Refusal::Path);
+    }
+    if let Err(refusal) = authenticate_config(primitives, config) {
+        return Err(refusal);
+    }
+    if parse_file_header(plaintext).is_ok() {
+        return Err(Refusal::DoubleEncryption);
+    }
+    let header = encode_file_header(&primitives.config_id(config));
+    let mut i = 0;
+    while i < FILE_HEADER_LEN {
+        out[i] = header[i];
+        i += 1;
+    }
+    if !primitives.seal_file(config, path, plaintext, &mut out[FILE_HEADER_LEN..]) {
+        return Err(Refusal::Primitive);
+    }
+    Ok(())
+}
+
+/// The smudge/verify direction. Plaintext is written to `out` and success
+/// reported only after the path, configuration, envelope, configuration
+/// identifier and AES-SIV authentication all succeed. If authentication
+/// fails, `out` is zeroed.
+/// `out.len()` must equal `record.len() - FILE_MIN_LEN`.
+pub fn open_record<P: V3Primitives>(
+    primitives: &P,
+    config: &[u8; CONFIG_LEN],
+    path: &[u8],
+    record: &[u8],
+    out: &mut [u8],
+) -> Result<(), Refusal> {
+    if record.len() > MAX_RECORD {
+        return Err(Refusal::Size);
+    }
+    if !is_canonical_protected_path(path) {
+        return Err(Refusal::Path);
+    }
+    if let Err(refusal) = authenticate_config(primitives, config) {
+        return Err(refusal);
+    }
+    let id = match parse_file_header(record) {
+        Ok(id) => id,
+        Err(_) => return Err(Refusal::Envelope),
+    };
+    // `parse_file_header` succeeded, so `record.len() >= FILE_MIN_LEN`.
+    if record.len() - FILE_MIN_LEN != out.len() {
+        return Err(Refusal::Size);
+    }
+    if !bytes_eq(&id, &primitives.config_id(config)) {
+        return Err(Refusal::ConfigMismatch);
+    }
+    if !primitives.open_file(config, path, &record[FILE_HEADER_LEN..], out) {
+        // Never leave unauthenticated primitive output in the caller's buffer.
+        let mut i = 0;
+        while i < out.len() {
+            out[i] = 0;
+            i += 1;
+        }
+        return Err(Refusal::Authentication);
+    }
+    Ok(())
+}
+
+/// Hydration of one protected file whose staged record has already been
+/// opened to `plaintext`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HydrateAction {
+    /// The worktree holds exactly the staged record: replace it by plaintext.
+    Publish,
+    /// The worktree already holds exactly the authenticated plaintext.
+    Keep,
+}
+
+/// Never overwrite bytes that are neither the staged ciphertext nor its
+/// authenticated plaintext: those may be the user's only copy of new data.
+pub fn hydrate_action(worktree: &[u8], record: &[u8], plaintext: &[u8]) -> Result<HydrateAction, Refusal> {
+    if bytes_eq(worktree, record) {
+        return Ok(HydrateAction::Publish);
+    }
+    if bytes_eq(worktree, plaintext) {
+        return Ok(HydrateAction::Keep);
+    }
+    Err(Refusal::UnexpectedWorktree)
+}
+
+/// Locking of one protected file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockAction {
+    /// The worktree already holds exactly the staged record.
+    Keep,
+    /// The worktree plaintext seals to exactly the staged record: replace it.
+    Flush,
+}
+
+/// Decide whether the worktree may be replaced by the staged record.
+/// `resealed` is `seal_record` applied to the worktree bytes (performed by the
+/// credential agent, which alone holds the key); it is ignored when the
+/// worktree already is the record. A plaintext is only discarded when
+/// sealing it reproduces the staged record byte for byte, so `lock` never
+/// destroys uncommitted plaintext.
+pub fn lock_action(worktree: &[u8], record: &[u8], resealed: &[u8]) -> Result<LockAction, Refusal> {
+    if bytes_eq(worktree, record) {
+        return Ok(LockAction::Keep);
+    }
+    if bytes_eq(resealed, record) {
+        return Ok(LockAction::Flush);
+    }
+    Err(Refusal::UnexpectedWorktree)
+}
+
+/// Requests understood by the credential agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentOp {
+    Ping,
+    Encrypt,
+    Decrypt,
+    Stop,
+}
+
+/// Authorize one framed agent request against the configuration the agent
+/// authenticated at startup. Data operations require a canonical protected
+/// path; control operations carry no path or body.
+pub fn authorize_agent_request(
+    opcode: u8,
+    supplied: &[u8; CONFIG_LEN],
+    active: &[u8; CONFIG_LEN],
+    path: &[u8],
+    body_len: usize,
+) -> Result<AgentOp, Refusal> {
+    if path.len() > MAX_PATH || body_len > MAX_RECORD {
+        return Err(Refusal::Size);
+    }
+    if !bytes_eq(supplied, active) {
+        return Err(Refusal::ConfigMismatch);
+    }
+    if opcode == b'E' || opcode == b'D' {
+        if !is_canonical_protected_path(path) {
+            return Err(Refusal::Path);
+        }
+        if opcode == b'E' {
+            return Ok(AgentOp::Encrypt);
+        }
+        return Ok(AgentOp::Decrypt);
+    }
+    if path.len() != 0 || body_len != 0 {
+        return Err(Refusal::Request);
+    }
+    if opcode == b'P' {
+        return Ok(AgentOp::Ping);
+    }
+    if opcode == b'X' {
+        return Ok(AgentOp::Stop);
+    }
+    Err(Refusal::Request)
+}
+
+/// Whether `response[j..]` starts with `FILTER_ATTR_SUFFIX`.
+fn filter_suffix_at(response: &[u8], j: usize) -> bool {
+    if response.len() < j || response.len() - j < FILTER_ATTR_SUFFIX.len() {
+        return false;
+    }
+    let mut k = 0;
+    while k < FILTER_ATTR_SUFFIX.len() {
+        if response[j + k] != FILTER_ATTR_SUFFIX[k] {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
+/// Check Git's `check-attr --cached -z --stdin filter` response. `request`
+/// is the exact stdin sent to Git: each path followed by one NUL. The
+/// response is accepted iff it is the request with every NUL replaced by
+/// `FILTER_ATTR_SUFFIX`, i.e. every requested path, in order, reports
+/// `filter: transcrypt-v3` and nothing else is reported.
+pub fn check_attr_response_ok(request: &[u8], response: &[u8]) -> bool {
+    let mut ok = true;
+    let mut i = 0;
+    let mut j = 0;
+    while ok && i < request.len() {
+        if request[i] == 0 {
+            if filter_suffix_at(response, j) {
+                j += FILTER_ATTR_SUFFIX.len();
+            } else {
+                ok = false;
+            }
+        } else if j < response.len() && response[j] == request[i] {
+            j += 1;
+        } else {
+            ok = false;
+        }
+        i += 1;
+    }
+    ok && j == response.len()
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -219,5 +596,173 @@ mod tests {
         }
         record[2] = 0;
         assert_eq!(parse_file_header(&record), Err(FormatError::Magic));
+    }
+
+    /// A deterministic toy primitive: NOT cryptography. It exists only so the
+    /// decision core can be exercised without the adapter's RustCrypto stack.
+    /// The "tag" mixes key, config, path and plaintext so that changing any
+    /// one of them makes `open_file` fail, mirroring the AES-SIV contract.
+    struct Mock {
+        key: u8,
+    }
+
+    impl Mock {
+        fn mac(&self, parts: &[&[u8]]) -> [u8; TAG_LEN] {
+            let mut tag = [self.key; TAG_LEN];
+            let mut n = 0usize;
+            for part in parts {
+                for &b in part.iter() {
+                    tag[n % TAG_LEN] = tag[n % TAG_LEN].rotate_left(3) ^ b ^ (n as u8);
+                    n += 1;
+                }
+                tag[n % TAG_LEN] ^= 0xa5;
+                n += 1;
+            }
+            tag
+        }
+    }
+
+    impl V3Primitives for Mock {
+        fn seal_config(&self, prefix: &[u8; CONFIG_PREFIX_LEN], tag: &mut [u8; TAG_LEN]) -> bool {
+            *tag = self.mac(&[b"config", prefix]);
+            true
+        }
+        fn open_config(&self, prefix: &[u8; CONFIG_PREFIX_LEN], tag: &[u8; TAG_LEN]) -> bool {
+            self.mac(&[b"config", prefix]) == *tag
+        }
+        fn seal_file(&self, config: &[u8; CONFIG_LEN], path: &[u8], plaintext: &[u8], out: &mut [u8]) -> bool {
+            if out.len() != plaintext.len() + TAG_LEN {
+                return false;
+            }
+            out[..TAG_LEN].copy_from_slice(&self.mac(&[b"file", config, path, plaintext]));
+            for (o, p) in out[TAG_LEN..].iter_mut().zip(plaintext) {
+                *o = p ^ self.key;
+            }
+            true
+        }
+        fn open_file(&self, config: &[u8; CONFIG_LEN], path: &[u8], sealed: &[u8], out: &mut [u8]) -> bool {
+            if sealed.len() < TAG_LEN || out.len() != sealed.len() - TAG_LEN {
+                return false;
+            }
+            let plaintext: std::vec::Vec<u8> = sealed[TAG_LEN..].iter().map(|c| c ^ self.key).collect();
+            if self.mac(&[b"file", config, path, &plaintext]) != sealed[..TAG_LEN] {
+                return false;
+            }
+            out.copy_from_slice(&plaintext);
+            true
+        }
+        fn config_id(&self, config: &[u8; CONFIG_LEN]) -> [u8; ID_LEN] {
+            self.mac(&[b"id", config])
+        }
+    }
+
+    fn seal(m: &Mock, config: &[u8; CONFIG_LEN], path: &[u8], pt: &[u8]) -> Result<std::vec::Vec<u8>, Refusal> {
+        let mut out = std::vec![0u8; pt.len() + FILE_MIN_LEN];
+        seal_record(m, config, path, pt, &mut out).map(|_| out)
+    }
+
+    fn open(m: &Mock, config: &[u8; CONFIG_LEN], path: &[u8], record: &[u8]) -> Result<std::vec::Vec<u8>, Refusal> {
+        let mut out = std::vec![0u8; record.len().saturating_sub(FILE_MIN_LEN)];
+        open_record(m, config, path, record, &mut out).map(|_| out)
+    }
+
+    #[test]
+    fn canonical_path_policy() {
+        for good in [b"a.secret".as_slice(), b"dir/x.secret", b"a b.secret", b".secret", b"d/.secret",
+                     b"raw/\xff.secret", b"dir/new\nline.secret", b"...secret", b"a/.../b.secret"] {
+            assert!(is_canonical_protected_path(good), "rejected {:?}", good);
+            assert!(is_protected_path(good));
+        }
+        for bad in [b"".as_slice(), b"absolute", b"/root.secret", b"../bad.secret", b"x/../bad.secret",
+                    b"./x.secret", b"x//y.secret", b"x/./y.secret", b"x.secret/", b"evil\0.secret",
+                    b"x.secret/..", b"x.secret/.", b"secret", b"x.secreT", b".secre"] {
+            assert!(!is_canonical_protected_path(bad), "accepted {:?}", bad);
+        }
+        let mut long = std::vec![b'x'; MAX_PATH - 7];
+        long.extend_from_slice(b".secret");
+        assert!(is_canonical_protected_path(&long));
+        long.insert(0, b'x');
+        assert!(!is_canonical_protected_path(&long));
+        assert!(is_protected_path(b"x/.secret") && !is_protected_path(b"x.secret.txt"));
+    }
+
+    #[test]
+    fn sealed_records_are_bound_to_config_and_path() {
+        let m = Mock { key: 9 };
+        let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+        assert!(authenticate_config(&m, &config).is_ok());
+        assert_eq!(authenticate_config(&Mock { key: 10 }, &config), Err(Refusal::ConfigAuthentication));
+        let mut bad = config;
+        bad[0] ^= 1;
+        assert_eq!(authenticate_config(&m, &bad), Err(Refusal::Config));
+        for pt in [b"".as_slice(), b"hello", &[0u8, 1, 255]] {
+            let rec = seal(&m, &config, b"v/a.secret", pt).unwrap();
+            assert_eq!(&rec[..FILE_HEADER_LEN], &encode_file_header(&m.config_id(&config)));
+            assert_eq!(open(&m, &config, b"v/a.secret", &rec).unwrap(), pt);
+            assert_eq!(open(&m, &config, b"v/b.secret", &rec), Err(Refusal::Authentication));
+            let mut flipped = rec.clone();
+            *flipped.last_mut().unwrap() ^= 1;
+            assert!(open(&m, &config, b"v/a.secret", &flipped).is_err());
+            assert_eq!(seal(&m, &config, b"v/a.secret", &rec), Err(Refusal::DoubleEncryption));
+            assert_eq!(seal(&m, &config, b"../a.secret", pt), Err(Refusal::Path));
+            assert_eq!(open(&m, &config, b"v/a", &rec), Err(Refusal::Path));
+        }
+        let other = initialize_config(&m, &[4u8; SALT_LEN]).unwrap();
+        let rec = seal(&m, &config, b"a.secret", b"x").unwrap();
+        assert_eq!(open(&m, &other, b"a.secret", &rec), Err(Refusal::ConfigMismatch));
+        assert_eq!(open(&m, &config, b"a.secret", &rec[..FILE_MIN_LEN - 1]), Err(Refusal::Envelope));
+        let mut out = [0u8; 2];
+        assert_eq!(open_record(&m, &config, b"a.secret", &rec, &mut out), Err(Refusal::Size));
+        assert_eq!(seal_record(&m, &config, b"a.secret", b"x", &mut out), Err(Refusal::Size));
+    }
+
+    #[test]
+    fn lifecycle_actions_never_discard_unknown_bytes() {
+        let m = Mock { key: 1 };
+        let config = initialize_config(&m, &[5u8; SALT_LEN]).unwrap();
+        let rec = seal(&m, &config, b"a.secret", b"plain").unwrap();
+        assert_eq!(hydrate_action(&rec, &rec, b"plain"), Ok(HydrateAction::Publish));
+        assert_eq!(hydrate_action(b"plain", &rec, b"plain"), Ok(HydrateAction::Keep));
+        assert_eq!(hydrate_action(b"edited", &rec, b"plain"), Err(Refusal::UnexpectedWorktree));
+        assert_eq!(lock_action(&rec, &rec, b""), Ok(LockAction::Keep));
+        let resealed = seal(&m, &config, b"a.secret", b"plain").unwrap();
+        assert_eq!(lock_action(b"plain", &rec, &resealed), Ok(LockAction::Flush));
+        let resealed = seal(&m, &config, b"a.secret", b"edited").unwrap();
+        assert_eq!(lock_action(b"edited", &rec, &resealed), Err(Refusal::UnexpectedWorktree));
+    }
+
+    #[test]
+    fn agent_requests_are_authorized_against_the_active_config() {
+        let a = [1u8; CONFIG_LEN];
+        let mut b = a;
+        b[54] = 2;
+        assert_eq!(authorize_agent_request(b'P', &a, &a, b"", 0), Ok(AgentOp::Ping));
+        assert_eq!(authorize_agent_request(b'X', &a, &a, b"", 0), Ok(AgentOp::Stop));
+        assert_eq!(authorize_agent_request(b'E', &a, &a, b"x.secret", 9), Ok(AgentOp::Encrypt));
+        assert_eq!(authorize_agent_request(b'D', &a, &a, b"x.secret", 0), Ok(AgentOp::Decrypt));
+        assert_eq!(authorize_agent_request(b'D', &b, &a, b"x.secret", 0), Err(Refusal::ConfigMismatch));
+        assert_eq!(authorize_agent_request(b'E', &a, &a, b"x", 0), Err(Refusal::Path));
+        assert_eq!(authorize_agent_request(b'P', &a, &a, b"x.secret", 0), Err(Refusal::Request));
+        assert_eq!(authorize_agent_request(b'X', &a, &a, b"", 1), Err(Refusal::Request));
+        assert_eq!(authorize_agent_request(b'Q', &a, &a, b"", 0), Err(Refusal::Request));
+        assert_eq!(authorize_agent_request(b'E', &a, &a, b"x.secret", MAX_RECORD + 1), Err(Refusal::Size));
+    }
+
+    #[test]
+    fn check_attr_response_must_report_the_filter_for_every_path() {
+        let request = b"a.secret\0d/b.secret\0";
+        let good = b"a.secret\0filter\0transcrypt-v3\0d/b.secret\0filter\0transcrypt-v3\0";
+        assert!(check_attr_response_ok(request, good));
+        assert!(check_attr_response_ok(b"", b""));
+        assert!(!check_attr_response_ok(b"", b"x"));
+        assert!(!check_attr_response_ok(request, &good[..good.len() - 1]));
+        let mut extra = good.to_vec();
+        extra.push(b'a');
+        assert!(!check_attr_response_ok(request, &extra));
+        assert!(!check_attr_response_ok(request,
+            b"a.secret\0filter\0unspecified\0d/b.secret\0filter\0transcrypt-v3\0"));
+        assert!(!check_attr_response_ok(request,
+            b"d/b.secret\0filter\0transcrypt-v3\0a.secret\0filter\0transcrypt-v3\0"));
+        assert!(!check_attr_response_ok(b"a.secret\0", b"a.secret\0filter\0transcrypt-v4\0"));
     }
 }

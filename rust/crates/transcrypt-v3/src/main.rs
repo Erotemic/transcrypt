@@ -15,10 +15,10 @@ use std::os::unix::{ffi::{OsStrExt, OsStringExt}, fs::OpenOptionsExt};
 use zeroize::Zeroizing;
 mod session;
 use session::Operation;
-use transcrypt_v3::{
-    initialize_config, unlock_config, MAX_FILE,
+use transcrypt_v3::{initialize_config, unlock_config};
+use transcrypt_v3_core::{
+    check_attr_response_ok, hydrate_action, lock_action, HydrateAction, LockAction, MAX_RECORD, SALT_LEN,
 };
-use transcrypt_v3_core::{parse_file_header, FILE_MIN_LEN, SALT_LEN};
 
 const ATTRS: &[u8] = b"*.secret filter=transcrypt-v3 -diff\n";
 
@@ -255,14 +255,17 @@ fn lock(root: &Path) -> Result<(), String> {
         let relative = indexed_path(&path)?;
         let dest = require_regular_under(root, &relative)?;
         let source = read_limited(fs::File::open(&dest)
-            .map_err(|_| "cannot read protected worktree file")?, MAX_FILE + FILE_MIN_LEN)?;
+            .map_err(|_| "cannot read protected worktree file")?, MAX_RECORD)?;
         let object = git_show(root, &path)?;
-        if source == object { continue; }
-        let derived = session::request(root, &config, Operation::Encrypt, &path, &source)?;
-        if derived != object {
-            return Err("protected worktree has uncommitted plaintext changes; refusing lock".into());
+        // Only the agent holds the key, so it reseals; the verified core decides.
+        let resealed = if source == object { Vec::new() } else {
+            session::request(root, &config, Operation::Encrypt, &path, &source)?
+        };
+        match lock_action(&source, &object, &resealed) {
+            Ok(LockAction::Keep) => {},
+            Ok(LockAction::Flush) => to_flush.push((dest, object)),
+            Err(_) => return Err("protected worktree has uncommitted plaintext changes; refusing lock".into()),
         }
-        to_flush.push((dest, object));
     }
     // Write only ciphertext using exclusive temporary files and atomic rename.
     // A filesystem crash can still leave a partially flushed worktree; keep the
@@ -295,11 +298,11 @@ fn read_limited<R: Read>(read: R, limit: usize) -> Result<Vec<u8>, String> {
 fn filter(root: &Path, clean: bool, git_path: &[u8]) -> Result<(), String> {
     transcrypt_v3::validate_protected_path(git_path)?;
     let config = load_config(root)?;
-    let input = read_limited(io::stdin(), MAX_FILE + FILE_MIN_LEN)?;
+    let input = read_limited(io::stdin(), MAX_RECORD)?;
+    // The verified core's `seal_record` refuses inputs that already are v3
+    // records (double encryption), and `open_record` releases plaintext only
+    // after authenticating it under this config and exact Git path.
     let result = if clean {
-        if parse_file_header(&input).is_ok() {
-            return Err("worktree contains v3 ciphertext instead of plaintext; refusing double encryption".into());
-        }
         session::request(root, &config, Operation::Encrypt, git_path, &input)?
     } else {
         session::request(root, &config, Operation::Decrypt, git_path, &input)?
@@ -374,7 +377,7 @@ fn indexed_files(root: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
 }
 
 fn protected_path(path: &[u8]) -> bool {
-    path.rsplit(|x| *x == b'/').next().unwrap_or(path).ends_with(b".secret")
+    transcrypt_v3_core::is_protected_path(path)
 }
 
 /// Check Git's *effective* staged filter policy, not just the contents of the
@@ -393,13 +396,16 @@ fn verify_staged_filter_attributes(root: &Path, paths: &[&[u8]]) -> Result<(), S
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let mut request = Vec::new();
+    for path in paths {
+        request.extend_from_slice(path);
+        request.push(0);
+    }
     let mut child = command.spawn().map_err(|_| "cannot run Git staged attribute check")?;
     {
         let mut stdin = child.stdin.take().ok_or("Git attribute input pipe missing")?;
-        for path in paths {
-            stdin.write_all(path).and_then(|_| stdin.write_all(&[0]))
-                .map_err(|_| "cannot send protected paths to Git attribute checker")?;
-        }
+        stdin.write_all(&request)
+            .map_err(|_| "cannot send protected paths to Git attribute checker")?;
     }
     let result = child.wait_with_output()
         .map_err(|_| "cannot read Git staged attribute check")?;
@@ -407,18 +413,8 @@ fn verify_staged_filter_attributes(root: &Path, paths: &[&[u8]]) -> Result<(), S
         return Err(format!("Git staged attribute check failed: {}",
             String::from_utf8_lossy(&result.stderr)));
     }
-    let fields: Vec<_> = result.stdout.split(|b| *b == 0).collect();
-    let expected_fields = paths.len().checked_mul(3)
-        .and_then(|n| n.checked_add(1))
-        .ok_or("too many protected Git paths")?;
-    if fields.last().map(|field| field.is_empty()) != Some(true) || fields.len() != expected_fields {
-        return Err("malformed Git staged attribute response".into());
-    }
-    for (expected, triple) in paths.iter().zip(fields[..fields.len() - 1].chunks_exact(3)) {
-        if triple[0] != *expected || triple[1] != &b"filter"[..] ||
-            triple[2] != &b"transcrypt-v3"[..] {
-            return Err("protected staged path does not have the required effective transcrypt-v3 filter".into());
-        }
+    if !check_attr_response_ok(&request, &result.stdout) {
+        return Err("protected staged path does not have the required effective transcrypt-v3 filter".into());
     }
     Ok(())
 }
@@ -507,11 +503,11 @@ fn hydrate(root: &Path) -> Result<(), String> {
         let relative = indexed_path(path)?;
         let dest = require_regular_under(root, &relative)?;
         let worktree = read_limited(fs::File::open(&dest)
-            .map_err(|_| "cannot read protected worktree file")?, MAX_FILE + FILE_MIN_LEN)?;
-        if worktree == object {
-            pending.push((path.clone(), relative));
-        } else if worktree != plaintext {
-            return Err("protected worktree differs from staged ciphertext and authenticated plaintext; refusing overwrite".into());
+            .map_err(|_| "cannot read protected worktree file")?, MAX_RECORD)?;
+        match hydrate_action(&worktree, &object, &plaintext) {
+            Ok(HydrateAction::Publish) => pending.push((path.clone(), relative)),
+            Ok(HydrateAction::Keep) => {},
+            Err(_) => return Err("protected worktree differs from staged ciphertext and authenticated plaintext; refusing overwrite".into()),
         }
     }
     // Detect a changed index or public configuration between validation and
@@ -526,7 +522,7 @@ fn hydrate(root: &Path) -> Result<(), String> {
         let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
         let dest = require_regular_under(root, &relative)?;
         let worktree = read_limited(fs::File::open(&dest)
-            .map_err(|_| "cannot re-read protected worktree file")?, MAX_FILE + FILE_MIN_LEN)?;
+            .map_err(|_| "cannot re-read protected worktree file")?, MAX_RECORD)?;
         if worktree != object {
             return Err("protected worktree changed during hydration; refusing overwrite".into());
         }

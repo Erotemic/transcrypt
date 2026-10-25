@@ -8,10 +8,23 @@
 [scenario.v3-wire]
 backend = "lean"
 include = [
+  # Wire codec, including the public slice-length boundaries.
   "transcrypt_v3_core::decode_config_exact",
   "transcrypt_v3_core::encode_config",
   "transcrypt_v3_core::decode_file_header_exact",
   "transcrypt_v3_core::encode_file_header",
+  "transcrypt_v3_core::parse_config",
+  "transcrypt_v3_core::parse_file_header",
+  # Protocol decision core invoked by the adapter.
+  "transcrypt_v3_core::is_canonical_protected_path",
+  "transcrypt_v3_core::initialize_config",
+  "transcrypt_v3_core::authenticate_config",
+  "transcrypt_v3_core::seal_record",
+  "transcrypt_v3_core::open_record",
+  "transcrypt_v3_core::hydrate_action",
+  "transcrypt_v3_core::lock_action",
+  "transcrypt_v3_core::authorize_agent_request",
+  "transcrypt_v3_core::check_attr_response_ok",
 ]
 # hax 0.4.2 requires scenario outputs to remain *inside* the Rust workspace.
 # Two levels above this crate is rust/, the workspace root.
