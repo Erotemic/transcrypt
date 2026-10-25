@@ -87,5 +87,13 @@ def validate_catalog() -> tuple[SceneInfo, ...]:
                 for rel in scene.sources if rel.endswith('.lean')
             ):
                 raise ValueError(f'{scene.id}: proof anchor {anchor} not found in referenced Lean sources')
-        scene.diagram()
+        diagram = scene.diagram()
+        # A green or purple per-operation badge must name a theorem in the
+        # *same scene's* grounded source set, not merely reuse a scene status.
+        for node in diagram.nodes:
+            evidence = node.evidence
+            if evidence and evidence.level in {'source-proof', 'conditional-proof', 'model-proof'}:
+                if not any(f'theorem {evidence.basis}' in (REPO_ROOT / rel).read_text()
+                           for rel in scene.sources if rel.endswith('.lean')):
+                    raise ValueError(f'{scene.id}:{node.key}: missing evidence theorem {evidence.basis}')
     return scenes

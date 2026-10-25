@@ -1,6 +1,6 @@
 """Named proof inventory: which production functions, versus which models."""
-from tvis.diagram import Beat, Diagram
-from tvis.plans.common import carry_knowledge, info4, row4
+from tvis.diagram import Processing, Beat, Diagram
+from tvis.plans.common import carry_knowledge, mark, info4, row4
 
 nodes = row4((
     ('codec', 'Wire codec', 'ACTUAL RUST: PROVED', 'proved', 'code'),
@@ -8,6 +8,13 @@ nodes = row4((
     ('crypto', 'Seal / open', 'PROVED IF Realizes', 'proved', 'key'),
     ('lifecycle', 'Git lifecycle', 'LEAN MODEL PROVED', 'policy', 'git'),
 ))
+
+nodes=mark(nodes,
+    codec=('source-proof', 'encode_file_header_refines', 'Actual Rust serializer'),
+    checks=('source-proof', 'parse_attr_response_spec', 'Source-derived selection/parse gate'),
+    crypto=('conditional-proof', 'seal_record_spec', 'Only IF external Realizes'),
+    lifecycle=('model-proof', 'hydratePlan_spec', 'Lean-defined sequencing model only'),
+)
 
 PLAN = Diagram(
     key='inventory', title='What exactly has a Lean theorem?',
@@ -21,7 +28,7 @@ PLAN = Diagram(
                 ('seal_record_spec', 'open_record_spec', 'requires Realizes (A5)'),
                 ('hydratePlan_spec (MODEL)', 'lockEntry_spec (MODEL)', 'verifyPlan_spec (MODEL)'),
              ))),
-        Beat('checks', 'ACTUAL Rust decisions: canonical currently *.secret paths, staged Git index records, object IDs, attribute replies, packet/frame headers and agent authorization.',
+        Beat('checks', 'ACTUAL Rust decisions: canonical Git paths, staged Git index records, object IDs, attribute replies, packet/frame headers and agent authorization.',
              focus=('checks',), status='proved'),
         Beat('crypto', 'ACTUAL Rust protocol functions: config authentication, seal and open conform to Lean specs for all admitted inputs, CONDITIONAL on an external cryptographic contract.',
              focus=('crypto',), status='proved'),

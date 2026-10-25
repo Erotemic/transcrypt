@@ -10,10 +10,10 @@ from manim import (Circumscribe, Create, FadeIn, FadeOut, MoveAlongPath,
                    RoundedRectangle, Scene, Text, VGroup, DOWN, UP)
 
 from tvis.components.graphics import (
-    edge_group, knowledge_card, link_path, node_card, package_group,
+    edge_group, knowledge_card, link_path, node_card, package_group, processing_card,
     region_box, text_label, traveling_label, xy,
 )
-from tvis.diagram import Diagram, layer_geometry, validate
+from tvis.diagram import Diagram, EVIDENCE_ROLES, layer_geometry, validate
 from tvis.palette import palette
 
 
@@ -58,6 +58,7 @@ class DiagramScene(Scene):
         self.add(label_panel)
         prev_caption=None
         prev_status=None
+        prev_processing=None
         for beat_index, stage in enumerate(plan.beats):
             self.next_section(stage.key)
             motion=[Create(routes[k]) for k in stage.links if k not in shown_links]
@@ -98,10 +99,19 @@ class DiagramScene(Scene):
                 if animations:
                     self.play(*animations,run_time=0.37/speed)
             knowledge_group=new_knowledge
+            if prev_processing is not None:
+                self.play(FadeOut(prev_processing),run_time=0.15/speed)
+                prev_processing=None
+            if stage.processing:
+                step=stage.processing
+                card=processing_card(step,node_map[step.node],colors)
+                self.play(FadeIn(card[0]),FadeIn(card[1]),run_time=0.28/speed)
+                self.play(FadeIn(card[2]),FadeIn(card[3]),run_time=0.38/speed)
+                prev_processing=card
             if stage.packet:
                 route=link_map[stage.packet]
                 track=link_path(route)
-                marker=traveling_label(stage.packet_label,colors[route.role],colors)
+                marker=traveling_label(stage.packet_label,stage.packet_kind,colors)
                 marker.move_to(track.get_start())
                 self.add(marker)
                 self.play(MoveAlongPath(marker,track),run_time=max(0.7,stage.duration)/speed)
@@ -109,7 +119,9 @@ class DiagramScene(Scene):
             for target in stage.focus:
                 item=cards.get(target) or routes.get(target)
                 if item is not None:
-                    self.play(Circumscribe(item,color=colors['policy'],fade_out=True,
+                    self.play(Circumscribe(item,color=(colors[EVIDENCE_ROLES[node_map[target].evidence.level]]
+                                                       if target in node_map and node_map[target].evidence
+                                                       else colors['policy']),fade_out=True,
                                            time_width=0.45),run_time=0.4/speed)
             if stage.layer_focus:
                 for name in shown_packages:

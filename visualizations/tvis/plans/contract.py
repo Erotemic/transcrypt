@@ -1,6 +1,6 @@
 """A worked security theorem, with the cryptographic premise visibly separate."""
-from tvis.diagram import Beat, Diagram, Link
-from tvis.plans.common import carry_knowledge, info4, route, row4
+from tvis.diagram import Processing, Beat, Diagram, Link
+from tvis.plans.common import carry_knowledge, mark, info4, route, row4
 
 nodes = row4((
     ('bytes', 'Untrusted record', 'config + path + bytes', 'provider', 'document'),
@@ -8,6 +8,11 @@ nodes = row4((
     ('proof', 'open_record_spec', 'Lean WP.spec theorem', 'proved', 'proof'),
     ('primitive', 'External crypto', 'Realizes (A5) REQUIRED', 'assumed', 'key'),
 ))
+nodes=mark(nodes,
+    core=('conditional-proof','open_record_spec','Actual Rust under Realizes'),
+    proof=('conditional-proof','open_record_spec','Theorem has explicit Realizes premise'),
+    primitive=('trusted-crypto','A5','RustCrypto tested, not Lean proved'),
+)
 links = (route(nodes, 'bytes', 'core', 'input', 'bytes', 'provider'),
          route(nodes, 'core', 'proof', 'derivation', 'RustM', 'proved'),
          Link('premise', 'primitive', 'proof', 'Realizes',
@@ -27,7 +32,8 @@ PLAN = Diagram(
                 ('AES-SIV correctness', 'SHA-256 digest contract', 'NOT a Lean theorem'),
              ))),
         Beat('source', 'Aeneas supplies the generated RustM open_record computation; Lean proves the branch contract of THAT function against V3Policy.',
-             links=('input','derivation'), focus=('core','proof'), status='proved'),
+             links=('input','derivation'), focus=('core','proof'), status='proved',
+             processing=Processing('core','record + AD','result / refusal','ciphertext','decision')),
         Beat('ok', 'IF Ok: the released bytes are exactly a record opening authenticated to the expected public config and exact path (OpensTo).',
              focus=('proof',), status='proved',
              knowledge=info4(nodes, (
@@ -45,6 +51,7 @@ PLAN = Diagram(
                  ('no claim about crypto', 'hardness from this theorem'),
              ))),
         Beat('conditional', 'Crucial premise: Realizes is assumed for production RustCrypto, checked with independent vectors but not proved. Git invocation and worktree writes remain outside this theorem.',
-             links=('premise',), focus=('primitive',), status='assumed'),
+             links=('premise',), focus=('primitive',), status='assumed',packet_kind='key',
+             processing=Processing('primitive','AES-SIV inputs','tag check','plaintext','decision')),
     ), footer='Exact Lean statement: Protocol.lean: open_record_spec (h : Realizes ...); see PROOF-ATLAS.md.')
 PLAN = carry_knowledge(PLAN)

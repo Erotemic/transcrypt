@@ -29,6 +29,13 @@ def build_gallery(target: Path, *, theme: str = 'dark',
                 'caption': beat.caption,
                 'status': beat.status,
                 'packet': beat.packet_label,
+                'packetKind': beat.packet_kind if beat.packet else '',
+                'processing': ({'node': beat.processing.node,
+                                'input': beat.processing.before,
+                                'inputKind': beat.processing.before_kind,
+                                'output': beat.processing.after,
+                                'outputKind': beat.processing.after_kind}
+                               if beat.processing else None),
                 'knowledge': [
                     {'party': diagram.node_map()[k.owner].title, 'items': list(k.items)}
                     for k in beat.knowledge
@@ -39,6 +46,11 @@ def build_gallery(target: Path, *, theme: str = 'dark',
             'id': scene.id, 'title': diagram.title,
             'video': videos.get(scene.id, ''),
             'status': scene.status, 'claim': scene.claim,
+            'operations': [
+                {'node': node.key, 'title': node.title, 'tier': node.evidence.level,
+                 'basis': node.evidence.basis, 'note': node.evidence.note}
+                for node in diagram.nodes if node.evidence is not None
+            ],
             'narration': scene.narration,
             'sources': list(scene.sources),
             'optionalSources': list(scene.optional_sources),
@@ -72,7 +84,7 @@ button{cursor:pointer}button:hover{background:#28516c}input[type=range]{padding:
 #image[hidden]{display:none}
 .foot{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
 .panel{background:#152638;border:1px solid #28465b;border-radius:12px;padding:16px}
-.panel strong{color:#6fe0b7}.panel span{color:#d2e3f0}.panel p{line-height:1.5}.inventory{grid-column:1 / -1}.inventory-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:8px}.inventory-grid h3{font-size:14px;margin:4px 0;color:#74ceec}.inventory-grid ul{margin-top:4px}@media(max-width:850px){.inventory-grid{grid-template-columns:1fr}}
+.panel strong{color:#6fe0b7}.panel span{color:#d2e3f0}.panel p{line-height:1.5}.operation-items{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:8px;margin:9px 0 0}.operation{border-left:4px solid #b1c0cd;padding:9px 12px;background:#132132;border-radius:7px}.operation strong{display:block;color:#eff6fb;font-size:14px}.operation small{display:block;font-size:12px;color:#b1c0cd}.operation .tier{font-size:12px;letter-spacing:.03em;color:#f4c474}.operation[data-tier=source-proof],.operation[data-tier=conditional-proof]{border-left-color:#78dba9}.operation[data-tier=model-proof]{border-left-color:#af9ef7}.operation[data-tier=tested]{border-left-color:#6fe0b7}.operation[data-tier=trusted-crypto],.operation[data-tier=trusted-platform]{border-left-color:#f4c474}.operation[data-tier=planned]{border-left-color:#ff947d}.operation.active{outline:2px solid #eff6fb}.inventory{grid-column:1 / -1}.inventory-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:8px}.inventory-grid h3{font-size:14px;margin:4px 0;color:#74ceec}.inventory-grid ul{margin-top:4px}@media(max-width:850px){.inventory-grid{grid-template-columns:1fr}}
 code{color:#f4c474;overflow-wrap:anywhere} ul{padding-left:21px;margin:9px 0;color:#b1c0cd}
 @media(max-width:780px){.foot{grid-template-columns:1fr}.controls{gap:7px}.panel{padding:12px}}
 </style>
@@ -97,6 +109,7 @@ code{color:#f4c474;overflow-wrap:anywhere} ul{padding-left:21px;margin:9px 0;col
 <div class="foot">
   <div class="panel"><strong id="status"></strong><p id="claim"></p><strong>Explanation</strong><p id="narration"></p></div>
   <div class="panel"><strong>Edit</strong><p id="editpaths"></p><strong>Source files</strong><ul id="sources"></ul></div>
+  <div class="panel inventory"><strong>Operation-by-operation evidence</strong><p>The badge applies to this operation only. The source or assumption is shown beneath it.</p><div id="operations" class="operation-items"></div></div>
   <div class="panel inventory"><strong>What each component holds at this step</strong><div id="inventory" class="inventory-grid"></div></div>
 </div>
 <script type="application/json" id="story-data">__PAYLOAD__</script>
@@ -126,11 +139,25 @@ function show(){
   const j = Math.min(Math.max(Number(beatRange.value),0),s.beats.length-1);
   const b=s.beats[j];
   document.getElementById('number').textContent=b.id+'  ('+(j+1)+'/'+s.beats.length+')';
+  const operations=document.getElementById('operations');operations.replaceChildren();
+  const opLabels={'source-proof':'LEAN: SOURCE PROOF','conditional-proof':'LEAN: IF REALIZES',
+    'model-proof':'LEAN: MODEL ONLY','tested':'TESTED: NO PROOF','trusted-crypto':'TRUSTED: CRYPTO',
+    'trusted-platform':'TRUSTED: GIT / OS','implemented':'IN CODE: NO PROOF','planned':'DESIGN GOAL'};
+  for(const op of s.operations){
+    const el=document.createElement('div');el.className='operation'+(b.processing?.node===op.node?' active':'');
+    el.dataset.tier=op.tier;
+    const title=document.createElement('strong');title.textContent=op.title;
+    const tier=document.createElement('span');tier.className='tier';tier.textContent=opLabels[op.tier];
+    const detail=document.createElement('small');detail.textContent=op.basis+' — '+op.note;
+    el.append(title,tier,detail);operations.append(el);
+  }
   image.src=b.image;
   document.getElementById('image').alt=s.title+' — '+b.caption;
   document.getElementById('status').textContent=b.status.toUpperCase();
   document.getElementById('claim').textContent=s.claim;
-  document.getElementById('narration').textContent=s.narration+'\\nCurrent beat: '+b.caption;
+  document.getElementById('narration').textContent=s.narration+'\\nCurrent beat: '+b.caption+
+    (b.processing?'\\nProcessing '+b.processing.node+': '+b.processing.inputKind+' ('+b.processing.input+
+    ') → '+b.processing.outputKind+' ('+b.processing.output+')':'');
   const ul=document.getElementById('sources');ul.replaceChildren();
   for(const f of s.sources.concat(s.optionalSources.map(x=>x+' (optional source)')).concat(s.proofAnchors.map(x=>'Lean theorem: '+x))){
     const li=document.createElement('li');const code=document.createElement('code');code.textContent=f;li.append(code);ul.append(li);

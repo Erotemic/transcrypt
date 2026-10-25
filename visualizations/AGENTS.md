@@ -3,12 +3,14 @@
 The user wants an editable, explanatory Manim animation in the style of the
 `aivm-secrets/visualizations` project, not a theorem-count marketing video.
 
-- Explain one real `account.secret` file's lifecycle using real Git filters.
+- Explain a concrete selected file's lifecycle using real Git filters; `account.secret` is just an example, not a hardcoded selection rule.
 - Each scene records who holds the plaintext, key, record and path; sending a
   copy does not delete it from the sender.
 - Use one semantic color per trust role. Green applies only to a precise
   source-derived Lean theorem, not the whole running app. Amber denotes a
   real assumption about cryptographic libraries, Git, OS or translation.
+- Encode each operation's evidence as its own `Evidence` badge with a grounded theorem/assumption; a payload color never implies proof.
+- Use typed packet kinds and an active `Processing` input/output step; a decision is not an OS write.
 - **Distinguish implemented, proved, modeled, tested, assumed and planned.**
   Never silently promote a planned product feature into an implemented fact.
 - Do not imply the Lean development proves AES-SIV, Argon2id, Git, the kernel,
@@ -23,4 +25,15 @@ The user wants an editable, explanatory Manim animation in the style of the
 - Never load actual secret files or git credential state while rendering.
 - Build and check `python3 -m tvis check` and unittest before packaging.
 - Manim/FFmpeg output belongs only under ignored `visualizations/.build`.
+- `storyboards/presentation.toml` chooses per-slide format (`cover`, `cinema`,
+  `split`, `diagram`, `evidence`, `statement`) and exact scene/beat still. It is
+  distinct from `overview.toml` (truth/narration) and `plans` (geometry/evidence).
+- HTML video only reflects Manim output if the file exists. Never synthesize
+  fake security execution footage. The fully inlined HTML variant embeds MP4
+  bytes; the default version uses movable relative sidecars.
+- PDF contains faithful SVG stills, not universally playable movies. It must
+  label video playback as a link to the companion HTML and never imply that a
+  PDF link is a security proof.
+- Maintain visual/tier parity across Manim, SVG, HTML and PDF. Test a static
+  no-Manim export plus a video-embedding scenario, and render-check the PDF.
 - Do not describe your own reporting contract inside user-facing reports.

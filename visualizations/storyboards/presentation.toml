@@ -1,0 +1,207 @@
+# Actual presentation order and PER-SLIDE layouts. No Manim imports.
+# Media defaults to SVG if the relevant Manim clip has not been rendered.
+# Choose a named 'beat' for the PDF still and HTML's video poster.
+[deck]
+title = "Transcrypt v3 | Data movement and evidence"
+subtitle = "Selected plaintext through public Git history and back"
+footer = "Source snapshot 16cc957 · Proofs are scoped; Git, OS and cryptography remain explicit premises"
+
+[[slide]]
+id = "intro"
+layout = "cover"
+scene = "clean"
+beat = "commit"
+title = "Where the bytes go"
+kicker = "TRANSCRYPT V3 / ASSURANCE WALKTHROUGH"
+subtitle = "Follow selected local plaintext into an authenticated public Git record and back — without confusing Lean proofs with the external trusted base."
+points = ["One protected file, one lifecycle", "Every operation has its own evidence tier"]
+
+[[slide]]
+id = "legend"
+layout = "evidence"
+scene = "legend"
+title = "How to read the trust labels"
+kicker = "TWO INDEPENDENT AXES"
+subtitle = "Packet color describes data. The badge below an operation describes its assurance basis."
+points = ["A source-derived theorem is not a proof of its external dependencies.", "A green decision is not evidence that Git or the OS performed an effect."]
+
+[[slide]]
+id = "selection"
+layout = "split"
+media = "diagram"
+scene = "selection"
+beat = "today"
+title = "What actually gets protected?"
+kicker = "01 / PATH SELECTION"
+subtitle = "Git matches attribute patterns; the core parses exact answers."
+points = ["Native .gitattributes patterns are implemented.", "Git matching is an external A19 premise.", "The exact raw path becomes authenticated context."]
+
+[[slide]]
+id = "unlock"
+layout = "cinema"
+scene = "unlock"
+beat = "persist"
+title = "Unlock: passphrase to usable key"
+kicker = "02 / KEY LIFECYCLE"
+subtitle = "Trusted Argon2id → conditional configuration proof → tested credential storage."
+points = ["Default: stored local key", "Optional: memory-only --private mode"]
+
+[[slide]]
+id = "clean"
+layout = "cinema"
+scene = "clean"
+beat = "commit"
+title = "Clean: plaintext enters Git as a record"
+kicker = "03 / ENCRYPT ON COMMIT"
+subtitle = "Follow the actual bytes, not just a diagram of function calls."
+points = ["Local worktree keeps plaintext", "Public index receives an authenticated record"]
+
+[[slide]]
+id = "sealing"
+layout = "split"
+scene = "crypto"
+beat = "primitive"
+title = "The critical crypto boundary"
+kicker = "04 / PROVED LOGIC VS. TRUSTED CRYPTO"
+subtitle = "The core theorem is conditional on Realizes; AES-SIV runs in an external library."
+points = ["The conditional theorem fixes core record behavior.", "AES-SIV correctness and security are external premises.", "The 22-byte header codec has a separate source-derived theorem."]
+
+[[slide]]
+id = "record"
+layout = "diagram"
+scene = "record"
+beat = "last"
+title = "The record that everyone can download"
+kicker = "05 / ON-WIRE DATA"
+subtitle = "Header, tag, ciphertext, public config and path-associated data are different objects."
+points = ["Codec ≠ cipher security", "Public metadata is not a plaintext key"]
+
+[[slide]]
+id = "rename"
+layout = "cinema"
+scene = "rename"
+beat = "last"
+title = "Rename: rebind a record to a path"
+kicker = "06 / MOVE AND RESEAL"
+subtitle = "Decision logic is source-proved; old-path lookup and actual Git move are tested/assumed."
+points = ["Old-path authentication", "Re-encrypt under the new raw pathname"]
+
+[[slide]]
+id = "audit"
+layout = "split"
+scene = "audit"
+beat = "last"
+title = "Audit before publication"
+kicker = "07 / CHECK WHAT LEAVES"
+subtitle = "Keyless envelope shape is proved; an auditor and enforcement location remain separate concerns."
+points = ["Shape cannot establish authenticity without a key.", "Runtime audit and hook deployment do not inherit a core theorem."]
+
+[[slide]]
+id = "clone"
+layout = "cinema"
+scene = "clone"
+beat = "last"
+title = "Clone: authenticated record to plaintext"
+kicker = "08 / CHECKOUT"
+subtitle = "Conditional open verifies context and tag; native filesystem writes stay outside the theorem."
+points = ["Public remote: ciphertext", "Authorized local checkout: plaintext"]
+
+[[slide]]
+id = "lock"
+layout = "split"
+scene = "lock"
+beat = "last"
+title = "Lock: preserve the public boundary"
+kicker = "09 / RELINQUISH CREDENTIALS"
+subtitle = "Checked core decisions, tested flushes and OS key deletion are distinct operations."
+points = ["Commit/flush must precede forgetting a key.", "Native filesystem behavior requires its own assurance."]
+
+[[slide]]
+id = "attack"
+layout = "diagram"
+scene = "attack"
+beat = "last"
+title = "Tamper with the public record"
+kicker = "10 / ATTACKER VIEW"
+subtitle = "Rejecting a forged context follows from the crypto premise; it is not a proof of the host system."
+points = ["Public history and metadata are visible", "Cryptographic authenticity depends on Realizes"]
+
+[[slide]]
+id = "inventory"
+layout = "evidence"
+scene = "inventory"
+title = "Three kinds of verification evidence"
+kicker = "ASSURANCE INVENTORY"
+subtitle = "Source-derived production theorems, a sequencing model, and runtime tests answer different questions."
+points = ["Source-derived theorems refer to extracted Rust functions.", "Model lemmas don't automatically refine a native adapter."]
+
+[[slide]]
+id = "contract"
+layout = "split"
+media = "diagram"
+scene = "contract"
+beat = "last"
+title = "Read the actual open-record theorem"
+kicker = "EXACT PROOF SCOPE"
+subtitle = "The explicit Realizes premise is the trust boundary — not an incidental footnote."
+points = ["The theorem governs production-core branching and bytes.", "It does not verify AES-SIV internals or Git callbacks."]
+
+[[slide]]
+id = "refinement"
+layout = "diagram"
+scene = "proof"
+beat = "last"
+title = "Rust source to Lean theorem"
+kicker = "FORMALIZATION PATH"
+subtitle = "Source/extraction correspondence is part of the reviewed trusted base."
+points = ["Specific theorem names, not blanket assurances", "Translation soundness is an explicit A3 assumption"]
+
+[[slide]]
+id = "effects"
+layout = "split"
+scene = "lifecycle"
+beat = "last"
+title = "A decision is not an OS effect"
+kicker = "ADAPTER CORRESPONDENCE"
+subtitle = "Proved core logic, modeled scheduling and tested native effects cannot share one badge."
+points = ["The model expresses legal sequencing.", "The actual writer/hook has separate tests and assumptions."]
+
+[[slide]]
+id = "trust-boundary"
+layout = "evidence"
+scene = "assumptions"
+title = "The remaining trusted base"
+kicker = "BOUNDARY SUMMARY"
+subtitle = "The assurance label belongs to the operation, not the repository as a whole."
+points = ["Crypto primitives and their security", "Git, hook deployment and operating-system effects", "Source-to-Lean translation / external contract"]
+
+[[slide]]
+id = "offline"
+layout = "statement"
+scene = "offline"
+beat = "last"
+title = "What the public observer still sees"
+kicker = "THREAT MODEL"
+subtitle = "Protection targets selected content in public history, not an already-unlocked machine."
+points = ["Path and other record metadata may leak.", "Old commits and deterministic equality may be visible.", "Offline passphrase guessing remains possible."]
+
+[[slide]]
+id = "roadmap"
+layout = "split"
+media = "diagram"
+scene = "roadmap"
+beat = "last"
+title = "Improve correspondence, not slogans"
+kicker = "ASSURANCE ROADMAP"
+subtitle = "Pattern selection, stored-key unlock, migration and rename handling are already implemented."
+points = ["Prove more of the real effectful adapter.", "Review external cryptographic dependencies.", "Harden and attest audit deployment where required."]
+
+[[slide]]
+id = "closing"
+layout = "statement"
+scene = "clean"
+beat = "last"
+title = "The guarantee lives at each boundary"
+kicker = "TAKEAWAY"
+subtitle = "Watch the data transform, read each evidence badge, and carry every external premise through the argument."
+points = ["Proved code is a specific component, not a system-wide adjective.", "A trusted dependency is not evidence of a flaw; it is an honest verification boundary."]

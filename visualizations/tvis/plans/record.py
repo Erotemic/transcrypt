@@ -1,5 +1,5 @@
 """Exploded-view reading of the authenticated file envelope, not literal nesting."""
-from tvis.diagram import Beat, Diagram, Layer, Link, Node, Package
+from tvis.diagram import Processing, Beat, Diagram, Layer, Link, Node, Package
 
 layers=Layer('envelope', 'V3 file record', 'public bytes in a Git object', 'plain',
              Layer('header', '22-byte header', '6-byte marker + 16-byte config id', 'plain',
@@ -23,5 +23,5 @@ PLAN=Diagram(
         Beat('content', 'The remaining bytes are specified encrypted payload; the crypto primitive must honor config and exact-path associated data.',
              layer_focus='ciphertext',status='assumed'),
         Beat('public', 'The public observer receives the entire record, not the decryption key.',
-             links=('publish',),packet='publish',packet_label='record bytes',status='implemented'),
+             links=('publish',),packet='publish',packet_label='record bytes',packet_kind='ciphertext',status='implemented'),
     ), footer='Fields are concatenated on disk; the nested rectangles are successive explanatory zooms, not nested encryption.')

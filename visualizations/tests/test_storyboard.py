@@ -16,8 +16,9 @@ from tvis.presentation import build_presentation, scene_fingerprint
 from tvis.svg_preview import CANVAS_W, CANVAS_H, render_svg
 
 
-IDS = ('legend', 'selection', 'clean', 'record', 'clone', 'attack',
-       'inventory', 'contract', 'proof', 'lifecycle', 'assumptions', 'offline', 'roadmap')
+IDS = ('legend', 'selection', 'unlock', 'clean', 'crypto', 'record',
+       'rename', 'audit', 'clone', 'lock', 'attack', 'inventory',
+       'contract', 'proof', 'lifecycle', 'assumptions', 'offline', 'roadmap')
 
 
 class StoryboardTests(unittest.TestCase):
@@ -65,13 +66,15 @@ class StoryboardTests(unittest.TestCase):
                 for beat in plan.beats:
                     self.assertEqual({k.owner for k in beat.knowledge}, set(plan.node_map()))
 
-    def test_contract_does_not_pretend_current_supports_future_ux(self):
+    def test_current_features_not_described_as_future_work(self):
         selection = get_scene('selection').diagram()
         roadmap = get_scene('roadmap').diagram()
-        self.assertTrue(any(b.status == 'planned' for b in selection.beats))
-        self.assertTrue(all(b.status == 'planned' for b in roadmap.beats))
-        self.assertIn('*.secret', selection.state('today')[2].caption)
-        self.assertTrue(any('agent' in b.caption.lower() for b in get_scene('clone').diagram().beats))
+        self.assertFalse(any(b.status == 'planned' for b in selection.beats))
+        self.assertTrue(any(b.status == 'planned' for b in roadmap.beats))
+        self.assertTrue(any(b.status == 'implemented' for b in roadmap.beats))
+        self.assertIn('private/**', selection.state('today')[2].caption)
+        self.assertTrue(any('store' in b.caption.lower() for b in get_scene('unlock').diagram().beats))
+        self.assertIn('migration', get_scene('roadmap').claim)
 
     def test_threat_boundary_is_visible_and_source_anchored(self):
         assumptions = get_scene('assumptions').diagram()
@@ -83,6 +86,62 @@ class StoryboardTests(unittest.TestCase):
         self.assertIn('open_record_spec', proof_scene.proof_anchors)
         self.assertTrue(any('Realizes' in s.narration for s in validate_catalog()))
         self.assertTrue(any(b.status == 'modeled' for b in get_scene('lifecycle').diagram().beats))
+
+    def test_operation_evidence_and_payload_types_are_independent(self):
+        from tvis.diagram import Processing, Evidence, PAYLOAD_ROLES, EVIDENCE_ROLES
+        expected={
+            'unlock': {'kdf':'trusted-crypto','auth':'conditional-proof','store':'tested'},
+            'clean': {'filter':'tested','core':'conditional-proof','git':'trusted-platform'},
+            'crypto': {'gate':'conditional-proof','primitive':'trusted-crypto','assemble':'source-proof'},
+            'rename': {'adapter':'tested','decide':'source-proof','seal':'conditional-proof'},
+            'audit': {'git':'trusted-platform','shape':'source-proof','audit':'tested','remote':'trusted-platform'},
+            'clone': {'check':'conditional-proof','disk':'tested'},
+            'lock': {'snapshot':'tested','gate':'source-proof','writer':'tested'},
+            'lifecycle': {'core':'conditional-proof','model':'model-proof','effect':'tested'},
+        }
+        for scene,levels in expected.items():
+            diagram=get_scene(scene).diagram()
+            for node,tier in levels.items():
+                self.assertEqual(diagram.node_map()[node].evidence.level,tier)
+        for scene in validate_catalog():
+            diagram=scene.diagram()
+            for beat in diagram.beats:
+                if beat.packet:
+                    self.assertIn(beat.packet_kind, PAYLOAD_ROLES)
+                if beat.processing:
+                    self.assertIn(beat.processing.node, diagram.node_map())
+                    self.assertIn(beat.processing.before_kind, PAYLOAD_ROLES)
+                    self.assertIn(beat.processing.after_kind, PAYLOAD_ROLES)
+            for node in diagram.nodes:
+                if node.evidence:
+                    self.assertIn(node.evidence.level, EVIDENCE_ROLES)
+
+    def test_data_transforms_show_all_main_lifecycle_operations(self):
+        kinds=set()
+        for name in ('selection','unlock','clean','crypto','rename','audit','clone','lock'):
+            plan=get_scene(name).diagram()
+            self.assertGreaterEqual(len([b for b in plan.beats if b.processing]),2)
+            self.assertGreaterEqual(len([b for b in plan.beats if b.packet]),2)
+            kinds.update(b.packet_kind for b in plan.beats if b.packet)
+        self.assertGreaterEqual(len(kinds),4)
+        svg=render_svg(get_scene('crypto').diagram(),beat='primitive')
+        self.assertIn('data-evidence="trusted-crypto"',svg)
+        self.assertIn('data-payload-kind="plaintext"',svg)
+        self.assertIn('data-processing="primitive"',svg)
+        self.assertIn('data-output="ciphertext"',svg)
+
+    def test_bogus_operation_proof_fails_catalog_validation(self):
+        from tvis.diagram import Evidence
+        from tvis.catalog import SceneInfo
+        from unittest.mock import patch
+        scene=get_scene('crypto')
+        diagram=scene.diagram()
+        bad=replace(diagram.nodes[0],evidence=Evidence('source-proof','imaginary_theorem'))
+        altered=replace(diagram,nodes=(bad,)+diagram.nodes[1:])
+        with patch.object(SceneInfo,'diagram',lambda self: altered if self.id=='crypto' else __import__(
+             self.plan,fromlist=['PLAN']).PLAN):
+            with self.assertRaisesRegex(ValueError,'missing evidence theorem'):
+                validate_catalog()
 
     def test_inventory_does_not_conflate_source_proofs_and_adapter_models(self):
         inventory = get_scene('inventory')
@@ -146,6 +205,8 @@ class StoryboardTests(unittest.TestCase):
             self.assertIn('Transcrypt v3', document)
             self.assertIn('open_record_spec', document)
             self.assertIn('data:image/svg+xml;base64,', document)
+            self.assertIn('Operation-by-operation evidence', document)
+            self.assertIn('"tier": "conditional-proof"', document)
             self.assertNotIn('http://localhost:', document)
             self.assertNotIn('file://', document)
             self.assertGreater(document.count('"id": "'), 10)  # all scene and beat IDs embedded

@@ -1,6 +1,6 @@
 """Separate the proved protocol core from proved *models* of effectful sequencing."""
-from tvis.diagram import Beat, Diagram
-from tvis.plans.common import carry_knowledge, info4, route, row4
+from tvis.diagram import Processing, Beat, Diagram
+from tvis.plans.common import carry_knowledge, mark, info4, route, row4
 
 nodes=row4((
     ('staged','Git index snapshot','objects + raw paths', 'provider','git'),
@@ -8,6 +8,12 @@ nodes=row4((
     ('model','Lean plan model','hydrate / lock / verify', 'policy','proof'),
     ('effect','Native file writes','OS side effects', 'assumed','database'),
 ))
+nodes=mark(nodes,
+    staged=('trusted-platform','A7','Git index / OID semantics'),
+    core=('conditional-proof','open_record_spec','Open requires Realizes(A5)'),
+    model=('model-proof','hydratePlan_spec','Lean model, not OS adapter'),
+    effect=('tested','A4','Effectful Rust + OS, tested not proved'),
+)
 links=(route(nodes,'staged','core','load','staged record','provider'),
        route(nodes,'core','model','reason','authenticated result','proved'),
        route(nodes,'model','effect','execute','operation plan','assumed'))
@@ -22,14 +28,17 @@ PLAN=Diagram(
                                   ('models failure ordering','no side effects'),
                                   ('actual filesystem','not yet changed')))),
         Beat('open','The real production core accepts only an authenticated opening under the primitive contract.',
-             links=('load',),packet='load',packet_label='record bytes',status='proved'),
+             links=('load',),packet='load',packet_label='record bytes',status='proved',packet_kind='ciphertext',
+             processing=Processing('core','record + path','Ok / refuse','ciphertext','decision')),
         Beat('model','Lean proves that the model checks its preconditions before proposed writes.',
-             links=('reason',),packet='reason',packet_label='approved result',status='modeled',
+             links=('reason',),packet='reason',packet_label='approved result',status='modeled',packet_kind='decision',
+             processing=Processing('model','opened bytes','proposed actions','plaintext','decision'),
              knowledge=info4(nodes,(('immutable OIDs','assumed Git behavior'),
                                   ('verified open decision',),
                                   ('hydratePlan_spec','lockEntry_spec','verifyPlan_spec'),
                                   ('must follow the plan','A4 correspondence')))),
         Beat('effect','Actual rename, fsync, file stamps and agent I/O are tested but not fully extracted into Lean.',
-             links=('execute',),packet='execute',packet_label='native operation',status='assumed'),
+             links=('execute',),packet='execute',packet_label='native operation',status='assumed',packet_kind='decision',
+             processing=Processing('effect','checked actions','worktree effects','decision','plaintext')),
     ),footer='Proof boundary: generated core + model; assumption A4: real adapter follows it on the same bytes.')
 PLAN=carry_knowledge(PLAN)

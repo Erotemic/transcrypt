@@ -18,6 +18,7 @@ import time
 from tvis.catalog import VIS_ROOT, get_scene, load_catalog, validate_catalog
 from tvis.svg_preview import write_preview
 from tvis.gallery import build_gallery
+from tvis.slide_deck import load_slides
 
 
 BUILD = VIS_ROOT / '.build'
@@ -90,9 +91,14 @@ def _all(args) -> int:
 
     output, changed = build_presentation(
         quality=args.quality, theme=args.theme, speed=args.speed,
-        force=getattr(args, 'force', False), render_scene=render_scene)
+        force=getattr(args, 'force', False), render_scene=render_scene,
+        formats=getattr(args, 'format', 'both'),
+        embed_videos=getattr(args, 'embed_videos', False))
     print(f'Updated {len(changed)} scene videos; {len(load_catalog()[1])-len(changed)} reused.', flush=True)
-    print(f'HTML presentation: {output}', flush=True)
+    print(f'Presentation: {output}', flush=True)
+    from tvis.presentation import PRESENTATION
+    if (PRESENTATION/'presentation.pdf').is_file() and args.format in {'pdf','both'}:
+        print(f'PDF presentation: {PRESENTATION / 'presentation.pdf'}', flush=True)
     if args.open_result:
         import webbrowser
         webbrowser.open(output.as_uri())
@@ -112,13 +118,14 @@ def _snapshot() -> tuple[tuple[str, int, int], ...]:
     """Watch only authored source and storyboard, never generated Manim media."""
     files = [* (VIS_ROOT / 'tvis').rglob('*.py'),
              * (VIS_ROOT / 'storyboards').glob('*.toml'),
+             * (VIS_ROOT / 'tvis/assets').glob('presentation.*'),
              * (VIS_ROOT / 'tvis/assets/icons').glob('*.svg')]
     return tuple(sorted((str(path), path.stat().st_mtime_ns, path.stat().st_size)
                         for path in files if path.is_file()))
 
 
 def make_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Editable diagrams of credential packaging and information flow')
+    parser = argparse.ArgumentParser(description='Transcrypt v3 data flow, proof boundaries and presentations')
     commands = parser.add_subparsers(dest='action', required=True)
     commands.add_parser('list', help='print every scene and its editable plan source')
     story = commands.add_parser('storyboard', help='show claims, speaker notes and source references')
@@ -126,6 +133,10 @@ def make_parser() -> argparse.ArgumentParser:
     commands.add_parser('check', help='validate scene plans, identifiers, and referenced source paths (no Manim)')
     gallery = commands.add_parser('gallery', help='build a single-file interactive storyboard, no Manim')
     gallery.add_argument('--theme', choices=['dark','light'], default='dark')
+    presentation=commands.add_parser('present',help='export full HTML/PDF slides, reusing videos when available; no Manim required')
+    presentation.add_argument('--theme',choices=['dark','light'],default='dark')
+    presentation.add_argument('--format',choices=['html','pdf','both'],default='both')
+    presentation.add_argument('--embed-videos',action='store_true',help='also output standalone embedded.html with base64 MP4s')
     preview = commands.add_parser('preview', help='instant SVG preview of any beat (no Manim)')
     preview.add_argument('scene', help='scene ID or all')
     preview.add_argument('--beat', default='last', help='zero-based number, named beat, or last')
@@ -148,6 +159,8 @@ def make_parser() -> argparse.ArgumentParser:
         cmd.add_argument('--dry-run', action='store_true', help='print command without rendering')
         if name == 'all':
             cmd.add_argument('--force', action='store_true', help='rerender every Manim scene')
+            cmd.add_argument('--format', choices=['html','pdf','both'], default='both', help='slide presentation export formats')
+            cmd.add_argument('--embed-videos', action='store_true', help='also generate fully self-contained embedded.html')
         if name == 'watch':
             cmd.add_argument('--mode', choices=['preview','render','gallery','all'], default='preview')
             cmd.add_argument('--beat', default='last')
@@ -180,7 +193,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == 'check':
             scenes = validate_catalog()
-            print(f'{len(scenes)} scene plans, storyboard classes and required source paths valid')
+            slides = load_slides()
+            print(f'{len(scenes)} scene plans and {len(slides.slides)} presentation slides valid')
             return 0
         if args.action == 'preview':
             _, scenes = load_catalog()
@@ -192,6 +206,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == 'gallery':
             print(build_gallery(BUILD / 'storyboard.html', theme=args.theme))
+            return 0
+        if args.action == 'present':
+            from tvis.presentation import export_presentation
+            paths=export_presentation(theme=args.theme,formats=args.format,embed_videos=args.embed_videos)
+            for kind,path in paths.items():
+                print(f'{kind}: {path}')
             return 0
         if args.action == 'render':
             return _render(args)

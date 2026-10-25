@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from tvis.diagram import Diagram, Knowledge, Link, Node
+from tvis.diagram import Diagram, Evidence, Knowledge, Link, Node
 
 X3 = (-4.82, 0.0, 4.82)
 X4 = (-5.24, -1.75, 1.75, 5.24)
@@ -57,3 +57,16 @@ def carry_knowledge(diagram: Diagram) -> Diagram:
         else:
             beats.append(replace(beat, knowledge=latest) if latest else beat)
     return replace(diagram, beats=tuple(beats))
+
+
+def mark(nodes: tuple[Node, ...], **evidence: tuple[str, str, str]) -> tuple[Node, ...]:
+    """Give each executable operation its *own* evidence tier and source.
+
+    The tuple is (tier, Lean theorem / assumption ID, precise qualifier).
+    Data stores and actors should normally remain unbadged.
+    """
+    unknown = set(evidence) - {node.key for node in nodes}
+    if unknown:
+        raise ValueError(f'unknown operation nodes: {sorted(unknown)}')
+    return tuple(replace(node, evidence=Evidence(*evidence[node.key]))
+                 if node.key in evidence else node for node in nodes)

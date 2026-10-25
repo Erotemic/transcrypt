@@ -7,8 +7,8 @@ and evidence-color conventions in the supplied `aivm-secrets/visualizations/`
 repository.
 
 The visuals teach the *current experimental implementation* in source snapshot
-`861975a` (October 25, 2026), and explicitly identify *design goals* that the
-user subsequently set. They are not a substitute for the source, independent
+`16cc957` (October 25, 2026). The previous storyboard was authored before
+Git-attribute patterns and default stored-key unlock were implemented. They are not a substitute for the source, independent
 specification, Lean theorems, or cryptographic security analysis. In particular,
 no Manim scene simulates the executable or produces new proof evidence.
 
@@ -26,13 +26,15 @@ xdg-open .build/storyboard.html
 ```
 
 The self-contained gallery lets you change **scene** and **beat**, inspect the
-current holdings of each component, read the narration, and locate the real
+current holdings of each component, see an operation-by-operation trust/evidence
+register with exact theorem names or A-number assumptions, and locate the real
 Rust, Lean and documentation sources behind every claim. All SVGs are generated
 locally; no server, secret material or external assets are loaded. The `check`
 command verifies that named Lean theorems exist in the referenced files,
-plans have valid edges and layers, and that evidence sources resolve.
+plans have valid edges and layers, and that evidence sources resolve. Per-operation Lean badges are also checked
+against theorem declarations in the scene's referenced Lean source files.
 
-## Render an actual Manim video and interactive presentation
+## Render Manim and export a full HTML/PDF presentation
 
 Manim Community 0.19 needs Cairo/Pango and FFmpeg. On Ubuntu, install its
 native prerequisites once if they are not already available:
@@ -47,11 +49,13 @@ credentials, Lean, or the cryptographic implementation.
 
 ```bash
 cd ~/code/transcrypt/visualizations
-uv sync --extra manim --extra test
+uv sync --extra manim --extra presentation --extra test
+uv run python -m tvis render unlock --quality l
 uv run python -m tvis render clean --quality l
-uv run python -m tvis render proof --quality l
+uv run python -m tvis render crypto --quality l
 uv run python -m tvis all --quality l
 xdg-open .build/presentation/index.html
+xdg-open .build/presentation/presentation.pdf
 ```
 
 If you already have Manim in the sibling `aivm-secrets` visualization
@@ -62,71 +66,124 @@ second copy:
 make all PYTHON=~/code/aivm-secrets/visualizations/.venv/bin/python QUALITY=l
 ```
 
-`all` renders each changed scene's MP4 only once and builds a local HTML
-presentation that switches between the **Manim video** and editable
-**beat-by-beat SVG**. Run `make watch-all PYTHON=.venv/bin/python` to regenerate
-clips after scene edits. Try `--quality m` or `h` after reviewing draft renders.
+`all` renders each changed scene's MP4 only once and builds a **20-slide
+HTML presentation plus a 16:9 PDF**, speaker notes, and a separate technical
+storyboard inspector. The HTML slides use genuine Manim MP4s when they exist;
+missing videos fall back to plan-derived SVG diagrams, never invented motion.
+The PDF uses SVG-derived static key beats and, for video slides, a link to the
+corresponding HTML slide. PDF readers do not consistently support playable
+embedded movies.
+
+The presentation is authored independently from the source inspector:
+
+```bash
+# No Manim needed: a usable static slide deck now, or refresh after an edit
+python3 -m tvis present --format both
+
+# With already-rendered MP4s: ALSO generate a single, portable HTML file
+# with the actual video bytes inlined, rather than relying on MP4 sidecars
+python3 -m tvis present --format both --embed-videos
+xdg-open .build/presentation/embedded.html
+
+# Or the standard small HTML with relative videos/*.mp4 sidecars:
+xdg-open .build/presentation/index.html
+
+# Browse every animated beat, per-operation basis, and provenance separately:
+xdg-open .build/presentation/storyboard.html
+```
+
+`--embed-videos` is optional: it base64-encodes each available MP4 once and can
+produce a large HTML file. `index.html`, `presentation.pdf`, `speaker-notes.md`
+and `storyboard.html` are always colocated in `.build/presentation/`. To share
+`index.html` with real video, copy its `videos/` directory too. To share one
+file, copy `embedded.html`. The PDF is static, but when viewed alongside the
+HTML its movie-slide captions link to the appropriate HTML slide (some local
+PDF viewers restrict opening file links).
+
+Run `make watch-all PYTHON=.venv/bin/python` to regenerate clips after scene edits. Try `--quality m` or `h` after reviewing draft renders.
 For narration-driven timing, change the `duration`/`hold` in plans and the
 `narration` in the TOML storyboard. Video clips are silent so they work equally
 well with live narration or a separately recorded TTS track.
 
-## Scenes and evidence levels
+## Data flow and trust encoding
 
-| Scene | What it explains | Evidence |
+Two **independent** visual channels are used:
+
+1. **Moving tokens show what data moves**: `PLAIN` (local plaintext), `RECORD`
+   (encrypted wire object), `KEY`, `PATH`, `DATA` (metadata), and `RESULT`
+   (a decision, *not* an already performed OS effect). The active operation
+   also displays a typed **input -> output** transformation beneath it.
+2. **Badges beneath executable operations show its evidence tier**. This badge
+   does not extend to a caller, a remote, or an entire lifecycle scene.
+
+| Badge | Meaning | Example |
 | --- | --- | --- |
-| `legend` | Local plaintext, public ciphertext, green and amber boundaries | architecture |
-| `selection` | Git attributes and the future arbitrary-pattern policy | implemented + planned |
-| `clean` | `git add`: filter, source-derived seal decision, Git index | proof + Git assumption |
-| `record` | Exact 22-byte header, SIV tag and content | codec proof + crypto assumption |
-| `clone` | Clone, authenticated unlock and hydration | proof + native-effects assumption |
-| `attack` | Changed, misplaced or misbound records | conditional protocol proof |
-| `inventory` | **Named production Rust functions actually proved** versus lifecycle models | 3 source-derived groups + model |
-| `contract` | **Worked `open_record_spec` theorem:** Ok, Authentication failure, other refusals, and `Realizes` premise | conditional source-derived proof |
-| `proof` | Rust -> Charon/Aeneas -> Lean vs independent specification | proof and translation assumption |
-| `lifecycle` | Proved plan models are not verified native file writes | model proof + A4 |
-| `assumptions` | A1/A2 versus A3/A4/A5/A7/A8/A9/A10/A13/A14 | explicit boundary |
-| `offline` | Offline threat and intentionally disclosed metadata | accepted limitations |
-| `roadmap` | Simple future UX: selected files, persistent unlock, migration | planned, **not** shipped |
+| `LEAN: SOURCE PROOF` | A source-derived theorem names the actual extracted Rust function | `lock_action_spec`, `record_envelope_ok_spec` (shape only) |
+| `LEAN: IF REALIZES` | Source-derived theorem requires an external primitive contract | `seal_record_spec`, `open_record_spec`, `authenticate_config_spec` |
+| `LEAN: MODEL ONLY` | Proved Lean sequencing model, **not** the native adapter | `hydratePlan_spec` |
+| `TESTED: NO PROOF` | Runtime adapter covered by tests/reviews, not source-derived proof | actual Git filter/Unix writer A4/A8 |
+| `TRUSTED: CRYPTO` | Externally supplied cryptographic library/assumptions; tested but not proved in Lean | RustCrypto, Argon2id, AES-SIV A5/A9/A10 |
+| `TRUSTED: GIT / OS` | Git and OS semantics, hook deployment or translation premise | A3/A7/A13/A19 |
+| `IN CODE: NO PROOF` | Implemented without source-derived proof | general utility action |
+| `DESIGN GOAL` | Not yet implemented; never promoted to a theorem | future adapter refinement |
 
-**Vocabulary is strict:** `SOURCE-DERIVED PROOF` refers to compiled Lean
-statements about production functions; `MODEL PROOF` refers only to a Lean
-adapter model; `TESTED` to empirical tests; `TRUSTED PREMISE` to behavior
-outside that proof; `DESIGN GOAL` to future functionality. In particular:
+Each proof badge has a **specific theorem name**; the storyboard validator
+checks it against the scene's Lean source references. Amber is not a judgment
+that an operation is insecure. It indicates a required external premise.
 
-- `seal_record_spec` and `open_record_spec` are **conditional** on `Realizes`.
-- `V3Primitives`/`Keyed` correctness (A5/A9) and algorithmic security (A10)
-  are **not proved by Lean**.
-- Git attributes, hooks, OS file writes and the adapter call order (A4/A7/A8)
-  are **not end-to-end source-derived proofs**.
-- A keyless audit validates *envelope shape*, not cryptographic authenticity.
-- The illustrated baseline still restricts protection to `*.secret` and uses
-  an in-memory agent. Arbitrary Git patterns and persistent local unlock are
-  **vision** scenes, not completed implementation claims.
+## Lifecycle scenes
 
-For a **complete named inventory** and a worked theorem translated into plain English,
-read [`PROOF-ATLAS.md`](PROOF-ATLAS.md). The video now has dedicated
-`inventory` and `contract` scenes instead of relying on a generic
-"formally verified" label.
+| Scene | Data and operation | Important boundary |
+| --- | --- | --- |
+| `legend` | Typed tokens versus evidence badges | no blanket green boundary |
+| `selection` | patterns -> Git verdict -> raw path | Git A19 versus proved parser |
+| `unlock` | passphrase -> Argon2id -> config authentication -> stored key | external KDF, conditional core, native storage A17 |
+| `clean` | local plaintext -> filter -> core -> Git index | adapter A4 and conditional seal |
+| `crypto` | seal preconditions -> AES-SIV -> header/record | trusted RustCrypto versus Lean codec |
+| `record` | public record 22-byte header, tag and encrypted body | codec proof versus crypto assumption |
+| `rename` | old path -> decision -> resealed new-path record | proved `seal_action` versus tested Git move A18 |
+| `audit` | committed bytes -> keyless shape -> auditor -> remote | no keyless authenticity; deployment A13/A14 |
+| `clone` | public ciphertext -> authenticated open -> local plaintext | conditional core versus native writer |
+| `lock` | local plaintext -> checked flush -> ciphertext -> forget key | `lock_action` proof versus filesystem/key deletion |
+| `attack` | tampered ciphertext -> gate -> rejection or actual publication | conditional authentication, A10 |
+| `inventory` | actual production theorems versus model theorems | exact Lean proof inventory |
+| `contract` | worked `open_record_spec` | `Realizes` hypothesis visible |
+| `proof` | Rust -> Charon/Aeneas -> Lean | A3 translation soundness |
+| `lifecycle` | indexed record -> core -> Lean plan -> OS effects | source, model and tested are separate |
+| `assumptions` | trust boundary ledger | A3/A4/A5/A7/A8/A13/A19 |
+| `offline` | ciphertext metadata observed publicly | accepted information leakage |
+| `roadmap` | **remaining assurance work**, not already-delivered features | adapter correspondence, crypto audit, deployment |
 
-All canonical facts and caveats are in
-`../docs/verification/V3-PROOF-COVERAGE.md`,
-`../docs/verification/V3-ASSUMPTIONS.md` and
-`../proofs/aeneas/v3/PROOF-STATUS.md`.
+The current source already implements and tests generic Git-attribute patterns,
+path-rebound renames, one-time v2 migration, and persistent **stored-key unlock
+by default** (with `--private` as an optional memory-only mode). None is an
+end-to-end Lean theorem about Git or the OS.
+
+For the **complete named proof inventory** and a worked `open_record_spec`
+statement, see [`PROOF-ATLAS.md`](PROOF-ATLAS.md).
+Authoritative source facts: [`V3-PROOF-COVERAGE.md`](../docs/verification/V3-PROOF-COVERAGE.md),
+[`V3-ASSUMPTIONS.md`](../docs/verification/V3-ASSUMPTIONS.md), and
+[`PROOF-STATUS.md`](../proofs/aeneas/v3/PROOF-STATUS.md).
 
 ## Authoring map
 
 ```text
 visualizations/
-  storyboards/overview.toml        # order, long narration, theorem anchors
+  storyboards/overview.toml        # scene catalog, long narration, theorem anchors
   tvis/
-    diagram.py                      # Beat, Node, Link, Knowledge, Package
-    plans/*.py                     # edit roles, geometry, packets and captions HERE
+    diagram.py                      # Beat, Evidence, Processing, Node, Knowledge, Package
+    plans/*.py                     # edit roles, trust tiers, typed packets and transformations HERE
     scenes/*.py                    # minimal Manim class for each plan
-    palette.py                     # semantic status colors, dark and light
+    palette.py                     # colors for payload roles and independent trust badges
     scene_base.py                  # incremental Manim animation engine
     svg_preview.py                 # SVG states from the SAME plans
-    gallery.py                     # self-contained HTML storyboard
-    presentation.py                # incremental MP4 + HTML compilation
+    gallery.py                     # technical beat-by-beat SVG/HTML inspector
+    slide_deck.py                  # heterogeneous full-slide HTML, video inlining
+    pdf_slides.py                  # paged 16:9 static PDF with video-slide links
+    assets/presentation.css        # slide templates / styles
+    assets/presentation.js         # offline arrow-key/media navigation
+    presentation.py                # incremental MP4 + HTML/PDF compilation
+  storyboards/presentation.toml   # page order/layout (different for EACH slide)
     assets/icons/*.svg             # custom local vector artwork
   tests/test_storyboard.py          # no-Manim authoring/traceability regression
   .build/                          # generated: ignored by Git
@@ -146,5 +203,28 @@ cd ~/code/transcrypt/visualizations
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m tvis check
 ```
+
+### Editing the actual deck
+
+`storyboards/presentation.toml` is the presentation editor. It selects the
+`scene`, **named** `beat` for the static poster/PDF, a slide-specific `layout`,
+and concise `points` for the stage. Available layouts are:
+
+| Layout | What it displays |
+| --- | --- |
+| `cover` | Big framing title plus a still |
+| `cinema` | Large Manim video (or exact SVG poster), small caption strip |
+| `split` | Motion/diagram beside short explanation and operation evidence |
+| `diagram` | Larger static visual with a compact takeaway |
+| `evidence` | Per-operation proof/trust cards; no invented blanket guarantee |
+| `statement` | Text-led framing, conclusions, limits and next steps |
+
+A `split` slide can use `media = "diagram"` to suppress animation; `cinema`/
+`split` default to video when the clip exists. You can show the same scene on
+multiple slides with different beat/poster/layout choices without duplicating
+assurance prose. To edit proof claims, modify the scene's `plans/*.py` and the
+source-anchored `overview.toml`, **not** slide text alone. Both HTML and PDF
+read the same operation `Evidence` objects. The `check` command validates that
+each slide points to a real scene and named beat.
 
 No `.build` outputs belong in the overlay or the repository.

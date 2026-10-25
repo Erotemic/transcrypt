@@ -1,6 +1,6 @@
 # What exactly is formalized in Transcrypt v3?
 
-**Source baseline:** `861975ad954a954aac8a89dea6687c6e7dbc3d0d` (2026-10-25). This atlas explains the *tracked, compiled Lean verification reported for this snapshot*. It is not a claim that the entire Rust executable, Git, Unix or cryptographic libraries are formally verified. If the production source or generated snapshot changes, reconcile this inventory with [`PROOF-STATUS.md`](../proofs/aeneas/v3/PROOF-STATUS.md) before presenting it as current.
+**Source baseline:** `16cc957` (2026-10-25). This atlas explains the *tracked, compiled Lean verification reported for this snapshot*. It is not a claim that the entire Rust executable, Git, Unix or cryptographic libraries are formally verified. If the production source or generated snapshot changes, reconcile this inventory with [`PROOF-STATUS.md`](../proofs/aeneas/v3/PROOF-STATUS.md) before presenting it as current.
 
 ## Read the evidence levels literally
 
@@ -15,8 +15,10 @@
 | --- | --- | --- | --- |
 | `encode_config_prefix`, `encode_config`, `decode_config_exact`, `parse_config` | [`Codec.lean`](../proofs/aeneas/v3/V3Wire/Verification/Codec.lean): `encode_config_bytes`, `encode_config_refines`, `decode_config_exact_spec`, `parse_config_spec` | The config is exactly **55 bytes**, with the specified magic, arbitrary 32-byte salt and 16-byte tag. Exact field recovery, proper length/magic refusal, and round-trip behavior. | A3 translator. **Does not prove the 16-byte config authentication tag is cryptographically sound.** |
 | `encode_file_header`, `decode_file_header_exact`, `parse_file_header` | [`Codec.lean`](../proofs/aeneas/v3/V3Wire/Verification/Codec.lean): `encode_file_header_refines`, `decode_file_header_exact_spec`, `parse_file_header_spec` | Every byte of the **22-byte file header**, correct config ID extraction and length/magic refusal for arbitrary inputs. | A3. **Not a proof of the AES-SIV payload.** |
-| `is_protected_path`, `component_ok`, `is_canonical_protected_path` | [`Path.lean`](../proofs/aeneas/v3/V3Wire/Verification/Path.lean): `is_protected_path_spec`, `component_ok_spec`, `is_canonical_protected_path_spec` | The *current* production path validator implements the independent `CanonicalProtectedPath` specification. | A3. **At this snapshot the validator includes the `*.secret` policy; arbitrary Git patterns are not yet proved.** Git's path selection remains A7. |
+| `is_protected_path`, `component_ok`, `is_canonical_protected_path` | [`Path.lean`](../proofs/aeneas/v3/V3Wire/Verification/Path.lean): `is_protected_path_spec`, `component_ok_spec`, `is_canonical_protected_path_spec` | The *current* production path validator implements the independent `CanonicalProtectedPath` specification. | A3. **At this snapshot the canonical validator excludes reserved metadata instead of enforcing `*.secret`; Git pattern evaluation is external A19, while parsed responses have source-derived proofs.** Git's path selection remains A19 / A7. |
 | `bytes_eq`, `check_attr_response_ok`, `parse_index_entry`, `is_object_id` | [`Bytes.lean`](../proofs/aeneas/v3/V3Wire/Verification/Bytes.lean), [`Index.lean`](../proofs/aeneas/v3/V3Wire/Verification/Index.lean), [`Envelope.lean`](../proofs/aeneas/v3/V3Wire/Verification/Envelope.lean) | Correct byte comparison, expected `check-attr` reply, index record parsing for specified stage/mode/path, and recognition of 40/64-character lowercase-hex Git object IDs. | A3; Git commands really produce and consume the described bytes (A4/A7). |
+| `parse_attr_record`, `parse_attr_response`, `is_reserved_path` | [`Attr.lean`](../proofs/aeneas/v3/V3Wire/Verification/Attr.lean): `parse_attr_response_spec`, `parse_attr_response_complete`; [`Path.lean`](../proofs/aeneas/v3/V3Wire/Verification/Path.lean): `is_reserved_path_spec` | The source-derived parser interprets the requested Git attribute response for exact raw path bytes and refuses reserved metadata. | A3; Git attribute matching and consistency are assumed A19; adapter request construction is A4. |
+| `seal_action` (move/rebind gate) | [`Bytes.lean`](../proofs/aeneas/v3/V3Wire/Verification/Bytes.lean): `seal_action_spec` | Production decision for Seal, Rebind, Keep or Refuse given authenticated/source/local facts. | A3; adapter's inputs to the decision are tested/reviewed A4/A18, and crypto requires A5. |
 | `decode_pkt_len`, `encode_frame_header`, `decode_frame_header` | [`Pkt.lean`](../proofs/aeneas/v3/V3Wire/Verification/Pkt.lean), [`Frame.lean`](../proofs/aeneas/v3/V3Wire/Verification/Frame.lean) | Exact admissible Git filter-protocol packet lengths, agent message header layouts and round trips. | A3; the other effectful message assembly and Unix IPC are not all translated into Lean (A4/A6). |
 | `initialize_config`, `authenticate_config` | [`Protocol.lean`](../proofs/aeneas/v3/V3Wire/Verification/Protocol.lean): `initialize_config_spec`, `authenticate_config_spec` | Correct config construction, acceptance of an authentic config and specified refusal for invalid config. | **A3 + A5 `Realizes`**, A9 library correctness, A10 computational security. |
 | `seal_record` | [`Protocol.lean`](../proofs/aeneas/v3/V3Wire/Verification/Protocol.lean): `seal_record_spec` | If the production function succeeds, the output bytes are **exactly** `sealedRecord` under the correct config and raw pathname and its `MaySeal` preconditions hold; errors have specified causes. | **A3 + A5.** Does not by itself prove Git invoked the filter or uploaded only encrypted objects. |
@@ -58,6 +60,36 @@ It proves the following **for arbitrary input bytes** admitted by those types, a
 
 The actual production RustCrypto implementation is supported by differential vectors and mutation tests, **not** by a machine-checked `Realizes` instance. Cryptographic confidentiality and tag unforgeability are additionally A10 algorithmic assumptions. The `Aeneas` source extraction is trusted (A3). The real adapter must call `open_record` on the verified bytes and act only on its result (A4).
 
+## Trust level of each visible operation
+
+The Manim and SVG diagrams now share a typed operation/evidence model.
+Badges are **not** inferred from the node's role color. Every green or purple
+badge names a Lean theorem validated against a scene's real source file.
+
+| Operation on screen | Evidence category | Precise basis |
+| --- | --- | --- |
+| Git path selection | Trusted platform | A19 (Git attribute semantics); parser is separately source-proved |
+| `parse_attr_response` | Source-derived proof | `parse_attr_response_spec` |
+| Argon2id key derivation | Trusted cryptographic library | A9/A10; reference/differential tests |
+| `authenticate_config` | Conditional source-derived proof | `authenticate_config_spec` if `Realizes` A5 |
+| Local stored key / optional agent | Tested adapter | A17 / A6, OS custody and same-UID risks |
+| Git clean filter and index storage | Tested adapter plus trusted Git | A4 / A7, not whole-program proof |
+| `seal_record` and `open_record` | Conditional source-derived proofs | `seal_record_spec`, `open_record_spec`, both if `Realizes` |
+| RustCrypto AES-SIV | Trusted cryptographic library | A5/A9/A10; not Lean proved |
+| Record header encoder | Source-derived proof | `encode_file_header_refines` |
+| Rename action decision | Source-derived proof | `seal_action_spec`; actual rebind A4/A18 tested |
+| Keyless envelope validator | Source-derived proof of **shape only** | `record_envelope_ok_spec`; does not check tag A14 |
+| History audit / pre-push / remote hooks | Tested adapter + external deployment | A4/A13; optional keyed auth separate |
+| Pure lock gate | Source-derived proof | `lock_action_spec` |
+| Hydrate/lock/verify sequencing | Model proof | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` |
+| Actual native worktree writer and key deletion | Tested adapter/OS | A4/A8/A17, not Lean proved |
+| Charon/Aeneas source translation | Trusted premise | A3; pinned and reproduced, not itself a proof |
+
+The moving tokens are for **data provenance**, not for evidence. Their kinds
+(plaintext, ciphertext record, key, raw path, metadata, decision) remain
+separate from these theorem/test/assumption classifications. A decision token
+is not a claim that an OS write has already happened.
+
 ## The big security claim we cannot yet assert as a Lean theorem
 
 > "For every file the user selected, no possible normal Git operation can publish that file's plaintext to a public history."
@@ -66,4 +98,4 @@ That is **not** a proved end-to-end property today. Such a theorem would need co
 
 The theorem-backed claim is narrower but valuable: **the actual Rust v3 protocol core has the specified byte-level and authentication-decision behavior, under an explicit primitive contract, and the sequencing models satisfy their own stated invariants.**
 
-For the authoritative detail, use [`V3-PROOF-COVERAGE.md`](../docs/verification/V3-PROOF-COVERAGE.md), [`V3-ASSUMPTIONS.md`](../docs/verification/V3-ASSUMPTIONS.md) and [`PROOF-STATUS.md`](../proofs/aeneas/v3/PROOF-STATUS.md). Product-design decisions are separate: in this snapshot `*.secret` selection and memory-only credentials are implemented, while generic patterns and persistent local unlock are planned, not proved.
+For the authoritative detail, use [`V3-PROOF-COVERAGE.md`](../docs/verification/V3-PROOF-COVERAGE.md), [`V3-ASSUMPTIONS.md`](../docs/verification/V3-ASSUMPTIONS.md) and [`PROOF-STATUS.md`](../proofs/aeneas/v3/PROOF-STATUS.md). Product-design decisions are separate: in this snapshot generic Git-attribute selection, local stored-key unlock (default), authenticated rename rebinding and explicit v2 migration are implemented and tested. Their effectful adapters are not end-to-end source-derived proved.

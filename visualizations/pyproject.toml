@@ -7,6 +7,7 @@ dependencies = []
 
 [project.optional-dependencies]
 manim = ["manim>=0.19,<0.20"]
+presentation = ["cairosvg>=2.7", "reportlab>=4.1"]
 test = ["pytest>=8"]
 
 [tool.pytest.ini_options]

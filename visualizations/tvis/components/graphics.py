@@ -11,7 +11,8 @@ from manim import (
     LEFT, RIGHT, UP, DOWN, SVGMobject,
 )
 
-from tvis.diagram import Link, Node, Region
+from tvis.diagram import (Link, Node, Region, Processing, EVIDENCE_LABELS,
+                          EVIDENCE_ROLES, PAYLOAD_LABELS, PAYLOAD_ROLES)
 from tvis.icons import icon_name, icon_path, icon_art
 
 
@@ -60,7 +61,42 @@ def node_card(n: Node, colors: dict) -> VGroup:
         tag.align_to(box, RIGHT).shift(LEFT*0.12)
         tag.align_to(box, UP).shift(DOWN*0.12)
         group.add(tag)
+    if n.evidence:
+        badge_color = colors[EVIDENCE_ROLES[n.evidence.level]]
+        badge = RoundedRectangle(width=n.width-0.1, height=0.24, corner_radius=0.075,
+                                 stroke_color=badge_color, stroke_width=1.9,
+                                 fill_color=colors['surface_soft'], fill_opacity=1.0)
+        badge.move_to(xy((n.xy[0], n.xy[1]-n.height/2-0.18)))
+        label = Text(EVIDENCE_LABELS[n.evidence.level], font_size=11.5,
+                     color=badge_color, weight='BOLD')
+        _fit(label, n.width-0.24)
+        label.move_to(badge.get_center())
+        group.add(badge, label)
     return group
+
+
+def processing_card(step: Processing, node: Node, colors: dict) -> VGroup:
+    """A typed input -> operation -> output, directly under its evidence badge."""
+    x = node.xy[0]
+    y = node.xy[1]-node.height/2-0.55
+    rect = RoundedRectangle(width=node.width-0.04, height=0.32,
+                            corner_radius=0.09, fill_color=colors['surface_soft'],
+                            fill_opacity=1, stroke_color=colors['neutral'], stroke_width=1.0)
+    rect.move_to(xy((x,y)))
+    bcolor = colors[PAYLOAD_ROLES[step.before_kind]]
+    acolor = colors[PAYLOAD_ROLES[step.after_kind]]
+    from manim import Dot
+    before_dot = Dot(radius=0.05, color=bcolor).move_to(xy((x-node.width/2+0.14,y)))
+    after_dot = Dot(radius=0.05, color=acolor).move_to(xy((x+0.14,y)))
+    before = Text(step.before, font_size=12.5, color=colors['foreground'])
+    _fit(before, node.width*0.37)
+    before.move_to(xy((x-node.width*0.25+0.07,y)))
+    arrow = Text('→', font_size=14, color=colors['muted']).move_to(xy((x,y)))
+    after = Text(step.after, font_size=12.5, color=colors['foreground'])
+    _fit(after, node.width*0.33)
+    after.move_to(xy((x+node.width*0.27,y)))
+    # Separate elements so Manim can reveal the input, then the result.
+    return VGroup(rect, VGroup(before_dot, before), arrow, VGroup(after_dot, after))
 
 
 def region_box(r: Region, colors: dict) -> VGroup:
@@ -161,14 +197,22 @@ def package_group(package, colors):
     return shells
 
 
-def traveling_label(title, color, colors):
+def traveling_label(title, kind, colors):
     from manim import Circle
+    color=colors[PAYLOAD_ROLES[kind]]
     if not title:
         return Circle(radius=0.065, color=color, fill_opacity=1.0,
                       stroke_width=0)
     content = Text(title, font_size=14, color=colors['foreground'], weight='BOLD')
-    _fit(content, 2.75)
-    bg = RoundedRectangle(width=max(content.width+0.19,0.9),height=0.31,
+    _fit(content, 2.12)
+    kind_label=Text(PAYLOAD_LABELS[kind],font_size=10,color=colors['background'],weight='BOLD')
+    swatch=RoundedRectangle(width=0.53,height=0.23,corner_radius=0.065,
+                            stroke_width=0,fill_color=color,fill_opacity=1.0)
+    kind_label.move_to(swatch.get_center())
+    bg = RoundedRectangle(width=max(content.width+0.95,1.35),height=0.33,
                           corner_radius=0.11,stroke_color=color,stroke_width=2,
                           fill_color=colors['surface_soft'],fill_opacity=1.0)
-    return VGroup(bg,content)
+    swatch.move_to(bg.get_left()+RIGHT*0.35)
+    kind_label.move_to(swatch.get_center())
+    content.move_to(bg.get_center()+RIGHT*0.30)
+    return VGroup(bg,swatch,kind_label,content)

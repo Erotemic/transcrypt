@@ -1,6 +1,6 @@
 """How genuine source-derived refinement is constructed and scoped."""
-from tvis.diagram import Beat,Diagram,Link
-from tvis.plans.common import carry_knowledge, info4,row4,route
+from tvis.diagram import Processing, Beat,Diagram,Link
+from tvis.plans.common import carry_knowledge, mark, info4,row4,route
 
 nodes=row4((
     ('rust','Production Rust','v3-core source', 'broker','code'),
@@ -8,6 +8,10 @@ nodes=row4((
     ('spec','Independent spec','V3Wire / V3Policy', 'policy','document'),
     ('lean','Lean theorems','WP.spec against spec', 'proved','proof'),
 ))
+nodes=mark(nodes,
+    hax=('trusted-platform','A3','Pinned toolchain; translation soundness assumed'),
+    lean=('source-proof','encode_file_header_refines','Example codec theorem; open has extra Realizes premise'),
+)
 links=(route(nodes,'rust','hax','translate','semantic translation','broker'),
        Link('model','hax','lean','generated functions',((-0.44,1.63),(3.93,1.63)),
             'proved',label_xy=(1.75,2.11)),
@@ -29,9 +33,11 @@ PLAN=Diagram(
                                   ('wire shapes','auth and path policy'),
                                   ('theorem about RustM','compiled by Lean')))),
         Beat('translate', 'Pinned cargo-hax translates production functions; its semantic correctness is assumption A3.',
-             links=('translate',),packet='translate',packet_label='Rust source',status='assumed'),
+             links=('translate',),packet='translate',packet_label='Rust source',status='assumed',packet_kind='metadata',
+             processing=Processing('hax','production Rust','RustM translation','metadata','metadata')),
         Beat('two_sides', 'The independent spec and translated Rust definitions meet in an actual refinement theorem.',
-             links=('model','compare'),packet='compare',packet_label='expected behavior',status='proved'),
+             links=('model','compare'),packet='compare',packet_label='expected behavior',status='proved',packet_kind='metadata',
+             processing=Processing('lean','RustM + spec','Lean theorem','metadata','decision')),
         Beat('theorem', 'A compiled theorem means every permitted input satisfies its exact proposition, not just tests.',
              focus=('lean',),status='proved'),
         Beat('scope', 'The theorem is conditional on Realizes and model premises; it does not verify Git or AES internals.',

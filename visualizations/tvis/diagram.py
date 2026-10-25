@@ -17,6 +17,63 @@ from tvis.palette import ROLES
 Point = tuple[float, float]
 LayerKind = Literal['plain', 'signed', 'encrypted', 'sealed', 'private']
 BeatStatus = Literal['explainer', 'implemented', 'proved', 'modeled', 'tested', 'assumed', 'planned', 'open']
+EvidenceLevel = Literal['source-proof', 'conditional-proof', 'model-proof', 'tested',
+                        'trusted-crypto', 'trusted-platform', 'implemented', 'planned']
+PayloadKind = Literal['plaintext', 'ciphertext', 'key', 'path', 'metadata', 'decision']
+
+# Evidence (what justifies a function) and payload (what bytes flow) are
+# independent axes. Never infer proof from a green data arrow or vice versa.
+EVIDENCE_LABELS = {
+    'source-proof': 'LEAN: SOURCE PROOF',
+    'conditional-proof': 'LEAN: IF REALIZES',
+    'model-proof': 'LEAN: MODEL ONLY',
+    'tested': 'TESTED: NO PROOF',
+    'trusted-crypto': 'TRUSTED: CRYPTO',
+    'trusted-platform': 'TRUSTED: GIT / OS',
+    'implemented': 'IN CODE: NO PROOF',
+    'planned': 'DESIGN GOAL',
+}
+EVIDENCE_ROLES = {
+    'source-proof': 'proved', 'conditional-proof': 'proved',
+    'model-proof': 'policy', 'tested': 'broker',
+    'trusted-crypto': 'assumed', 'trusted-platform': 'assumed',
+    'implemented': 'neutral', 'planned': 'open',
+}
+PAYLOAD_ROLES = {
+    'plaintext': 'secret', 'ciphertext': 'guest', 'key': 'policy',
+    'path': 'policy', 'metadata': 'neutral', 'decision': 'proved',
+}
+PAYLOAD_LABELS = {
+    'plaintext': 'PLAIN', 'ciphertext': 'RECORD', 'key': 'KEY',
+    'path': 'PATH', 'metadata': 'DATA', 'decision': 'RESULT',
+}
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """Evidence for one operation, never a blanket claim about its caller.
+
+    ``basis`` names a Lean theorem for the three proof kinds. Catalog checks
+    the theorem really exists in the scene's referenced Lean files. For
+    external/tested operations, it names a documented A-number boundary.
+    """
+    level: EvidenceLevel
+    basis: str
+    note: str = ''
+
+
+@dataclass(frozen=True)
+class Processing:
+    """One operation consumes one type of data and produces another.
+
+    A status/decision output does not mean a real filesystem write occurred.
+    """
+    node: str
+    before: str
+    after: str
+    before_kind: PayloadKind = 'metadata'
+    after_kind: PayloadKind = 'decision'
+
 
 
 @dataclass(frozen=True)
@@ -30,6 +87,7 @@ class Node:
     role: str = 'neutral'
     tag: str = ''
     icon: str = ''  # see tvis/icons.py; inferred from role when empty
+    evidence: Evidence | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +181,8 @@ class Beat:
     hold: float = 0.6
     # The text travels along ``packet`` and is also displayed in a still.
     packet_label: str = ''
+    packet_kind: PayloadKind = 'metadata'
+    processing: Processing | None = None
     # Only the active beat's knowledge is shown; it replaces the previous beat.
     knowledge: tuple[Knowledge, ...] = ()
     # Package panels are cumulative, like nodes/links.
@@ -228,6 +288,9 @@ def validate(plan: Diagram) -> None:
         icon_art(icon_name(node))
         if node.role not in ROLES or node.width <= 0 or node.height <= 0:
             raise ValueError(f'{plan.key}: invalid node {node.key}')
+        if node.evidence is not None and (node.evidence.level not in EVIDENCE_LABELS or
+                                          not node.evidence.basis.strip()):
+            raise ValueError(f'{plan.key}: invalid operation evidence for {node.key}')
         if not _inside(node.xy, node.width, node.height):
             raise ValueError(f'{plan.key}: node {node.key} clipped')
     for edge in plan.links:
@@ -284,6 +347,18 @@ def validate(plan: Diagram) -> None:
             raise ValueError(f'{plan.key}: moving packet route not visible in {stage.key}')
         if stage.packet_label and not stage.packet:
             raise ValueError(f'{plan.key}: moving packet text without route')
+        if stage.packet_kind not in PAYLOAD_ROLES:
+            raise ValueError(f'{plan.key}: invalid packet kind in {stage.key}')
+        if stage.processing:
+            step = stage.processing
+            if step.node not in known_nodes:
+                raise ValueError(f'{plan.key}: processing unknown/invisible node in {stage.key}')
+            if nodes[step.node].evidence is None:
+                raise ValueError(f'{plan.key}: processing requires evidence on {step.node}')
+            if not step.before.strip() or not step.after.strip():
+                raise ValueError(f'{plan.key}: empty processing payload in {stage.key}')
+            if step.before_kind not in PAYLOAD_ROLES or step.after_kind not in PAYLOAD_ROLES:
+                raise ValueError(f'{plan.key}: invalid processing payload in {stage.key}')
         if stage.layer_focus and stage.layer_focus not in layer_ids:
             raise ValueError(f'{plan.key}: unknown package layer {stage.layer_focus}')
         if stage.layer_focus and not any(

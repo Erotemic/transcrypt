@@ -6,7 +6,9 @@ import textwrap
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-from tvis.diagram import Diagram, Node, Region, Link, Package, Knowledge, layer_geometry
+from tvis.diagram import (Diagram, Node, Region, Link, Package, Knowledge,
+                          Processing, EVIDENCE_LABELS, EVIDENCE_ROLES, PAYLOAD_LABELS,
+                          PAYLOAD_ROLES, layer_geometry)
 from tvis.palette import palette
 from tvis.icons import embedded_icon, icon_name
 
@@ -57,7 +59,39 @@ def _node(n: Node, colors: dict, *, highlight: bool) -> str:
     if n.tag:
         parts.append(f'<text x="{x+w/2-9:.1f}" y="{y-h/2+13:.1f}" text-anchor="end" '
                      f'font-size="11" font-weight="700" fill="{stroke}">{_xml(n.tag)}</text>')
+    if n.evidence:
+        evidence = n.evidence
+        color = colors[EVIDENCE_ROLES[evidence.level]]
+        badge_y = y+h/2+18
+        badge_w = w-10
+        parts += [f'<g data-evidence="{_xml(evidence.level)}" data-operation="{_xml(n.key)}">',
+                  f'<title>{_xml(evidence.basis + ": " + evidence.note)}</title>',
+                  f'<rect x="{x-badge_w/2:.1f}" y="{badge_y-12:.1f}" width="{badge_w:.1f}" height="24" rx="8" '
+                  f'fill="{colors["surface_soft"]}" stroke="{color}" stroke-width="2"/>',
+                  f'<text x="{x:.1f}" y="{badge_y+4:.1f}" text-anchor="middle" font-size="12" '
+                  f'font-weight="700" fill="{color}">{_xml(EVIDENCE_LABELS[evidence.level])}</text>', '</g>']
     return '\n'.join(parts)
+
+
+def _processing(step: Processing, node: Node, colors: dict) -> str:
+    x = sx(node.xy[0])
+    y = sy(node.xy[1]-node.height/2-0.55)
+    w = node.width*100 - 4
+    ink = colors['foreground']
+    bcolor = colors[PAYLOAD_ROLES[step.before_kind]]
+    acolor = colors[PAYLOAD_ROLES[step.after_kind]]
+    def clipped(s: str, max_len: int = 11) -> str:
+        return _xml(textwrap.shorten(s, width=max_len, placeholder='…'))
+    return (f'<g data-processing="{_xml(step.node)}" data-input="{_xml(step.before_kind)}" '
+            f'data-output="{_xml(step.after_kind)}">'
+            f'<rect x="{x-w/2:.1f}" y="{y-16:.1f}" width="{w:.1f}" height="32" rx="9" '
+            f'fill="{colors["surface_soft"]}" stroke="{colors["neutral"]}" stroke-opacity=".65"/> '
+            f'<circle cx="{x-w/2+12:.1f}" cy="{y:.1f}" r="5" fill="{bcolor}"/> '
+            f'<text x="{x-w/2+22:.1f}" y="{y+4:.1f}" font-size="12" fill="{ink}">{clipped(step.before)}</text>'
+            f'<text x="{x:.1f}" y="{y+4:.1f}" text-anchor="middle" font-size="13" fill="{colors["muted"]}">→</text>'
+            f'<circle cx="{x+7:.1f}" cy="{y:.1f}" r="5" fill="{acolor}"/> '
+            f'<text x="{x+17:.1f}" y="{y+4:.1f}" font-size="12" fill="{ink}">{clipped(step.after)}</text>'
+            f'</g>')
 
 
 def _region(r: Region, colors: dict) -> str:
@@ -133,7 +167,7 @@ def _knowledge(entry: Knowledge, colors: dict, owner_role: str, owner_title: str
     return '\n'.join(result)
 
 
-def _travel_marker(link: Link, label: str, colors: dict) -> str:
+def _travel_marker(link: Link, label: str, kind: str, colors: dict) -> str:
     # Halfway along true multi-segment length; never just average endpoints.
     pts = [(sx(x),sy(y)) for x,y in link.path]
     segments = [math.dist(a,b) for a,b in zip(pts[:-1],pts[1:])]
@@ -149,11 +183,17 @@ def _travel_marker(link: Link, label: str, colors: dict) -> str:
     else:
         px,py=pts[-1]
     text=label or 'request'
-    width=max(90,min(330,len(text)*8.1+22))
-    return (f'<rect x="{px-width/2:.1f}" y="{py-17:.1f}" width="{width:.1f}" height="32" '
-            f'rx="11" fill="{colors["surface_soft"]}" stroke="{colors[link.role]}" stroke-width="2.5"/>'
-            f'<text x="{px:.1f}" y="{py+4:.1f}" font-size="14" font-weight="650" '
-            f'text-anchor="middle" fill="{colors["foreground"]}">{_xml(text)}</text>')
+    tint=colors[PAYLOAD_ROLES[kind]]
+    category=PAYLOAD_LABELS[kind]
+    width=max(115,min(330,len(text)*8.1+67))
+    return (f'<g data-payload-kind="{_xml(kind)}">'
+            f'<rect x="{px-width/2:.1f}" y="{py-17:.1f}" width="{width:.1f}" height="32" '
+            f'rx="11" fill="{colors["surface_soft"]}" stroke="{tint}" stroke-width="2.5"/>'
+            f'<rect x="{px-width/2+4:.1f}" y="{py-12:.1f}" width="42" height="22" rx="6" fill="{tint}"/>'
+            f'<text x="{px-width/2+25:.1f}" y="{py+3:.1f}" text-anchor="middle" font-size="9" '
+            f'font-weight="700" fill="{colors["background"]}">{category}</text>'
+            f'<text x="{px+23:.1f}" y="{py+4:.1f}" font-size="13" font-weight="650" '
+            f'text-anchor="middle" fill="{colors["foreground"]}">{_xml(text)}</text></g>')
 
 
 def render_svg(plan: Diagram, *, beat: int | str = 'last', theme: str = 'dark') -> str:
@@ -177,11 +217,13 @@ def render_svg(plan: Diagram, *, beat: int | str = 'last', theme: str = 'dark') 
         pieces.append(_node(node,colors,highlight=node.key in stage.focus))
     for pack in plan.visible_packages(index):
         pieces.append(_package(pack,colors,focus=stage.layer_focus,depth=plan.visible_layer_depth(pack.key,index)))
+    if stage.processing:
+        pieces.append(_processing(stage.processing, plan.node_map()[stage.processing.node], colors))
     for knowledge in stage.knowledge:
         owner=plan.node_map()[knowledge.owner]
         pieces.append(_knowledge(knowledge,colors,owner.role,owner.title))
     if stage.packet:
-        pieces.append(_travel_marker(plan.link_map()[stage.packet],stage.packet_label,colors))
+        pieces.append(_travel_marker(plan.link_map()[stage.packet],stage.packet_label,stage.packet_kind,colors))
     pieces += [f'<rect x="70" y="663" width="1300" height="90" rx="15" '
                f'fill="{colors["surface_soft"]}" stroke="{colors["neutral"]}" stroke-opacity=".2"/>',
                f'<text x="92" y="690" font-size="15" font-weight="700" '
