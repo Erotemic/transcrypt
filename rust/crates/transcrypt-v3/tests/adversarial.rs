@@ -591,8 +591,11 @@ fn hydrate_makes_existing_plaintext_private() {
     let mut scratch = Scratch::new("perms");
     let repo = scratch.repo("repo");
     fs::set_permissions(repo.join("a.secret"), fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(repo.join("KEY.SECRET"), b"looks protected\n").unwrap();
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("readable by other users"), "{status}");
+    assert!(status.contains("KEY.SECRET is NOT encrypted"), "{status}");
+    fs::remove_file(repo.join("KEY.SECRET")).unwrap();
     run(&repo, bin(), &["hydrate"], None);
     assert_eq!(fs::metadata(repo.join("a.secret")).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");

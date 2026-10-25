@@ -182,6 +182,14 @@ fn status(root: &Path) -> Result<(), String> {
     if loose > 0 {
         println!("warning:    {loose} untracked *.secret file(s); `git add` them or lock will refuse");
     }
+    // Protection is exactly the lowercase suffix `.secret`.
+    let tracked = git(root, &["ls-files", "-z"])?;
+    for path in tracked.split(|b| *b == 0).chain(untracked.split(|b| *b == 0)) {
+        if !protected_path(path) && path.to_ascii_lowercase().ends_with(b".secret") {
+            println!("warning:    {} is NOT encrypted (only names ending in lowercase .secret are)",
+                String::from_utf8_lossy(path));
+        }
+    }
     if unlocked && counts[0] > 0 {
         println!("hint:       run `transcrypt-v3 hydrate` to decrypt ciphertext in the worktree");
     }
