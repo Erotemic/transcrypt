@@ -910,3 +910,43 @@ fn remote_enforcement_check_detects_unprotected_remotes() {
         assert!(refs.is_empty(), "{name}: canary left behind");
     }
 }
+
+/// Randomized hostile clients: random opcodes, mutated configs and paths,
+/// lying length fields, truncated and garbage frames. The agent never
+/// releases plaintext for anything but an exact, authorized request, never
+/// stalls on lying lengths beyond its timeout, and keeps serving.
+#[test]
+fn agent_survives_random_hostile_frames() {
+    let mut scratch = Scratch::new("agentfuzz");
+    let repo = scratch.repo("repo");
+    let config = fs::read(repo.join(".transcrypt/config")).unwrap();
+    let record = staged(&repo, "a.secret");
+    let mut state = 0x51ed_270b_2b3a_44c1u64;
+    let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+    for _ in 0..150 {
+        let op = [b'P', b'E', b'D', b'X', b'Q', 0][(next() % 6) as usize];
+        let mut cfg = config.clone();
+        if next() % 3 == 0 { let i = (next() as usize) % cfg.len(); cfg[i] ^= 1 << (next() % 8); }
+        let path: &[u8] = [&b"a.secret"[..], b"dir/b.secret", b"../a.secret", b"", b"a.secret\0"][(next() % 5) as usize];
+        let mut body = record.clone();
+        if next() % 2 == 0 && !body.is_empty() { let i = (next() as usize) % body.len(); body[i] ^= 1; }
+        let exact = op == b'D' && cfg == config && path == b"a.secret" && body == record;
+        if op == b'X' && cfg == config { continue; } // a valid stop request would end the session
+        if next() % 4 == 0 {
+            // Garbage or a frame whose length fields lie (claims more than sent).
+            let mut stream = UnixStream::connect(socket(&repo)).unwrap();
+            let mut frame = vec![op];
+            frame.extend_from_slice(&cfg[..(next() as usize) % (cfg.len() + 1)]);
+            frame.extend((0..(next() % 64)).map(|_| next() as u8));
+            let _ = stream.write_all(&frame);
+            drop(stream);
+            continue;
+        }
+        match agent_request(&repo, op, &cfg, path, &body) {
+            Ok(plain) if op == b'D' => assert!(exact && plain == b"alpha plaintext\n", "released plaintext for a hostile request"),
+            Ok(_) => assert!(matches!(op, b'P' | b'E') && cfg == config, "unexpected success for opcode {op}"),
+            Err(_) => assert!(!exact, "refused the genuine request"),
+        }
+    }
+    assert_eq!(agent_request(&repo, b'D', &config, b"a.secret", &record).unwrap(), b"alpha plaintext\n");
+}

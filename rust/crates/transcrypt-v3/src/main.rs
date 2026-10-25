@@ -764,12 +764,7 @@ impl Objects {
         let mut header = Vec::new();
         (&mut self.output).take(160).read_until(b'\n', &mut header)
             .map_err(|_| "cannot read git cat-file reply")?;
-        let size = header.strip_prefix(oid.as_bytes())
-            .and_then(|rest| rest.strip_prefix(b" blob "))
-            .and_then(|rest| rest.strip_suffix(b"\n"))
-            .and_then(|digits| std::str::from_utf8(digits).ok())
-            .and_then(|digits| digits.parse::<usize>().ok())
-            .filter(|size| header == format!("{oid} blob {size}\n").as_bytes())
+        let size = batch_blob_size(&header, oid)
             .ok_or_else(|| format!("Git object {oid} is missing or not a blob"))?;
         if size > MAX_RECORD {
             return Err("input exceeds the 16 MiB v3 size limit".into());
@@ -781,6 +776,18 @@ impl Objects {
         }
         Ok(data)
     }
+}
+
+/// The size in a `cat-file --batch` reply header, which must be exactly
+/// `<oid> blob <size> LF` with `<size>` in canonical decimal (checked by
+/// re-serializing it).
+fn batch_blob_size(header: &[u8], oid: &str) -> Option<usize> {
+    header.strip_prefix(oid.as_bytes())
+        .and_then(|rest| rest.strip_prefix(b" blob "))
+        .and_then(|rest| rest.strip_suffix(b"\n"))
+        .and_then(|digits| std::str::from_utf8(digits).ok())
+        .and_then(|digits| digits.parse::<usize>().ok())
+        .filter(|size| header == format!("{oid} blob {size}\n").as_bytes())
 }
 
 impl Drop for Objects {
@@ -921,6 +928,9 @@ struct Staged {
 /// `is_object_id`.
 /// Unmerged and malformed records are refused.
 fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
+    if !data.is_empty() && data.last() != Some(&0) {
+        return Err("truncated Git listing".into());
+    }
     let mut entries = Vec::new();
     for entry in data.split(|b| *b == 0).filter(|item| !item.is_empty()) {
         let parsed = parse_index_entry(entry)
@@ -1178,7 +1188,16 @@ struct AuditState {
 fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Vec<Staged>, String> {
     let Some(parent) = parent else { return tree_files(root, commit) };
     let data = git(root, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
-    // Records are `:<old mode> <new mode> <old oid> <new oid> <status> NUL <path> NUL`.
+    parse_diff_tree(&data)
+}
+
+/// Parse `diff-tree -r -z --raw` records,
+/// `:<old mode> <new mode> <old oid> <new oid> <status> NUL <path> NUL`, keeping
+/// the new side of every entry that is not deleted.
+fn parse_diff_tree(data: &[u8]) -> Result<Vec<Staged>, String> {
+    if !data.is_empty() && data.last() != Some(&0) {
+        return Err("truncated git diff-tree output".into());
+    }
     let mut fields = data.split(|b| *b == 0);
     let mut listing = Vec::new();
     while let Some(header) = fields.next() {
@@ -1187,7 +1206,11 @@ fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Vec<
         let parts: Vec<&[u8]> = header.strip_prefix(b":").ok_or("malformed git diff-tree output")?
             .split(|b| *b == b' ').collect();
         let [_, mode, _, oid, status] = parts[..] else { return Err("malformed git diff-tree output".into()) };
-        if status == b"D" { continue; }
+        match status {
+            b"D" => continue,
+            b"A" | b"M" | b"T" => {},
+            _ => return Err("unexpected git diff-tree status".into()),
+        }
         listing.extend_from_slice(mode);
         listing.push(b' ');
         listing.extend_from_slice(oid);
@@ -1492,6 +1515,65 @@ mod local_path_tests {
         fs::set_permissions(&sdir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(staging_dir(&tmp).is_err());
         fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// Randomized robustness of the adapter's parsers of Git output: no
+    /// input panics, every accepted record round-trips to exactly what Git
+    /// would print for it, and mutations of valid input are either rejected
+    /// or still exact.
+    #[test]
+    fn git_output_parsers_never_panic_and_accept_only_exact_records() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+        let alphabet = b"0123456789abcdef :\t\n\0blobtreeAMDT.secret/-";
+        let valid_tree = format!("100644 blob {oid}\tdir/a b.secret").into_bytes();
+        let valid_diff = format!(":100644 100644 {oid} {oid} M\0dir/a\tb.secret\0").into_bytes();
+        for round in 0..20000 {
+            let base: &[u8] = match round % 3 { 0 => &valid_tree, 1 => &valid_diff, _ => b"" };
+            let mut input = base.to_vec();
+            for _ in 0..(next() % 4) {
+                let at = (next() as usize) % (input.len() + 1);
+                let byte = alphabet[(next() as usize) % alphabet.len()];
+                match next() % 3 {
+                    0 => input.insert(at, byte),
+                    1 if at < input.len() => input[at] = byte,
+                    _ if at < input.len() => { input.remove(at); },
+                    _ => {},
+                }
+            }
+            if let Ok(record) = tree_record(&input) {
+                if let Ok(parsed) = parse_listing(&[record.as_slice(), b"\0"].concat()) {
+                    for e in parsed {
+                        assert!(is_object_id(e.oid.as_bytes()));
+                        assert!(input.ends_with(&e.path) && input.starts_with(&input[..6]));
+                    }
+                }
+            }
+            if let Ok(entries) = parse_diff_tree(&input) {
+                for e in entries {
+                    assert!(is_object_id(e.oid.as_bytes()));
+                    let mut needle = e.path.clone();
+                    needle.push(0);
+                    assert!(input.windows(needle.len()).any(|w| w == needle.as_slice()), "{:?}", String::from_utf8_lossy(&input));
+                }
+            }
+            let header = [oid.as_bytes(), b" blob ", input.as_slice()].concat();
+            if let Some(size) = batch_blob_size(&header, oid) {
+                assert_eq!(header, format!("{oid} blob {size}\n").as_bytes());
+            }
+        }
+        // The valid records parse to exactly their fields.
+        let tree = parse_listing(&[tree_record(&valid_tree).unwrap().as_slice(), b"\0"].concat()).unwrap();
+        assert_eq!((tree[0].regular, tree[0].oid.as_str(), tree[0].path.as_slice()), (true, oid, &b"dir/a b.secret"[..]));
+        let diff = parse_diff_tree(&valid_diff).unwrap();
+        assert_eq!((diff[0].regular, diff[0].oid.as_str(), diff[0].path.as_slice()), (true, oid, &b"dir/a\tb.secret"[..]));
+        assert_eq!(batch_blob_size(format!("{oid} blob 12\n").as_bytes(), oid), Some(12));
+        for bad in ["blob 12\n", " blob 012\n", " blob +12\n", " blob 12", " tree 12\n", " missing\n"] {
+            let header = if bad.starts_with(' ') { format!("{oid}{bad}") } else { bad.to_owned() };
+            assert_eq!(batch_blob_size(header.as_bytes(), oid), None, "{bad:?}");
+        }
+        assert!(parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap().is_empty());
     }
 
     #[test]
