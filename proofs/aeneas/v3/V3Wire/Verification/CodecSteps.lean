@@ -109,15 +109,14 @@ theorem extracted_header_id_step
   have hdst : 6 + j.val < out.length := by omega
   simp only [CoreModels.core.slice.Slice.len,
     CoreModels.rust_primitives.slice.slice_length]
-  -- The terminal WP obligation is a single read-after-write equation.
-  -- Rewrite *only* the local symbolic-execution equalities: unlike
-  -- wildcard simplification, this cannot expand the concrete arrays recursively.
-  step* by
-    simp_all only [] <;>
-      (first
-        | solve | (apply read_after_set <;> omega)
-        | solve | omega
-        | solve | agrind)
+  -- Symbolic execution leaves one read-after-write equation. Close it with
+  -- the targeted `read_after_set` lemma rather than a wildcard simplifier,
+  -- which would expand the concrete 22-byte array.
+  step*
+  refine ⟨j1_post, ?_⟩
+  have hpos : i2.val = 6 + j.val := by rw [i2_post, s_post, hmagic]
+  rw [a_post, read_after_set out i2 (6 + j.val) _ hpos hdst, i_post2,
+    getElem!_pos id.val j.val (by omega)]
 
 /-- The generated file-header decoder's data-copy step extracts precisely
     the corresponding byte from an arbitrary fixed-width input record. -/
@@ -147,11 +146,11 @@ theorem extracted_header_decode_id_step
   have hdst : j.val < id.length := by omega
   simp only [CoreModels.core.slice.Slice.len,
     CoreModels.rust_primitives.slice.slice_length]
-  step* by
-    simp_all only [] <;>
-      (first
-        | solve | (apply read_after_set <;> omega)
-        | solve | omega
-        | solve | agrind)
+  step*
+  refine ⟨j1_post, ?_⟩
+  have hpos : i1.val = 6 + j.val := by rw [i1_post, s_post, hmagic]
+  rw [a_post, read_after_set id j j.val _ rfl hdst, i2_post2,
+    getElem!_pos input.val (6 + j.val) (by omega)]
+  simp only [hpos]
 
 end Transcrypt.V3Verification

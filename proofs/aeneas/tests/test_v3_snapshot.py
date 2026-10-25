@@ -30,7 +30,10 @@ class TrackedV3Tests(unittest.TestCase):
             dest = self.root / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, dest)
-        shutil.copytree(ROOT / SNAP, self.root / SNAP)
+        # Exclude the untracked Lake build cache: a local `lake build` leaves
+        # large trees and dangling symlinks there that are not snapshot inputs.
+        shutil.copytree(ROOT / SNAP, self.root / SNAP,
+                        ignore=shutil.ignore_patterns('.lake'))
 
     def regenerated(self) -> Path:
         dst = self.root / GENERATED
