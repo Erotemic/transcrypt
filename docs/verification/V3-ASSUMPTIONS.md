@@ -292,8 +292,10 @@ one.
   under other names: the well-known editor and merge copy names are
   excluded locally and refused by `audit`, but any other name is not
   recognized.
-- **Next reduction:** document and ship a ready-made CI/pre-receive
-  snippet.
+- **Next reduction:** done in this campaign: a CI snippet (user guide) and a
+  server hook `contrib/v3/pre-receive` (TESTED against a bare repository
+  with a client that skipped its own hook). What remains is deploying them,
+  which is the repository owner's decision.
 - **Status:** REVIEWED + TESTED; enforcement depends on deployment.
 
 ### A14 — Keyless checks are envelope checks (new, by design)
@@ -319,9 +321,9 @@ by cost.
 
 1. **Plaintext from checkouts without v3 filters (A13).** Most likely real
    leak: a collaborator commits a `*.secret` in a clone that never ran
-   `unlock`. *Strongest next action:* make server-side `audit` part of the
-   documented setup (CI snippet), and consider refusing `status`/`audit`
-   success when hooks are bypassed.
+   `unlock`. *Strongest next action:* deploy `contrib/v3/pre-receive` or the
+   CI `audit` step on every shared remote (a deployment decision; both are
+   shipped and tested).
 2. **No external review (R-01, A9).** *Action:* independent cryptographic
    and adapter review using [the review package](V3-SECURITY-REVIEW.md#review-package).
 3. **Same-UID processes (A6, A8).** Any program running as the user can use

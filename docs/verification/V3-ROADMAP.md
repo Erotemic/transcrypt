@@ -99,8 +99,9 @@ verified" or "cryptographic security has been proved from first principles."
 ### Remaining, ranked by security value (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md#ranked-unresolved-risks))
 
 1. **A13 — server-side enforcement.** Plaintext from checkouts that never
-   ran `unlock` is only stopped where `audit` runs. Ship and document a
-   CI/pre-receive integration and make it part of the setup.
+   ran `unlock` is only stopped where `audit` runs. The CI snippet and
+   `contrib/v3/pre-receive` are shipped and tested; deploying them on shared
+   remotes is the owner's decision.
 2. **R-01 — external review** of the construction, `aes-siv`, the
    locked-filter envelope pass-through (A14) and the adapter, using the
    [review package](V3-SECURITY-REVIEW.md#review-package). Release blocker.

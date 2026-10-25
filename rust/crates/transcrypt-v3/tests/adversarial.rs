@@ -702,3 +702,30 @@ fn editor_and_merge_copies_of_secrets_are_caught() {
         let _ = fs::remove_file(repo.join(name));
     }
 }
+
+/// The shipped server-side hook (`contrib/v3/pre-receive`) refuses a push
+/// carrying plaintext even when the client skipped its own pre-push hook.
+#[test]
+fn server_pre_receive_hook_refuses_plaintext_pushes() {
+    let mut scratch = Scratch::new("prereceive");
+    let repo = scratch.repo("repo");
+    run(&scratch.root, "git", &["init", "-q", "--bare", "remote.git"], None);
+    let hook = scratch.root.join("remote.git/hooks/pre-receive");
+    fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contrib/v3/pre-receive"), &hook).unwrap();
+    run(&repo, "git", &["remote", "add", "origin", "../remote.git"], None);
+    let push = |args: &[&str]| {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(&repo).env("TRANSCRYPT_V3", bin())
+            .stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.output().unwrap()
+    };
+    assert!(push(&["push", "-q", "origin", "HEAD:refs/heads/main"]).status.success());
+    let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
+        Some(b"SERVER MUST REFUSE\n"))).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "bypass"], None);
+    let out = push(&["push", "-q", "--no-verify", "origin", "HEAD:refs/heads/main"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && err.contains("leak.secret"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+}

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Server-side Git hook: refuse pushes that would publish an unencrypted
+# *.secret file (or an editor/merge copy of one) to this repository.
+#
+# Install in a bare repository as hooks/pre-receive (mode 0755) with
+# `transcrypt-v3` on the hook's PATH, or set TRANSCRYPT_V3 to its path. No
+# key is needed: every *.secret blob in the new commits must be a v3 record
+# for the .transcrypt/config committed alongside it. See
+# docs/verification/V3-USER-GUIDE.md ("Keep plaintext out of the remote").
+set -eu
+bin=${TRANSCRYPT_V3:-transcrypt-v3}
+status=0
+while read -r old new ref; do
+  case $new in
+    *[!0]*) ;;          # an update or a new ref
+    *) continue ;;      # a deletion publishes nothing
+  esac
+  # Commits reachable from the new tip that no existing ref already has.
+  if ! "$bin" audit "$new" --not --all; then
+    echo "pre-receive: refusing $ref" >&2
+    status=1
+  fi
+done
+exit $status

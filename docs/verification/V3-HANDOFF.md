@@ -100,7 +100,8 @@ has a regression test in `tests/adversarial.rs`.
 ## Next tasks
 
 See the ranked list in `V3-ROADMAP.md` ("Remaining"). In short:
-server-side `audit` deployment (A13), external review R-01, then the A4
+server-side `audit` deployment (A13; `contrib/v3/pre-receive`), external
+review R-01, then the A4
 remainder (prove the `cat-file --batch` header check; long-running filter
 protocol for speed).
 

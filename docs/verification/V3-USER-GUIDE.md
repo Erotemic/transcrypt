@@ -100,8 +100,11 @@ For example, in GitHub Actions (any CI works the same way):
 - run: transcrypt-v3 audit --all     # every commit on every branch; no key needed
 ```
 
-On a self-hosted server, a `pre-receive` hook can run
-`transcrypt-v3 audit <new> --not --all` for each updated ref.
+On a self-hosted server, install
+[`contrib/v3/pre-receive`](../../contrib/v3/pre-receive) as the bare
+repository's `hooks/pre-receive`, with `transcrypt-v3` on its `PATH` (or
+`TRANSCRYPT_V3` set to it). It refuses any push whose new commits contain an
+unencrypted secret, even from clients that skipped their own hooks.
 
 For scripts, `init` and `unlock` accept `--password-stdin`.
 
