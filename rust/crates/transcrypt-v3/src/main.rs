@@ -62,6 +62,8 @@ pub(crate) struct Options {
     pub(crate) password_stdin: bool,
     pub(crate) private: bool,
     pub(crate) hydrate: bool,
+    /// Private mode: forget the key after this long without use.
+    pub(crate) timeout: Option<std::time::Duration>,
     pub(crate) patterns: Vec<OsString>,
 }
 
@@ -113,16 +115,23 @@ fn run() -> Result<(), String> {
         "status" => { no_args(action)?; status(&root) },
         "doctor" => { no_args(action)?; doctor(&root) },
         "init" | "unlock" | "rekey" | "migrate" | "reencrypt" => {
-            let mut options = Options { password_stdin: false, private: false, hydrate: true, patterns: Vec::new() };
+            let mut options = Options { password_stdin: false, private: false, hydrate: true, timeout: None,
+                patterns: Vec::new() };
             for arg in &args[1..] {
                 match (arg.to_str(), action) {
                     (Some("--password-stdin"), _) => options.password_stdin = true,
                     (Some("--private"), "init" | "unlock" | "migrate") => options.private = true,
                     (Some("--no-hydrate"), "unlock") => options.hydrate = false,
+                    (Some(flag), "init" | "unlock") if flag.starts_with("--timeout=") => {
+                        options.timeout = Some(parse_duration(&flag["--timeout=".len()..])?);
+                    },
                     (Some(flag), _) if flag.starts_with('-') => return Err(format!("{action}: unknown option {flag}")),
                     (_, "init") => options.patterns.push(arg.clone()),
                     _ => return Err(format!("{action}: unexpected argument {}", arg.to_string_lossy())),
                 }
+            }
+            if options.timeout.is_some() && !options.private {
+                return Err("--timeout applies to the private mode: use it with --private".into());
             }
             match action {
                 "init" => init(&root, &options),
@@ -230,6 +239,8 @@ Options
                             instead of the terminal (where a new one is asked for twice)
   --private                 (init, unlock, migrate) keep the key only in memory (a background
                             agent, until lock or logout) and decrypted files private (0600)
+  --timeout=DURATION        (init, unlock, with --private) forget the key after that long
+                            without use (90s, 15m, 2h); decrypted files stay until `lock`
   --no-hydrate              (unlock) leave ciphertext in the worktree
 
 A file is protected when its .gitattributes pattern says `transcrypt` (or sets
@@ -342,6 +353,20 @@ impl<'a> Filters<'a> {
                 filter); refusing to present it as a protected file".into()),
             Err(_) => Err("input exceeds the 16 MiB v3 size limit".into()),
         }
+    }
+}
+
+/// A positive duration: a number with an optional unit `s`, `m` (the
+/// default) or `h`.
+fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
+    let (number, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => text.split_at(i),
+        None => (text, "m"),
+    };
+    let scale = match unit { "s" => 1, "m" => 60, "h" => 3600, _ => 0 };
+    match number.parse::<u64>() {
+        Ok(n) if n > 0 && scale > 0 => Ok(std::time::Duration::from_secs(n.saturating_mul(scale))),
+        _ => Err(format!("--timeout takes a positive duration such as 90s, 15m or 2h (got {text:?})")),
     }
 }
 

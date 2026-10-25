@@ -148,7 +148,7 @@ verified" or "cryptographic security has been proved from first principles."
 2. Done: the rebind decision is the verified `seal_action`; next, its adapter inputs (A4).
 3. A hint for cross-branch rename conflicts (Git cannot pair path-bound records; documented limitation).
 4. A4 narrowing for `protected_flags` and the stored-key load.
-5. Optional: private-agent idle timeout.
+5. Done: private-agent idle timeout (`unlock --private --timeout=15m`).
 
 **Parallel optional tracks:** server/CI audits for organizations requiring
 remote policy enforcement; session-only credential/strict-local-privacy mode;

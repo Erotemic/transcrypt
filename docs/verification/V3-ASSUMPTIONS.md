@@ -175,9 +175,11 @@ one.
     (`stored_and_private_modes_encrypt_identically`).
 - **Residual:** any same-UID process can use or impersonate the agent while
   unlocked (ACCEPTED RISK; it needs a different privilege boundary).
-  Plaintext buffers are not `mlock`ed. The agent never times out.
-- **Next reduction:** an optional idle timeout; a separate UID or OS keyring
-  if the threat model ever admits hostile same-UID code.
+  Plaintext buffers are not `mlock`ed. An optional idle limit
+  (`unlock --private --timeout=…`, sent over the startup pipe) makes the
+  agent forget the key; without it, the key lives until `lock` or logout.
+- **Next reduction:** a separate UID or OS keyring if the threat model ever
+  admits hostile same-UID code.
 - **Status:** TESTED + REVIEWED; same-UID ACCEPTED RISK.
 
 ### A7 — Git semantics

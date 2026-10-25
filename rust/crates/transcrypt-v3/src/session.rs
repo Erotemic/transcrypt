@@ -192,8 +192,10 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
 }
 
 /// Derive and authenticate *before* this function is called. The process key
-/// arrives by pipe, and the parent does not persist it anywhere on disk.
-pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), String> {
+/// arrives by pipe, and the parent does not persist it anywhere on disk. With
+/// `idle`, the agent forgets the key and exits after that long without a
+/// request (session expiration).
+pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
     let path = prepare_directory(root)?.join(SOCK);
     match fs::symlink_metadata(&path) {
         Ok(meta) => {
@@ -212,7 +214,7 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), S
                         lock it there first".into());
                 }
                 if fs::symlink_metadata(&path).is_err() {
-                    return start_agent(root, config, key);
+                    return start_agent(root, config, key, idle);
                 }
             }
             // A dead process may leave its socket inode; our 0700 parent is
@@ -222,10 +224,10 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), S
         Err(e) if e.kind() == io::ErrorKind::NotFound => {},
         Err(_) => return Err("cannot examine session socket".into()),
     }
-    start_agent(root, config, key)
+    start_agent(root, config, key, idle)
 }
 
-fn start_agent(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), String> {
+fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|_| "cannot locate executable for credential agent")?;
     let mut child = Command::new(executable)
         .arg("serve")
@@ -234,8 +236,10 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), String
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn().map_err(|e| format!("cannot spawn credential agent: {e}"))?;
-    let sent = child.stdin.take().ok_or("agent key pipe missing")?
-        .write_all(&key[..]);
+    // The key, then the idle limit in seconds (0: none), over the pipe.
+    let idle_seconds = idle.map_or(0u64, |d| d.as_secs().max(1));
+    let sent = child.stdin.take().ok_or("agent key pipe missing")
+        .map(|mut pipe| pipe.write_all(&key[..]).and_then(|_| pipe.write_all(&idle_seconds.to_be_bytes())))?;
     if sent.is_err() {
         let _ = child.kill();
         let _ = child.wait();
@@ -342,14 +346,29 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
     // SAFETY: the pointer and length describe `key`, which outlives the lock.
     let _ = unsafe { libc::mlock(key.as_ptr().cast(), KEY_SIZE) };
     io::stdin().read_exact(&mut key[..]).map_err(|_| "missing private startup key")?;
+    let mut idle = [0u8; 8];
+    io::stdin().read_exact(&mut idle).map_err(|_| "missing agent idle limit")?;
+    let idle_ms: i32 = match u64::from_be_bytes(idle) {
+        0 => -1,
+        seconds => i32::try_from(seconds.saturating_mul(1000)).unwrap_or(i32::MAX),
+    };
     authenticate_config(config, &key)?;
     let path = directory(root)?.join(SOCK);
     let listener = at_socket(root, |p| UnixListener::bind(p))?.map_err(|e| format!("cannot bind private credential socket: {e}"))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .map_err(|_| "cannot secure session socket")?;
     let mut stopping = false;
-    for connection in listener.incoming() {
-        let mut stream = match connection { Ok(s) => s, Err(_) => break };
+    loop {
+        // Wait for a client; past the idle limit, forget the key.
+        let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd for the listener's open descriptor.
+        match unsafe { libc::poll(&mut ready, 1, idle_ms) } {
+            0 => break,
+            n if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+            n if n < 0 => break,
+            _ => {},
+        }
+        let mut stream = match listener.accept() { Ok((s, _)) => s, Err(_) => break };
         // A stalled client must not hold the single-threaded agent forever.
         stream.set_read_timeout(Some(Duration::from_secs(120)))
             .map_err(|_| "cannot set agent inbound timeout")?;

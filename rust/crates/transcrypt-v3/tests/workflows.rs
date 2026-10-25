@@ -826,3 +826,26 @@ fn macro_conflicts_other_worktrees_and_deleted_files_are_refused() {
     assert!(err.contains("b.env has uncommitted changes (or was deleted)"), "{err}");
     assert_eq!(fs::read(repo.join(".transcrypt/config")).unwrap(), config, "nothing changed");
 }
+
+/// Private mode's optional session expiration: the agent forgets the key
+/// after the idle limit (and the checkout is then locked), but any use
+/// before that keeps it alive.
+#[test]
+fn private_sessions_expire_when_idle() {
+    let mut scratch = Scratch::new("expire");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    let err = run_fails(&repo, bin(), &["unlock", "--timeout=2s", "--password-stdin"], Some(PASS));
+    assert!(err.contains("--private"), "{err}");
+    let err = run_fails(&repo, bin(), &["unlock", "--private", "--timeout=0", "--password-stdin"], Some(PASS));
+    assert!(err.contains("positive duration"), "{err}");
+    run(&repo, bin(), &["unlock", "--private", "--timeout=3s", "--password-stdin"], Some(PASS));
+    let status = || String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    for _ in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(status().contains("unlocked (private"), "use keeps the session alive");
+    }
+    std::thread::sleep(std::time::Duration::from_millis(4500));
+    assert!(status().contains("key:        locked"), "{}", status());
+    assert!(!repo.join(".git/transcrypt-v3/session.sock").exists());
+}

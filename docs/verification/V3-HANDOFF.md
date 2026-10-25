@@ -185,7 +185,7 @@ The branch is unpushed: push needs the owner's credentials.
 4. **Done:** selection parsing is the verified `parse_attr_response`. Next
    A4 narrowings: the inputs of `seal_action` and the stored-key load
    (authenticate before use).
-5. **Optional:** an idle timeout for the private-mode agent.
+5. **Done:** the private-mode agent's optional idle timeout (`--timeout`).
 
 Remote enforcement is an **optional organizational control** (A13), not a
 hard dependency for using the product. Keyless enforcement detects obvious

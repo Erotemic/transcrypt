@@ -178,7 +178,9 @@ trusted state and is outside this POC.
     supplied config on every operation, and exits when it refuses a request
     while its worktree's config no longer equals its own (a pulled rekey).
     Stale sockets left by dead processes are reclaimed only after verifying
-    the socket type and that it has no listening peer.
+    the socket type and that it has no listening peer. An optional idle
+    limit (`--timeout`), sent after the key over the same pipe, makes the
+    agent exit, forgetting the key, after that long without a request.
 
   Each mode removes the other's credential. Both use the same verified
   core, so they produce byte-identical records.

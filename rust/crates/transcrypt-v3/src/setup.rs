@@ -168,11 +168,13 @@ fn remove_hooks(root: &Path) -> Result<(), String> {
 
 /// Make `key` the credential of this checkout, in the requested mode, and
 /// remove the other mode's.
-fn activate(root: &Path, config: &[u8], key: &SecretKey, private: bool) -> Result<(), String> {
+fn activate(root: &Path, config: &[u8], key: &SecretKey, private: bool, idle: Option<std::time::Duration>)
+    -> Result<(), String>
+{
     if private {
         credential::forget(root)?;
         if Key::load(root, config)?.is_none() {
-            session::start(root, config, key)?;
+            session::start(root, config, key, idle)?;
         }
     } else {
         credential::store(root, config, key)?;
@@ -262,7 +264,7 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options) -> Result<Rollb
         edit_attributes(root, &staging, |_| Ok(()))?;
         install_filters(root)?;
         install_hooks(root)?;
-        activate(root, &config, &key, options.private)?;
+        activate(root, &config, &key, options.private, options.timeout)?;
         git(root, &["add", "--", ".transcrypt/config", ".gitattributes"])?;
         Ok(())
     })();
@@ -293,7 +295,7 @@ pub(crate) fn unlock(root: &Path, options: &Options) -> Result<(), String> {
     let key = unlock_config(&password, &config)?; // Authenticate BEFORE any persistent writes.
     install_filters(root)?;
     install_hooks(root)?;
-    activate(root, &config, &key, options.private)?;
+    activate(root, &config, &key, options.private, options.timeout)?;
     let mode = if options.private { "private mode: key in memory until lock or logout" }
         else { "key stored in .git/transcrypt-v3/key until lock" };
     if !options.hydrate {
@@ -608,7 +610,7 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     if old_key.private() {
         session::stop(root, &old_config)?;
     }
-    activate(root, &config, &key, old_key.private())
+    activate(root, &config, &key, old_key.private(), None)
         .map_err(|e| format!("{e}; the rekey is staged: run `transcrypt-v3 unlock` with the NEW passphrase"))?;
     drop(staging);
     // The worktree plaintext now cleans to the new staged records.

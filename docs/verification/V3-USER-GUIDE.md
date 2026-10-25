@@ -128,7 +128,9 @@ never on disk. It also keeps decrypted files private to you (mode 0600):
   run `transcrypt-v3 hydrate`.
 
 Other programs running as your user can still use the agent while you are
-unlocked. Both modes produce byte-identical ciphertext; switch with `unlock`
+unlocked. `unlock --private --timeout=15m` (or `90s`, `2h`) also makes the
+agent forget the key after that long without use. Decrypted files stay
+until you `lock`; Git then treats the checkout as locked. Both modes produce byte-identical ciphertext; switch with `unlock`
 or `unlock --private`.
 
 ## Day to day
