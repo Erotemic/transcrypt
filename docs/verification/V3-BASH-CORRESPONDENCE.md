@@ -23,8 +23,8 @@ allows (see [V3-ROADMAP](V3-ROADMAP.md), stage V7).
 | — | `doctor`, `contrib/v3/check-remote-enforcement` | No Bash equivalent. |
 | `--add PATTERN` | — | v3 protects exactly the files named `*.secret`. |
 | `-C`, `--context`, `--list-contexts` | — | v3 has one passphrase per repository. |
-| `-r`, `--rekey` | — (gap) | Planned: a new config and every secret re-encrypted in one commit. History stays readable with the old passphrase, as with Bash. |
-| `-u`, `--uninstall` | — (gap) | Planned. Until then: `lock`, then remove the `filter.transcrypt-v3.*` config and the hooks. |
+| `-r`, `--rekey` | `rekey` | A new config (fresh salt) and every secret re-encrypted, staged as one change to commit. Refuses uncommitted edits. History stays readable with the old passphrase, as with Bash. |
+| `-u`, `--uninstall` | `uninstall` | Locks first and leaves **ciphertext** (Bash leaves plaintext); removes only the filters, hooks and ignore rules v3 installed. |
 | `-e` / `-i` (`--export-gpg` / `--import-gpg`) | — | Share the passphrase out of band. |
 | `--upgrade`, `--set-openssl-path` | — | One self-contained binary; no OpenSSL. |
 

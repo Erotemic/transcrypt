@@ -181,6 +181,21 @@ trusted state and is outside this POC.
   as already published. `--max-commits=N` bounds the work. Every Git
   subprocess's output is capped at 256 MiB (the process is killed beyond
   that) and its error output is drained and capped.
+- `rekey`: requires the unlocked agent and that every protected file is
+  exactly the plaintext of its staged record (after hydrating). A fresh
+  salt and the new passphrase give a new config. Every staged record is
+  re-encrypted under it; all records and the config are written as objects
+  and staged in one `update-index -z --index-info`. Only then are the
+  worktree config and the agent switched. Before the agent switch,
+  `git reset` undoes it. Commits made before the rekey keep their records
+  under the old config and passphrase.
+- `uninstall`: `lock` if unlocked. Then refuse while any protected file
+  holds anything but a v3 envelope, or an untracked `*.secret` exists.
+  Remove `filter.transcrypt-v3.*`, the hooks v3 installed (if unchanged),
+  its ignore rules and its private directories. The committed attributes
+  and config stay; without the filter, Git would store a new `*.secret` as
+  plaintext, which the command warns about.
+- A new passphrase typed on a terminal (`init`, `rekey`) is asked for twice.
 - `doctor`: report, and exit non-zero unless all hold:
   - the effective `filter.transcrypt-v3.{clean,smudge,required}` are this
     binary's, and no `process` filter overrides them;

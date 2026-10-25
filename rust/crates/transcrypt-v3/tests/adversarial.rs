@@ -1046,3 +1046,35 @@ fn uninstall_removes_v3_and_leaves_only_ciphertext() {
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
     assert!(exec(&repo, bin(), &["doctor"], None).status.success());
 }
+
+/// `rekey` re-encrypts every secret under a new passphrase in one staged
+/// change, refuses to mix in uncommitted edits, and leaves history readable
+/// with the old passphrase only.
+#[test]
+fn rekey_rotates_the_passphrase() {
+    let mut scratch = Scratch::new("rekey");
+    let repo = scratch.repo("repo");
+    const NEW: &[u8] = b"a completely different long passphrase\n";
+    fs::write(repo.join("a.secret"), b"uncommitted\n").unwrap();
+    let err = run_fails(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    assert!(err.contains("uncommitted changes"), "{err}");
+    run(&repo, "git", &["checkout", "--", "a.secret"], None);
+    let before = run(&repo, "git", &["rev-parse", "HEAD"], None);
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    // Config and both records are staged; the worktree is still plaintext.
+    let staged = run(&repo, "git", &["diff", "--cached", "--name-only"], None);
+    assert_eq!(staged, b".transcrypt/config\na.secret\ndir/b.secret\n");
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    assert!(run(&repo, "git", &["status", "--porcelain", "--untracked-files=no"], None)
+        .split(|b| *b == b'\n').all(|l| l.is_empty() || l.starts_with(b"M ")));
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    run(&repo, bin(), &["audit"], None);
+    run(&repo, bin(), &["lock"], None);
+    run_fails(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(NEW));
+    assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
+    // The old commit still needs (and opens with) the old passphrase.
+    let old = String::from_utf8(before).unwrap();
+    let old_config = run(&repo, "git", &["show", &format!("{}:.transcrypt/config", old.trim())], None);
+    assert_ne!(old_config, fs::read(repo.join(".transcrypt/config")).unwrap());
+}

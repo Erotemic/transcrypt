@@ -67,7 +67,7 @@ pub(crate) fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
     output(command)
 }
 
-fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
     let mut command = git_command(Some(root));
     command.args(arguments);
     run_bounded(command, Some(input.to_vec()), GIT_OUTPUT_LIMIT)

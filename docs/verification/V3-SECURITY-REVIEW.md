@@ -98,6 +98,9 @@ regression test that fails on the old implementation.
 | H-20 | Medium (usability → safety) | **Per-file filter processes made v3 slow enough to tempt bypasses.** Each file spawned a filter that also spawned `git rev-parse`. Release timings for 300 secrets: `git add` 4.1 s, `lock` 5.5 s, `unlock` 5.8 s, a decrypting checkout 9.5 s. | Git's long-running filter protocol, with pkt-line lengths decoded by the verified core (`decode_pkt_len`): 0.25 s, 1.4 s, 1.8 s and 1.7 s. Tests `long_running_filter_protocol` (handshake, round trips, path binding, oversized and malformed input) plus every real-Git test, which now runs through it. |
 | H-21 | Low | A truncated final record (missing NUL) in `ls-tree`/`diff-tree` output was accepted. Found by the new randomized parser test; Git never emits it. | Listings must be NUL-terminated; diff-tree statuses are limited to A/M/T/D. |
 
+| H-22 | Medium (data loss) | `init` read a terminal passphrase once: a typo encrypted everything under a passphrase nobody knows, unrecoverable after `lock`. | A new passphrase is asked for twice on a terminal (`init`, `rekey`). |
+| H-23 | Medium (product gap) | No way to rotate a passphrase (a suspected leak left users stuck) and no safe uninstall. | `rekey` (one staged change, refuses uncommitted edits, agent switched only after staging; test `rekey_rotates_the_passphrase`) and `uninstall` (locks first, leaves ciphertext, removes only what v3 installed; test `uninstall_removes_v3_and_leaves_only_ciphertext`). |
+
 Re-attacking the earlier fixes found no further exploit:
 - **Pathspec staging:** only `update-index -z --stdin` paths remain, and they come from the verified snapshot.
 - **difftool/mergetool temporaries:** written through smudge, so the umask rule now covers them.

@@ -382,3 +382,70 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
         using v3, commit the removal of .gitattributes and .transcrypt/ (history stays encrypted).");
     Ok(())
 }
+
+/// Change the passphrase. Every protected file must be committed (no edit
+/// is mixed into the re-encryption). A fresh salt and key give a new config;
+/// every staged record is re-encrypted under it, and all of them plus the
+/// config are staged in one index update for the user to commit. Only then
+/// does the agent switch to the new key. Commits made before keep their old
+/// records, readable with the old passphrase. Before the agent switches,
+/// `git reset` undoes everything.
+pub(crate) fn rekey(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
+    let old_config = load_config(root)?;
+    session::request(root, &old_config, Operation::Ping, &[], &[])
+        .map_err(|_| "unlock with the current passphrase first")?;
+    // Decrypt everything first, then require that each file is exactly the
+    // plaintext of its staged record.
+    crate::hydrate(root)?;
+    let verified = crate::verify_index(root)?;
+    let mut plaintexts = Vec::new();
+    for staged in &verified.protected {
+        let object = crate::git::git_blob(root, &staged.oid)?;
+        let plaintext = session::request(root, &old_config, Operation::Decrypt, &staged.path, &object)?;
+        let relative = crate::worktree::indexed_path(&staged.path)?;
+        let (worktree, _) = crate::worktree::open_protected(root, &relative)?.read()?;
+        if *worktree != *plaintext {
+            return Err(format!("{} has uncommitted changes; commit or discard them before rekeying",
+                String::from_utf8_lossy(&staged.path)));
+        }
+        plaintexts.push((staged, plaintext));
+    }
+    let mut salt = [0u8; SALT_LEN];
+    getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
+    let (config, key) = initialize_config(&password, &salt)?;
+    // The new records, written as Git objects, and one index update.
+    let mut index_info = Vec::new();
+    let mut add = |path: &[u8], bytes: &[u8]| -> Result<(), String> {
+        let oid = crate::git::git_with_input(root, &["hash-object", "-w", "--no-filters", "--stdin"], bytes)?;
+        let oid = String::from_utf8(oid).map_err(|_| "malformed git hash-object output")?;
+        if !transcrypt_v3_core::is_object_id(oid.trim_end().as_bytes()) {
+            return Err("malformed git hash-object output".into());
+        }
+        index_info.extend_from_slice(format!("100644 {}\t", oid.trim_end()).as_bytes());
+        index_info.extend_from_slice(path);
+        index_info.push(0);
+        Ok(())
+    };
+    for (staged, plaintext) in &plaintexts {
+        add(&staged.path, &transcrypt_v3::encrypt_file(&config, &key, &staged.path, plaintext)?)?;
+    }
+    add(b".transcrypt/config", &config)?;
+    crate::git::git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
+    // Switch the worktree config and the agent to the new key.
+    let path = root.join(".transcrypt/config");
+    let temp = root.join(".transcrypt/config.rekey");
+    fs::write(&temp, config).and_then(|_| fs::rename(&temp, &path))
+        .map_err(|e| format!("cannot write the new .transcrypt/config: {e}; run `git reset` to undo the staged rekey"))?;
+    session::stop(root, &old_config)?;
+    session::start(root, &config, &key)
+        .map_err(|e| format!("{e}; the rekey is staged: run `transcrypt-v3 unlock` with the NEW passphrase"))?;
+    // The worktree plaintext now cleans to the new staged records.
+    let paths: Vec<Vec<u8>> = verified.protected.iter().map(|e| e.path.clone()).collect();
+    let listing = git(root, &["ls-files", "--stage", "-z"])?;
+    crate::git::reindex(root, &listing, &paths)?;
+    eprintln!("Rekeyed {} file(s); the new config and records are staged. Commit them now, e.g.\n  \
+        git commit -m 'Rekey transcrypt-v3'\n\
+        Earlier commits stay readable with the old passphrase: if it was exposed, rotate the secrets themselves.",
+        plaintexts.len());
+    Ok(())
+}

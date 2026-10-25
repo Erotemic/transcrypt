@@ -97,18 +97,22 @@ fn run() -> Result<(), String> {
             if args.len() != 1 { return Err("doctor takes no arguments".into()); }
             doctor(&root)
         },
-        "init" | "unlock" => {
+        "init" | "unlock" | "rekey" => {
             let mut stdin = false;
             let mut auto_hydrate = true;
             for arg in &args[1..] {
                 match arg.to_str() {
                     Some("--password-stdin") if !stdin => stdin = true,
                     Some("--no-hydrate") if action == "unlock" && auto_hydrate => auto_hydrate = false,
-                    _ => return Err("init accepts --password-stdin; unlock accepts --password-stdin and --no-hydrate".into()),
+                    _ => return Err("init and rekey accept --password-stdin; unlock accepts --password-stdin and --no-hydrate".into()),
                 }
             }
-            let password = passphrase(stdin)?;
-            if action == "init" { init(&root, password) } else { unlock(&root, password, auto_hydrate) }
+            let password = passphrase(stdin, action != "unlock")?;
+            match action {
+                "init" => init(&root, password),
+                "rekey" => rekey(&root, password),
+                _ => unlock(&root, password, auto_hydrate),
+            }
         },
         "filter-process" => {
             if args.len() != 1 { return Err("filter-process takes no arguments".into()); }
@@ -138,7 +142,7 @@ fn run() -> Result<(), String> {
     }
 }
 
-const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|doctor|verify-index|audit|lock|uninstall|help \
+const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|doctor|verify-index|audit|lock|rekey|uninstall|help \
     (clean/smudge <git-path> and pre-push are invoked by Git)";
 
 const HELP: &str = "\
@@ -166,11 +170,14 @@ Typical workflow
                             from checkouts that never ran unlock
   transcrypt-v3 lock        replace plaintext by the committed ciphertext and stop the agent;
                             refuses if any protected file has uncommitted changes
+  transcrypt-v3 rekey       change the passphrase: a new config and every *.secret re-encrypted,
+                            staged for you to commit (old commits keep the old passphrase)
   transcrypt-v3 uninstall   lock, then remove the filters, hooks and ignore rules from this
                             checkout (committed files and history stay encrypted)
 
 Options
-  --password-stdin          (init, unlock) read the passphrase from stdin instead of the terminal
+  --password-stdin          (init, unlock, rekey) read the passphrase from stdin instead of the
+                            terminal (where a new passphrase is asked for twice)
   --no-hydrate              (unlock) leave ciphertext in the worktree
 
 Files matching *.secret are encrypted with AES-256-SIV under a key derived by
@@ -262,7 +269,10 @@ fn load_config(root: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn passphrase(from_stdin: bool) -> Result<Zeroizing<Vec<u8>>, String> {
+/// Read the passphrase. A new one (`init`, `rekey`) typed on a terminal is
+/// asked for twice: a typo would otherwise encrypt everything under a
+/// passphrase nobody knows.
+fn passphrase(from_stdin: bool, new: bool) -> Result<Zeroizing<Vec<u8>>, String> {
     // Preallocated and wrapped before reading, so the buffer never grows
     // (leaving unwiped copies) and every exit path wipes it.
     let bytes = if from_stdin {
@@ -275,9 +285,14 @@ fn passphrase(from_stdin: bool) -> Result<Zeroizing<Vec<u8>>, String> {
         if value.last() == Some(&b'\r') { value.pop(); }
         value
     } else {
-        Zeroizing::new(rpassword::prompt_password("Transcrypt v3 passphrase: ")
-            .map_err(|e| format!("cannot read terminal passphrase: {e}"))?
-            .into_bytes())
+        let prompt = |text: &str| rpassword::prompt_password(text)
+            .map(|p| Zeroizing::new(p.into_bytes()))
+            .map_err(|e| format!("cannot read terminal passphrase: {e}"));
+        let value = prompt(if new { "New transcrypt v3 passphrase: " } else { "Transcrypt v3 passphrase: " })?;
+        if new && value.len() >= 16 && *prompt("Repeat the passphrase: ")? != *value {
+            return Err("the passphrases differ".into());
+        }
+        value
     };
     if bytes.len() < 16 { return Err("v3 requires a passphrase of at least 16 bytes".into()); }
     Ok(bytes)
