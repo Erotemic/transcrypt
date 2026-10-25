@@ -173,6 +173,10 @@ one.
     `cat-file blob` behave as documented.
   - `filter.<d>.required` is enforced.
   - `update-index --stdin` takes literal paths and never adds files.
+  - The long-running filter protocol (version 2) frames each request as
+    documented (`command=`, `pathname=` with the exact path bytes, content
+    up to a flush), and Git fails the command when a required filter
+    returns `status=error` or exits.
   - `GIT_LITERAL_PATHSPECS` and `GIT_NO_REPLACE_OBJECTS` are honored.
   - The pre-commit hook sees the index being committed (`GIT_INDEX_FILE`).
 - **Consequence:** wrong bytes authenticated, or protected files not
@@ -398,6 +402,7 @@ verified decision that gates it:
 | `smudge` filter output (unlocked) | agent `Decrypt` → `open_record` | same config; `%f`; blob from stdin | `Ok` |
 | `clean`/`smudge` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
 | Agent framing | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, lengths | proved roundtrip |
+| Git filter-process framing | `decode_pkt_len` for every packet; then the same conversion as the per-file filters | 4-byte pkt-line headers from Git; `command=`/`pathname=` values | `Ok` (else the process ends and Git fails) |
 | Agent dispatch | `authorize_agent_request` before the body is read; peer UID check | opcode, supplied config, startup config, path, length | `Ok(op)` from a same-UID peer |
 | Agent startup | `authenticate_config` | config bytes, piped key | `Ok` |
 | `unlock` / `init` | `authenticate_config` / `initialize_config` | config bytes / fresh salt | `Ok`, before any persistent effect |

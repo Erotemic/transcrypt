@@ -131,6 +131,16 @@ trusted state and is outside this POC.
   `hydrate --auto` (a no-op while locked that never fails the finished Git
   command), which decrypts with mode 0600.
   Git diffs are disabled for protected files rather than invoking textconv.
+- **Filter transport.** Git runs the filters through its long-running
+  protocol (`filter.transcrypt-v3.process = <bin> filter-process`, protocol
+  version 2): one process per Git command, advertising `clean` and `smudge`
+  only. Each pkt-line length is decoded by the verified core
+  (`decode_pkt_len`: four lowercase hex digits, flush or 5..65520 bytes);
+  each file goes through exactly the per-file conversion; content beyond
+  the 16 MiB bound is read to its flush and refused with `status=error`; a
+  malformed packet ends the process, so Git fails the command. The per-file
+  `clean %f` / `smudge %f` filters remain configured for Git versions
+  without the protocol.
 - **Locked filters.** When no agent serves the worktree config, neither
   filter has the key, so neither can change a record: both output input that
   has the v3 envelope of this config (header with its config id, within the

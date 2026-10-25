@@ -22,6 +22,7 @@ authoritative: Rust is changed to meet it, never the reverse.
 | Trust-ordered assumptions, adapter call-site table | `docs/verification/V3-ASSUMPTIONS.md` |
 | Internal security review (V6) | `docs/verification/V3-SECURITY-REVIEW.md` |
 | User documentation | `docs/verification/V3-USER-GUIDE.md` |
+| Bash ↔ v3 command and mechanism map | `docs/verification/V3-BASH-CORRESPONDENCE.md` |
 | Wire/AAD/Git behavior | `docs/verification/specs/V3-AUTHENTICATED-P0.md` |
 | Verified pure core (codec + every decision) | `rust/crates/transcrypt-v3-core/src/lib.rs` |
 | Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-v3/src/lib.rs` |

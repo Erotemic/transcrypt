@@ -18,7 +18,7 @@ them with your entire team or complicate your workflow.
 > implementation and Lean/Aeneas verification project are under active
 > development. Its protocol core is machine-checked against an independent
 > specification; it does **not** change the released Bash format and has not
-> had an external security review. Users: [v3 user guide](docs/verification/V3-USER-GUIDE.md).
+> had an external security review. Users: [v3 user guide](docs/verification/V3-USER-GUIDE.md); coming from this Bash tool: [command and mechanism map](docs/verification/V3-BASH-CORRESPONDENCE.md).
 > Contributors: the [active v3 roadmap](docs/verification/V3-ROADMAP.md), the
 > [proof coverage ledger](docs/verification/V3-PROOF-COVERAGE.md), the
 > [assumption register](docs/verification/V3-ASSUMPTIONS.md) and the
