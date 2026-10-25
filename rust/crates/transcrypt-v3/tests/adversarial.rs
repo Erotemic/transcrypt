@@ -264,8 +264,17 @@ fn help_and_status_report_state_without_changing_anything() {
     assert!(help.contains("transcrypt-v3 unlock") && help.contains("*.secret"));
     let repo = scratch.repo("repo");
     let text = |repo: &Path| String::from_utf8(run(repo, bin(), &["status"], None)).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    for f in ["a.secret", "dir/b.secret"] {
+        fs::set_permissions(repo.join(f), fs::Permissions::from_mode(0o644)).unwrap();
+    }
     let unlocked = text(&repo);
     assert!(unlocked.contains("session:    unlocked"), "{unlocked}");
+    assert!(unlocked.contains("2 decrypted *.secret file(s) are readable by other users"), "{unlocked}");
+    for f in ["a.secret", "dir/b.secret"] {
+        fs::set_permissions(repo.join(f), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert!(!text(&repo).contains("readable by other users"));
     assert!(unlocked.contains("2 plaintext"), "{unlocked}");
     fs::write(repo.join("a.secret"), b"edited\n").unwrap();
     fs::write(repo.join("new.secret"), b"untracked\n").unwrap();

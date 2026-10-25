@@ -118,14 +118,17 @@ fn status(root: &Path) -> Result<(), String> {
     println!("repository: v3 config {}", hex(&transcrypt_v3::config_id(&config)[..4]));
     println!("session:    {}", if unlocked { "unlocked (in-memory key agent running)" } else { "locked" });
     let mut counts = [0usize; 4];
+    let mut exposed = 0usize;
     for (mode, path) in indexed_files(root)? {
         if !protected_path(&path) { continue; }
         let name = String::from_utf8_lossy(&path).into_owned();
         let state = (|| -> Result<&str, String> {
             if mode != b"100644" { return Ok("unsupported mode"); }
             let object = git_show(root, &path)?;
-            let worktree = open_protected(root, &indexed_path(&path)?)?.read()?;
+            let target = open_protected(root, &indexed_path(&path)?)?;
+            let worktree = target.read()?;
             if worktree == object { return Ok("ciphertext"); }
+            if target.readable_by_others()? { exposed += 1; }
             if !unlocked { return Ok("modified or plaintext"); }
             let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
             Ok(if worktree == plaintext { "plaintext" } else { "modified" })
@@ -135,6 +138,10 @@ fn status(root: &Path) -> Result<(), String> {
     }
     println!("protected:  {} ciphertext, {} plaintext, {} modified, {} other",
         counts[0], counts[1], counts[2], counts[3]);
+    if exposed > 0 {
+        println!("warning:    {exposed} decrypted *.secret file(s) are readable by other users; \
+            run `chmod go-rwx` on them and use `umask 077` in this checkout");
+    }
     let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     let loose = untracked.split(|b| *b == 0).filter(|p| protected_path(p)).count();
     if loose > 0 {
@@ -469,6 +476,14 @@ fn open_protected(root: &Path, relative: &Path) -> Result<Protected, String> {
 }
 
 impl Protected {
+    /// Whether group or other users may read the file.
+    fn readable_by_others(&self) -> Result<bool, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let file = self.dir.open_regular(&self.leaf).map_err(|_| "cannot open protected worktree file")?;
+        let mode = file.metadata().map_err(|_| "cannot stat protected worktree file")?.permissions().mode();
+        Ok(mode & 0o044 != 0)
+    }
+
     fn read(&self) -> Result<Vec<u8>, String> {
         let file = self.dir.open_regular(&self.leaf)
             .map_err(|_| "cannot read protected worktree file (missing, symlink or not regular)")?;

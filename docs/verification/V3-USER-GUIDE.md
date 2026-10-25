@@ -83,6 +83,10 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
   disk.
 - **Hooks are local.** A `--no-verify` commit or a server without the hook
   is not checked. The clean filter still encrypts everything it processes.
+- **Use `umask 077` in protected checkouts.** `hydrate` writes plaintext
+  with mode 0600, but files Git writes on checkout (through the smudge
+  filter) and files you create get your umask, often readable by other
+  local users. `transcrypt-v3 status` warns about such files.
 - Files larger than 16 MiB are refused.
 
 ## Troubleshooting
