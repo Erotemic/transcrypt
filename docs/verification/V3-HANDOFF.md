@@ -169,11 +169,19 @@ The branch is unpushed: push needs the owner's credentials.
 
 ## Next tasks (resume after each checkpoint)
 
-1. **Keep the adversarial agent review rounds going** on each new change
-   (rounds so far: H-28 to H-73 in; the seventh round found nothing above Low
-   [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md)). The external human review
-   (R-01) is deliberately the **final** step, after engineering and proofs
-   are pushed as far as they go; it is not a blocker for ongoing work.
+1. **Adversarial agent review: converged.** Seven rounds (H-28 to H-73 in
+   [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md)) ended with nothing above
+   Low. The invariants that got there are the design rules for new code:
+   - interruption fails closed, and rerunning converges;
+   - the hooks accept what the audit accepts (or are stricter);
+   - the `transcrypt` macro must resolve to the filter, checked on real
+     paths too;
+   - attribute queries are case-sensitive;
+   - records of other configs pass only as Git's own blobs.
+
+   Run a fresh round on any substantial change. The external human review
+   (R-01) is deliberately the **final** step; it is not a blocker for
+   ongoing work.
 2. **Done:** the rebind decision is the verified `seal_action`
    (`sealSpec_repairs_only_local`). Remaining: show the adapter computes its
    inputs (`local`, `moved`) correctly.
@@ -186,6 +194,12 @@ The branch is unpushed: push needs the owner's credentials.
    A4 narrowings: the inputs of `seal_action` and the stored-key load
    (authenticate before use).
 5. **Done:** the private-mode agent's optional idle timeout (`--timeout`).
+6. **Performance at this checkpoint** (release build, 10 000 files, 300
+   protected): a commit with the hook takes 0.46 s, `git status` 0.05 s,
+   an audit of 4 commits 0.30 s. Most of the hook's time is decrypting
+   every staged protected file. If repositories with thousands of secrets
+   need it, verify only changed entries keyed and keep the others to the
+   keyless envelope check.
 
 Remote enforcement is an **optional organizational control** (A13), not a
 hard dependency for using the product. Keyless enforcement detects obvious
