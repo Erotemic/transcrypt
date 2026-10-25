@@ -67,7 +67,10 @@ fn rewrite_attributes(text: &[u8]) -> Option<Vec<u8>> {
 
 /// `migrate`: see the module documentation.
 pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
-    if fs::symlink_metadata(root.join(".transcrypt")).is_ok() {
+    // An uncommitted v3 config is an interrupted migration: rerunning it,
+    // with the same v3 passphrase, completes it.
+    let resuming = fs::symlink_metadata(root.join(".transcrypt")).is_ok();
+    if resuming && git(root, &["cat-file", "-e", "HEAD:.transcrypt/config"]).is_ok() {
         return Err("this repository already uses v3".into());
     }
     if git(root, &["config", "--get", "filter.crypt.clean"]).is_err() {
@@ -83,9 +86,6 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
         return Err(format!("{} has Bash transcrypt rules; move them to .gitattributes (and commit) \
             first, so that the conversion keeps them for everyone", info.display()));
     }
-    if !git(root, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
-        return Err("commit or discard your changes first; the conversion must start from a committed state".into());
-    }
     // The files Bash protects, by its attributes.
     let entries = indexed_files(root)?;
     let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
@@ -100,8 +100,19 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
     let mut selected = Vec::new();
     for record in fields.chunks(3).filter(|r| r.len() == 3) {
-        if record[2] == b"crypt" || record[2].starts_with(b"crypt-") {
+        // When resuming, rules already converted select with transcrypt-v3.
+        if record[2] == b"crypt" || record[2].starts_with(b"crypt-") || (resuming && record[2] == b"transcrypt-v3") {
             selected.push(record[0].to_vec());
+        }
+    }
+    // A committed state, except for an interrupted migration's own changes.
+    let status = git(root, &["status", "--porcelain", "-z", "--untracked-files=no"])?;
+    for entry in status.split(|b| *b == 0).filter(|e| e.len() > 3) {
+        let path = &entry[3..];
+        let own = resuming && entry[0] != b'R' && (path == b".transcrypt/config" || path == b".gitattributes"
+            || path.ends_with(b"/.gitattributes") || selected.iter().any(|p| p == path));
+        if !own {
+            return Err("commit or discard your changes first; the conversion must start from a committed state".into());
         }
     }
     for path in &selected {
@@ -173,6 +184,15 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
         if let Some((path, _)) = refs.iter().zip(protected_flags(root, &refs, Attributes::Staged)?).find(|(_, p)| !*p) {
             return Err(format!("{} would no longer be protected after the conversion (an attribute \
                 rule could not be converted); convert it in .gitattributes by hand", String::from_utf8_lossy(path)));
+        }
+        // Nothing may stay v2 ciphertext (a rule Git applied only
+        // case-insensitively, or one that could not be converted).
+        for entry in indexed_files(root)? {
+            if git_blob_if_record_sized(root, &entry.oid)?.is_some_and(|b| b.starts_with(b"U2FsdGVk")) {
+                return Err(format!("{} is still v2 ciphertext after the conversion (selected by a rule v3 \
+                    does not apply, e.g. only case-insensitively); fix its rule in .gitattributes and rerun",
+                    String::from_utf8_lossy(&entry.path)));
+            }
         }
         crate::lifecycle::verify_index_command(root)
     })();

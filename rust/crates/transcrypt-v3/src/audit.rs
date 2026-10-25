@@ -213,8 +213,9 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     // While a v3 config exists, the policy must define the `transcrypt`
     // macro (checked when either changes).
     if config_oid.is_some() && (config_changed || attributes_changed) {
-        let top = attributes.iter().find(|(p, _)| p == b".gitattributes");
-        if !top.map(|(_, oid)| git_blob(root, oid)).transpose()?.is_some_and(|t| crate::setup::defines_our_macro(&t)) {
+        let top = attributes.iter().find(|(p, _)| p == b".gitattributes").map(|(_, oid)| oid.as_str());
+        let dir = state.policy.file.parent().map(Path::to_path_buf).unwrap_or_default();
+        if !crate::git::macro_resolves(root, &dir, top)? {
             return Err(format!("commit {commit}: {}", crate::setup::MACRO_MISSING));
         }
     }

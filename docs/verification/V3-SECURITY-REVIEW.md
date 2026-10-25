@@ -256,6 +256,32 @@ Smaller:
 - A new passphrase must be one line.
 - `core.hooksPath` pointing at `.git/hooks` is no longer reported.
 
+A sixth round attacked the two invariants as wholes. It killed every
+multi-step command before each of its Git calls, and hunted for macro
+bypasses. It lost no data, and found five issues. Both remaining classes
+had one root, so two rules now extend the invariants:
+
+- **The hooks and the audit enforce one predicate.** Pre-commit,
+  pre-merge-commit (`verify-index`), the audit and `doctor` share
+  `macro_resolves`. It is a temporary index holding the commit's top-level
+  `.gitattributes` and a probe directory marked `transcrypt`; Git must
+  resolve the probe to `filter=transcrypt-v3`. A commit without
+  `.transcrypt/config` is judged by the audit's own rule: refused only if it
+  protects a file.
+- **Rerunning an interrupted command converges.** An uncommitted config
+  means an interrupted `init` or `migrate`, which a rerun with the same
+  passphrase completes. `unprotect` completes when only the worktree rules
+  were edited. `reencrypt` checks every earlier passphrase before any
+  write. `unlock` sets `filter.required` before the filter commands.
+
+| ID | Severity | Finding | Fix and evidence |
+| --- | --- | --- | --- |
+| H-65 | Medium (plaintext published) | A later `[attr]transcrypt -text` line passed the audit, pre-push and pre-merge-commit; only pre-commit's semantic check refused it. | One predicate (`macro_resolves`) everywhere. Test `hooks_and_audit_agree_on_the_macro_and_configless_branches`. |
+| H-66 | Low–Medium (stuck) | Every commit on a branch made before `init` was refused, and so was `uninstall` there. | Configless commits follow the audit's rule; `uninstall` works without a config. Same test. |
+| H-67 | Low (stuck after interruption) | Interrupted `init`, `migrate` and `unprotect` could not be rerun. | They resume when rerun. Test `interrupted_commands_converge_when_rerun` (including a migration killed mid-way by a Git shim). |
+| H-68 | Low | `reencrypt` asked for a second earlier passphrase after it had already written files. | All passphrases are asked for and checked first. |
+| H-69 | Low (incomplete migration) | `migrate` skipped v2 files Bash selected only case-insensitively. | `migrate` refuses to finish (and rolls back) while any staged file is still v2 ciphertext. Same test. |
+
 Attack review of the new surface:
 - **Selection.** v3 never matches patterns. Git's answers are parsed by
   `parse_attr_record`, which is proved to accept exactly the requested

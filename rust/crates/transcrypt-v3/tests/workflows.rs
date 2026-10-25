@@ -923,7 +923,7 @@ fn legacy_keys_macro_redefinitions_and_crlf() {
     fs::write(repo.join(".git/info/attributes"), b"\"[attr]transcrypt\" -diff\n").unwrap();
     fs::write(repo.join("a.env"), b"S=3\n").unwrap();
     let err = run_fails(&repo, "git", &["commit", "-qam", "x"], None);
-    assert!(err.contains("marked `transcrypt` would not be encrypted"), "{err}");
+    assert!(err.contains("does not set filter=transcrypt-v3"), "{err}");
     assert!(!run(&repo, "git", &["show", "HEAD:a.env"], None).starts_with(b"S=3"));
     assert!(!exec(&repo, bin(), &["doctor"], None).status.success());
     fs::remove_file(repo.join(".git/info/attributes")).unwrap();
@@ -1042,10 +1042,10 @@ fn interrupted_migration_lost_macro_and_case_sensitivity() {
     run(&repo, "git", &["commit", "-qm", "init"], None);
     fs::write(repo.join(".gitattributes"), b"*.png binary\n").unwrap();
     let err = run_fails(&repo, "git", &["commit", "-qam", "clobber"], None);
-    assert!(err.contains("no longer defines the `transcrypt` macro"), "{err}");
+    assert!(err.contains("does not set filter=transcrypt-v3"), "{err}");
     run(&repo, "git", &["commit", "-q", "--no-verify", "-am", "clobber"], None);
     let err = run_fails(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
-    assert!(err.contains("no longer defines the `transcrypt` macro"), "{err}");
+    assert!(err.contains("does not set filter=transcrypt-v3"), "{err}");
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
 
     run(&repo, "git", &["config", "core.ignorecase", "true"], None);
@@ -1081,4 +1081,97 @@ fn foreign_hooks_executable_bits_and_one_line_passphrases() {
     assert!(out.contains("FAIL pre-commit hook installed"), "{out}");
     run(&repo, bin(), &["unlock"], None);
     assert!(exec(&repo, bin(), &["doctor"], None).status.success());
+}
+
+/// Sixth review F1/F2: the hooks and the audit enforce one predicate. A
+/// redefinition of the macro later in `.gitattributes` is refused by the
+/// read-only check (merge commits) and by the audit; a commit on a branch
+/// from before `init` passes the hooks exactly as it passes the audit.
+#[test]
+fn hooks_and_audit_agree_on_the_macro_and_configless_branches() {
+    let mut scratch = Scratch::new("review6");
+    let repo = scratch.git_repo("repo");
+    run(&repo, "git", &["branch", "before-init"], None);
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"S=1\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    attributes.extend_from_slice(b"[attr]transcrypt -text\n");
+    fs::write(repo.join(".gitattributes"), attributes).unwrap();
+    fs::write(repo.join("n.env"), b"NEW=plain\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    let err = run_fails(&repo, bin(), &["verify-index"], None);
+    assert!(err.contains("does not set filter=transcrypt-v3"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "redefine"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+    assert!(err.contains("does not set filter=transcrypt-v3"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    // A branch from before init: ordinary commits pass, as in the audit.
+    run(&repo, "git", &["checkout", "-q", "before-init"], None);
+    fs::write(repo.join("README"), b"edited on an old branch\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "old branch work"], None);
+    run(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+}
+
+/// Sixth review F3/F5: rerunning an interrupted `init`, `unprotect` or
+/// `migrate` completes it; `migrate` never finishes with v2 ciphertext left
+/// over (here: a file Bash selected only case-insensitively).
+#[test]
+fn interrupted_commands_converge_when_rerun() {
+    let mut scratch = Scratch::new("converge");
+    // init: config written but never committed (an interruption).
+    let repo = scratch.git_repo("init");
+    run(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(NEW));
+    assert!(err.contains("interrupted init") && err.contains("start over"), "{err}");
+    fs::write(repo.join("a.env"), b"A\n").unwrap();
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    assert!(is_record(&committed(&repo, "a.env")));
+    // unprotect: the worktree rules already lost the line.
+    let rules = fs::read_to_string(repo.join(".gitattributes")).unwrap();
+    fs::write(repo.join(".gitattributes"), rules.replace("*.env transcrypt\n", "")).unwrap();
+    run(&repo, bin(), &["unprotect", "*.env"], None);
+    assert_eq!(staged(&repo, "a.env"), b"A\n");
+
+    // migrate: killed during re-encryption, then rerun.
+    let repo = scratch.git_repo("migrate");
+    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
+    fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    let shim = scratch.root.join("shim");
+    fs::create_dir(&shim).unwrap();
+    let real_git = String::from_utf8(run(&repo, "sh", &["-c", "command -v git"], None)).unwrap();
+    fs::write(shim.join("git"), format!("#!/bin/sh\ncase \"$*\" in *--renormalize*) kill -9 $PPID; exit 1;; esac\nexec {} \"$@\"\n",
+        real_git.trim())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
+    let mut child = Command::new(bin()).args(["migrate", "--password-stdin"]).current_dir(&repo)
+        .env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(PASS).unwrap();
+    assert!(!child.wait().unwrap().success(), "the shim kills migrate");
+    run(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
+    assert!(is_record(&staged(&repo, "db.key")));
+    run(&repo, "git", &["commit", "-qm", "converted"], None);
+    run(&repo, bin(), &["audit"], None);
+
+    // migrate: a v2 file selected only case-insensitively is not left behind.
+    let repo = scratch.git_repo("case");
+    run(&repo, "git", &["config", "core.ignorecase", "true"], None);
+    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    fs::write(repo.join(".gitattributes"), b"*.env filter=crypt diff=crypt merge=crypt\n").unwrap();
+    fs::write(repo.join("a.env"), b"a\n").unwrap();
+    fs::write(repo.join("PROD.ENV"), b"prod\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    assert!(committed(&repo, "PROD.ENV").starts_with(b"U2FsdGVk"));
+    let err = run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
+    assert!(err.contains("PROD.ENV is still v2 ciphertext"), "{err}");
+    assert!(!repo.join(".transcrypt").exists(), "rolled back");
 }

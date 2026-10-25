@@ -49,9 +49,11 @@ fn program() -> Result<String, String> {
 fn expected_config() -> Result<[(&'static str, String); 7], String> {
     let program = program()?;
     Ok([
+        // Required first: an interrupted install then fails Git's commands
+        // rather than letting them store plaintext.
+        ("filter.transcrypt-v3.required", "true".into()),
         ("filter.transcrypt-v3.clean", format!("{program} clean %f")),
         ("filter.transcrypt-v3.smudge", format!("{program} smudge %f")),
-        ("filter.transcrypt-v3.required", "true".into()),
         // Preferred by Git when present: one process per Git command.
         ("filter.transcrypt-v3.process", format!("{program} filter-process")),
         ("merge.transcrypt-v3.name", "transcrypt-v3: merge decrypted protected files".into()),
@@ -278,15 +280,31 @@ impl Rollback {
 pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Option<Zeroizing<Vec<u8>>>)
     -> Result<Rollback, String>
 {
-    if fs::symlink_metadata(root.join(".transcrypt")).is_ok() {
-        return Err(".transcrypt already exists: this repository is set up; run `transcrypt-v3 unlock`".into());
-    }
+    // An existing config not yet in `HEAD` is an interrupted `init`: rerunning
+    // with the same passphrase completes it.
+    let interrupted = if fs::symlink_metadata(root.join(".transcrypt")).is_ok() {
+        if git(root, &["cat-file", "-e", "HEAD:.transcrypt/config"]).is_ok() {
+            return Err(".transcrypt already exists: this repository is set up; run `transcrypt-v3 unlock`".into());
+        }
+        Some(load_config(root).map_err(|e| format!("{e} (left by an interrupted init? to start over: \
+            `git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`)"))?)
+    } else { None };
     check_hook_available(root)?;
     // Asked before anything is written: an interrupted prompt changes nothing.
-    let password = match password { Some(p) => p, None => passphrase(options.password_stdin, true)? };
-    let mut salt = [0u8; SALT_LEN];
-    getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
-    let (config, key) = initialize_config(&password, &salt)?;
+    let password = match password { Some(p) => p, None => passphrase(options.password_stdin, interrupted.is_none())? };
+    let (config, key) = match &interrupted {
+        Some(existing) => {
+            let key = unlock_config(&password, existing).map_err(|e| format!("{e}: an interrupted init left \
+                .transcrypt/config under another passphrase; rerun with that one, or start over: \
+                `git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`"))?;
+            (transcrypt_v3::config_array(existing)?.to_owned(), key)
+        },
+        None => {
+            let mut salt = [0u8; SALT_LEN];
+            getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
+            initialize_config(&password, &salt)?
+        },
+    };
     let rollback = Rollback {
         root: root.to_owned(),
         config: config.to_vec(),
@@ -296,7 +314,9 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
     };
     let staging = staging_dir(root)?;
     let result = (|| -> Result<(), String> {
-        write_repository_file(root, &staging, Path::new(".transcrypt/config"), &config)?;
+        if interrupted.is_none() {
+            write_repository_file(root, &staging, Path::new(".transcrypt/config"), &config)?;
+        }
         edit_attributes(root, &staging, true, |_| Ok(()))?;
         install_filters(root)?;
         install_hooks(root)?;
@@ -421,67 +441,17 @@ fn check_selects(root: &Path, patterns: &[Vec<u8>]) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether an attributes file defines v3's own `transcrypt` macro. While a
-/// v3 config exists, the top-level `.gitattributes` must: without it, every
-/// `PATTERN transcrypt` rule silently selects nothing (a file overwritten,
-/// deleted, or taken from a branch made before `init`).
-pub(crate) fn defines_our_macro(text: &[u8]) -> bool {
-    text.split(|b| *b == b'\n').any(|line| line.trim_ascii() == MACRO)
-}
-
 /// The error for a missing macro.
-pub(crate) const MACRO_MISSING: &str = "the top-level .gitattributes no longer defines the `transcrypt` macro, \
-    so files marked `transcrypt` would be stored unencrypted; restore it (`transcrypt-v3 protect` with any \
-    of your patterns re-adds it), or remove .transcrypt/ to stop using v3";
+pub(crate) const MACRO_MISSING: &str = "the `transcrypt` macro does not set filter=transcrypt-v3 here (the \
+    top-level .gitattributes lost its `[attr]transcrypt` line, or another rule redefines or overrides it), \
+    so files marked `transcrypt` would be stored unencrypted; restore the line (`transcrypt-v3 protect` \
+    with any of your patterns re-adds it) and remove the other definition";
 
 /// Whether an attribute line defines the `transcrypt` macro.
 fn defines_macro(line: &[u8]) -> bool {
     let line = line.trim_ascii();
     line.strip_prefix(b"[attr]transcrypt").or_else(|| line.strip_prefix(b"\"[attr]transcrypt\""))
         .is_some_and(|rest| rest.is_empty() || rest[0].is_ascii_whitespace())
-}
-
-/// Whether the `transcrypt` macro, as Git resolves it for the next commit
-/// (the staged top-level `.gitattributes`, plus `info/attributes` and the
-/// global attribute file), still sets `filter=transcrypt-v3`. Probed in a
-/// temporary index holding that file and a directory whose own attributes
-/// say `probe transcrypt`; a redefinition (quoted or not, anywhere) shows
-/// as a probe Git would not encrypt. An exclusion such as `PATH -filter`
-/// for real files is not affected. Returns a description when broken.
-pub(crate) fn macro_disabled(root: &Path) -> Result<Option<String>, String> {
-    // Only relevant if some staged file is marked `transcrypt` at all.
-    let entries = indexed_files(root)?;
-    let mut request = Vec::new();
-    for entry in &entries {
-        request.extend_from_slice(&entry.path);
-        request.push(0);
-    }
-    if entries.is_empty() { return Ok(None); }
-    let response = git_with_input(root, &["-c", "core.ignorecase=false", "check-attr", "--cached", "-z", "--stdin", "transcrypt"], &request)?;
-    let marked = response.split(|b| *b == 0).collect::<Vec<_>>().chunks(3)
-        .any(|r| r.len() == 3 && r[1] == b"transcrypt" && r[2] == b"set");
-    if !marked { return Ok(None); }
-    let probe_rules = hash_object(root, b"probe transcrypt\n")?;
-    let mut info = format!("100644 {probe_rules}\ttranscrypt-v3-probe/.gitattributes\0").into_bytes();
-    if let Some(top) = entries.into_iter().find(|e| e.path == b".gitattributes") {
-        info.extend_from_slice(format!("100644 {}\t.gitattributes\0", top.oid).as_bytes());
-    }
-    let index = git_dir(root).join(format!("transcrypt-v3-probe-{}.index", std::process::id()));
-    let _ = fs::remove_file(&index);
-    let mut command = git_command(Some(root));
-    command.env("GIT_INDEX_FILE", &index).args(["update-index", "-z", "--index-info"]);
-    let built = run_bounded_status(command, Some(info), 1 << 20);
-    let probed = built.and_then(|(status, _, errors)| if status.success() {
-        protected_flags(root, &[b"transcrypt-v3-probe/probe"], Attributes::Index(&index))
-    } else {
-        Err(String::from_utf8_lossy(&errors).into_owned())
-    });
-    let _ = fs::remove_file(&index);
-    Ok(match probed?.first() {
-        Some(true) => None,
-        _ => Some("the `transcrypt` macro does not set filter=transcrypt-v3 (it is redefined in \
-            .gitattributes or a local attribute file)".to_owned()),
-    })
 }
 
 /// One `.gitattributes` line, as bytes, without its newline.
@@ -613,11 +583,15 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
     let undo = AttributesUndo::capture(root)?;
     let result = (|| -> Result<Vec<Vec<u8>>, String> {
         let staging = staging_dir(root)?;
+        // The staged rules: an interrupted `unprotect` already removed the
+        // line from the worktree file but not from the index.
+        let staged_rules = indexed_files(root)?.into_iter().find(|e| e.path == b".gitattributes")
+            .map(|e| git_blob(root, &e.oid)).transpose()?.unwrap_or_default();
         edit_attributes(root, &staging, false, |existing| {
             for line in &lines {
                 let n = existing.len();
                 existing.retain(|l| l != line);
-                if existing.len() == n {
+                if existing.len() == n && !staged_rules.split(|b| *b == b'\n').any(|l| l.trim_ascii() == line.as_slice()) {
                     return Err(format!("no `{}` line in .gitattributes; edit it directly to change other rules",
                         String::from_utf8_lossy(line)));
                 }
@@ -802,8 +776,8 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
             return Err("not confirmed; review those commits, then run `transcrypt-v3 reencrypt --yes`".into());
         }
     }
-    let mut index_info = Vec::new();
-    let staging = staging_dir(root)?;
+    // Every earlier passphrase is asked for and checked before any write.
+    let mut keys = Vec::new();
     for (old, introduced) in configs.iter().filter(|(c, _)| stale.iter().any(|(_, _, f)| *f == transcrypt_v3::config_id(c))) {
         let old_id = transcrypt_v3::config_id(old);
         let names: Vec<String> = stale.iter().filter(|(_, _, f)| *f == old_id)
@@ -811,9 +785,13 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         eprintln!("Passphrase of config {} (introduced by {introduced}), for: {}",
             crate::hex(&old_id[..4]), names.join(", "));
         let password = passphrase(options.password_stdin, false)?;
-        let old_key = unlock_config(&password, old)?;
-        for (staged, record, _) in stale.iter().filter(|(_, _, f)| *f == old_id) {
-            let plaintext = transcrypt_v3::decrypt_file(old, &old_key, &staged.path, record)
+        keys.push((old, old_id, unlock_config(&password, old)?));
+    }
+    let mut index_info = Vec::new();
+    let staging = staging_dir(root)?;
+    for (old, old_id, old_key) in &keys {
+        for (staged, record, _) in stale.iter().filter(|(_, _, f)| f == old_id) {
+            let plaintext = transcrypt_v3::decrypt_file(old, old_key, &staged.path, record)
                 .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
             let sealed = key.clean(&staged.path, &plaintext)?;
             index_info.extend_from_slice(format!("{} {}\t", staged.mode, hash_object(root, &sealed)?).as_bytes());
@@ -839,12 +817,15 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
 /// committed `.transcrypt/config` and `.gitattributes` stay: removing them
 /// from the repository is a commit, and the history stays encrypted.
 pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
-    let config = load_config(root)?;
-    if Key::load(root, &config)?.is_some() {
-        lock(root)?;
+    // On a branch without a v3 config (made before `init`) there is nothing
+    // to lock here; other worktrees must still hold no plaintext.
+    if let Ok(config) = load_config(root) {
+        if Key::load(root, &config)?.is_some() {
+            lock(root)?;
+        }
+        worktree_encrypted(root, &config)
+            .map_err(|e| format!("{e}; unlock, commit or discard it, and lock before uninstalling"))?;
     }
-    worktree_encrypted(root, &config)
-        .map_err(|e| format!("{e}; unlock, commit or discard it, and lock before uninstalling"))?;
     others_encrypted(root)?;
     credential::forget(root)?;
     remove_filters(root);
@@ -938,11 +919,9 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         report(installed, &format!("{name} hook installed"));
     }
     report(!hooks_bypassed(root), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
-    let disabled = macro_disabled(root).unwrap_or(None);
-    report(disabled.is_none(), &match &disabled {
-        None => "every file marked `transcrypt` gets the transcrypt-v3 filter".to_owned(),
-        Some(problem) => format!("every file marked `transcrypt` gets the transcrypt-v3 filter ({problem})"),
-    });
+    let top = indexed_files(root).ok().and_then(|e| e.into_iter().find(|e| e.path == b".gitattributes")).map(|e| e.oid);
+    report(macro_resolves(root, &git_dir(root), top.as_deref()).unwrap_or(false),
+        "the `transcrypt` macro sets filter=transcrypt-v3 for the next commit");
     // Attribute files outside the repository apply only here, and could
     // silently unprotect files that the committed .gitattributes protect.
     let overrides = filter_overrides(root);

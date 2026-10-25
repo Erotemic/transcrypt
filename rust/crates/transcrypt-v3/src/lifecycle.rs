@@ -60,8 +60,8 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
         _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree \
             (an interrupted `rekey`? `git reset` undoes a staged rekey)".into()),
     }
-    let top = entries.iter().find(|e| e.path == b".gitattributes" && e.regular);
-    if !top.map(|e| git_blob(root, &e.oid)).transpose()?.is_some_and(|text| crate::setup::defines_our_macro(&text)) {
+    let top = entries.iter().find(|e| e.path == b".gitattributes" && e.regular).map(|e| e.oid.as_str());
+    if !macro_resolves(root, &git_dir(root), top)? {
         return Err(crate::setup::MACRO_MISSING.into());
     }
     let head = head_files(root)?;
@@ -164,9 +164,24 @@ fn incoming(root: &Path) -> Result<Option<Files>, String> {
     Ok(Some(files))
 }
 
+/// A commit without `.transcrypt/config` (a branch from before `init`):
+/// the hooks accept exactly what the audit does, which is anything that
+/// protects no file. Returns whether the index is such a commit.
+fn configless(root: &Path) -> Result<bool, String> {
+    let entries = indexed_files(root)?;
+    if entries.iter().any(|e| e.path == b".transcrypt/config") { return Ok(false); }
+    if let Some(entry) = staged_protected(root, entries)?.first() {
+        return Err(format!("{} is protected, but this commit has no .transcrypt/config: it would be \
+            stored unencrypted; check out .transcrypt/ from a branch that uses v3",
+            String::from_utf8_lossy(&entry.path)));
+    }
+    Ok(true)
+}
+
 /// `verify-index`: the read-only check. Locked, it checks the keyless
 /// envelopes, which still rejects any plaintext.
 pub(crate) fn verify_index_command(root: &Path) -> Result<(), String> {
+    if configless(root)? { return Ok(()); }
     let config = load_config(root)?;
     let key = Key::load(root, &config)?;
     check_index(root, key.as_ref())?;
@@ -179,9 +194,7 @@ pub(crate) fn verify_index_command(root: &Path) -> Result<(), String> {
 /// The pre-commit hook. First encrypt what ordinary Git commands stage
 /// without the filter (`seal_staged`), then check the whole index.
 pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
-    if let Some(problem) = crate::setup::macro_disabled(root)? {
-        return Err(format!("files marked `transcrypt` would not be encrypted: {problem}; remove that definition"));
-    }
+    if configless(root)? { return Ok(()); }
     let config = load_config(root)?;
     let key = Key::load(root, &config)?;
     if let Some(key) = &key {

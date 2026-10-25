@@ -273,7 +273,9 @@ git commit -m "Convert to transcrypt-v3"
 - initializes v3 and re-encrypts those files with it.
 
 Nothing is lost if it fails: the worktree plaintext is never modified, and
-the attribute files and hooks are restored. It sets aside the Bash
+the attribute files and hooks are restored. If it is interrupted (Ctrl-C,
+a crash), run it again with the same v3 passphrase to complete it; the
+same holds for `init` and `unprotect`. It sets aside the Bash
 pre-commit hook. It leaves the v2 configuration in place, including the v2
 password in `.git/config`.
 

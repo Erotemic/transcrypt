@@ -484,6 +484,31 @@ pub(crate) fn other_filter(value: &[u8]) -> bool {
     !matches!(value, b"unspecified" | b"unset" | b"transcrypt-v3")
 }
 
+/// Whether Git resolves the `transcrypt` macro to `filter=transcrypt-v3`
+/// for a commit whose top-level `.gitattributes` is the blob `top`: probed
+/// in a temporary index (in `index_dir`) holding that file and a directory
+/// whose own rules say `probe transcrypt`. Local attribute files apply, as
+/// they do to Git's filters. A missing, redefined or overridden macro all
+/// show as a probe Git would not encrypt. The hooks and the audit use this
+/// one predicate.
+pub(crate) fn macro_resolves(root: &Path, index_dir: &Path, top: Option<&str>) -> Result<bool, String> {
+    let rules = git_with_input(root, &["hash-object", "-w", "--no-filters", "--stdin"], b"probe transcrypt\n")?;
+    let rules = String::from_utf8_lossy(&rules).trim().to_owned();
+    if !is_object_id(rules.as_bytes()) { return Err("malformed git hash-object output".into()); }
+    let mut info = format!("100644 {rules}\ttranscrypt-v3-probe/.gitattributes\0").into_bytes();
+    if let Some(top) = top {
+        info.extend_from_slice(format!("100644 {top}\t.gitattributes\0").as_bytes());
+    }
+    let index = index_dir.join(format!("transcrypt-v3-probe-{}.index", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let mut command = git_command(Some(root));
+    command.env("GIT_INDEX_FILE", &index).args(["update-index", "-z", "--index-info"]);
+    let result = run_bounded(command, Some(info), 1 << 20)
+        .and_then(|_| protected_flags(root, &[b"transcrypt-v3-probe/probe"], Attributes::Index(&index)));
+    let _ = std::fs::remove_file(&index);
+    Ok(result?.first() == Some(&true))
+}
+
 /// The entries among `entries` that Git's attributes protect.
 pub(crate) fn protected_entries(root: &Path, entries: Vec<Staged>, from: Attributes) -> Result<Vec<Staged>, String> {
     let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
