@@ -190,7 +190,9 @@ fn symlinked_protected_files_are_never_followed() {
 fn stale_agent_socket_is_reclaimed_but_live_agent_is_not_replaced() {
     let mut scratch = Scratch::new("socket");
     let repo = scratch.repo("repo");
-    run_fails(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    // Unlocking again keeps the live agent (and needs no passphrase).
+    let out = exec(&repo, bin(), &["unlock"], None);
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stderr).contains("Already unlocked"));
     run(&repo, bin(), &["lock"], None);
     // A dead agent leaves its socket inode behind; it has no listener.
     drop(UnixListener::bind(socket(&repo)).unwrap());
@@ -1197,4 +1199,21 @@ fn git_diff_shows_decrypted_changes() {
     run(&repo, bin(), &["lock"], None);
     let diff = String::from_utf8(run(&repo, "git", &["diff", "HEAD~1", "HEAD"], None)).unwrap();
     assert!(diff.contains("unlock to see the decrypted diff") && !diff.contains("alpha"), "{diff}");
+}
+
+/// `unlock` and `lock` are idempotent: unlocking again needs no passphrase
+/// and hydrates; locking again succeeds when no plaintext is left, and
+/// refuses (without an agent to help) when some is.
+#[test]
+fn unlock_and_lock_are_idempotent() {
+    let mut scratch = Scratch::new("idempotent");
+    let repo = scratch.repo("repo");
+    run(&repo, bin(), &["unlock"], None);
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, bin(), &["lock"], None);
+    fs::write(repo.join("a.secret"), b"plaintext written while locked\n").unwrap();
+    let err = run_fails(&repo, bin(), &["lock"], None);
+    assert!(err.contains("a.secret holds plaintext"), "{err}");
+    run(&repo, "git", &["checkout", "--", "a.secret"], None);
+    run(&repo, bin(), &["lock"], None);
 }

@@ -130,7 +130,13 @@ verified" or "cryptographic security has been proved from first principles."
    agent idle timeout and an `nlink > 1` warning at lock are cheap
    follow-ups.
 6. **A3 — translator trust.** Track Aeneas/hax releases.
-7. **V7 — Bash** only after a dependency-policy decision for AES-SIV.
+7. **V7 — Bash v3.** It becomes feasible exactly when OpenSSL ≥ 3.2 is an
+   acceptable Bash dependency. OpenSSL 3.2 adds Argon2id to `openssl kdf`,
+   and AES-SIV can be composed from `openssl mac` (CMAC) and
+   `openssl enc -aes-256-ctr`, checked against `tests/v3/reference/`.
+   Ubuntu 24.04 (OpenSSL 3.0.13) and macOS (LibreSSL) do not ship it. This
+   is a user decision. Until then the Bash tool stays v2, mapped in
+   [V3-BASH-CORRESPONDENCE](V3-BASH-CORRESPONDENCE.md).
 
 ## Scope discipline and risk decisions
 

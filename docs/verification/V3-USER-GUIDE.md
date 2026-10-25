@@ -74,7 +74,7 @@ which run no hook, run `transcrypt-v3 hydrate` (`status` reminds you).
 | Edit and commit secrets | edit, `git add`, `git commit` (encryption is automatic) |
 | Check the staged secrets before committing | `transcrypt-v3 verify-index` (also the pre-commit hook) |
 | Check commits before pushing | `transcrypt-v3 audit origin/main..HEAD` (the pre-push hook does this) |
-| Remove plaintext and forget the key | `transcrypt-v3 lock` |
+| Remove plaintext and forget the key | `transcrypt-v3 lock` (safe to repeat; so is `unlock`) |
 | Change the passphrase | `transcrypt-v3 rekey`, then commit the staged change |
 | Remove v3 from this checkout | `transcrypt-v3 uninstall` (locks first; files stay encrypted) |
 

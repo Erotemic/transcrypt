@@ -112,6 +112,10 @@ fn run() -> Result<(), String> {
                     _ => return Err("init and rekey accept --password-stdin; unlock accepts --password-stdin and --no-hydrate".into()),
                 }
             }
+            if action == "unlock" && load_config(&root)
+                .is_ok_and(|c| session::request(&root, &c, Operation::Ping, &[], &[]).is_ok()) {
+                return unlock_again(&root, auto_hydrate);
+            }
             let password = passphrase(stdin, action != "unlock")?;
             match action {
                 "init" => init(&root, password),
@@ -338,6 +342,13 @@ fn passphrase(from_stdin: bool, new: bool) -> Result<Zeroizing<Vec<u8>>, String>
 }
 
 fn lock(root: &Path) -> Result<(), String> {
+    let config = load_config(root)?;
+    if session::request(root, &config, Operation::Ping, &[], &[]).is_err() {
+        // No agent: nothing to stop. Locked means no plaintext is left.
+        return worktree_encrypted(root, &config)
+            .map(|_| eprintln!("Already locked."))
+            .map_err(|e| format!("{e}, but no agent runs: unlock, then lock"));
+    }
     let staging = staging_dir(root)?;
     // Every tracked secret must match the encrypted index BEFORE any worktree rewrite.
     // If anything is dirty or untracked, do not remove credentials.

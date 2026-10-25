@@ -366,22 +366,8 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
     if session::request(root, &config, Operation::Ping, &[], &[]).is_ok() {
         crate::lock(root)?;
     }
-    let id = transcrypt_v3::config_id(&config);
-    for staged in indexed_files(root)? {
-        if !protected_path(&staged.path) { continue; }
-        let relative = crate::worktree::indexed_path(&staged.path)?;
-        let readable = crate::worktree::open_protected(root, &relative).and_then(|p| p.read());
-        if let Ok((contents, _)) = readable {
-            if !transcrypt_v3_core::record_envelope_ok(&contents, &id) {
-                return Err(format!("{} holds plaintext; unlock, commit or discard it, and lock before uninstalling",
-                    String::from_utf8_lossy(&staged.path)));
-            }
-        }
-    }
-    let untracked = git(root, &["ls-files", "--others", "-z"])?;
-    if untracked.split(|b| *b == 0).any(protected_path) {
-        return Err("untracked *.secret files exist; remove them before uninstalling".into());
-    }
+    worktree_encrypted(root, &config)
+        .map_err(|e| format!("{e}; unlock, commit or discard it, and lock before uninstalling"))?;
     let _ = git(root, &["config", "--local", "--remove-section", "filter.transcrypt-v3"]);
     remove_merge_driver(root);
     for (name, command) in HOOKS {
@@ -494,4 +480,42 @@ fn remove_merge_driver(root: &Path) {
         if !rewritten.is_empty() { rewritten.push('\n'); }
         let _ = fs::write(&attributes, rewritten);
     }
+}
+
+/// Whether the worktree holds no plaintext secret: every protected tracked
+/// file present has the v3 envelope of this config, and no untracked
+/// `*.secret` exists.
+pub(crate) fn worktree_encrypted(root: &Path, config: &[u8]) -> Result<(), String> {
+    let id = transcrypt_v3::config_id(config);
+    for staged in indexed_files(root)? {
+        if !protected_path(&staged.path) { continue; }
+        let relative = crate::worktree::indexed_path(&staged.path)?;
+        if let Some(target) = crate::worktree::find_protected(root, &relative)? {
+            let (contents, _) = target.read()?;
+            if !transcrypt_v3_core::record_envelope_ok(&contents, &id) {
+                return Err(format!("{} holds plaintext", String::from_utf8_lossy(&staged.path)));
+            }
+        }
+    }
+    let untracked = git(root, &["ls-files", "--others", "-z"])?;
+    if untracked.split(|b| *b == 0).any(protected_path) {
+        return Err("untracked *.secret files exist".into());
+    }
+    Ok(())
+}
+
+/// `unlock` when the agent already serves this config: no passphrase is
+/// needed. Reinstall the filters, hooks and ignore rules, then hydrate.
+pub(crate) fn unlock_again(root: &Path, auto_hydrate: bool) -> Result<(), String> {
+    check_hook_available(root)?;
+    install_filters(root)?;
+    install_hook(root)?;
+    exclude_plaintext_copies(root)?;
+    if auto_hydrate {
+        let n = hydrate(root)?;
+        eprintln!("Already unlocked; decrypted {n} protected file(s) (mode 0600).");
+    } else {
+        eprintln!("Already unlocked.");
+    }
+    Ok(())
 }
