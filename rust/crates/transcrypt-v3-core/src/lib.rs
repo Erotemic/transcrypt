@@ -627,6 +627,40 @@ pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
     Ok(IndexEntry { regular, path_start: t + 1 })
 }
 
+/// A Git object name as printed by `ls-files --stage` or `ls-tree`: 40
+/// (SHA-1) or 64 (SHA-256) lowercase hexadecimal digits. The adapter passes
+/// only such names to `git cat-file`, never revision syntax such as
+/// `:<stage>:<path>` or text that Git could read as an option.
+pub fn is_object_id(oid: &[u8]) -> bool {
+    let n = oid.len();
+    let mut ok = false;
+    if n == 40 || n == 64 {
+        ok = true;
+    }
+    let mut i = 0;
+    while ok && i < n {
+        let c = oid[i];
+        ok = (c >= b'0' && c <= b'9') || (c >= b'a' && c <= b'f');
+        i += 1;
+    }
+    ok
+}
+
+/// Keyless check of a committed record: its size is within bounds, it has
+/// the v3 file header, and the header names configuration `id`. Without the
+/// key this cannot authenticate, but it rejects every plaintext that is not
+/// deliberately formatted as a record for this configuration. This is the
+/// check run on pushed history and by server-side audits.
+pub fn record_envelope_ok(record: &[u8], id: &[u8; ID_LEN]) -> bool {
+    if record.len() < FILE_MIN_LEN || record.len() > MAX_RECORD {
+        return false;
+    }
+    match parse_file_header(record) {
+        Ok(found) => bytes_eq(&found, id),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -889,6 +923,30 @@ mod tests {
         ] {
             assert_eq!(parse_index_entry(&bad), Err(Refusal::Index), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn object_ids_and_record_envelopes() {
+        assert!(is_object_id(&[b'0'; 40]));
+        assert!(is_object_id(&[b'f'; 64]));
+        for bad in [&b""[..], &[b'0'; 39], &[b'0'; 41], &[b'0'; 63], &[b'A'; 40], &[b'g'; 40], b"-0000000000000000000000000000000000000000"] {
+            assert!(!is_object_id(bad), "{bad:?}");
+        }
+        let mut colon = [b'0'; 40];
+        colon[1] = b':';
+        assert!(!is_object_id(&colon));
+        let id = core::array::from_fn(|i| i as u8);
+        let header = encode_file_header(&id);
+        let mut record = std::vec::Vec::from(&header[..]);
+        record.extend_from_slice(&[0u8; TAG_LEN]);
+        assert!(record_envelope_ok(&record, &id));
+        assert!(!record_envelope_ok(&record[..FILE_MIN_LEN - 1], &id));
+        let mut other = id;
+        other[0] ^= 1;
+        assert!(!record_envelope_ok(&record, &other));
+        record[0] ^= 1;
+        assert!(!record_envelope_ok(&record, &id));
+        assert!(!record_envelope_ok(b"plaintext that is long enough to pass the size bound", &id));
     }
 
     #[test]

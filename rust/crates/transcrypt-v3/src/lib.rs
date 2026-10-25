@@ -6,8 +6,8 @@
 //! plaintext) is made by the Aeneas-extracted core functions it calls.
 //! Assumes RustCrypto primitive correctness. Research prototype, not audited.
 
-use aes_siv::{siv::Aes256Siv, KeyInit};
-use argon2::{Algorithm, Argon2, Params, Version};
+use aes_siv::{siv::Aes256Siv, KeyInit, Tag};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use sha2::{Digest, Sha256};
 pub use transcrypt_v3_core::{MAX_FILE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
@@ -39,9 +39,12 @@ pub fn derive_key(password: &[u8], salt: &[u8; SALT_LEN]) -> Result<SecretKey, S
     }
     let params = Params::new(ARGON_MEMORY_KIB, ARGON_PASSES, ARGON_LANES, Some(KEY_SIZE))
         .map_err(|_| "unsupported fixed Argon2id parameters")?;
+    // Argon2 frees its own working memory without wiping it, and those 64
+    // MiB determine the key. Supply memory that is zeroed when dropped.
+    let mut memory = Zeroizing::new(vec![Block::default(); params.block_count()]);
     let kdf = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; KEY_SIZE]);
-    kdf.hash_password_into(password, salt, &mut key[..])
+    kdf.hash_password_into_with_memory(password, salt, &mut key[..], &mut memory[..])
         .map_err(|_| "Argon2id failed")?;
     Ok(key)
 }
@@ -80,30 +83,41 @@ impl V3Primitives for Keyed<'_> {
         matches!(self.siv().map(|mut siv| siv.decrypt(headers, tag)), Some(Ok(pt)) if pt.is_empty())
     }
 
+    /// Encrypts in place in the caller's buffer: the plaintext is copied
+    /// once into `out[TAG_LEN..]` and overwritten there by the keystream, so
+    /// no heap copy of it is left behind.
     fn seal_file(&self, config: &[u8; CONFIG_LEN], path: &[u8], plaintext: &[u8], out: &mut [u8]) -> bool {
+        if out.len() != plaintext.len() + TAG_LEN {
+            return false;
+        }
         let headers: [&[u8]; 3] = [FILE_DOMAIN, config, path];
-        match self.siv().map(|mut siv| siv.encrypt(headers, plaintext)) {
-            Some(Ok(sealed)) if sealed.len() == out.len() => {
-                out.copy_from_slice(&sealed);
+        let Some(mut siv) = self.siv() else { return false };
+        let (tag_out, body) = out.split_at_mut(TAG_LEN);
+        body.copy_from_slice(plaintext);
+        match siv.encrypt_inout_detached(headers, body.into()) {
+            Ok(tag) => {
+                tag_out.copy_from_slice(&tag);
                 true
             }
-            _ => false,
+            Err(_) => {
+                body.fill(0);
+                false
+            }
         }
     }
 
+    /// Decrypts in place in the caller's buffer. On authentication failure
+    /// the library re-encrypts the buffer, so it never holds unauthenticated
+    /// plaintext afterwards (and the core then zeroes it).
     fn open_file(&self, config: &[u8; CONFIG_LEN], path: &[u8], sealed: &[u8], out: &mut [u8]) -> bool {
-        let headers: [&[u8]; 3] = [FILE_DOMAIN, config, path];
-        match self.siv().map(|mut siv| siv.decrypt(headers, sealed)) {
-            Some(Ok(plaintext)) => {
-                let plaintext = Zeroizing::new(plaintext);
-                if plaintext.len() != out.len() {
-                    return false;
-                }
-                out.copy_from_slice(&plaintext);
-                true
-            }
-            _ => false,
+        if sealed.len() != out.len() + TAG_LEN {
+            return false;
         }
+        let headers: [&[u8]; 3] = [FILE_DOMAIN, config, path];
+        let Some(mut siv) = self.siv() else { return false };
+        let Ok(tag) = Tag::try_from(&sealed[..TAG_LEN]) else { return false };
+        out.copy_from_slice(&sealed[TAG_LEN..]);
+        siv.decrypt_inout_detached(headers, out.into(), &tag).is_ok()
     }
 
     fn config_id(&self, config: &[u8; CONFIG_LEN]) -> [u8; ID_LEN] {
@@ -175,6 +189,22 @@ pub fn encrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], plai
     Ok(out)
 }
 
+/// Git's clean filter. Git expects filters to be idempotent (it re-cleans
+/// a worktree file whenever its cached stat data is stale, including a
+/// worktree that `lock` just reset to ciphertext). A record that already
+/// opens at this path under this configuration is returned unchanged: by
+/// determinism it is exactly what sealing its plaintext produces, so the
+/// result is the same as decrypting and re-encrypting. Everything else is
+/// sealed by the verified core, which still refuses any other v3 record.
+pub fn clean_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], input: &[u8])
+    -> Result<Vec<u8>, String>
+{
+    if decrypt_file(config_bytes, key, path, input).is_ok() {
+        return Ok(input.to_vec());
+    }
+    encrypt_file(config_bytes, key, path, input)
+}
+
 pub fn decrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], record: &[u8])
     -> Result<Zeroizing<Vec<u8>>, String>
 {
@@ -212,6 +242,20 @@ mod tests {
             corrupt[last] ^= 1;
             assert!(decrypt_file(&config, &key, b"safe/item.secret", &corrupt).is_err());
         }
+    }
+
+    #[test]
+    fn clean_is_idempotent_and_still_refuses_foreign_records() {
+        let (config, key) = fixture();
+        let record = encrypt_file(&config, &key, b"a.secret", b"payload").unwrap();
+        assert_eq!(clean_file(&config, &key, b"a.secret", b"payload").unwrap(), record);
+        assert_eq!(clean_file(&config, &key, b"a.secret", &record).unwrap(), record);
+        // The same record at another path, or tampered, is not authentic there.
+        assert!(clean_file(&config, &key, b"b.secret", &record).is_err());
+        let mut tampered = record.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(clean_file(&config, &key, b"a.secret", &tampered).is_err());
     }
 
     #[test]

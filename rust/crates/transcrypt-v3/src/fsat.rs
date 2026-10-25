@@ -27,6 +27,30 @@ fn check(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(rc) }
 }
 
+/// Identity, size and change times of a file. Writing, truncating, replacing
+/// or chmod-ing a file changes its stamp, so comparing stamps just before a
+/// rename detects that the file changed since it was checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stamp([i64; 7]);
+
+impl Stamp {
+    fn from_stat(st: &libc::stat) -> Stamp {
+        Stamp([
+            st.st_dev as i64, st.st_ino as i64, st.st_size as i64,
+            st.st_mtime as i64, st.st_mtime_nsec as i64,
+            st.st_ctime as i64, st.st_ctime_nsec as i64,
+        ])
+    }
+
+    /// The stamp of an open file.
+    pub(crate) fn of(file: &File) -> io::Result<Stamp> {
+        // SAFETY: `st` is fully written by a successful fstat.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        check(unsafe { libc::fstat(file.as_raw_fd(), &mut st) })?;
+        Ok(Stamp::from_stat(&st))
+    }
+}
+
 /// An open directory.
 pub(crate) struct Dir(OwnedFd);
 
@@ -91,14 +115,23 @@ impl Dir {
         check(unsafe { libc::unlinkat(self.0.as_raw_fd(), c.as_ptr(), 0) }).map(|_| ())
     }
 
-    /// `lstat` of an entry: (is regular file, is symlink).
-    pub(crate) fn entry_kind(&self, name: &OsStr) -> io::Result<(bool, bool)> {
+    fn lstat(&self, name: &OsStr) -> io::Result<libc::stat> {
         let c = cstr(name)?;
         // SAFETY: `st` is fully written by a successful fstatat.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         check(unsafe { libc::fstatat(self.0.as_raw_fd(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) })?;
-        let kind = st.st_mode & libc::S_IFMT;
+        Ok(st)
+    }
+
+    /// `lstat` of an entry: (is regular file, is symlink).
+    pub(crate) fn entry_kind(&self, name: &OsStr) -> io::Result<(bool, bool)> {
+        let kind = self.lstat(name)?.st_mode & libc::S_IFMT;
         Ok((kind == libc::S_IFREG, kind == libc::S_IFLNK))
+    }
+
+    /// The stamp of an entry, without following a symlink.
+    pub(crate) fn stamp(&self, name: &OsStr) -> io::Result<Stamp> {
+        self.lstat(name).map(|st| Stamp::from_stat(&st))
     }
 
     /// Permission bits of this directory.
@@ -132,6 +165,13 @@ impl Dir {
         // SAFETY: closes the stream and the duplicated descriptor.
         unsafe { libc::closedir(stream) };
         Ok(names)
+    }
+
+    /// Take an exclusive advisory lock on this directory without waiting;
+    /// it is released when the descriptor is closed (also on a crash).
+    pub(crate) fn try_lock(&self) -> io::Result<()> {
+        // SAFETY: valid descriptor; flock takes integer arguments only.
+        check(unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }).map(|_| ())
     }
 
     pub(crate) fn sync(&self) -> io::Result<()> {

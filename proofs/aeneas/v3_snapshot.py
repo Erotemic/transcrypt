@@ -51,8 +51,9 @@ ENTRYPOINTS = (
     'seal_record', 'open_record', 'hydrate_action', 'lock_action',
     'authorize_agent_request', 'check_attr_response_ok', 'parse_index_entry',
     'encode_frame_header', 'decode_frame_header',
+    'is_object_id', 'record_envelope_ok',
 )
-BAD = re.compile(r'\b(?:sorry|admit|axiom|native_decide)\b')
+BAD = re.compile(r'\b(?:sorry|admit|axiom|native_decide|bv_decide)\b')
 
 
 class SnapshotError(ValueError):

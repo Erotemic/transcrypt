@@ -4,6 +4,7 @@
 compile_error!("transcrypt-v3 POC requires Unix for 0600/0700 local credential permissions");
 
 use std::{
+    collections::{HashMap, HashSet},
     env, fs,
     ffi::{OsStr, OsString},
     io::{self, Read, Write},
@@ -18,8 +19,8 @@ mod session;
 use session::Operation;
 use transcrypt_v3::{initialize_config, unlock_config};
 use transcrypt_v3_core::{
-    check_attr_response_ok, hydrate_action, lock_action, parse_index_entry, HydrateAction, LockAction,
-    MAX_RECORD, SALT_LEN,
+    check_attr_response_ok, hydrate_action, is_object_id, lock_action, parse_index_entry, record_envelope_ok,
+    HydrateAction, LockAction, MAX_RECORD, SALT_LEN,
 };
 
 const ATTRS: &[u8] = b"*.secret filter=transcrypt-v3 -diff\n";
@@ -44,6 +45,20 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     session::harden_process()?;
+    if action == "audit" {
+        // Also runs keyless in a bare repository (a server's pre-receive
+        // hook), where there is no worktree and no agent.
+        let (root, keyed) = match repo_root() {
+            Ok(root) => (root, true),
+            Err(_) => (env::current_dir().map_err(|_| "cannot read working directory")?, false),
+        };
+        env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
+        let audited = audit(&root, &args[1..], keyed)?;
+        println!("audit: {} protected record(s) checked{}", audited.records,
+            if audited.authenticated { ", all authenticated by the unlocked agent" }
+            else { " (envelopes only: unlock to authenticate them)" });
+        return Ok(());
+    }
     let root = repo_root()?;
     // All v3 paths, including the agent's short relative socket address,
     // are interpreted from the repository root.
@@ -70,11 +85,15 @@ fn run() -> Result<(), String> {
             if args.len() != 2 { return Err("Git filter requires exactly one %f pathname".into()); }
             filter(&root, action == "clean", args[1].as_bytes())
         },
+        "pre-push" => {
+            if args.len() > 3 { return Err("pre-push takes the remote name and URL".into()); }
+            pre_push(&root, args.get(1).map(OsString::as_os_str))
+        },
         "lock" | "verify-index" | "hydrate" | "serve" => {
             if args.len() != 1 { return Err("unexpected operation arguments".into()); }
             match action {
                 "lock" => lock(&root),
-                "verify-index" => verify_index(&root),
+                "verify-index" => verify_index_command(&root),
                 "hydrate" => hydrate(&root),
                 "serve" => session::serve(&root, &load_config(&root)?),
                 _ => unreachable!(),
@@ -84,8 +103,8 @@ fn run() -> Result<(), String> {
     }
 }
 
-const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|verify-index|lock|help \
-    (clean/smudge <git-path> are invoked by Git)";
+const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|verify-index|audit|lock|help \
+    (clean/smudge <git-path> and pre-push are invoked by Git)";
 
 const HELP: &str = "\
 transcrypt-v3: authenticated, path-bound encryption of *.secret files in Git.
@@ -100,7 +119,14 @@ Typical workflow
   transcrypt-v3 status      show lock state and each protected file's worktree state
   transcrypt-v3 verify-index
                             check every staged *.secret is ciphertext for its own path
-                            (also run by the installed pre-commit hook)
+                            (also run by the installed pre-commit hook; while locked it
+                            checks record envelopes only)
+  transcrypt-v3 audit [<rev-list args>]
+                            check every *.secret in the given commits (default HEAD) is a
+                            v3 record, without the key; authenticates them when unlocked.
+                            The installed pre-push hook runs it on the commits being
+                            pushed; run it in CI or a server hook to catch plaintext pushed
+                            from checkouts that never ran unlock
   transcrypt-v3 lock        replace plaintext by the committed ciphertext and stop the agent;
                             refuses if any protected file has uncommitted changes
 
@@ -128,19 +154,19 @@ fn status(root: &Path) -> Result<(), String> {
     println!("session:    {}", if unlocked { "unlocked (in-memory key agent running)" } else { "locked" });
     let mut counts = [0usize; 4];
     let mut exposed = 0usize;
-    for (regular, path) in indexed_files(root)? {
-        if !protected_path(&path) { continue; }
-        let name = String::from_utf8_lossy(&path).into_owned();
+    for staged in indexed_files(root)? {
+        if !protected_path(&staged.path) { continue; }
+        let name = String::from_utf8_lossy(&staged.path).into_owned();
         let state = (|| -> Result<&str, String> {
-            if !regular { return Ok("unsupported mode"); }
-            let object = git_show(root, &path)?;
-            let target = open_protected(root, &indexed_path(&path)?)?;
-            let worktree = target.read()?;
-            if worktree == object { return Ok("ciphertext"); }
+            if !staged.regular { return Ok("unsupported mode"); }
+            let object = git_blob(root, &staged.oid)?;
+            let target = open_protected(root, &indexed_path(&staged.path)?)?;
+            let (worktree, _) = target.read()?;
+            if *worktree == object { return Ok("ciphertext"); }
             if target.readable_by_others()? { exposed += 1; }
             if !unlocked { return Ok("modified or plaintext"); }
-            let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
-            Ok(if worktree == plaintext { "plaintext" } else { "modified" })
+            let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &object)?;
+            Ok(if *worktree == *plaintext { "plaintext" } else { "modified" })
         })().unwrap_or("error");
         counts[match state { "ciphertext" => 0, "plaintext" => 1, "modified" | "modified or plaintext" => 2, _ => 3 }] += 1;
         println!("  {state:<22} {name}");
@@ -159,7 +185,19 @@ fn status(root: &Path) -> Result<(), String> {
     if unlocked && counts[0] > 0 {
         println!("hint:       run `transcrypt-v3 hydrate` to decrypt ciphertext in the worktree");
     }
+    if hooks_bypassed(root) {
+        println!("warning:    {HOOKS_BYPASSED}");
+    }
     Ok(())
+}
+
+const HOOKS_BYPASSED: &str = "core.hooksPath is set, so Git does not run the v3 pre-commit and \
+    pre-push checks installed in .git/hooks";
+
+/// Whether Git is configured to run hooks from somewhere other than
+/// `.git/hooks`, where v3 installs its checks.
+fn hooks_bypassed(root: &Path) -> bool {
+    git(root, &["config", "core.hooksPath"]).map(|v| !v.trim_ascii().is_empty()).unwrap_or(false)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -175,14 +213,43 @@ fn output(mut command: Command) -> Result<Vec<u8>, String> {
     Ok(result.stdout)
 }
 
-fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
+/// Every Git subprocess. Pathspecs are literal, so a tracked file named
+/// `[a].secret` or `:(glob)*` can never select other files, and replace
+/// refs are ignored, so an object id names exactly the bytes hashed into it.
+fn git_command(root: Option<&Path>) -> Command {
     let mut command = Command::new("git");
-    command.current_dir(root).args(arguments);
+    if let Some(root) = root { command.current_dir(root); }
+    command.env("GIT_LITERAL_PATHSPECS", "1").env("GIT_NO_REPLACE_OBJECTS", "1");
+    command
+}
+
+fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
+    let mut command = git_command(Some(root));
+    command.args(arguments);
     output(command)
 }
 
+fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
+    let mut child = git_command(Some(root))
+        .args(arguments)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|e| format!("cannot run git {}: {e}", arguments.join(" ")))?;
+    // Feed the input from another thread: Git may fill its output pipe
+    // before it has read all of a large input.
+    let mut stdin = child.stdin.take().ok_or("Git input pipe missing")?;
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let result = child.wait_with_output().map_err(|_| "cannot wait for Git")?;
+    let written = writer.join().map_err(|_| "Git input writer failed")?;
+    if written.is_err() || !result.status.success() {
+        return Err(format!("Git command failed (git {}): {}", arguments.join(" "),
+            String::from_utf8_lossy(&result.stderr)));
+    }
+    Ok(result.stdout)
+}
+
 fn repo_root() -> Result<PathBuf, String> {
-    let mut command = Command::new("git");
+    let mut command = git_command(None);
     command.args(["rev-parse", "--show-toplevel"]);
     let bytes = output(command)?;
     let root = PathBuf::from(String::from_utf8(bytes).map_err(|_| "repository path is not UTF-8")?.trim());
@@ -218,8 +285,10 @@ fn load_config(root: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn passphrase(from_stdin: bool) -> Result<Zeroizing<Vec<u8>>, String> {
+    // Preallocated and wrapped before reading, so the buffer never grows
+    // (leaving unwiped copies) and every exit path wipes it.
     let bytes = if from_stdin {
-        let mut value = Vec::new();
+        let mut value = Zeroizing::new(Vec::with_capacity(4098));
         io::stdin().take(4097).read_to_end(&mut value).map_err(|_| "cannot read passphrase from stdin")?;
         if value.len() > 4096 {
             return Err("passphrase too long".into());
@@ -228,12 +297,12 @@ fn passphrase(from_stdin: bool) -> Result<Zeroizing<Vec<u8>>, String> {
         if value.last() == Some(&b'\r') { value.pop(); }
         value
     } else {
-        rpassword::prompt_password("Transcrypt v3 passphrase: ")
+        Zeroizing::new(rpassword::prompt_password("Transcrypt v3 passphrase: ")
             .map_err(|e| format!("cannot read terminal passphrase: {e}"))?
-            .into_bytes()
+            .into_bytes())
     };
     if bytes.len() < 16 { return Err("v3 requires a passphrase of at least 16 bytes".into()); }
-    Ok(Zeroizing::new(bytes))
+    Ok(bytes)
 }
 
 fn shell_quote(text: &str) -> String {
@@ -254,37 +323,55 @@ fn install_filters(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn expected_hook() -> Result<String, String> {
+/// Hooks installed by init and unlock, with the v3 command each runs:
+/// verify the staged index before every commit, and audit the commits being
+/// pushed (which also covers merges, rebases, cherry-picks and
+/// `--no-verify` commits that never ran the pre-commit hook).
+const HOOKS: [(&str, &str); 2] = [("pre-commit", "verify-index"), ("pre-push", "pre-push \"$@\"")];
+
+fn expected_hook(command: &str) -> Result<String, String> {
     let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
     let b = bin.to_str().ok_or("executable path must be UTF-8")?;
-    Ok(format!("#!/bin/sh\nexec {} verify-index\n", shell_quote(b)))
+    Ok(format!("#!/bin/sh\nexec {} {command}\n", shell_quote(b)))
+}
+
+fn hook_path(root: &Path, name: &str) -> PathBuf {
+    root.join(".git/hooks").join(name)
 }
 
 fn check_hook_available(root: &Path) -> Result<(), String> {
-    let path = root.join(".git/hooks/pre-commit");
-    match fs::symlink_metadata(&path) {
-        Ok(meta) => {
-            if !meta.is_file() || meta.file_type().is_symlink() ||
-                fs::read_to_string(&path).map_err(|_| "cannot read existing pre-commit hook")? != expected_hook()? {
-                return Err("pre-commit hook already exists and is not this v3 hook; refuse to override".into());
+    for (name, command) in HOOKS {
+        let path = hook_path(root, name);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if !meta.is_file() || meta.file_type().is_symlink() ||
+                    fs::read_to_string(&path).map_err(|_| format!("cannot read existing {name} hook"))? != expected_hook(command)? {
+                    return Err(format!("{name} hook already exists and is not this v3 hook; refuse to override"));
+                }
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err("cannot inspect hook directory".into()),
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err("cannot inspect hook directory".into()),
     }
     Ok(())
 }
 
 fn install_hook(root: &Path) -> Result<(), String> {
-    let path = root.join(".git/hooks/pre-commit");
-    if path.exists() { return check_hook_available(root); }
-    let script = expected_hook()?;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o700);
-    options.open(path).map_err(|e| format!("cannot install hook: {e}"))?
-        .write_all(script.as_bytes()).map_err(|e| format!("cannot write hook: {e}"))?;
+    check_hook_available(root)?;
+    for (name, command) in HOOKS {
+        let path = hook_path(root, name);
+        if fs::symlink_metadata(&path).is_ok() { continue; }
+        let script = expected_hook(command)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o700);
+        options.open(path).map_err(|e| format!("cannot install {name} hook: {e}"))?
+            .write_all(script.as_bytes()).map_err(|e| format!("cannot write {name} hook: {e}"))?;
+    }
+    if hooks_bypassed(root) {
+        eprintln!("warning: {HOOKS_BYPASSED}");
+    }
     Ok(())
 }
 
@@ -312,7 +399,7 @@ fn init(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
         return Err(".gitattributes already exists; this POC requires a new attributes policy".into());
     }
     check_hook_available(root)?;
-    let hook_preexisted = fs::symlink_metadata(root.join(".git/hooks/pre-commit")).is_ok();
+    let hook_preexisted = HOOKS.map(|(name, _)| fs::symlink_metadata(hook_path(root, name)).is_ok());
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
     let (config, key) = initialize_config(&password, &salt)?;
@@ -339,7 +426,7 @@ fn init(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
 /// Undo exactly what a failed `init` created, so it can simply be rerun:
 /// staged metadata, the files it wrote (only if unchanged), its hook (only
 /// if it did not exist before) and its filter configuration.
-fn rollback_init(root: &Path, config: &[u8], hook_preexisted: bool) {
+fn rollback_init(root: &Path, config: &[u8], hook_preexisted: [bool; HOOKS.len()]) {
     let _ = git(root, &["reset", "-q", "--", ".transcrypt/config", ".gitattributes"]);
     if fs::read(root.join(".gitattributes")).ok().as_deref() == Some(ATTRS) {
         let _ = fs::remove_file(root.join(".gitattributes"));
@@ -348,9 +435,11 @@ fn rollback_init(root: &Path, config: &[u8], hook_preexisted: bool) {
         let _ = fs::remove_file(root.join(".transcrypt/config"));
     }
     let _ = fs::remove_dir(root.join(".transcrypt"));
-    let hook = root.join(".git/hooks/pre-commit");
-    if !hook_preexisted && fs::read_to_string(&hook).ok() == expected_hook().ok() {
-        let _ = fs::remove_file(&hook);
+    for ((name, command), preexisted) in HOOKS.into_iter().zip(hook_preexisted) {
+        let hook = hook_path(root, name);
+        if !preexisted && fs::read_to_string(&hook).ok() == expected_hook(command).ok() {
+            let _ = fs::remove_file(&hook);
+        }
     }
     let _ = git(root, &["config", "--local", "--remove-section", "filter.transcrypt-v3"]);
 }
@@ -375,43 +464,51 @@ fn unlock(root: &Path, password: Zeroizing<Vec<u8>>, auto_hydrate: bool) -> Resu
 }
 
 fn lock(root: &Path) -> Result<(), String> {
+    let staging = staging_dir(root)?;
     // Every tracked secret must match the encrypted index BEFORE any worktree rewrite.
     // If anything is dirty or untracked, do not remove credentials.
-    verify_index(root)?;
+    let verified = verify_index(root)?;
     let untracked = git(root, &["ls-files", "--others", "-z"])?;
     if untracked.split(|b| *b == 0).any(protected_path) {
         return Err("untracked *.secret files exist; refusing to leave unprotected plaintext behind".into());
     }
     let config = load_config(root)?;
-    session::request(root, &config, Operation::Ping, &[], &[])?;
     let mut to_flush = Vec::new();
-    for (regular, path) in indexed_files(root)? {
-        if !protected_path(&path) { continue; }
-        if !regular {
-            return Err("protected staged object is not a regular file".into());
-        }
-        let relative = indexed_path(&path)?;
+    for staged in &verified.protected {
+        let relative = indexed_path(&staged.path)?;
         let target = open_protected(root, &relative)?;
-        let source = target.read()?;
-        let object = git_show(root, &path)?;
+        let (source, stamp) = target.read()?;
+        // The object the index named when it was verified, by object id.
+        let object = git_blob(root, &staged.oid)?;
         // Only the agent holds the key, so it reseals; the verified core decides.
-        let resealed = if source == object { Vec::new() } else {
-            session::request(root, &config, Operation::Encrypt, &path, &source)?
+        let resealed = if *source == object { Zeroizing::new(Vec::new()) } else {
+            session::request(root, &config, Operation::Encrypt, &staged.path, &source)?
         };
         match lock_action(&source, &object, &resealed) {
             Ok(LockAction::Keep) => {},
-            Ok(LockAction::Flush) => to_flush.push((target, object)),
+            Ok(LockAction::Flush) => {
+                if target.links()? > 1 {
+                    eprintln!("warning: {} has other hard links; they keep its plaintext after lock",
+                        String::from_utf8_lossy(&staged.path));
+                }
+                to_flush.push((relative, object, stamp));
+            },
             Err(_) => return Err("protected worktree has uncommitted plaintext changes; refusing lock".into()),
         }
     }
     // Write only ciphertext via private staged files and atomic rename. A
     // crash can leave some files flushed and others plaintext; the key stays
     // in the agent until every rename succeeds, and rerunning `lock` resumes
-    // (already-flushed files are `LockAction::Keep`). No secure erasure claim.
-    let staging = staging_dir(root)?;
-    for (i, (target, object)) in to_flush.iter().enumerate() {
-        target.replace(&staging, object, i)?;
+    // (already-flushed files are `LockAction::Keep`). A file changed after it
+    // was checked is refused, not overwritten. No secure erasure claim.
+    for (i, (relative, object, stamp)) in to_flush.iter().enumerate() {
+        open_protected(root, relative)?.replace(&staging, object, i, stamp)?;
     }
+    // While the agent still runs, refresh Git's cached stat data for the
+    // ciphertext now in the worktree (the clean filter returns an authentic
+    // record unchanged), so a locked checkout is clean and `git commit -a`
+    // does not need the key.
+    reindex(root, &verified)?;
     session::stop(root, &config)?;
     eprintln!("Locked: tracked *.secret files flushed and the in-memory credential agent stopped. This does not securely erase historical plaintext backups.");
     Ok(())
@@ -420,17 +517,33 @@ fn lock(root: &Path) -> Result<(), String> {
 fn read_limited<R: Read>(read: R, limit: usize) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     read.take((limit as u64) + 1).read_to_end(&mut out).map_err(|_| "cannot read input")?;
-    if out.len() > limit { return Err("v3 filter input exceeds supported size".into()); }
+    if out.len() > limit { return Err("input exceeds the 16 MiB v3 size limit".into()); }
     Ok(out)
 }
 
 fn filter(root: &Path, clean: bool, git_path: &[u8]) -> Result<(), String> {
     transcrypt_v3::validate_protected_path(git_path)?;
     let config = load_config(root)?;
-    let input = read_limited(io::stdin(), MAX_RECORD)?;
-    // The verified core's `seal_record` refuses inputs that already are v3
-    // records (double encryption), and `open_record` releases plaintext only
-    // after authenticating it under this config and exact Git path.
+    let input = Zeroizing::new(read_limited(io::stdin(), MAX_RECORD)?);
+    if session::request(root, &config, Operation::Ping, &[], &[]).is_err() {
+        // Locked (no agent serves this config): without the key neither
+        // filter can change a record, so both pass a record envelope of
+        // this configuration through unchanged and refuse anything else.
+        // A locked checkout then behaves like a clone that was never
+        // unlocked (ciphertext in the worktree), Git can re-clean it, and
+        // plaintext is still never stored. Authenticity is checked when
+        // unlocked (verify-index, hydrate, audit).
+        if !record_envelope_ok(&input, &transcrypt_v3::config_id(&config)) {
+            return Err("v3 session is locked; run unlock".into());
+        }
+        io::stdout().write_all(&input).map_err(|_| "cannot write output")?;
+        return Ok(());
+    }
+    // The agent's clean returns a record that already opens at this path
+    // unchanged and otherwise seals with the verified core's `seal_record`,
+    // which refuses any other v3 record (double encryption); `open_record`
+    // releases plaintext only after authenticating it under this config and
+    // exact Git path.
     let result = if clean {
         session::request(root, &config, Operation::Encrypt, git_path, &input)?
     } else {
@@ -440,17 +553,27 @@ fn filter(root: &Path, clean: bool, git_path: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn git_show(root: &Path, path: &[u8]) -> Result<Vec<u8>, String> {
-    let mut query = Vec::with_capacity(path.len() + 1);
-    query.push(b':');
-    query.extend_from_slice(path);
-    let mut command = Command::new("git");
-    command.current_dir(root).arg("show");
-    #[cfg(unix)]
-    command.arg(std::ffi::OsString::from_vec(query));
-    #[cfg(not(unix))]
-    command.arg(String::from_utf8(query).map_err(|_| "non-UTF8 path unsupported here")?);
-    output(command)
+/// The content of one Git object, named by an id the verified core accepted
+/// (never revision syntax such as `:path`, which reads `:0:x.secret` as stage
+/// 0 of `x.secret`). Reading stops at the v3 size bound, so a hostile
+/// oversized blob is refused without being loaded.
+fn git_blob(root: &Path, oid: &str) -> Result<Vec<u8>, String> {
+    if !is_object_id(oid.as_bytes()) {
+        return Err("invalid Git object id".into());
+    }
+    let mut child = git_command(Some(root))
+        .args(["cat-file", "blob", oid])
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|e| format!("cannot run git cat-file: {e}"))?;
+    let stdout = child.stdout.take().ok_or("git cat-file output pipe missing")?;
+    let data = read_limited(stdout, MAX_RECORD);
+    if data.is_err() { let _ = child.kill(); }
+    let status = child.wait().map_err(|_| "cannot wait for git cat-file")?;
+    let data = data?;
+    if !status.success() {
+        return Err(format!("cannot read Git blob {oid}"));
+    }
+    Ok(data)
 }
 
 fn indexed_path(path: &[u8]) -> Result<PathBuf, String> {
@@ -495,6 +618,26 @@ fn open_protected(root: &Path, relative: &Path) -> Result<Protected, String> {
 }
 
 impl Protected {
+    /// Remove group and other permissions (through an `O_NOFOLLOW`
+    /// descriptor, so a swapped-in symlink is never followed).
+    fn make_private(&self) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        let file = self.dir.open_regular(&self.leaf).map_err(|_| "cannot open protected worktree file")?;
+        let mode = file.metadata().map_err(|_| "cannot stat protected worktree file")?.permissions().mode();
+        if mode & 0o077 != 0 {
+            file.set_permissions(fs::Permissions::from_mode(mode & 0o700))
+                .map_err(|_| "cannot restrict protected worktree file permissions")?;
+        }
+        Ok(())
+    }
+
+    /// Number of hard links to the file.
+    fn links(&self) -> Result<u64, String> {
+        use std::os::unix::fs::MetadataExt;
+        let file = self.dir.open_regular(&self.leaf).map_err(|_| "cannot open protected worktree file")?;
+        Ok(file.metadata().map_err(|_| "cannot stat protected worktree file")?.nlink())
+    }
+
     /// Whether group or other users may read the file.
     fn readable_by_others(&self) -> Result<bool, String> {
         use std::os::unix::fs::PermissionsExt;
@@ -503,17 +646,27 @@ impl Protected {
         Ok(mode & 0o044 != 0)
     }
 
-    fn read(&self) -> Result<Vec<u8>, String> {
+    /// The contents and the stamp of the file they were read from.
+    fn read(&self) -> Result<(Zeroizing<Vec<u8>>, fsat::Stamp), String> {
         let file = self.dir.open_regular(&self.leaf)
             .map_err(|_| "cannot read protected worktree file (missing, symlink or not regular)")?;
-        read_limited(file, MAX_RECORD)
+        let stamp = fsat::Stamp::of(&file).map_err(|_| "cannot stat protected worktree file")?;
+        let contents = Zeroizing::new(read_limited(&file, MAX_RECORD)?);
+        if fsat::Stamp::of(&file).map_err(|_| "cannot stat protected worktree file")? != stamp {
+            return Err("protected worktree file changed while it was read".into());
+        }
+        Ok((contents, stamp))
     }
 
     /// Replace the file by `contents` through an exclusive mode-0600 file in
     /// the private staging directory, fsync, `renameat` into the held parent
-    /// directory, then fsync that directory. A cross-filesystem rename fails
-    /// closed (EXDEV) without touching the file. Not a multi-file transaction.
-    fn replace(&self, staging: &Staging, contents: &[u8], slot: usize) -> Result<(), String> {
+    /// directory, then fsync that directory. The entry must still have the
+    /// `expected` stamp of the read that justified the replacement, so an
+    /// edit made since then is refused instead of being lost (a same-UID
+    /// writer can still race the final check and the rename). A
+    /// cross-filesystem rename fails closed (EXDEV) without touching the
+    /// file. Not a multi-file transaction.
+    fn replace(&self, staging: &Staging, contents: &[u8], slot: usize, expected: &fsat::Stamp) -> Result<(), String> {
         let temp = OsString::from(format!("{}-{slot}.tmp", std::process::id()));
         let mut file = staging.dir.create_new(&temp, 0o600)
             .map_err(|e| format!("cannot create private staged file: {e}"))?;
@@ -523,6 +676,10 @@ impl Protected {
             let _ = staging.dir.unlink(&temp);
             return Err(format!("cannot write private staged file: {e}"));
         }
+        if self.dir.stamp(&self.leaf).ok().as_ref() != Some(expected) {
+            let _ = staging.dir.unlink(&temp);
+            return Err("protected worktree file changed after it was checked; refusing to replace it".into());
+        }
         if let Err(e) = staging.dir.rename_to(&temp, &self.dir, &self.leaf) {
             let _ = staging.dir.unlink(&temp);
             return Err(format!("cannot replace protected worktree file: {e}"));
@@ -531,19 +688,42 @@ impl Protected {
     }
 }
 
-/// Stage-0 files with paths represented as raw bytes (no newline splitting).
-/// Each record is parsed by the verified core (`parse_index_entry`): the
-/// flag says whether the mode is exactly 100644, and the path is everything
-/// after the first TAB. Unmerged and malformed records are refused.
-fn indexed_files(root: &Path) -> Result<Vec<(bool, Vec<u8>)>, String> {
-    let data = git(root, &["ls-files", "--stage", "-z"])?;
+/// One stage-0 record of the index or of a commit's tree. Every later read
+/// of its content goes through `oid`, so a concurrent index change cannot
+/// substitute other bytes for the ones that were verified.
+struct Staged {
+    regular: bool,
+    oid: String,
+    path: Vec<u8>,
+}
+
+/// Parse NUL-separated `<mode> SP <oid> SP 0 TAB <path>` records, with paths
+/// as raw bytes. Each record is parsed by the verified core
+/// (`parse_index_entry`): the flag says whether the mode is exactly 100644,
+/// and the path is everything after the first TAB. Its specification fixes
+/// the record as `mode(6) SP oid SP "0" TAB path`, so the object id is
+/// `entry[7..path_start - 3]`, which must also pass `is_object_id`.
+/// Unmerged and malformed records are refused.
+fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
     let mut entries = Vec::new();
     for entry in data.split(|b| *b == 0).filter(|item| !item.is_empty()) {
         let parsed = parse_index_entry(entry)
             .map_err(|_| "malformed or unmerged Git index entry; resolve conflicts first")?;
-        entries.push((parsed.regular, entry[parsed.path_start..].to_vec()));
+        let oid = &entry[7..parsed.path_start - 3];
+        if !is_object_id(oid) {
+            return Err("malformed Git object id in index entry".into());
+        }
+        entries.push(Staged {
+            regular: parsed.regular,
+            oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
+            path: entry[parsed.path_start..].to_vec(),
+        });
     }
     Ok(entries)
+}
+
+fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
+    parse_listing(&git(root, &["ls-files", "--stage", "-z"])?)
 }
 
 fn protected_path(path: &[u8]) -> bool {
@@ -560,74 +740,196 @@ fn verify_staged_filter_attributes(root: &Path, paths: &[&[u8]]) -> Result<(), S
     if paths.iter().any(|path| path.is_empty() || path.contains(&0)) {
         return Err("invalid indexed protected path".into());
     }
-    let mut command = Command::new("git");
-    command.current_dir(root)
-        .args(["check-attr", "--cached", "-z", "--stdin", "filter"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
     let mut request = Vec::new();
     for path in paths {
         request.extend_from_slice(path);
         request.push(0);
     }
-    let mut child = command.spawn().map_err(|_| "cannot run Git staged attribute check")?;
-    {
-        let mut stdin = child.stdin.take().ok_or("Git attribute input pipe missing")?;
-        stdin.write_all(&request)
-            .map_err(|_| "cannot send protected paths to Git attribute checker")?;
-    }
-    let result = child.wait_with_output()
-        .map_err(|_| "cannot read Git staged attribute check")?;
-    if !result.status.success() {
-        return Err(format!("Git staged attribute check failed: {}",
-            String::from_utf8_lossy(&result.stderr)));
-    }
-    if !check_attr_response_ok(&request, &result.stdout) {
+    let response = git_with_input(root, &["check-attr", "--cached", "-z", "--stdin", "filter"], &request)?;
+    if !check_attr_response_ok(&request, &response) {
         return Err("protected staged path does not have the required effective transcrypt-v3 filter".into());
     }
     Ok(())
 }
 
-fn verify_index(root: &Path) -> Result<(), String> {
+/// The staged state that `verify_index` checked: the exact index listing
+/// and its protected entries, all regular files.
+struct Verified {
+    listing: Vec<u8>,
+    protected: Vec<Staged>,
+}
+
+/// Read one snapshot of the index and check it: the staged public metadata
+/// equals the v3 policy and the worktree config, Git's effective filter
+/// applies to every protected path, and every protected entry is a regular
+/// file whose blob opens at its own path under the agent's key (`keyed`) or,
+/// while locked, at least has the envelope of this configuration.
+fn check_index(root: &Path, keyed: bool) -> Result<Verified, String> {
     let config = load_config(root)?;
-    if git_show(root, b".transcrypt/config")? != config {
-        return Err("staged .transcrypt/config is missing or differs from worktree".into());
-    }
-    if git_show(root, b".gitattributes")? != ATTRS {
-        return Err("staged .gitattributes differs from required v3 policy".into());
-    }
-    session::request(root, &config, Operation::Ping, &[], &[])?;
-    let entries = indexed_files(root)?;
-    for (regular, path) in &entries {
-        if (path.as_slice() == &b".transcrypt/config"[..] ||
-            path.as_slice() == &b".gitattributes"[..]) && !*regular {
-            return Err("public v3 metadata is not a regular staged file".into());
+    let listing = git(root, &["ls-files", "--stage", "-z"])?;
+    let entries = parse_listing(&listing)?;
+    let metadata = |name: &[u8], expected: &[u8], message: &str| -> Result<(), String> {
+        match entries.iter().find(|e| e.path == name) {
+            Some(e) if e.regular && git_blob(root, &e.oid)? == expected => Ok(()),
+            _ => Err(message.into()),
         }
+    };
+    metadata(b".transcrypt/config", &config,
+        "staged .transcrypt/config is missing, not a regular file or differs from the worktree")?;
+    metadata(b".gitattributes", ATTRS, "staged .gitattributes differs from required v3 policy")?;
+    if keyed {
+        session::request(root, &config, Operation::Ping, &[], &[])?;
     }
-    let protected: Vec<_> = entries.iter()
-        .filter(|(_, path)| protected_path(path))
-        .map(|(_, path)| path.as_slice())
-        .collect();
+    let protected: Vec<Staged> = entries.into_iter().filter(|e| protected_path(&e.path)).collect();
+    if protected.iter().any(|e| !e.regular) {
+        return Err("protected path is not a regular file in staged index".into());
+    }
+    let paths: Vec<&[u8]> = protected.iter().map(|e| e.path.as_slice()).collect();
     // Fail before any decryption if the effective Git filter changed.
-    verify_staged_filter_attributes(root, &protected)?;
-    for (regular, path) in entries {
-        if !protected_path(&path) { continue; }
-        if !regular {
-            return Err("protected path is not a regular file in staged index".into());
+    verify_staged_filter_attributes(root, &paths)?;
+    let id = transcrypt_v3::config_id(&config);
+    for staged in &protected {
+        let record = git_blob(root, &staged.oid)?;
+        if keyed {
+            session::request(root, &config, Operation::Decrypt, &staged.path, &record)?;
+        } else if !record_envelope_ok(&record, &id) {
+            return Err(format!("staged {} is not v3 ciphertext for this repository",
+                String::from_utf8_lossy(&staged.path)));
         }
-        let encrypted = git_show(root, &path)?;
-        session::request(root, &config, Operation::Decrypt, &path, &encrypted)?;
+    }
+    Ok(Verified { listing, protected })
+}
+
+/// Full verification with the unlocked agent; required by hydrate and lock.
+fn verify_index(root: &Path) -> Result<Verified, String> {
+    check_index(root, true)
+}
+
+/// The pre-commit check. While locked the clean filter cannot run, so a
+/// staged protected change can only come from bypassing it; the keyless
+/// envelope check still rejects any plaintext, and committing unrelated
+/// files keeps working.
+fn verify_index_command(root: &Path) -> Result<(), String> {
+    let config = load_config(root)?;
+    let unlocked = session::request(root, &config, Operation::Ping, &[], &[]).is_ok();
+    check_index(root, unlocked)?;
+    if !unlocked {
+        eprintln!("transcrypt-v3: locked; checked staged record envelopes only");
     }
     Ok(())
+}
+
+/// Result of `audit`.
+struct Audited {
+    records: usize,
+    authenticated: bool,
+}
+
+/// Check committed history: in every commit `git rev-list <revs>` names
+/// (default `HEAD`), every `*.secret` entry must be a regular file whose blob
+/// is a v3 record for the configuration committed in the same tree. This
+/// needs no key, so it also runs in CI or a server-side hook. When the agent
+/// is unlocked for that configuration, each record is also authenticated at
+/// its path.
+fn audit(root: &Path, revs: &[OsString], keyed: bool) -> Result<Audited, String> {
+    let mut command = git_command(Some(root));
+    command.arg("rev-list");
+    if revs.is_empty() { command.arg("HEAD"); } else { command.args(revs); }
+    let commits = output(command)?;
+    // Per committed config blob: its bytes, id and whether the agent serves it.
+    let mut configs: HashMap<String, (Vec<u8>, [u8; transcrypt_v3_core::ID_LEN], bool)> = HashMap::new();
+    let mut checked: HashSet<(String, String, Vec<u8>)> = HashSet::new();
+    let mut audited = Audited { records: 0, authenticated: true };
+    for commit in commits.split(|b| *b == b'\n').filter(|c| !c.is_empty()) {
+        if !is_object_id(commit) {
+            return Err("unexpected git rev-list output".into());
+        }
+        let commit = String::from_utf8_lossy(commit).into_owned();
+        let listing = git(root, &["ls-tree", "-r", "-z", "--full-tree",
+            "--format=%(objectmode) %(objectname) 0%x09%(path)", &commit])
+            .map_err(|e| format!("{e} (audit requires Git 2.36 or newer)"))?;
+        let entries = parse_listing(&listing)?;
+        let protected: Vec<&Staged> = entries.iter().filter(|e| protected_path(&e.path)).collect();
+        if protected.is_empty() { continue; }
+        let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));
+        let Some(config_entry) = entries.iter().find(|e| e.path == b".transcrypt/config" && e.regular) else {
+            return Err(format!("{}: *.secret file in a commit without a v3 configuration (plaintext?)",
+                at(&protected[0].path)));
+        };
+        if !configs.contains_key(&config_entry.oid) {
+            let bytes = git_blob(root, &config_entry.oid)?;
+            transcrypt_v3_core::parse_config(&bytes)
+                .map_err(|_| format!("commit {commit}: invalid v3 configuration"))?;
+            let id = transcrypt_v3::config_id(&bytes);
+            let live = keyed && session::request(root, &bytes, Operation::Ping, &[], &[]).is_ok();
+            configs.insert(config_entry.oid.clone(), (bytes, id, live));
+        }
+        let (config, id, live) = &configs[&config_entry.oid];
+        for entry in protected {
+            if !entry.regular {
+                return Err(format!("{}: protected path is not a regular file", at(&entry.path)));
+            }
+            if !checked.insert((entry.oid.clone(), config_entry.oid.clone(), entry.path.clone())) { continue; }
+            let record = git_blob(root, &entry.oid).map_err(|e| format!("{}: {e}", at(&entry.path)))?;
+            if !record_envelope_ok(&record, id) {
+                return Err(format!("{}: not v3 ciphertext for its configuration (plaintext?)", at(&entry.path)));
+            }
+            if *live {
+                session::request(root, config, Operation::Decrypt, &entry.path, &record)
+                    .map_err(|e| format!("{}: {e}", at(&entry.path)))?;
+            } else {
+                audited.authenticated = false;
+            }
+            audited.records += 1;
+        }
+    }
+    Ok(audited)
+}
+
+/// The pre-push hook: audit every commit being pushed that the remote does
+/// not already have. Git supplies `<local ref> SP <local oid> SP <remote
+/// ref> SP <remote oid>` lines on stdin.
+fn pre_push(root: &Path, remote: Option<&OsStr>) -> Result<(), String> {
+    // Never silently drop refs: oversized input is refused, not truncated.
+    let input = read_limited(io::stdin(), MAX_RECORD).map_err(|_| "cannot read pre-push input")?;
+    let mut revs: Vec<OsString> = Vec::new();
+    for line in input.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
+        if fields.len() != 4 || !is_object_id(fields[1]) || !is_object_id(fields[3]) {
+            return Err("malformed pre-push input".into());
+        }
+        let zero = |oid: &[u8]| oid.iter().all(|b| *b == b'0');
+        if zero(fields[1]) { continue; } // deleting a remote ref pushes nothing
+        revs.push(OsString::from_vec(fields[1].to_vec()));
+        let mut known = fields[3].to_vec();
+        known.extend_from_slice(b"^{commit}");
+        if !zero(fields[3]) && git(root, &["cat-file", "-e", &String::from_utf8_lossy(&known)]).is_ok() {
+            let mut exclude = b"^".to_vec();
+            exclude.extend_from_slice(fields[3]);
+            revs.push(OsString::from_vec(exclude));
+        }
+    }
+    if revs.is_empty() { return Ok(()); }
+    // Commits on this remote's tracking branches were audited when pushed.
+    // Only a plain remote name is used as a pattern; anything else (a URL)
+    // audits the complete history being pushed.
+    if let Some(name) = remote.and_then(OsStr::to_str) {
+        if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) {
+            revs.push("--not".into());
+            revs.push(format!("--remotes={name}").into());
+        }
+    }
+    audit(root, &revs, true).map(|_| ())
+        .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-v3 audit`"))
 }
 
 /// Private staging directory for whole-file replacements:
 /// `.git/transcrypt-v3-staging`, a real mode-0700 directory held open by fd.
 /// Temporaries never live in the worktree, so a crash cannot leave plaintext
 /// where `git add` could commit it unencrypted, and Git never reads files
-/// under `.git`. Anything left by an interrupted earlier run is ours and is
-/// removed.
+/// under `.git`. Holding it also holds an exclusive lock, so worktree-
+/// mutating operations (`hydrate`, `lock`) never interleave, and anything
+/// left in it is from an interrupted earlier run and is removed.
 struct Staging {
     dir: fsat::Dir,
 }
@@ -646,6 +948,7 @@ fn staging_dir(root: &Path) -> Result<Staging, String> {
     if dir.mode().map_err(|_| "cannot examine private staging directory")? & 0o077 != 0 {
         return Err("unsafe .git/transcrypt-v3-staging; require a real 0700 directory".into());
     }
+    dir.try_lock().map_err(|_| "another transcrypt-v3 hydrate or lock is running in this repository")?;
     for entry in dir.entries().map_err(|_| "cannot list private staging directory")? {
         let (regular, _) = dir.entry_kind(&entry).map_err(|_| "cannot examine stale staged file")?;
         if !regular {
@@ -657,66 +960,71 @@ fn staging_dir(root: &Path) -> Result<Staging, String> {
 }
 
 fn hydrate(root: &Path) -> Result<(), String> {
+    let staging = staging_dir(root)?;
     let config = load_config(root)?;
     // Authenticate ALL staged protected objects and the staged metadata
-    // before exposing any plaintext in the checkout.
-    verify_index(root)?;
-    let index_before = git(root, &["ls-files", "--stage", "-z"])?;
-    let entries: Vec<_> = indexed_files(root)?.into_iter()
-        .filter(|(_, path)| protected_path(path)).collect();
+    // before exposing any plaintext in the checkout. Everything below uses
+    // the object ids of this verified snapshot.
+    let verified = verify_index(root)?;
     let mut pending = Vec::new();
+    let mut kept = Vec::new();
 
     // Validate the complete worktree first. A checkout may contain a mixture
     // of ciphertext and already-hydrated plaintext after an interrupted run.
     // Neither an unexpected third value nor a protected symlink is replaced.
-    for (regular, path) in &entries {
-        if !*regular { return Err("protected path is not regular".into()); }
-        let object = git_show(root, path)?;
-        let plaintext = session::request(root, &config, Operation::Decrypt, path, &object)?;
-        let relative = indexed_path(path)?;
-        let worktree = open_protected(root, &relative)?.read()?;
+    for staged in &verified.protected {
+        let object = git_blob(root, &staged.oid)?;
+        let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &object)?;
+        let relative = indexed_path(&staged.path)?;
+        let (worktree, stamp) = open_protected(root, &relative)?.read()?;
         match hydrate_action(&worktree, &object, &plaintext) {
-            Ok(HydrateAction::Publish) => pending.push((path.clone(), relative)),
-            Ok(HydrateAction::Keep) => {},
+            Ok(HydrateAction::Publish) => pending.push((staged, relative, stamp)),
+            Ok(HydrateAction::Keep) => kept.push(relative),
             Err(_) => return Err("protected worktree differs from staged ciphertext and authenticated plaintext; refusing overwrite".into()),
         }
     }
     // Detect a changed index or public configuration between validation and
-    // publication. Concurrent changes during publication still require OS
-    // isolation; they are explicitly outside this prototype's guarantees.
-    if git(root, &["ls-files", "--stage", "-z"])? != index_before || load_config(root)? != config {
+    // publication.
+    if git(root, &["ls-files", "--stage", "-z"])? != verified.listing || load_config(root)? != config {
         return Err("index or public configuration changed during hydration".into());
     }
 
-    let staging = staging_dir(root)?;
-    for (i, (path, relative)) in pending.into_iter().enumerate() {
-        let object = git_show(root, &path)?;
-        let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
-        let target = open_protected(root, &relative)?;
-        if target.read()? != object {
-            return Err("protected worktree changed during hydration; refusing overwrite".into());
-        }
-        target.replace(&staging, &plaintext, i)?;
+    for (i, (staged, relative, stamp)) in pending.into_iter().enumerate() {
+        // Same object id, hence the same bytes that were authenticated above.
+        let object = git_blob(root, &staged.oid)?;
+        let plaintext = session::request(root, &config, Operation::Decrypt, &staged.path, &object)?;
+        // `replace` refuses unless the file is still the ciphertext checked above.
+        open_protected(root, &relative)?.replace(&staging, &plaintext, i, &stamp)?;
     }
-    // Git's index still caches the size/mtime of the encrypted checkout.
-    // `git add` is needed to refresh the worktree stat cache: merely having
-    // equal clean-filter output may still report a modified working file.
-    // The filter now receives only authenticated plaintext, never the raw
-    // ciphertext that caused the original `git restore` failure. Verify that
-    // re-staging changes NO staged blob or mode, even when index != HEAD.
-    for (_, path) in &entries {
-        let mut command = Command::new("git");
-        command.current_dir(root).args(["add", "--"]);
-        #[cfg(unix)]
-        command.arg(std::ffi::OsString::from_vec(path.clone()));
-        #[cfg(not(unix))]
-        command.arg(String::from_utf8(path.clone()).map_err(|_| "non-UTF8 path unsupported")?);
-        output(command)?;
+    // Plaintext that Git's checkout (smudge) wrote follows the umask and may
+    // be readable by other users; published files are already 0600.
+    for relative in &kept {
+        open_protected(root, relative)?.make_private()?;
     }
-    if git(root, &["ls-files", "--stage", "-z"])? != index_before {
-        return Err("hydration changed staged Git objects; refusing to report success".into());
-    }
+    // Git's index still caches the size/mtime of the encrypted checkout, and
+    // `update-index --refresh` skips files whose size changed. Re-index
+    // exactly the protected paths through the clean filter instead:
+    // `update-index -z --stdin` takes raw path bytes, never pathspecs (a
+    // tracked `[a].secret` must not select an untracked `a.secret`), and
+    // without `--add` cannot stage an untracked file. `reindex` verifies that
+    // no staged blob or mode changed, even when index != HEAD.
+    reindex(root, &verified)?;
     eprintln!("Hydration complete.");
+    Ok(())
+}
+
+/// Re-index exactly the verified protected paths through the clean filter
+/// and check that no staged blob or mode changed.
+fn reindex(root: &Path, verified: &Verified) -> Result<(), String> {
+    let mut paths = Vec::new();
+    for staged in &verified.protected {
+        paths.extend_from_slice(&staged.path);
+        paths.push(0);
+    }
+    git_with_input(root, &["update-index", "-z", "--stdin"], &paths)?;
+    if git(root, &["ls-files", "--stage", "-z"])? != verified.listing {
+        return Err("staged Git objects changed while refreshing the index; inspect `git diff --cached`".into());
+    }
     Ok(())
 }
 
@@ -738,11 +1046,14 @@ mod local_path_tests {
         // A crash-leftover temporary is purged on the next use.
         fs::write(sdir.join("stale.tmp"), b"stale plaintext").unwrap();
         let staging = staging_dir(&tmp).unwrap();
+        // A concurrent operation cannot enter (or purge) while it is held.
+        assert!(staging_dir(&tmp).is_err());
         assert_eq!(fs::read_dir(&sdir).unwrap().count(), 0);
         let path = tmp.join("item.secret");
         fs::write(&path, b"ciphertext placeholder").unwrap();
         let target = open_protected(&tmp, Path::new("item.secret")).unwrap();
-        target.replace(&staging, b"authenticated plaintext", 0).unwrap();
+        let (_, stamp) = target.read().unwrap();
+        target.replace(&staging, b"authenticated plaintext", 0, &stamp).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"authenticated plaintext");
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
         assert_eq!(fs::read_dir(&tmp).unwrap().count(), 2, "only .git and the file");
@@ -755,6 +1066,32 @@ mod local_path_tests {
         fs::create_dir(&sdir).unwrap();
         fs::set_permissions(&sdir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(staging_dir(&tmp).is_err());
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn replacement_refuses_a_file_changed_since_it_was_checked() {
+        let tmp = std::env::temp_dir().join(format!(
+            "transcrypt-v3-stamp-{}", std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+        let staging = staging_dir(&tmp).unwrap();
+        let path = tmp.join("item.secret");
+        fs::write(&path, b"checked contents").unwrap();
+        let target = open_protected(&tmp, Path::new("item.secret")).unwrap();
+        let (_, stamp) = target.read().unwrap();
+        // A concurrent edit after the check, even one of the same size.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&path, b"edited contents!").unwrap();
+        assert!(target.replace(&staging, b"replacement", 0, &stamp).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"edited contents!", "edit must survive");
+        // So is a file replaced by a different inode.
+        let (_, stamp) = target.read().unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"edited contents!").unwrap();
+        assert!(target.replace(&staging, b"replacement", 1, &stamp).is_err());
+        assert_eq!(fs::read_dir(tmp.join(".git/transcrypt-v3-staging")).unwrap().count(), 0);
         fs::remove_dir_all(&tmp).unwrap();
     }
 
@@ -778,13 +1115,14 @@ mod local_path_tests {
         fs::create_dir(checkout.join("regular")).unwrap();
         fs::write(checkout.join("regular/item.secret"), b"test").unwrap();
         let target = open_protected(&checkout, Path::new("regular/item.secret")).unwrap();
-        assert_eq!(target.read().unwrap(), b"test");
+        let (contents, stamp) = target.read().unwrap();
+        assert_eq!(*contents, b"test");
         // Race: after resolution, the parent is swapped for a symlink to an
         // outside directory. The held directory fd keeps the write inside.
         let staging = staging_dir(&checkout).unwrap();
         fs::rename(checkout.join("regular"), checkout.join("moved")).unwrap();
         symlink(&external, checkout.join("regular")).unwrap();
-        target.replace(&staging, b"plaintext", 0).unwrap();
+        target.replace(&staging, b"plaintext", 0, &stamp).unwrap();
         assert_eq!(fs::read(external.join("item.secret")).unwrap(), b"test", "write escaped");
         assert_eq!(fs::read(checkout.join("moved/item.secret")).unwrap(), b"plaintext");
         let _ = fs::remove_dir_all(tmp);

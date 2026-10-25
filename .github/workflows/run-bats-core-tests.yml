@@ -104,6 +104,12 @@ jobs:
       - name: Test legacy parity and v3 end-to-end Git lifecycle
         working-directory: rust
         run: cargo test --workspace
+      - name: Check dependencies against the RustSec advisory database
+        if: runner.os == 'Linux'
+        working-directory: rust
+        run: |
+          cargo install --locked --version 0.22.1 cargo-audit
+          cargo audit --deny warnings
 
   v3-reference:
     runs-on: ubuntu-24.04
@@ -116,6 +122,8 @@ jobs:
         run: python -m pip install cryptography==46.0.4 argon2-cffi==25.1.0
       - name: Verify independent AES-SIV / Argon2id vectors
         run: python tests/v3/reference/check_vectors.py -v
+      - name: Verify the differential AES-SIV / Argon2id corpus
+        run: python tests/v3/reference/differential.py
 
       - name: Verify raw Git %f pathname transport
         run: python -m unittest discover -s tests/v3/reference -p 'test_git_filter_paths.py' -v

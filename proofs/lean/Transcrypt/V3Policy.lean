@@ -225,4 +225,36 @@ theorem be32_decode (n : Nat) (h : n < 2^32) :
     (n / 2^24 % 256) * 2^24 + (n / 2^16 % 256) * 2^16 + (n / 2^8 % 256) * 2^8 + n % 256 = n := by
   omega
 
+/-! ## Git object names and keyless record envelopes -/
+
+/-- A lowercase hexadecimal digit. -/
+def HexDigit (c : Nat) : Prop := (48 ≤ c ∧ c ≤ 57) ∨ (97 ≤ c ∧ c ≤ 102)
+
+/-- A Git object name as `ls-files --stage` and `ls-tree` print it: 40
+    (SHA-1) or 64 (SHA-256) lowercase hexadecimal digits. The adapter reads
+    Git content only through such names. -/
+def ObjectId (oid : List Nat) : Prop :=
+  (oid.length = 40 ∨ oid.length = 64) ∧ ∀ c ∈ oid, HexDigit c
+
+/-- An object name is neither revision syntax (no `:`, `^`, `~`, `@`, `{`)
+    nor an option (it does not start with `-`). -/
+theorem objectId_plain {oid : List Nat} (h : ObjectId oid) :
+    ∀ c ∈ oid, c ∉ [58, 94, 126, 64, 123, 45] := by
+  intro c hc hbad
+  rcases h.2 c hc with ⟨h1, h2⟩ | ⟨h1, h2⟩ <;> simp at hbad <;> omega
+
+/-- The keyless check of a committed record: within the size bound, with the
+    v3 file header naming configuration id `id`. It cannot establish
+    authenticity, which needs the key. -/
+def EnvelopeOk (record id : List Nat) : Prop :=
+  record.length ≤ maxRecord ∧ decodeFileHeaderShape record = some id
+
+/-- Every genuine record passes the keyless check for its configuration,
+    so the check never rejects legitimate history. -/
+theorem opensTo_envelopeOk (s : Suite) {config path record pt : List Nat}
+    (h : OpensTo s config path record pt) : EnvelopeOk record (s.digest16 config) := by
+  obtain ⟨_, _, hlen, rfl⟩ := h
+  refine ⟨hlen, ?_⟩
+  exact decode_file_header_encode _ _ (s.digest16_length config) (by simp [s.siv_length])
+
 end Transcrypt.V3Policy

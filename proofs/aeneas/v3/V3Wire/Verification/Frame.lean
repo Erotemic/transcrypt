@@ -32,7 +32,11 @@ theorem be32_bv (c0 c1 c2 c3 : BitVec 8) :
     (r >>> 24).setWidth 8 = c0 ∧ (r >>> 16).setWidth 8 = c1 ∧ (r >>> 8).setWidth 8 = c2 ∧
       r.setWidth 8 = c3 := by
   intro r
-  refine ⟨?_, ?_, ?_, ?_⟩ <;> bv_decide
+  -- Bit by bit, without `bv_decide` (whose native evaluation adds axioms).
+  refine ⟨?_, ?_, ?_, ?_⟩ <;>
+  · ext i hi
+    rcases i with _ | _ | _ | _ | _ | _ | _ | _ | i
+    all_goals first | (simp [r]; done) | omega
 
 theorem bv_byte (r : BitVec 32) (k : Nat) : ((r >>> k).setWidth 8).toNat = r.toNat / 2^k % 256 := by
   simp [BitVec.toNat_setWidth, BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]

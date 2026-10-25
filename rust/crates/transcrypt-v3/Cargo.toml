@@ -12,7 +12,9 @@ aes-siv = { version = "=0.8.0", features = ["zeroize"] }
 aes = { version = "=0.9.3", features = ["zeroize"] }
 cmac = { version = "=0.8.0", features = ["zeroize"] }
 ctr = { version = "=0.10.1", features = ["zeroize"] }
-argon2 = "=0.6.0"
+# `zeroize` wipes Argon2's 64 MiB of password-derived memory blocks and its
+# initial hash when key derivation finishes.
+argon2 = { version = "=0.6.0", features = ["zeroize"] }
 sha2 = "=0.10.9"
 getrandom = "=0.3.4"
 rpassword = "=7.4.0"

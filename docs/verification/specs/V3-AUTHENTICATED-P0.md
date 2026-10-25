@@ -95,8 +95,10 @@ trusted state and is outside this POC.
 ## Stateful lifecycle and key management
 
 - `init`: require an ordinary Git repository, no `.transcrypt` or
-  `.gitattributes`, and no conflicting pre-commit hook. Generate metadata,
-  install Git filters, install a local hook, and stage the public config and
+  `.gitattributes`, and no conflicting `pre-commit` or `pre-push` hook.
+  Generate metadata, install Git filters, install the local `pre-commit`
+  (`verify-index`) and `pre-push` (`audit` of the pushed commits) hooks, and
+  stage the public config and
   `*.secret` attributes with `-diff` (no textconv cache). Explicitly committing those files is required.
 - `unlock`: derive from a terminal passphrase or opt-in stdin, authenticate
   the config **first**, and send the derived key over a private one-way stdin
@@ -110,17 +112,48 @@ trusted state and is outside this POC.
   the socket type and that it has no listening peer. Missing/dead agents fail
   closed. Earlier prototype on-disk keys must be removed or locked using the
   previous binary before starting this agent.
-- `clean`: accept plaintext only, require the Git-provided `%f` path as
-  a single argument, and emit a complete path-bound authenticated record only
-  after successful encryption. Do not double-encrypt recognizable records.
+- `clean`: require the Git-provided `%f` path as a single argument and emit
+  a complete path-bound authenticated record. Clean is **idempotent**, as Git
+  expects of filters: input that already opens as a record at this path under
+  this config is returned unchanged (by determinism, exactly the record that
+  sealing its plaintext gives); any other recognizable v3 record is refused
+  (no double encryption); everything else is sealed.
 - `smudge`: authenticate including the Git-provided `%f` path and then
   release plaintext; reject all other bytes.
   Git diffs are disabled for protected files rather than invoking textconv.
+- **Locked filters.** When no agent serves the worktree config, neither
+  filter has the key, so neither can change a record: both output input that
+  has the v3 envelope of this config (header with its config id, within the
+  size bound) unchanged and refuse everything else. A locked checkout thus
+  behaves like a clone that never ran `unlock` (ciphertext in the worktree;
+  checkout, status and commits of other files work), and plaintext can still
+  never be cleaned into the index. Authenticity of such records is checked
+  when unlocked (`verify-index`, `hydrate`, `audit`).
+- **Git object access.** Every staged or committed object is read by the
+  object id from one `ls-files --stage -z` (or `ls-tree`) snapshot, through
+  `git cat-file blob <oid>`, never by `:<path>` revision syntax (which reads
+  `:0:x.secret` as stage 0 of `x.secret`). Object ids must be 40 or 64
+  lowercase hex digits. Every Git subprocess runs with
+  `GIT_LITERAL_PATHSPECS=1` and `GIT_NO_REPLACE_OBJECTS=1`. Blob reads stop
+  at the 16 MiB record bound.
 - `verify-index`: check staged `.transcrypt/config` exactly matches worktree
   config; staged `.gitattributes` equals the fixed policy; every index
   `*.secret` is a regular Git blob decryptable using the active config/key.
-  A Git hook only guards cooperating local commits; it is bypassable and does
-  not enforce remote policy.
+  While locked (as the `pre-commit` hook) it checks the record envelopes
+  instead, which rejects every plaintext not deliberately formatted as a v3
+  record. A Git hook only guards cooperating local commits; it is bypassable
+  and does not enforce remote policy.
+- `audit [<rev-list arguments>]`: for every commit selected (default
+  `HEAD`), every `*.secret` tree entry must be a regular file whose blob has
+  the v3 envelope of the `.transcrypt/config` committed in the same tree; a
+  commit with protected files but no config is refused. Needs no key, so it
+  can run in CI or a server-side hook, and catches plaintext committed by
+  clones that never ran `unlock`. When the agent serves that config, each
+  record is also authenticated at its path. The `pre-push` hook audits the
+  pushed commits not already on the remote's tracking branches (merges,
+  rebases, cherry-picks and `--no-verify` commits never ran `pre-commit`).
+  A keyless audit cannot detect forged records that merely carry a valid
+  envelope.
 - `hydrate`: authenticate **every staged protected object** and confirm the
   staged metadata matches the worktree before exposing plaintext. Each
   protected worktree file must equal either its staged ciphertext or the
@@ -133,21 +166,29 @@ trusted state and is outside this POC.
   it) and renamed with `renameat` into the protected file's parent directory,
   which was resolved once with `O_NOFOLLOW` per component. Stale staging
   files from an interrupted run are deleted. Do **not** invoke `git restore` or `git checkout`
-  on ciphertext worktrees: those Git operations may invoke `clean` on the
-  ciphertext, which correctly refuses double encryption. Already-hydrated
+  to hydrate: they would publish files one at a time through the smudge
+  filter, outside this all-or-nothing preflight. Already-hydrated
   paths are left untouched, allowing retries after interrupted hydration.
-  Compare the staged index snapshot before publication. Afterwards run the
-  installed clean filter on authenticated plaintext using `git add` to refresh
-  the worktree stat cache, and verify that the staged blob IDs and modes have
-  not changed. Without that refresh, Git can report hydrated files as dirty
-  because cached size and mtime still describe ciphertext. The adapter remains
-  vulnerable to concurrent same-UID path/index races and does not claim
-  atomicity across multiple files.
+  Compare the staged index snapshot before publication, and replace a file
+  only if its stamp (device, inode, size, mtime, ctime) still equals the one
+  read when it was checked. Afterwards re-index exactly the protected paths
+  with `git update-index -z --stdin` (raw paths, never pathspecs, and never
+  `--add`; `git add -- <path>` would read a tracked `[a].secret` as a glob
+  and stage an untracked `a.secret`) so the clean filter refreshes the stat
+  cache, and verify that the staged blob IDs and modes have not changed.
+  Without that refresh, Git can report hydrated files as dirty because cached
+  size and mtime still describe ciphertext. `hydrate` and `lock` hold an
+  exclusive lock on the staging directory for their whole run. A same-UID
+  writer can still race the final stamp check and the rename; multi-file
+  atomicity is not claimed.
 - `lock`: preflight no dirty or untracked protected files; overwrite tracked
   plaintext working files with the exact ciphertext in the index (only when
   resealing the worktree reproduces that ciphertext byte for byte, through
-  the same private staging directory) and then terminate the credential
-  agent. An interrupted `lock` is resumed by rerunning it. No derived-key file is written. This is NOT
+  the same private staging directory, and only if the file's stamp is
+  unchanged since it was checked), re-index those paths while the agent still
+  runs (clean returns the records unchanged, so a locked checkout is clean),
+  and then terminate the credential agent. An interrupted `lock` is resumed
+  by rerunning it. No derived-key file is written. This is NOT
   certified secure deletion, atomic across multiple files, or protection
   against plaintext in Git textconv notes, caches, process memory dumps,
   swap, snapshots, or backups.
@@ -156,7 +197,12 @@ Process and filesystem hardening: every v3 process disables core dumps and,
 on Linux, is non-dumpable (no same-UID `ptrace` or `/proc/PID/mem` access to
 the agent); the agent `mlock`s its key page where permitted. Protected paths
 are resolved with `openat(O_NOFOLLOW)` per component and replaced with
-`renameat` relative to the held directory descriptors. The agent socket is
+`renameat` relative to the held directory descriptors. The session directory
+and socket must be owned by the effective UID, and both client and agent
+refuse a socket peer running as another UID (`SO_PEERCRED`/`getpeereid`).
+Argon2id runs in caller-supplied memory that is wiped afterwards, and
+AES-SIV encrypts and decrypts in place in caller buffers (no heap copies of
+plaintext); passphrase buffers are preallocated and wiped. The agent socket is
 bound and connected through the relative address
 `.git/transcrypt-v3/session.sock` from the repository root, so deep
 repository paths do not exceed the `sun_path` limit. Remaining limits: the

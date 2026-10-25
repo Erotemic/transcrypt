@@ -218,12 +218,14 @@ fn agent_refuses_hostile_requests_and_keeps_serving() {
         (b'D', &config, b"dir/b.secret", &record[..]),     // cross-path replay
         (b'D', &config, b"../a.secret", &record[..]),      // noncanonical path
         (b'D', &config, b"a.txt", &record[..]),            // unprotected path
-        (b'E', &config, b"a.secret", &record[..]),         // double encryption
+        (b'E', &config, b"dir/b.secret", &record[..]),     // double encryption
         (b'P', &config, b"a.secret", &b""[..]),            // control op with a path
         (b'Q', &config, b"", &b""[..]),                    // unknown opcode
     ] {
         assert!(agent_request(&repo, op, cfg, path, body).is_err(), "accepted op {}", op as char);
     }
+    // Clean is idempotent: an authentic record at its own path is returned.
+    assert_eq!(agent_request(&repo, b'E', &config, b"a.secret", &record).unwrap(), record);
     // A truncated frame must not take the agent down.
     drop(UnixStream::connect(socket(&repo)).unwrap().write_all(b"D"));
     assert!(agent_request(&repo, b'P', &config, b"", b"").is_ok(), "agent survives hostile clients");
@@ -378,4 +380,220 @@ fn unlock_hydrates_by_default_and_reports_refusals() {
     assert_ne!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
     assert_eq!(fs::read(clone.join("dir/b.secret")).unwrap(), b"local edit\n");
     fs::write(clone.join("dir/b.secret"), run(&clone, "git", &["show", ":dir/b.secret"], None)).unwrap();
+}
+
+/// Regression: hydration refreshed the index with `git add -- <path>`, which
+/// Git reads as a pathspec. A hostile commit adding `sub/[a].secret` (a glob
+/// matching `sub/a.secret`) next to `sub/.gitattributes: a.secret -filter`
+/// made `unlock` stage an untracked plaintext `sub/a.secret` unencrypted.
+#[test]
+fn hydration_never_stages_untracked_files_through_pathspec_magic() {
+    let mut scratch = Scratch::new("pathspec");
+    let repo = scratch.repo("repo");
+    fs::create_dir(repo.join("sub")).unwrap();
+    fs::write(repo.join("sub/.gitattributes"), b"a.secret -filter\n").unwrap();
+    fs::write(repo.join("sub/[a].secret"), b"decoy\n").unwrap();
+    fs::write(repo.join("sub/:(glob)*.secret"), b"decoy two\n").unwrap();
+    run(&repo, "git", &["add", "sub"], None);
+    run(&repo, "git", &["commit", "-qm", "hostile names"], None);
+    run(&repo, bin(), &["lock"], None);
+    fs::write(repo.join("sub/a.secret"), b"UNTRACKED PLAINTEXT\n").unwrap();
+    fs::write(repo.join("sub/b.secret"), b"UNTRACKED PLAINTEXT\n").unwrap();
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    let staged = run(&repo, "git", &["ls-files", "-z", "sub"], None);
+    assert_eq!(staged, b"sub/.gitattributes\0sub/:(glob)*.secret\0sub/[a].secret\0", "untracked file staged");
+    assert_eq!(fs::read(repo.join("sub/[a].secret")).unwrap(), b"decoy\n");
+    assert_eq!(fs::read(repo.join("sub/:(glob)*.secret")).unwrap(), b"decoy two\n");
+    let status = run(&repo, "git", &["status", "--porcelain", "--untracked-files=no"], None);
+    assert!(status.is_empty(), "{}", String::from_utf8_lossy(&status));
+    fs::remove_file(repo.join("sub/a.secret")).unwrap();
+    fs::remove_file(repo.join("sub/b.secret")).unwrap();
+}
+
+/// Regression: staged objects were read with `git show :<path>`, so a
+/// protected file named `0:a.secret` was read as stage 0 of `a.secret`.
+/// Objects are now read by the object id of the verified index snapshot.
+#[test]
+fn staged_objects_are_read_by_object_id_not_revision_syntax() {
+    let mut scratch = Scratch::new("revsyntax");
+    let repo = scratch.repo("repo");
+    fs::write(repo.join("0:a.secret"), b"colon plaintext\n").unwrap();
+    run(&repo, "git", &["add", "0:a.secret"], None);
+    run(&repo, "git", &["commit", "-qm", "colon name"], None);
+    run(&repo, bin(), &["verify-index"], None);
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(repo.join("0:a.secret")).unwrap(), b"colon plaintext\n");
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+}
+
+/// Plaintext that reaches a commit without passing the pre-commit hook
+/// (`--no-verify`, a filter disabled when the file was added, or a clone
+/// that never ran unlock) is refused by the pre-push hook and by `audit`,
+/// which needs no key.
+#[test]
+fn pre_push_and_audit_refuse_plaintext_in_history() {
+    let mut scratch = Scratch::new("audit");
+    let repo = scratch.repo("repo");
+    run(&scratch.root, "git", &["init", "-q", "--bare", "remote.git"], None);
+    run(&repo, "git", &["remote", "add", "origin", "../remote.git"], None);
+    run(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    let out = String::from_utf8(run(&repo, bin(), &["audit"], None)).unwrap();
+    assert!(out.contains("2 protected record(s) checked, all authenticated"), "{out}");
+    // A plaintext secret committed with --no-verify.
+    let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
+        Some(b"PLAINTEXT LEAK\n"))).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
+    run_fails(&repo, "git", &["commit", "-qm", "blocked by pre-commit"], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "bypass"], None);
+    let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    assert!(err.contains("leak.secret") && err.contains("refusing to push"), "{err}");
+    run_fails(&repo, bin(), &["audit"], None);
+    // The keyless audit refuses it too, and accepts the earlier history.
+    run(&repo, "git", &["branch", "leaky"], None);
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    // A bare server repository (as in a pre-receive hook) audits keylessly.
+    let remote = scratch.root.join("remote.git");
+    let out = String::from_utf8(run(&remote, bin(), &["audit", "--all"], None)).unwrap();
+    assert!(out.contains("2 protected record(s) checked (envelopes only"), "{out}");
+    run(&repo, "git", &["push", "-q", "--no-verify", "origin", "leaky:refs/heads/leaky"], None);
+    let err = run_fails(&remote, bin(), &["audit", "--all"], None);
+    assert!(err.contains("leak.secret"), "{err}");
+    run(&repo, "git", &["push", "-q", "origin", ":refs/heads/leaky"], None);
+    run(&repo, bin(), &["lock"], None);
+    run_fails(&repo, bin(), &["audit", "leaky"], None);
+    let out = String::from_utf8(run(&repo, bin(), &["audit", "HEAD"], None)).unwrap();
+    assert!(out.contains("envelopes only"), "{out}");
+    // A clone that never ran unlock has no filter: a new secret is committed
+    // as plaintext. Its own audit (as CI or a server hook would run) refuses.
+    let clone = scratch.root.join("clone");
+    run(&scratch.root, "git", &["clone", "-q", "-b", "main", "remote.git", "clone"], None);
+    run(&clone, "git", &["config", "user.name", "Example"], None);
+    run(&clone, "git", &["config", "user.email", "example@example.test"], None);
+    fs::write(clone.join("new.secret"), b"FRESH CLONE PLAINTEXT\n").unwrap();
+    run(&clone, "git", &["add", "new.secret"], None);
+    run(&clone, "git", &["commit", "-qm", "unfiltered"], None);
+    let err = run_fails(&clone, bin(), &["audit", "origin/main..HEAD"], None);
+    assert!(err.contains("new.secret"), "{err}");
+    run(&clone, bin(), &["audit", "origin/main"], None);
+}
+
+/// While locked, the pre-commit hook still refuses staged plaintext (by its
+/// envelope), but commits of unrelated files keep working.
+#[test]
+fn locked_pre_commit_checks_envelopes_and_allows_other_commits() {
+    let mut scratch = Scratch::new("lockedhook");
+    let repo = scratch.repo("repo");
+    run(&repo, bin(), &["lock"], None);
+    fs::write(repo.join("README"), b"public edit\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "public change while locked"], None);
+    let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
+        Some(b"PLAINTEXT WHILE LOCKED\n"))).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "late.secret"], None);
+    run_fails(&repo, "git", &["commit", "-qm", "plaintext while locked"], None);
+    run(&repo, "git", &["rm", "-q", "--cached", "late.secret"], None);
+    // The locked checkout holds ciphertext and stays usable: it is clean,
+    // and switching branches passes records through without the key.
+    assert!(run(&repo, "git", &["status", "--porcelain", "--untracked-files=no"], None).is_empty());
+    run(&repo, "git", &["checkout", "-q", "HEAD~2"], None);
+    run(&repo, "git", &["checkout", "-q", "-"], None);
+    // A plaintext secret still cannot be added while locked.
+    fs::write(repo.join("new.secret"), b"PLAINTEXT\n").unwrap();
+    run_fails(&repo, "git", &["add", "new.secret"], None);
+    fs::remove_file(repo.join("new.secret")).unwrap();
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+}
+
+fn worktree_files(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path == root.join(".git") { continue; }
+            if path.is_dir() { walk(&path, root, out) } else { out.push(path.strip_prefix(root).unwrap().to_path_buf()) }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// Crash safety under real process termination: `lock` and `hydrate` are
+/// killed with SIGKILL at many points. After every kill each protected file
+/// is exactly its staged ciphertext or its plaintext, no other file appeared
+/// in the worktree, and rerunning the operation converges.
+#[test]
+fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
+    let mut scratch = Scratch::new("kill");
+    let repo = scratch.repo("repo");
+    for i in 0..20 {
+        fs::write(repo.join(format!("dir/f{i}.secret")), format!("plaintext number {i}\n")).unwrap();
+    }
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "many secrets"], None);
+    let mut files = Vec::new();
+    for path in worktree_files(&repo) {
+        let name = path.to_str().unwrap().to_owned();
+        if name.ends_with(".secret") {
+            let plaintext = fs::read(repo.join(&path)).unwrap();
+            files.push((path, plaintext, run(&repo, "git", &["show", &format!(":{name}")], None)));
+        }
+    }
+    assert_eq!(files.len(), 22);
+    let listing = worktree_files(&repo);
+    let start = std::time::Instant::now();
+    run(&repo, bin(), &["lock"], None);
+    let full = start.elapsed().as_micros() as u64;
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    let live = |repo: &Path| repo.join(".git/transcrypt-v3/session.sock").exists();
+    for round in 0..12u64 {
+        let op = if round % 2 == 0 { "lock" } else { "hydrate" };
+        if !live(&repo) {
+            run(&repo, bin(), &["unlock", "--password-stdin", "--no-hydrate"], Some(PASS));
+        }
+        let mut child = Command::new(bin()).arg(op).current_dir(&repo)
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        std::thread::sleep(Duration::from_micros(full * (round / 2 + 1) / 7));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(worktree_files(&repo), listing, "round {round}: unexpected worktree file");
+        for (path, plaintext, ciphertext) in &files {
+            let now = fs::read(repo.join(path)).unwrap();
+            assert!(now == *plaintext || now == *ciphertext, "round {round}: {path:?} corrupted");
+        }
+        if !live(&repo) {
+            run(&repo, bin(), &["unlock", "--password-stdin", "--no-hydrate"], Some(PASS));
+        }
+        // A Git child of the killed process may still hold `.git/index.lock`
+        // for a moment; Git itself then refuses, so retry briefly.
+        let mut attempts = 0;
+        while !exec(&repo, bin(), &[op], None).status.success() {
+            attempts += 1;
+            assert!(attempts < 20, "round {round}: {op} cannot resume");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for (path, plaintext, ciphertext) in &files {
+            let expected = if op == "lock" { ciphertext } else { plaintext };
+            assert_eq!(&fs::read(repo.join(path)).unwrap(), expected, "round {round}: {op} did not converge");
+        }
+        if op == "hydrate" {
+            assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty(), "round {round}");
+        }
+    }
+}
+
+/// Plaintext that Git's checkout wrote with a permissive umask is made
+/// private by hydrate (published files are created 0600).
+#[test]
+fn hydrate_makes_existing_plaintext_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut scratch = Scratch::new("perms");
+    let repo = scratch.repo("repo");
+    fs::set_permissions(repo.join("a.secret"), fs::Permissions::from_mode(0o644)).unwrap();
+    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    assert!(status.contains("readable by other users"), "{status}");
+    run(&repo, bin(), &["hydrate"], None);
+    assert_eq!(fs::metadata(repo.join("a.secret")).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
 }

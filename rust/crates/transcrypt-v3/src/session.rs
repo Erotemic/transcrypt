@@ -11,14 +11,17 @@
 use std::{
     fs,
     io::{self, Read, Write},
-    os::unix::{fs::{DirBuilderExt, FileTypeExt, PermissionsExt}, net::{UnixListener, UnixStream}},
+    os::{
+        fd::AsRawFd,
+        unix::{fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt}, net::{UnixListener, UnixStream}},
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::Duration,
 };
 
-use transcrypt_v3::{authenticate_config, config_array, decrypt_file, encrypt_file, SecretKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
+use transcrypt_v3::{authenticate_config, clean_file, config_array, decrypt_file, SecretKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
     authorize_agent_request, decode_be_u32, decode_frame_header, encode_be_u32, encode_frame_header, AgentOp,
     CONFIG_LEN, FRAME_HEADER_LEN,
@@ -41,10 +44,51 @@ pub(crate) enum Operation {
 fn directory(root: &Path) -> Result<PathBuf, String> {
     let path = root.join(".git/transcrypt-v3");
     let meta = fs::symlink_metadata(&path).map_err(|_| "no local v3 session directory; run unlock")?;
-    if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 {
-        return Err("unsafe local v3 session directory; require a real 0700 directory".into());
+    if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 || meta.uid() != euid() {
+        return Err("unsafe local v3 session directory; require a real 0700 directory owned by this user".into());
     }
     Ok(path)
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() as u32 }
+}
+
+/// The effective UID of the process at the other end of a Unix socket, as
+/// recorded by the kernel when the connection was made.
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: `cred` and `len` describe a writable ucred buffer.
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(), &mut len)
+        };
+        if rc != 0 { return Err(io::Error::last_os_error()); }
+        Ok(cred.uid as u32)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let (mut uid, mut gid) = (0, 0);
+        // SAFETY: both out-pointers are valid.
+        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(uid as u32)
+    }
+}
+
+/// Both ends refuse a peer running as another user. The 0700 directory
+/// already denies other users; this also holds if the socket inode is ever
+/// reachable another way. Same-UID peers remain inside the trust boundary.
+fn same_user(stream: &UnixStream) -> Result<(), String> {
+    match peer_uid(stream) {
+        Ok(uid) if uid == euid() => Ok(()),
+        _ => Err("v3 credential socket peer is not this user".into()),
+    }
 }
 
 fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
@@ -87,8 +131,8 @@ fn socket(root: &Path) -> Result<PathBuf, String> {
 
 fn check_socket(path: &Path) -> Result<(), String> {
     let meta = fs::symlink_metadata(path).map_err(|_| "v3 session is locked; run unlock")?;
-    if !meta.file_type().is_socket() || meta.permissions().mode() & 0o077 != 0 {
-        return Err("unsafe v3 session socket; expected mode 0600".into());
+    if !meta.file_type().is_socket() || meta.permissions().mode() & 0o077 != 0 || meta.uid() != euid() {
+        return Err("unsafe v3 session socket; expected mode 0600 and owned by this user".into());
     }
     Ok(())
 }
@@ -109,13 +153,15 @@ fn reply(stream: &mut UnixStream, response: Result<Vec<u8>, String>) -> io::Resu
 /// A single operation on the *live* agent. The caller sends the complete
 /// public config each time: a stale agent cannot authorize a newly changed
 /// configuration merely because the directory or socket still exists.
-pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u8], body: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u8], body: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     if config.len() != CONFIG_LEN || body.len() > WIRE_LIMIT || path_bytes.len() > MAX_PATH {
         return Err("invalid v3 agent request length".into());
     }
     let path = socket(root)?;
     check_socket(&path)?;
     let mut stream = UnixStream::connect(socket_addr(root)?).map_err(|_| "v3 credential agent is not running; run unlock")?;
+    // Plaintext is about to be sent to, or accepted from, this peer.
+    same_user(&stream)?;
     // Bound a broken local peer rather than hanging a Git operation forever.
     stream.set_read_timeout(Some(Duration::from_secs(120)))
         .map_err(|_| "cannot set agent read timeout")?;
@@ -132,7 +178,7 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
     stream.read_exact(&mut header).map_err(|_| "credential agent failed before replying")?;
     let size = decode_be_u32(header[1..5].try_into().map_err(|_| "malformed agent response")?) as usize;
     if size > MAX_RESPONSE { return Err("credential agent response exceeds limit".into()); }
-    let mut value = vec![0u8; size];
+    let mut value = Zeroizing::new(vec![0u8; size]);
     stream.read_exact(&mut value).map_err(|_| "incomplete credential agent response")?;
     match header[0] {
         0 => Ok(value),
@@ -221,7 +267,7 @@ fn transaction(stream: &mut UnixStream, config: &[u8; CONFIG_LEN], key: &SecretK
     stream.read_exact(&mut body).map_err(|_| "incomplete agent body")?;
     let result = match action {
         AgentOp::Ping => Ok(Vec::new()),
-        AgentOp::Encrypt => encrypt_file(config, key, &path_bytes, &body),
+        AgentOp::Encrypt => clean_file(config, key, &path_bytes, &body),
         AgentOp::Decrypt => decrypt_file(config, key, &path_bytes, &body)
             .map(|mut plaintext| std::mem::take(&mut *plaintext)),
         AgentOp::Stop => {
@@ -268,8 +314,12 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
     let mut stopping = false;
     for connection in listener.incoming() {
         let mut stream = match connection { Ok(s) => s, Err(_) => break };
+        // A stalled client must not hold the single-threaded agent forever.
         stream.set_read_timeout(Some(Duration::from_secs(120)))
             .map_err(|_| "cannot set agent inbound timeout")?;
+        stream.set_write_timeout(Some(Duration::from_secs(120)))
+            .map_err(|_| "cannot set agent outbound timeout")?;
+        if same_user(&stream).is_err() { continue; }
         match transaction(&mut stream, config, &key) {
             Ok(stop) => stopping = stop,
             Err(message) => { let _ = reply(&mut stream, Err(message)); },

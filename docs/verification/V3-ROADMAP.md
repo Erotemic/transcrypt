@@ -81,21 +81,38 @@ verified" or "cryptographic security has been proved from first principles."
       (V5).
 - [x] Internal security review, trust-ordered assumption register, user
       guide, axiom audit and CI gates (V6, internal part).
+- [x] Security-hardening campaign
+      ([V3-SECURITY-REVIEW §5](V3-SECURITY-REVIEW.md#5-hardening-campaign-second-pass-2026-10-25)):
+      - fixed a reproducible plaintext-staging bug in hydration (H-1);
+      - all Git objects are now read by verified object id from one snapshot
+        (H-2);
+      - added a keyless `audit` command and a `pre-push` hook (H-3);
+      - wiped Argon2 memory and moved AES-SIV in place (H-4, H-5);
+      - added the differential crypto corpus (H-6);
+      - stamp-checked replacement and an operation lock (H-7);
+      - peer-UID checks (H-8);
+      - made locked checkouts usable without weakening the plaintext gate
+        (H-9);
+      - added SIGKILL fault injection.
+      New proved core functions: `is_object_id`, `record_envelope_ok`.
 
-### Remaining, in trust order (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md))
+### Remaining, ranked by security value (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md#ranked-unresolved-risks))
 
-1. **A4 — adapter correspondence.** Keep the call-site table current. The
-   index-record parser and the agent request framing are now in the core
-   and proved; what remains in the adapter is I/O sequencing (modeled in
-   `Lifecycle.lean`) and OS calls.
-2. **A3 — translator trust.** Track Aeneas/hax releases; consider
-   differential testing of extracted definitions once they can be made
-   computable.
-3. **A8 — same-UID content races** are accepted; revisit only if the threat
-   model admits hostile same-UID processes.
-4. **R-01 — external review** of the construction, `aes-siv`, and the
-   adapter before any security-sensitive release.
-5. **V7 — Bash** only after a dependency-policy decision for AES-SIV.
+1. **A13 — server-side enforcement.** Plaintext from checkouts that never
+   ran `unlock` is only stopped where `audit` runs. Ship and document a
+   CI/pre-receive integration and make it part of the setup.
+2. **R-01 — external review** of the construction, `aes-siv`, the
+   locked-filter envelope pass-through (A14) and the adapter, using the
+   [review package](V3-SECURITY-REVIEW.md#review-package). Release blocker.
+3. **A4 — adapter remainder.** Move the object-id offset into the proved
+   `IndexEntry`; batch object reads through `git cat-file --batch` with a
+   proved header parser; keep the call-site table current.
+4. **A7 — Git versions.** CI matrix over Git releases (≥ 2.36 for `audit`).
+5. **A8/A6 — same-UID** races and agent access are accepted; an optional
+   agent idle timeout and an `nlink > 1` warning at lock are cheap
+   follow-ups.
+6. **A3 — translator trust.** Track Aeneas/hax releases.
+7. **V7 — Bash** only after a dependency-policy decision for AES-SIV.
 
 ## Scope discipline and risk decisions
 

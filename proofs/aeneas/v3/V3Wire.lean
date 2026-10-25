@@ -8,3 +8,4 @@ import V3Wire.Verification.Protocol
 import V3Wire.Verification.Lifecycle
 import V3Wire.Verification.Index
 import V3Wire.Verification.Frame
+import V3Wire.Verification.Envelope

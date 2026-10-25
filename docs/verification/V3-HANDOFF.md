@@ -30,7 +30,7 @@ authoritative: Rust is changed to meet it, never the reverse.
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
 | Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Index,Frame,Protocol,Lifecycle}.lean` |
 | Theorem ledger | `proofs/aeneas/v3/PROOF-STATUS.md` |
-| Tests | `rust/crates/transcrypt-v3/tests/{git_lifecycle,adversarial,v3_vectors}.rs`, `tests/v3/reference/` |
+| Tests | `rust/crates/transcrypt-v3/tests/{git_lifecycle,adversarial,v3_vectors,v3_differential}.rs`, `tests/v3/reference/` (`differential.py` regenerates the OpenSSL/argon2 corpus) |
 
 ## Verified state
 
@@ -42,9 +42,10 @@ authoritative: Rust is changed to meet it, never the reverse.
   loops.
 - `bash proofs/aeneas/build-v3-tracked.sh` builds everything;
   `bash proofs/aeneas/check-v3-axioms.sh` shows only standard axioms.
-- Rust: `cargo test --workspace` (lifecycle, adversarial, vectors, contract
-  test). Python: `tests/v3/reference/*.py` need `cryptography>=42` (Ubuntu's
-  41.x rejects empty AES-SIV plaintexts) and `argon2-cffi`; CI pins them.
+- Rust: `cargo test --workspace` (lifecycle, adversarial incl. SIGKILL fault
+  injection, vectors, differential, contract test). Python:
+  `tests/v3/reference/*.py` need `cryptography>=42` (Ubuntu's 41.x rejects
+  empty AES-SIV plaintexts) and `argon2-cffi`; CI pins them.
 
 ## Commands
 
@@ -52,6 +53,7 @@ authoritative: Rust is changed to meet it, never the reverse.
 cd ~/code/transcrypt
 cd rust && cargo test --workspace && cd ..
 python3 tests/v3/reference/check_vectors.py -v      # in a venv with the pinned deps
+python3 tests/v3/reference/differential.py          # same venv
 python3 -m unittest discover -s proofs/aeneas/tests -p 'test_v3_*.py'
 bash proofs/aeneas/build-v3-tracked.sh
 bash proofs/aeneas/check-v3-axioms.sh
@@ -78,12 +80,28 @@ stable, but reordering loops inside a proved function renames them.
 - Unnamed hypotheses: refer by type with `‹_›` instead of `rename_i` where
   possible.
 
-## Next tasks (trust order)
+## Adapter invariants (do not regress)
 
-1. Keep the adapter call-site table in `V3-ASSUMPTIONS.md` current; every
-   parser and decision is now in the proved core.
-2. External review R-01.
-3. Bash v7 only after a dependency-policy decision.
+These came out of the hardening campaign (`V3-SECURITY-REVIEW.md` §5); each
+has a regression test in `tests/adversarial.rs`.
+
+- Read Git objects only by object id, from one parsed snapshot, through
+  `git_blob` (`cat-file blob`, bounded). Never use `:<path>` revision
+  syntax.
+- Create Git subprocesses only with `git_command` (literal pathspecs, no
+  replace refs). Never `git add -- <path>` with repository-derived paths;
+  re-index with `update-index -z --stdin`.
+- Replace a worktree file only through `Protected::replace` with the stamp
+  from the read that justified it, while holding `staging_dir` (its
+  `flock`).
+- Release plaintext only through the agent's `open_record`. While locked,
+  filters may only pass through inputs accepted by `record_envelope_ok`.
+
+## Next tasks
+
+See the ranked list in `V3-ROADMAP.md` ("Remaining"). In short:
+server-side `audit` deployment (A13), external review R-01, then the A4
+remainder (oid offset in `IndexEntry`, batched object reads).
 
 **Decision rule:** spend effort on proofs connected to shipped Rust or on
 exploitable lifecycle failures, not on theorem counts.

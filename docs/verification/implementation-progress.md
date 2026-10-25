@@ -458,3 +458,26 @@ path is rejected rather than releasing another file's plaintext.
 - **V6 (internal).** Security review, trust-ordered assumption register,
   profile-1 freeze decision, agent hardening (no core dumps, non-dumpable,
   `mlock`), key-schedule zeroization, user guide. External review remains.
+
+### 2026-10-25 (later) — security-hardening campaign
+
+- **H-1 (high), fixed.** `unlock`/`hydrate` refreshed the stat cache with
+  `git add -- <path>`, a pathspec: a hostile tracked `sub/[a].secret` staged
+  an untracked plaintext `sub/a.secret` unencrypted. Reproduced, then fixed
+  with `update-index -z --stdin` and literal pathspecs for every Git call.
+- **A4 structure.** All Git objects are read by object id from one parsed
+  snapshot (`cat-file blob`, bounded), never `:<path>`; worktree
+  replacement is stamp-checked; `hydrate`/`lock` take an operation lock.
+- **Plaintext before push.** Keyless `audit` (CI, bare repos) and an
+  installed `pre-push` hook; locked checkouts usable (idempotent clean,
+  envelope pass-through, lock re-index, keyless locked pre-commit).
+- **Crypto hygiene.** Argon2 memory wiped (the crate frees it unwiped);
+  in-place AES-SIV; differential corpus against OpenSSL/argon2-cffi;
+  RustSec check plus `cargo audit` in CI; peer-UID and ownership checks for
+  the agent.
+- **Proofs.** New core functions `is_object_id`, `record_envelope_ok` proved
+  against new spec predicates. The axiom audit had missed wrapped output and
+  `bv_decide`'s native axioms in the frame proofs; both corrected (30
+  theorems, standard axioms only).
+- **Fault injection.** SIGKILL of `lock`/`hydrate` at 12 points: every file
+  stays exactly ciphertext or plaintext, and reruns converge.

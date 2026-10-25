@@ -1468,4 +1468,80 @@ def parse_index_entry
               ok (core.result.Result.Ok { regular, path_start := i6 })
   else ok (core.result.Result.Err Refusal.Index)
 
+/-- [transcrypt_v3_core::is_object_id]: loop body 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-645:5
+    Visibility: public -/
+@[rust_loop_body]
+def is_object_id_loop.body
+  (oid : Slice Std.U8) (n : Std.Usize) (ok1 : Bool) (i : Std.Usize) :
+  RustM (ControlFlow (Bool × Std.Usize) Bool)
+  := do
+  if ok1
+  then
+    if i < n
+    then
+      let c ← Slice.index_usize oid i
+      let ok2 ←
+        if c >= 48#u8
+        then
+          if c <= 57#u8
+          then ok true
+          else if c >= 97#u8
+               then ok (c <= 102#u8)
+               else ok false
+        else if c >= 97#u8
+             then ok (c <= 102#u8)
+             else ok false
+      let i1 ← i + 1#usize
+      ok (cont (ok2, i1))
+    else ok (done true)
+  else ok (done false)
+
+/-- [transcrypt_v3_core::is_object_id]: loop 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-645:5
+    Visibility: public -/
+@[rust_loop]
+def is_object_id_loop
+  (oid : Slice Std.U8) (n : Std.Usize) (ok1 : Bool) (i : Std.Usize) :
+  RustM Bool
+  := do
+  loop
+    (fun (ok2, i1) => is_object_id_loop.body oid n ok2 i1)
+    (ok1, i)
+
+/-- [transcrypt_v3_core::is_object_id]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 634:0-647:1
+    Visibility: public -/
+def is_object_id (oid : Slice Std.U8) : RustM Bool := do
+  let n ← core.slice.Slice.len oid
+  let ok1 ←
+    if n = 40#usize
+    then ok true
+    else if n = 64#usize
+         then ok true
+         else ok false
+  is_object_id_loop oid n ok1 0#usize
+
+/-- [transcrypt_v3_core::record_envelope_ok]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 654:0-662:1
+    Visibility: public -/
+def record_envelope_ok
+  (record : Slice Std.U8) (id : Array Std.U8 16#usize) : RustM Bool := do
+  let i ← core.slice.Slice.len record
+  let i1 ← FILE_MIN_LEN
+  if i < i1
+  then ok false
+  else
+    let i2 ← MAX_RECORD
+    if i > i2
+    then ok false
+    else
+      let r ← parse_file_header record
+      match r with
+      | core.result.Result.Ok found =>
+        let s ← lift (Array.to_slice found)
+        let s1 ← lift (Array.to_slice id)
+        bytes_eq s s1
+      | core.result.Result.Err _ => ok false
+
 end transcrypt_v3_core

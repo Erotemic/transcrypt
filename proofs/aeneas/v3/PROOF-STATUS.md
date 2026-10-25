@@ -6,10 +6,17 @@ translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All are `WP.spec`
 triples, so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;
-`bash proofs/aeneas/check-v3-axioms.sh` confirms the headline theorems use
+`bash proofs/aeneas/check-v3-axioms.sh` confirms the 30 headline theorems use
 only `propext`, `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
-`axiom` or `native_decide` occurs in any verification module (enforced by
-`v3_snapshot.py verify`).
+`axiom`, `native_decide` or `bv_decide` occurs in any verification module
+(enforced by `v3_snapshot.py verify`).
+
+**Correction (2026-10-25).** Until this date the audit script read only the
+first line of each `#print axioms` report, and Lean wraps long lists. The two
+frame-decoding theorems then depended on `bv_decide`'s native-evaluation
+axioms, which the audit did not report. The lemma `be32_bv` is now proved bit
+by bit without `bv_decide`, and the script parses complete reports (checked
+against a wrapped list containing a native axiom).
 
 For the cross-component picture see
 [`V3-PROOF-COVERAGE.md`](../../../docs/verification/V3-PROOF-COVERAGE.md) and
@@ -27,13 +34,14 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
 | `Path` | `is_protected_path`, `component_ok`, `is_canonical_protected_path` | `is_protected_path_spec`, `component_ok_spec`, `is_canonical_protected_path_spec` | Exactly the spec's `Protected` / `CanonicalProtectedPath` (defined with `List.splitOn`) |
 | `Index` | `parse_index_entry` | `parse_index_entry_spec` | Accepts exactly the spec's `IndexRecord` (stage 0, path after the first TAB, `100644` flag) and returns that path |
 | `Frame` | `encode_be_u32`, `decode_be_u32`, `encode_frame_header`, `decode_frame_header` | `encode_be_u32_spec`, `decode_be_u32_spec`, `encode_frame_header_spec`, `decode_frame_header_spec`, `decode_frame_header_encode` | Agent request header is exactly the spec's `frameHeader`; decoding inverts encoding |
+| `Envelope` | `is_object_id`, `record_envelope_ok` | `is_object_id_spec`, `record_envelope_ok_spec` | Object ids passed to Git are exactly the spec's `ObjectId` (40/64 lowercase hex: never revision syntax or an option, `objectId_plain`); the keyless check is exactly `EnvelopeOk` (size bound, magic, config id), which every genuine record satisfies (`opensTo_envelopeOk`) |
 | `Protocol` | `initialize_config` | `initialize_config_spec` | Output is the spec layout and authenticates |
 | `Protocol` | `authenticate_config` | `authenticate_config_spec` | `Ok` iff `ConfigAuthentic`; refusals classified |
 | `Protocol` | `seal_record` | `seal_record_spec` | `Ok` ⇒ `MaySeal` and output = `sealedRecord`; every refusal names a violated precondition or primitive failure |
 | `Protocol` | `open_record` | `open_record_spec`, `open_record_complete` | `Ok` ⇒ `OpensTo` for exactly the released bytes; authentication failure ⇒ zeroed buffer and no genuine record exists; other refusals leave the buffer untouched; genuine right-sized records always open to their plaintext |
 | `Protocol` | `authorize_agent_request` | `authorize_agent_request_spec` | Exactly `authorizeSpec` |
 | `Lifecycle` | adapter sequencing models over the above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec`, `check_attr_paths` | Hydrate only replaces exact staged ciphertext by its authentic plaintext (all-or-nothing); lock only discards plaintext the record restores; verify-index success ⇒ every staged record opens at its own path; accepted check-attr ⇒ filter reported for every path |
-| spec (`V3Policy`) | — | `opensTo_unique`, `seal_opens`, `lock_flush_recoverable`, `expectedAttrResponse_paths` | Spec-level consequences used above |
+| spec (`V3Policy`) | — | `opensTo_unique`, `seal_opens`, `lock_flush_recoverable`, `expectedAttrResponse_paths`, `objectId_plain`, `opensTo_envelopeOk` | Spec-level consequences used above |
 
 ## Explicit assumptions in the statements
 
