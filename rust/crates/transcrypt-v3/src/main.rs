@@ -18,7 +18,8 @@ mod session;
 use session::Operation;
 use transcrypt_v3::{initialize_config, unlock_config};
 use transcrypt_v3_core::{
-    check_attr_response_ok, hydrate_action, lock_action, HydrateAction, LockAction, MAX_RECORD, SALT_LEN,
+    check_attr_response_ok, hydrate_action, lock_action, parse_index_entry, HydrateAction, LockAction,
+    MAX_RECORD, SALT_LEN,
 };
 
 const ATTRS: &[u8] = b"*.secret filter=transcrypt-v3 -diff\n";
@@ -119,11 +120,11 @@ fn status(root: &Path) -> Result<(), String> {
     println!("session:    {}", if unlocked { "unlocked (in-memory key agent running)" } else { "locked" });
     let mut counts = [0usize; 4];
     let mut exposed = 0usize;
-    for (mode, path) in indexed_files(root)? {
+    for (regular, path) in indexed_files(root)? {
         if !protected_path(&path) { continue; }
         let name = String::from_utf8_lossy(&path).into_owned();
         let state = (|| -> Result<&str, String> {
-            if mode != b"100644" { return Ok("unsupported mode"); }
+            if !regular { return Ok("unsupported mode"); }
             let object = git_show(root, &path)?;
             let target = open_protected(root, &indexed_path(&path)?)?;
             let worktree = target.read()?;
@@ -366,9 +367,9 @@ fn lock(root: &Path) -> Result<(), String> {
     let config = load_config(root)?;
     session::request(root, &config, Operation::Ping, &[], &[])?;
     let mut to_flush = Vec::new();
-    for (mode, path) in indexed_files(root)? {
+    for (regular, path) in indexed_files(root)? {
         if !protected_path(&path) { continue; }
-        if mode != b"100644" {
+        if !regular {
             return Err("protected staged object is not a regular file".into());
         }
         let relative = indexed_path(&path)?;
@@ -513,16 +514,16 @@ impl Protected {
 }
 
 /// Stage-0 files with paths represented as raw bytes (no newline splitting).
-fn indexed_files(root: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+/// Each record is parsed by the verified core (`parse_index_entry`): the
+/// flag says whether the mode is exactly 100644, and the path is everything
+/// after the first TAB. Unmerged and malformed records are refused.
+fn indexed_files(root: &Path) -> Result<Vec<(bool, Vec<u8>)>, String> {
     let data = git(root, &["ls-files", "--stage", "-z"])?;
     let mut entries = Vec::new();
     for entry in data.split(|b| *b == 0).filter(|item| !item.is_empty()) {
-        let tab = entry.iter().position(|x| *x == b'\t').ok_or("malformed Git index entry")?;
-        let mode = &entry[..tab];
-        if !mode.ends_with(b" 0") { return Err("unmerged index entries are unsupported".into()); }
-        if mode.len() < 6 { return Err("malformed Git file mode".into()); }
-        let mode = mode[..6].to_vec();
-        entries.push((mode, entry[tab + 1..].to_vec()));
+        let parsed = parse_index_entry(entry)
+            .map_err(|_| "malformed or unmerged Git index entry; resolve conflicts first")?;
+        entries.push((parsed.regular, entry[parsed.path_start..].to_vec()));
     }
     Ok(entries)
 }
@@ -580,9 +581,9 @@ fn verify_index(root: &Path) -> Result<(), String> {
     }
     session::request(root, &config, Operation::Ping, &[], &[])?;
     let entries = indexed_files(root)?;
-    for (mode, path) in &entries {
+    for (regular, path) in &entries {
         if (path.as_slice() == &b".transcrypt/config"[..] ||
-            path.as_slice() == &b".gitattributes"[..]) && mode.as_slice() != &b"100644"[..] {
+            path.as_slice() == &b".gitattributes"[..]) && !*regular {
             return Err("public v3 metadata is not a regular staged file".into());
         }
     }
@@ -592,9 +593,9 @@ fn verify_index(root: &Path) -> Result<(), String> {
         .collect();
     // Fail before any decryption if the effective Git filter changed.
     verify_staged_filter_attributes(root, &protected)?;
-    for (mode, path) in entries {
+    for (regular, path) in entries {
         if !protected_path(&path) { continue; }
-        if mode != b"100644" {
+        if !regular {
             return Err("protected path is not a regular file in staged index".into());
         }
         let encrypted = git_show(root, &path)?;
@@ -650,8 +651,8 @@ fn hydrate(root: &Path) -> Result<(), String> {
     // Validate the complete worktree first. A checkout may contain a mixture
     // of ciphertext and already-hydrated plaintext after an interrupted run.
     // Neither an unexpected third value nor a protected symlink is replaced.
-    for (mode, path) in &entries {
-        if mode != b"100644" { return Err("protected path is not regular".into()); }
+    for (regular, path) in &entries {
+        if !*regular { return Err("protected path is not regular".into()); }
         let object = git_show(root, path)?;
         let plaintext = session::request(root, &config, Operation::Decrypt, path, &object)?;
         let relative = indexed_path(path)?;

@@ -195,4 +195,18 @@ noncomputable def authorizeSpec (opcode : Nat) (supplied active path : List Nat)
   else if opcode = 88 then some .stop
   else none
 
+/-! ## Git index records -/
+
+/-- Git mode of a regular, non-executable file. -/
+def regularMode : List Nat := ascii "100644"
+
+/-- A stage-0 `git ls-files --stage -z` record `mode SP oid SP 0 TAB path`.
+    Modes and object ids never contain TAB, so the path (which becomes
+    AES-SIV associated data) is exactly what follows the first TAB; paths
+    themselves may contain TAB. -/
+def IndexRecord (entry : List Nat) (regular : Bool) (path : List Nat) : Prop :=
+  ∃ mode oid, entry = mode ++ [32] ++ oid ++ [32, 48, 9] ++ path ∧
+    mode.length = 6 ∧ oid ≠ [] ∧ 9 ∉ mode ∧ 9 ∉ oid ∧ path ≠ [] ∧
+    (regular = true ↔ mode = regularMode)
+
 end Transcrypt.V3Policy

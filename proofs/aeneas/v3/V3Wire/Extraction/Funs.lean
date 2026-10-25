@@ -613,7 +613,7 @@ def FILTER_ATTR_SUFFIX : Array Std.U8 22#usize :=
     ]
 
 /-- [transcrypt_v3_core::bytes_eq]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 231:4-238:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 233:4-240:1
     Visibility: public -/
 @[rust_loop_body]
 def bytes_eq_loop.body
@@ -632,7 +632,7 @@ def bytes_eq_loop.body
   else ok (done true)
 
 /-- [transcrypt_v3_core::bytes_eq]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 231:4-238:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 233:4-240:1
     Visibility: public -/
 @[rust_loop]
 def bytes_eq_loop
@@ -642,7 +642,7 @@ def bytes_eq_loop
     i
 
 /-- [transcrypt_v3_core::bytes_eq]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 226:0-238:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 228:0-240:1
     Visibility: public -/
 def bytes_eq (a : Slice Std.U8) (b : Slice Std.U8) : RustM Bool := do
   let i ← core.slice.Slice.len a
@@ -652,7 +652,7 @@ def bytes_eq (a : Slice Std.U8) (b : Slice Std.U8) : RustM Bool := do
   else bytes_eq_loop a b 0#usize
 
 /-- [transcrypt_v3_core::is_protected_path]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-257:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-259:1
     Visibility: public -/
 @[rust_loop_body]
 def is_protected_path_loop.body
@@ -673,7 +673,7 @@ def is_protected_path_loop.body
   else ok (done true)
 
 /-- [transcrypt_v3_core::is_protected_path]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-257:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-259:1
     Visibility: public -/
 @[rust_loop]
 def is_protected_path_loop
@@ -683,7 +683,7 @@ def is_protected_path_loop
     k
 
 /-- [transcrypt_v3_core::is_protected_path]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 243:0-257:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 245:0-259:1
     Visibility: public -/
 def is_protected_path (path : Slice Std.U8) : RustM Bool := do
   let n ← core.slice.Slice.len path
@@ -698,7 +698,7 @@ def is_protected_path (path : Slice Std.U8) : RustM Bool := do
     is_protected_path_loop path start 0#usize
 
 /-- [transcrypt_v3_core::component_ok]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 261:0-270:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 263:0-272:1 -/
 def component_ok
   (path : Slice Std.U8) (start : Std.Usize) («end» : Std.Usize) :
   RustM Bool
@@ -741,7 +741,7 @@ def component_ok
       ok (¬ b)
 
 /-- [transcrypt_v3_core::is_canonical_protected_path]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-292:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-294:5
     Visibility: public -/
 @[rust_loop_body]
 def is_canonical_protected_path_loop.body
@@ -778,7 +778,7 @@ def is_canonical_protected_path_loop.body
   else ok (done false)
 
 /-- [transcrypt_v3_core::is_canonical_protected_path]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-292:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-294:5
     Visibility: public -/
 @[rust_loop]
 def is_canonical_protected_path_loop
@@ -792,7 +792,7 @@ def is_canonical_protected_path_loop
     (ok1, start, i)
 
 /-- [transcrypt_v3_core::is_canonical_protected_path]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 276:0-294:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 278:0-296:1
     Visibility: public -/
 def is_canonical_protected_path (path : Slice Std.U8) : RustM Bool := do
   let n ← core.slice.Slice.len path
@@ -808,7 +808,7 @@ def is_canonical_protected_path (path : Slice Std.U8) : RustM Bool := do
       else ok false
 
 /-- [transcrypt_v3_core::initialize_config]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 297:0-304:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 299:0-306:1
     Visibility: public -/
 def initialize_config
   {P : Type} (V3PrimitivesInst : V3Primitives P) (primitives : P)
@@ -825,7 +825,7 @@ def initialize_config
   else ok (core.result.Result.Err Refusal.Primitive)
 
 /-- [transcrypt_v3_core::authenticate_config]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 307:0-317:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 309:0-319:1
     Visibility: public -/
 def authenticate_config
   {P : Type} (V3PrimitivesInst : V3Primitives P) (primitives : P)
@@ -843,7 +843,7 @@ def authenticate_config
   | core.result.Result.Err _ => ok (core.result.Result.Err Refusal.Config)
 
 /-- [transcrypt_v3_core::seal_record]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 343:4-346:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 345:4-348:5
     Visibility: public -/
 @[rust_loop_body]
 def seal_record_loop.body
@@ -859,7 +859,7 @@ def seal_record_loop.body
   else ok (done out)
 
 /-- [transcrypt_v3_core::seal_record]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 343:4-346:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 345:4-348:5
     Visibility: public -/
 @[rust_loop]
 def seal_record_loop
@@ -871,7 +871,7 @@ def seal_record_loop
     (out, i)
 
 /-- [transcrypt_v3_core::seal_record]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 322:0-351:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 324:0-353:1
     Visibility: public -/
 def seal_record
   {P : Type} (V3PrimitivesInst : V3Primitives P) (primitives : P)
@@ -922,7 +922,7 @@ def seal_record
       else ok (core.result.Result.Err Refusal.Path, out)
 
 /-- [transcrypt_v3_core::open_record]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 388:8-391:9
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 390:8-393:9
     Visibility: public -/
 @[rust_loop_body]
 def open_record_loop.body
@@ -938,7 +938,7 @@ def open_record_loop.body
   else ok (done out)
 
 /-- [transcrypt_v3_core::open_record]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 388:8-391:9
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 390:8-393:9
     Visibility: public -/
 @[rust_loop]
 def open_record_loop
@@ -948,7 +948,7 @@ def open_record_loop
     (out, i)
 
 /-- [transcrypt_v3_core::open_record]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 358:0-395:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 360:0-397:1
     Visibility: public -/
 def open_record
   {P : Type} (V3PrimitivesInst : V3Primitives P) (primitives : P)
@@ -1001,7 +1001,7 @@ def open_record
     else ok (core.result.Result.Err Refusal.Path, out)
 
 /-- [transcrypt_v3_core::hydrate_action]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 409:0-417:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 411:0-419:1
     Visibility: public -/
 def hydrate_action
   (worktree : Slice Std.U8) (record : Slice Std.U8) (plaintext : Slice Std.U8)
@@ -1018,7 +1018,7 @@ def hydrate_action
     else ok (core.result.Result.Err Refusal.UnexpectedWorktree)
 
 /-- [transcrypt_v3_core::lock_action]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 434:0-442:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 436:0-444:1
     Visibility: public -/
 def lock_action
   (worktree : Slice Std.U8) (record : Slice Std.U8) (resealed : Slice Std.U8) :
@@ -1034,7 +1034,7 @@ def lock_action
     else ok (core.result.Result.Err Refusal.UnexpectedWorktree)
 
 /-- [transcrypt_v3_core::authorize_agent_request]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 456:0-488:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 458:0-490:1
     Visibility: public -/
 def authorize_agent_request
   (opcode : Std.U8) (supplied : Array Std.U8 55#usize)
@@ -1090,7 +1090,7 @@ def authorize_agent_request
       else ok (core.result.Result.Err Refusal.ConfigMismatch)
 
 /-- [transcrypt_v3_core::filter_suffix_at]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-503:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-505:1 -/
 @[rust_loop_body]
 def filter_suffix_at_loop.body
   (response : Slice Std.U8) (j : Std.Usize) (k : Std.Usize) :
@@ -1110,7 +1110,7 @@ def filter_suffix_at_loop.body
   else ok (done true)
 
 /-- [transcrypt_v3_core::filter_suffix_at]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-503:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-505:1 -/
 @[rust_loop]
 def filter_suffix_at_loop
   (response : Slice Std.U8) (j : Std.Usize) (k : Std.Usize) : RustM Bool := do
@@ -1119,7 +1119,7 @@ def filter_suffix_at_loop
     k
 
 /-- [transcrypt_v3_core::filter_suffix_at]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 491:0-503:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 493:0-505:1 -/
 def filter_suffix_at
   (response : Slice Std.U8) (j : Std.Usize) : RustM Bool := do
   let i ← core.slice.Slice.len response
@@ -1134,7 +1134,7 @@ def filter_suffix_at
     else filter_suffix_at_loop response j 0#usize
 
 /-- [transcrypt_v3_core::check_attr_response_ok]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-527:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-529:5
     Visibility: public -/
 @[rust_loop_body]
 def check_attr_response_ok_loop.body
@@ -1179,7 +1179,7 @@ def check_attr_response_ok_loop.body
   else ok (done (false, j))
 
 /-- [transcrypt_v3_core::check_attr_response_ok]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-527:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-529:5
     Visibility: public -/
 @[rust_loop]
 def check_attr_response_ok_loop
@@ -1193,7 +1193,7 @@ def check_attr_response_ok_loop
     (ok1, i, j)
 
 /-- [transcrypt_v3_core::check_attr_response_ok]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 510:0-529:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 512:0-531:1
     Visibility: public -/
 def check_attr_response_ok
   (request : Slice Std.U8) (response : Slice Std.U8) : RustM Bool := do
@@ -1203,5 +1203,110 @@ def check_attr_response_ok
   then let i ← core.slice.Slice.len response
        ok (j = i)
   else ok false
+
+/-- [transcrypt_v3_core::REGULAR_MODE]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 534:0-534:45
+    Visibility: public -/
+@[global_simps, irreducible]
+def REGULAR_MODE : Array Std.U8 6#usize :=
+  Array.make 6#usize [ 49#u8, 48#u8, 48#u8, 54#u8, 52#u8, 52#u8 ]
+
+/-- [transcrypt_v3_core::parse_index_entry]: loop body 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-559:5
+    Visibility: public -/
+@[rust_loop_body]
+def parse_index_entry_loop0.body
+  (entry : Slice Std.U8) (n : Std.Usize) (t : Std.Usize) (found : Bool) :
+  RustM (ControlFlow (Std.Usize × Bool) (Std.Usize × Bool))
+  := do
+  if found
+  then ok (done (t, true))
+  else
+    if t < n
+    then
+      let i ← Slice.index_usize entry t
+      if i = 9#u8
+      then ok (cont (t, true))
+      else let t1 ← t + 1#usize
+           ok (cont (t1, false))
+    else ok (done (t, false))
+
+/-- [transcrypt_v3_core::parse_index_entry]: loop 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-559:5
+    Visibility: public -/
+@[rust_loop]
+def parse_index_entry_loop0
+  (entry : Slice Std.U8) (n : Std.Usize) (t : Std.Usize) (found : Bool) :
+  RustM (Std.Usize × Bool)
+  := do
+  loop
+    (fun (t1, found1) => parse_index_entry_loop0.body entry n t1 found1)
+    (t, found)
+
+/-- [transcrypt_v3_core::parse_index_entry]: loop body 1:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-573:5
+    Visibility: public -/
+@[rust_loop_body]
+def parse_index_entry_loop1.body
+  (entry : Slice Std.U8) (regular : Bool) (k : Std.Usize) :
+  RustM (ControlFlow (Bool × Std.Usize) Bool)
+  := do
+  let s ← lift (Array.to_slice REGULAR_MODE)
+  let i ← core.slice.Slice.len s
+  if k < i
+  then
+    let i1 ← Slice.index_usize entry k
+    let i2 ← Array.index_usize REGULAR_MODE k
+    let regular1 ← if i1 != i2
+                     then ok false
+                     else ok regular
+    let k1 ← k + 1#usize
+    ok (cont (regular1, k1))
+  else ok (done regular)
+
+/-- [transcrypt_v3_core::parse_index_entry]: loop 1:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 0:0-573:5
+    Visibility: public -/
+@[rust_loop]
+def parse_index_entry_loop1
+  (entry : Slice Std.U8) (regular : Bool) (k : Std.Usize) : RustM Bool := do
+  loop
+    (fun (regular1, k1) => parse_index_entry_loop1.body entry regular1 k1)
+    (regular, k)
+
+/-- [transcrypt_v3_core::parse_index_entry]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 549:0-575:1
+    Visibility: public -/
+def parse_index_entry
+  (entry : Slice Std.U8) : RustM (core.result.Result IndexEntry Refusal) := do
+  let n ← core.slice.Slice.len entry
+  let (t, found) ← parse_index_entry_loop0 entry n 0#usize false
+  if found
+  then
+    if t < 10#usize
+    then ok (core.result.Result.Err Refusal.Index)
+    else
+      let i ← t + 1#usize
+      if i >= n
+      then ok (core.result.Result.Err Refusal.Index)
+      else
+        let i1 ← Slice.index_usize entry 6#usize
+        if i1 != 32#u8
+        then ok (core.result.Result.Err Refusal.Index)
+        else
+          let i2 ← t - 2#usize
+          let i3 ← Slice.index_usize entry i2
+          if i3 != 32#u8
+          then ok (core.result.Result.Err Refusal.Index)
+          else
+            let i4 ← t - 1#usize
+            let i5 ← Slice.index_usize entry i4
+            if i5 != 48#u8
+            then ok (core.result.Result.Err Refusal.Index)
+            else
+              let regular ← parse_index_entry_loop1 entry true 0#usize
+              let i6 ← t + 1#usize
+              ok (core.result.Result.Ok { regular, path_start := i6 })
+  else ok (core.result.Result.Err Refusal.Index)
 
 end transcrypt_v3_core

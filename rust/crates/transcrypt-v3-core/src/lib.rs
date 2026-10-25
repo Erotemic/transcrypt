@@ -197,6 +197,8 @@ pub enum Refusal {
     UnexpectedWorktree,
     /// Agent request is malformed or not permitted.
     Request,
+    /// A `git ls-files --stage -z` record is malformed or not stage 0.
+    Index,
 }
 
 /// The cryptographic boundary. Implementations must realize exactly the
@@ -528,6 +530,50 @@ pub fn check_attr_response_ok(request: &[u8], response: &[u8]) -> bool {
     ok && j == response.len()
 }
 
+/// Git mode of a regular, non-executable file.
+pub const REGULAR_MODE: [u8; 6] = *b"100644";
+
+/// One parsed `git ls-files --stage -z` record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexEntry {
+    /// The mode is exactly `100644`.
+    pub regular: bool,
+    /// The path is `entry[path_start..]`: everything after the first TAB.
+    pub path_start: usize,
+}
+
+/// Parse a stage-0 record `<6-byte mode> SP <object id> SP 0 TAB <path>`.
+/// The path, which becomes AES-SIV associated data, is everything after the
+/// *first* TAB (Git paths may themselves contain TABs; modes and object ids
+/// cannot). Unmerged entries (stage 1-3) and malformed records are refused.
+pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
+    let n = entry.len();
+    let mut t = 0;
+    let mut found = false;
+    while !found && t < n {
+        if entry[t] == b'\t' {
+            found = true;
+        } else {
+            t += 1;
+        }
+    }
+    if !found || t < 10 || t + 1 >= n {
+        return Err(Refusal::Index);
+    }
+    if entry[6] != b' ' || entry[t - 2] != b' ' || entry[t - 1] != b'0' {
+        return Err(Refusal::Index);
+    }
+    let mut regular = true;
+    let mut k = 0;
+    while k < REGULAR_MODE.len() {
+        if entry[k] != REGULAR_MODE[k] {
+            regular = false;
+        }
+        k += 1;
+    }
+    Ok(IndexEntry { regular, path_start: t + 1 })
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -764,5 +810,31 @@ mod tests {
         assert!(!check_attr_response_ok(request,
             b"d/b.secret\0filter\0transcrypt-v3\0a.secret\0filter\0transcrypt-v3\0"));
         assert!(!check_attr_response_ok(b"a.secret\0", b"a.secret\0filter\0transcrypt-v4\0"));
+    }
+
+    #[test]
+    fn index_entries_are_parsed_at_the_first_tab_and_stage_zero_only() {
+        let oid = b"0123456789abcdef0123456789abcdef01234567";
+        let mut e = std::vec::Vec::new();
+        e.extend_from_slice(b"100644 ");
+        e.extend_from_slice(oid);
+        e.extend_from_slice(b" 0\tdir/a\tb.secret");
+        let parsed = parse_index_entry(&e).unwrap();
+        assert!(parsed.regular);
+        assert_eq!(&e[parsed.path_start..], b"dir/a\tb.secret");
+        let exec: std::vec::Vec<u8> = [b"100755 ".as_slice(), oid, b" 0\tx.secret"].concat();
+        assert!(!parse_index_entry(&exec).unwrap().regular);
+        let link: std::vec::Vec<u8> = [b"120000 ".as_slice(), oid, b" 0\tx.secret"].concat();
+        assert!(!parse_index_entry(&link).unwrap().regular);
+        for bad in [
+            [b"100644 ".as_slice(), oid, b" 1\tx.secret"].concat(),  // unmerged
+            [b"100644 ".as_slice(), oid, b" 0\t"].concat(),          // empty path
+            [b"100644 ".as_slice(), oid, b" 0 x.secret"].concat(),    // no tab
+            b"100644 0\tx".to_vec(),                                  // missing object id
+            [b"1006440".as_slice(), oid, b" 0\tx.secret"].concat(),  // no separator
+            std::vec::Vec::new(),
+        ] {
+            assert_eq!(parse_index_entry(&bad), Err(Refusal::Index), "{bad:?}");
+        }
     }
 }

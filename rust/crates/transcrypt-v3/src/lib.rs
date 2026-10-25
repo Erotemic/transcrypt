@@ -124,6 +124,7 @@ fn refusal(r: Refusal) -> String {
         Refusal::Primitive => "AES-SIV primitive failed",
         Refusal::UnexpectedWorktree => "protected worktree differs from staged ciphertext and its plaintext",
         Refusal::Request => "unsupported agent request",
+        Refusal::Index => "malformed or unmerged Git index entry",
     }
     .into()
 }
