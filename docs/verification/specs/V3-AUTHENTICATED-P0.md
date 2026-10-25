@@ -256,7 +256,10 @@ trusted state and is outside this POC.
     not also at another path in the index or `HEAD` (a moved or copied
     record).
 - **Pre-commit hook.** With the key, it first seals what Git staged without
-  the filter, then runs the `verify-index` check.
+  the filter, then runs the `verify-index` check. Entries unchanged since
+  `HEAD` get only its keyless checks there (they are already in history);
+  `verify-index`, `hydrate`, `lock`, merge commits and the audit
+  authenticate every entry.
   - A protected entry whose blob is not a record is sealed at its path.
   - A record that opens at a `HEAD` path no longer in the index (a `git mv`)
     is re-sealed for its new path.

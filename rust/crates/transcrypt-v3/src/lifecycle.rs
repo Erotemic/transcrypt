@@ -52,6 +52,15 @@ pub(crate) fn staged_protected(root: &Path, entries: Vec<Staged>) -> Result<Vec<
 ///   configuration: one moved to an unprotected name (`git mv x.env x.bak`)
 ///   would be committed where nothing ever decrypts it.
 pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, String> {
+    check_staged(root, key, false)
+}
+
+/// `check_index`; with `incremental` (the pre-commit hook), protected
+/// entries unchanged since `HEAD` get the keyless checks only. They are
+/// already in history, so authenticating them again on every commit would
+/// prevent nothing; `verify-index`, `hydrate`, `lock`, merge commits and the
+/// audit still authenticate everything.
+fn check_staged(root: &Path, key: Option<&Key>, incremental: bool) -> Result<Verified, String> {
     let config = load_config(root)?;
     let listing = git(root, &["ls-files", "--stage", "-z"])?;
     let entries = parse_listing(&listing)?;
@@ -127,6 +136,7 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
             return Err(format!("staged {name} is encrypted under another config (cherry-picked or rebased \
                 across a rekey?); run `transcrypt-v3 reencrypt` with that config's passphrase"));
         }
+        let key = key.filter(|_| !incremental || head_oid.get(staged.path.as_slice()) != Some(&staged.oid.as_str()));
         match key {
             Some(key) => { key.open(&staged.path, &record).map_err(|e| format!("staged {name}: {e}; if it \
                 was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
@@ -212,7 +222,7 @@ pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
     if let Some(key) = &key {
         seal_staged(root, key, &[])?;
     }
-    check_index(root, key.as_ref())?;
+    check_staged(root, key.as_ref(), true)?;
     if key.is_none() {
         eprintln!("transcrypt-v3: locked; checked staged record envelopes only");
     }
