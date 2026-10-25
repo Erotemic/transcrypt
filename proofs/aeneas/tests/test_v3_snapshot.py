@@ -25,6 +25,7 @@ class TrackedV3Tests(unittest.TestCase):
         paths = list(SOURCE) + [
             'proofs/lean/Transcrypt/V3Wire.lean',
             'proofs/lean/Transcrypt/V3WireCodec.lean',
+            'proofs/lean/Transcrypt/V3Policy.lean',
         ]
         for name in paths:
             dest = self.root / name
@@ -46,11 +47,11 @@ class TrackedV3Tests(unittest.TestCase):
     def test_real_uploaded_source_and_snapshot_bound_together(self) -> None:
         verify(self.root)
         stage_spec(self.root)
-        for name in ('V3Wire.lean', 'V3WireCodec.lean'):
+        for name in ('V3Wire.lean', 'V3WireCodec.lean', 'V3Policy.lean'):
             self.assertEqual((self.root / SNAP / 'Transcrypt' / name).read_bytes(),
                              (self.root / 'proofs/lean/Transcrypt' / name).read_bytes())
         self.assertEqual((self.root / SNAP / 'Transcrypt.lean').read_text(),
-                         'import Transcrypt.V3WireCodec\n')
+                         'import Transcrypt.V3WireCodec\nimport Transcrypt.V3Policy\n')
 
     def test_source_change_requires_real_regeneration(self) -> None:
         path = self.root / SOURCE[0]

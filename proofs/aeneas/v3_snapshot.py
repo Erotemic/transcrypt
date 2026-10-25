@@ -42,12 +42,16 @@ PINS = {
     'lean': 'leanprover/lean4:v4.31.0',
     'hax_lean_lib': 'v0.3.30',
 }
-# Exact production entrypoints; regenerated source must contain all four.
+# Exact production entrypoints; regenerated source must contain all of them.
 ENTRYPOINTS = (
     'decode_config_exact', 'encode_config',
     'decode_file_header_exact', 'encode_file_header',
+    'parse_config', 'parse_file_header',
+    'is_canonical_protected_path', 'initialize_config', 'authenticate_config',
+    'seal_record', 'open_record', 'hydrate_action', 'lock_action',
+    'authorize_agent_request', 'check_attr_response_ok',
 )
-BAD = re.compile(r'\b(?:sorry|admit|axiom)\b')
+BAD = re.compile(r'\b(?:sorry|admit|axiom|native_decide)\b')
 
 
 class SnapshotError(ValueError):
@@ -79,7 +83,7 @@ def check_generated_shape(root: Path) -> None:
         if not re.search(r'(?m)^def ' + name + r'\s', funcs):
             raise SnapshotError(f'Missing extracted production entrypoint: {name}')
     types = safe_file(root, 'V3Wire/Extraction/Types.lean').decode('utf-8')
-    for name in ('Config', 'FormatError'):
+    for name in ('Config', 'FormatError', 'Refusal', 'V3Primitives'):
         if not re.search(r'(?m)^(?:structure|inductive) ' + name + r'\s', types):
             raise SnapshotError(f'Missing extracted production type: {name}')
 
@@ -131,8 +135,9 @@ def verify(root: Path) -> None:
         if needle not in cfg:
             raise SnapshotError(f'Unpinned or missing Lake package: {needle}')
     check_generated_shape(snap)
-    no_lean_holes(snap, HAX_OWNED + ASSUMPTIONS + (
-        'V3Wire.lean', 'V3Wire/Verification/Refinement.lean'))
+    proofs = tuple(sorted(p.relative_to(snap).as_posix()
+                          for p in (snap / 'V3Wire/Verification').glob('*.lean')))
+    no_lean_holes(snap, HAX_OWNED + ASSUMPTIONS + ('V3Wire.lean',) + proofs)
 
 
 def check_regenerated_toolchain(root: Path, generated: Path) -> None:
@@ -220,6 +225,7 @@ def stage_spec(root: Path) -> None:
     sources = (
         ('proofs/lean/Transcrypt/V3Wire.lean', 'Transcrypt/V3Wire.lean'),
         ('proofs/lean/Transcrypt/V3WireCodec.lean', 'Transcrypt/V3WireCodec.lean'),
+        ('proofs/lean/Transcrypt/V3Policy.lean', 'Transcrypt/V3Policy.lean'),
     )
     for name, dst in sources:
         data = safe_file(root, name)
@@ -228,12 +234,12 @@ def stage_spec(root: Path) -> None:
         if destination.is_symlink():
             raise SnapshotError(f'Refusing symlink for staged spec: {destination}')
         destination.write_bytes(data)
-    (target / 'Transcrypt.lean').write_text('import Transcrypt.V3WireCodec\n')
+    (target / 'Transcrypt.lean').write_text('import Transcrypt.V3WireCodec\nimport Transcrypt.V3Policy\n')
     # This is a copy of the exact independent spec, never a second authority.
     for name, dst in sources:
         if safe_file(root, name) != safe_file(target, dst):
             raise SnapshotError(f'Staged Lean spec diverged from authoritative source: {name}')
-    no_lean_holes(target, ('Transcrypt/V3Wire.lean', 'Transcrypt/V3WireCodec.lean'))
+    no_lean_holes(target, tuple(dst for _, dst in sources))
 
 
 def main() -> int:
