@@ -4,10 +4,12 @@
 2026-10-25.** Every guarantee about the Rust v3 implementation is
 conditional on the assumptions below. Identifiers are stable: A1–A10 keep
 their meaning, and A11–A14 were added when this campaign surfaced them.
-A16–A18 below track **new product obligations, not implemented protections**.
-Older security-hardening priorities may be superseded by the current
-[product charter](V3-PRODUCT-CHARTER.md); the source-derived proof status and
-existing assumption meanings are not superseded.
+A16–A18 were opened by the [product charter](V3-PRODUCT-CHARTER.md) and
+the independent review, and are now implemented and tested; A19 was added
+with attribute-based selection. Older security-hardening priorities are
+superseded by the charter where they conflict (for example, private worktree
+permissions are now an optional mode); the source-derived proof status and
+existing assumption meanings are not.
 
 Assumptions are listed from **least trusted** (our own newest code) to
 **most trusted** (standard cryptographic hardness).
@@ -30,7 +32,7 @@ one.
 | A3 | Charon/Aeneas/hax translation and Lean are sound | ASSUMED (pinned, reproduced) |
 | A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model) + REVIEWED + TESTED |
 | A5 | `Keyed` realizes the primitive contract | TESTED (differential vs OpenSSL, exhaustive tampering) |
-| A6 | Credential agent relays core results faithfully | TESTED + REVIEWED; same-UID ACCEPTED RISK |
+| A6 | Private-mode credential agent relays core results faithfully | TESTED + REVIEWED; same-UID ACCEPTED RISK (optional mode) |
 | A7 | Git semantics | TESTED on Git 2.43; ASSUMED otherwise |
 | A8 | OS / filesystem behavior | Narrowed + TESTED (SIGKILL fault injection); same-UID races ACCEPTED RISK |
 | A9 | RustCrypto implementations are correct | TESTED (differential); no external audit |
@@ -39,10 +41,11 @@ one.
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
 | A13 | History is audited before it reaches others (deployment) | REVIEWED; depends on deployment |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
-| A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); **not a required default v3 privacy guarantee** |
-| A16 | Arbitrary Git-selected protected paths correspond to actual enforced/index policy | **OPEN / PLANNED** (current Rust still matches `*.secret`) |
-| A17 | Persistent local-derived credential retrieval is correct, local-only and mode-independent | **OPEN / PLANNED** (current Rust requires an agent) |
-| A18 | Path-bound renames preserve ability to decrypt at the new path | **OPEN** (independent real-Git reproduction shows `git mv` does not re-clean) |
+| A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
+| A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED; selection by Git ASSUMED (A19); TESTED end to end |
+| A17 | The stored key is local-only, used only for the config it authenticates, and mode-independent | TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
+| A18 | Path-bound renames are re-encrypted for the new path, never laundered | TESTED (real Git) + REVIEWED |
+| A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK |
 
 ## Detailed register
 
@@ -148,11 +151,12 @@ one.
   OpenSSL.
 - **Status:** TESTED.
 
-### A6 — Credential agent
+### A6 — Private-mode credential agent
 
-- **Claim:** the agent holds the key only in memory, answers only framed
-  requests for the authenticated config, and returns the core's results
-  unchanged.
+- **Claim:** in the optional private mode (`unlock --private`), the agent
+  holds the key only in memory, answers only framed requests for the
+  authenticated config, and returns the core's results unchanged. The
+  default mode has no agent (A17).
 - **Trust boundary:** our `session.rs`; Unix sockets; process isolation.
 - **Consequence:** key or plaintext exposure to another process; forged
   results.
@@ -165,7 +169,10 @@ one.
     `getpeereid`).
   - 120 s read and write timeouts.
   - Non-dumpable, no core dumps, key page `mlock`ed.
-  - TESTED by hostile-client, stale-socket and dumpability tests.
+  - TESTED by hostile-client, fuzzed-frame, stale-socket and dumpability
+    tests (all run in private mode).
+  - Both modes produce byte-identical records
+    (`stored_and_private_modes_encrypt_identically`).
 - **Residual:** any same-UID process can use or impersonate the agent while
   unlocked (ACCEPTED RISK; it needs a different privilege boundary).
   Plaintext buffers are not `mlock`ed. The agent never times out.
@@ -333,120 +340,178 @@ one.
   that would need the 6-byte magic plus 16 bytes of the config's SHA-256.
 - **Status:** ACCEPTED RISK (forgery detection deferred to unlocked checks).
 
-### A15 — Git applies its filters' umask to new worktree files (new)
+### A15 — Git applies its filters' umask to new worktree files (private mode)
 
 - **Claim:** the umask a smudge filter inherits is the umask Git applies
   when it creates the worktree file (`0666 & ~umask`, or `0777` for
   executables). So a filter that sees a private umask knows Git will write a
-  private file.
+  private file. Only the private mode relies on this; the default mode lets
+  plaintext follow the user's umask, as any file does.
 - **Trust boundary:** Git's checkout code (`entry.c`) and POSIX `open`.
-- **Consequence if false:** plaintext written by Git could be readable by
-  other local users (H-16 would reopen).
+- **Consequence if false:** in private mode, plaintext written by Git could
+  be readable by other local users (H-16 would reopen there).
 - **Evidence:** TESTED against real Git:
-  - `git_never_writes_plaintext_readable_by_others` checks every protected
-    file after checkout, merge, rebase, stash, stash pop and restore, under
-    `umask 022` and `077`;
+  - `git_never_writes_plaintext_readable_by_others` (private mode) checks
+    every protected file after checkout, merge, rebase, stash, stash pop and
+    restore, under `umask 022` and `077`;
   - the assumption is consistent with Git's documented checkout behavior.
 - **Residual:**
   - a Git that writes worktree files with a mode independent of the umask
     (no known version);
   - plaintext a user creates themselves (A8).
-- **Next reduction:** none needed unless a Git version behaves differently;
-  the test runs on every CI platform.
-- **Status:** TESTED.
+- **Next reduction:** none needed unless a Git version behaves differently.
+- **Status:** TESTED; optional-mode guarantee.
 
-### A16 — Generalized Git attribute selection (planned)
+### A16 — Selection by Git attributes
 
-- **Claim sought:** for any valid Git pathname selected by the relevant
-  staged/committed `.gitattributes` rules, every normal clean/decrypt/index
-  decision operates on that exact path, not just on `*.secret`.
-- **Trust boundary:** Git's attribute selection, staged tree/index and our
-  Rust attribute adapter; future verified canonical-path selection core.
-- **Consequence if false:** expected protected plaintext enters the public
-  index/history, or a protected record is checked under the wrong path.
-- **Evidence:** current tests/proofs apply only to the restricted suffix
-  policy; this generalized obligation is **not yet proved or implemented**.
-- **Residual:** Git does not promise correct filtering in an unconfigured
-  clone or after intentional user bypass; keyless checks cannot prove a tag.
-- **Next reduction:** source-generalize the core; prove correspondence to an
-  independent Git-path selection spec; test arbitrary patterns, historical
-  commits, nested attributes, raw byte names and adversarial staged state.
-- **Status:** OPEN / PLANNED.
+- **Claim:** a path is protected exactly when Git's effective `filter`
+  attribute for it is `transcrypt-v3` (reserved metadata excepted), and
+  every v3 decision (clean, smudge, verify, hydrate, lock, status, audit)
+  uses that answer for the exact path bytes. v3 never matches patterns
+  itself.
+- **Trust boundary:** Git's attribute evaluation (A19); our request
+  construction (`protected_flags`: raw paths, `-z --stdin`); the verified
+  parser `parse_attr_record`.
+- **Consequence if false:** a protected file stored or checked as
+  unprotected (plaintext published), or a public file treated as protected.
+- **Evidence:**
+  - `parse_attr_record` PROVED to accept exactly
+    `path NUL filter NUL value NUL` for the requested path, and to report
+    `protected` iff the value is `transcrypt-v3`; the adapter requires every
+    record in order and the response consumed exactly.
+  - The path policy (`is_canonical_protected_path`) is suffix-free and PROVED:
+    any canonical path except `.transcrypt/…`, `.gitattributes` and
+    `.gitmodules`.
+  - TESTED: `.env`, a file in a directory, `private/**`, `*.key`, a quoted
+    name with spaces, a name with a quote, newline and a non-UTF-8 byte, an
+    executable, a nested `.gitattributes`, an exclusion, clone, lock and
+    unlock (`arbitrary_patterns_protect_exactly_the_selected_files`);
+    policy changes, reserved patterns and `unprotect`
+    (`protect_and_unprotect_change_the_policy_explicitly`).
+  - The audit evaluates each commit with that commit's own attribute files
+    (a temporary index), so history is judged by the policy it was
+    committed under.
+- **Residual:** the staged policy (`check-attr --cached`) decides
+  verification, while `git add` applies the worktree policy; an unstaged
+  `.gitattributes` edit can differ until it is staged (`protect` stages it).
+  Local override files (A19).
+- **Next reduction:** the adapter's record loop is now a proved model
+  (`attrFlagsModel_sound`/`_complete`); what remains is that
+  `protected_flags` follows it (A4).
+- **Status:** parsing and path policy PROVED; Git's evaluation ASSUMED (A19);
+  TESTED end to end.
 
-### A17 — Persistent local unlock (planned)
+### A17 — Stored key (the default unlock)
 
-- **Claim sought:** the derived, repo-scoped key is saved only to local Git
-  state (never public committed state), is read exactly for the selected repo
-  and config, and produces the same authenticated v3 ciphertext as session
-  mode without requiring a resident agent.
-- **Trust boundary:** local config/file access, credential parsing, Git
-  worktrees and crypto adapter.
-- **Consequence if false:** credential leaks to public history, wrong repo
-  unlock, unexpected failed operations, or mismatched ciphertext.
-- **Evidence:** existing memory-only agent tests, **not** tests of a
-  persistent implementation.
-- **Residual:** other processes able to read the unlocked user's local Git
-  state can use the derived key. This is accepted for default local mode.
-- **Next reduction:** compare `.git/config` against local sidecar on simplicity
-  and safety; implement persistent default and optional session-only mode;
-  test clone/reboot/worktree/rekey/credential separation end to end.
-- **Status:** OPEN / PLANNED.
+- **Claim:** `unlock` stores the Argon2id-derived key, never the
+  passphrase, only in `$GIT_COMMON_DIR/transcrypt-v3/key` (a regular 64-byte
+  file, mode 0600, in a 0700 directory owned by the user, outside `git
+  config`). Every use authenticates the current `.transcrypt/config` with
+  it first; a key that does not authenticate (a pulled rekey) is treated as
+  locked. The ciphertext does not depend on the mode.
+- **Trust boundary:** our `credential.rs`; the local file system; Git's
+  common directory for worktrees.
+- **Consequence if false:** a key in public or shared state; a key used for
+  another config (records under the wrong config, refused later by
+  verification); different ciphertext per mode.
+- **Evidence:**
+  - Written via an exclusive 0600 temporary, `fsync` and `renameat` in the
+    held, checked directory; read with `O_NOFOLLOW`, exact size required.
+  - `assert_unlocked` (git_lifecycle): exactly one private 64-byte key file,
+    no agent, no passphrase in `.git/config` or the key file.
+  - Stale key after a pulled rekey decrypts and encrypts nothing until
+    `unlock` (`pulled_rekey_makes_the_stored_key_stale_until_unlock`).
+  - Mode independence (`stored_and_private_modes_encrypt_identically`).
+  - `lock` deletes it; `uninstall` deletes it.
+- **Residual (ACCEPTED, by the charter):** anything that can read the
+  user's files (other same-UID programs, backups, copies of `.git`) can use
+  the key, as it can read the unlocked plaintext. Deleting the file is not a
+  secure erasure.
+- **Next reduction:** none planned for the default; private mode is the
+  stricter alternative.
+- **Status:** TESTED + REVIEWED.
 
 ### A18 — Authenticated path rebinding on rename
 
-- **Claim sought:** a supported normal Git rename preserves plaintext
-  recoverability while re-sealing under the destination path, or fails
-  before accepting a broken staged record.
-- **Trust boundary:** Git `mv` staging behavior, path-bound AES-SIV
-  associated data, filter/adapter handling and verified index.
-- **Consequence if false:** valid source ciphertext is committed at a new
-  path and cannot be decrypted there; keyless framing will miss it.
-- **Evidence:** the [independent 2026-10-25 assessment]
-  (reviews/2026-10-25-independent-source-assessment.md) reproduced that
-  Git `mv` reuses the old blob; the Rust end-to-end exploit was not run.
-- **Residual:** read/write and index changes between rebind checks.
-- **Next reduction:** real Rust regression, reliable rebind/rename operation
-  consistent with everyday Git, and corresponding verified policy where
-  worthwhile. Never silently discard history or pretend envelope checks
-  verify the new path.
-- **Status:** OPEN pending current-source verification / implementation.
+- **Claim:** a `git mv` of a protected file, made locally, is re-encrypted
+  for its new path before it is committed; content that arrived in a commit
+  (pull, merge, rebase) is never re-encrypted for another path, so a hostile
+  move is refused, not laundered; while locked, a moved record is refused.
+- **Trust boundary:** Git `mv` staging behavior; the pre-commit hook
+  (`seal_staged`), which re-encrypts only through `open_record` at the old
+  path and `seal_record` at the new one; keyless checks in `check_index` and
+  `audit`.
+- **Consequence if false:** an undecryptable record at the new path (data
+  needs recovery from the old path), or a hostile move accepted as genuine.
+- **Evidence:**
+  - Rebinding requires: no merge, cherry-pick, revert or rebase in progress;
+    the staged blob differs from `HEAD`'s at that path; the source path is
+    in `HEAD`, no longer in the index, and the record opens there.
+  - TESTED: files, directories, unprotected→protected
+    (`renames_are_re_encrypted_for_their_new_path`); locked move refused at
+    commit and unbound move refused by keyless audit
+    (`locked_renames_and_unbound_moves_are_refused`); a committed hostile
+    move refused by the hook (`git_lifecycle`).
+  - Smudge of a moved record fails with instructions (`git add` re-cleans it).
+- **Residual:**
+  - `git commit -- <paths>` after `git mv` uses a temporary index, so the
+    main index keeps the old record until the next `git add`.
+  - A copy (not a move) of a record is detected keylessly only in the
+    index, not in history.
+  - A user who deliberately stages a hostile commit's tree over their own
+    `HEAD` (`git restore --staged --source=…`) presents its moves as local
+    ones. The hook then re-encrypts them, naming the source path. This is
+    equivalent to running the `git mv` themselves.
+  - Git's content-based rename detection cannot pair path-bound records, so
+    a rename on one branch and an edit on another merge as modify/delete
+    (recoverable in plaintext; tested).
+- **Next reduction:** a Lean model of `seal_staged`'s decision.
+- **Status:** TESTED + REVIEWED.
+
+### A19 — Git's attribute evaluation (new)
+
+- **Claim:** Git computes the effective `filter` attribute the same way for
+  the filters it runs, for `git check-attr --cached` against the index, and
+  for `check-attr --cached` against a temporary index holding a commit's
+  `.gitattributes` blobs: patterns, nesting, precedence, macros,
+  `.git/info/attributes` and `core.attributesFile`.
+- **Trust boundary:** Git (`attr.c`).
+- **Consequence if false:** selection disagreements between staging,
+  verification and audit (A16).
+- **Evidence:** TESTED on Git 2.43 (CI 2.34) through every selection test;
+  the temporary-index technique works in bare repositories (server hook
+  tests).
+- **Residual (ACCEPTED):** local override files apply only locally: a
+  `filter` rule in `.git/info/attributes` or the global attributes file can
+  unprotect a file in this checkout, so local checks pass while a server
+  audit (without those files) refuses the plaintext. `doctor` fails on such
+  files and the pre-commit hook warns.
+- **Status:** TESTED; overrides ACCEPTED RISK (an informed user's choice).
 
 ## Ranked unresolved risks and *product* opportunities
 
-Rank by violation of [the declared product promise](V3-PRODUCT-CHARTER.md),
-realistic impact and effort, not by local-at-rest hardening alone. An
-independent source report is evidence, not a tested fix in current HEAD.
+Ranked by violation of [the declared product promise](V3-PRODUCT-CHARTER.md),
+realistic impact and effort.
 
-1. **F-02: possible out-of-repository write on `rekey`** (A4/A8): highest
-   priority candidate; reproduce using the real Rust CLI against a malicious
-   tracked symlink, and use no-follow atomic replacement. See
-   [review triage](V3-REVIEW-TRIAGE.md).
-2. **F-03: `git mv` creates path-bound but now undecryptable records**
-   (A18/A4): test real Rust end to end, make renames transparent and recoverable.
-3. **Missing arbitrary protected paths** (A16): the central feature gap. A
-   suffix-only filter is an unacceptable limit on the target user workflow.
-4. **Persistent local unlock and transparent Git** (A17): eliminate the
-   default agent dependency and mandatory private-umask ceremony, retaining
-   those features as optional strict mode.
-5. **Adapter correctness** (A4/A7/A8): keep indexed object/policy
-   correspondence accurate as new selection, rename and credential paths
-   are introduced; formalize the consequential pure decisions and test the
-   effectful remainder.
-6. **External crypto/adapter review** (A5/A9/R-01): required for credible
+1. **External crypto/adapter review** (A5/A9/R-01): required for credible
    release claims. Differential vectors reduce, but do not discharge, the
    trusted-library boundary.
-7. **Bash v2 transition**: independent F-01 represents a genuine legacy
-   plaintext-release risk. Provide mitigation and recoverable migration;
-   do not import the legacy cipher into the v3 verified core.
-8. **Optional organization policy** (A13/A14): CI/server hooks and keyed
-   authenticity policy are deployment options, not fundamental requirements
-   for an individual's transparent Git workflow. Keyless audit still only
-   detects obvious plaintext/structure.
-9. **Optional workstation privacy** (A6/A8/A15): other local users or the
-   same UID may read the unlocked user's plaintext/credential as documented.
-   Strict local mode may promise `0600`; default mode makes no such promise.
-10. **Inherent wire limits** (A10): offline guessing for weak passwords,
+2. **Adapter correctness** (A4/A7/A8/A16): the new selection, rebind and
+   credential paths are tested and reviewed but not proved; the next proof
+   targets are the attribute-record loop and the rebind decision.
+3. **Deployment of history audits** (A13/A14): a clone that never unlocked
+   commits plaintext; only a server or CI audit stops it reaching others.
+4. **Local overrides and unconfigured clones** (A19): informed-user choices;
+   reported by `doctor`, not prevented.
+5. **Optional workstation privacy** (A6/A8/A15/A17): the stored key and the
+   plaintext are readable by anything running as the user; private mode
+   narrows this to the agent's lifetime.
+6. **Inherent wire limits** (A10): offline guessing for weak passwords,
     deterministic equality, object metadata and historical rollback.
+
+Closed by this campaign: F-02 (rekey symlink write), F-03 (`git mv`), F-04
+(ignored chmod), F-01 (Bash v2 prefix bypass), arbitrary selection (A16),
+persistent unlock (A17) and the v2 migration path.
 
 ## Discharged by proof
 
@@ -458,12 +523,13 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | --- | --- |
 | Encoders write the spec layout | `encode_config_bytes`, `encode_config_refines`, `encode_file_header_bytes`, `encode_file_header_refines` |
 | Decoders and public parsers implement the spec grammar | `decode_*_exact_spec`, `parse_config_spec`, `parse_file_header_spec`, roundtrips |
-| Path canonicalization policy | `is_canonical_protected_path_spec` |
+| Path policy: canonical, any name except reserved metadata | `is_canonical_protected_path_spec`, `is_reserved_path_spec` |
 | Config authentication | `authenticate_config_spec`, `initialize_config_spec` |
 | Clean never emits anything but a correct record, never double-encrypts | `seal_record_spec` |
 | Smudge/verify release only authentic plaintext for this config and path | `open_record_spec`, `open_record_complete`, `opensTo_unique` |
 | Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
-| Effective filter attribute check | `check_attr_response_ok_spec`, `check_attr_paths` |
+| Parsing Git's attribute answers (what is protected) | `parse_attr_record_spec` (both directions), `attrResponse_recordAt`, `attrFlagsModel_sound`, `attrFlagsModel_complete` |
+| Smudge keeps only genuine envelopes; opens only its own config | `smudge_action_spec`, `smudgeSpec_keep_envelope`, `smudgeModel_spec` |
 | Index record parsing | `parse_index_entry_spec` |
 | Git filter-protocol packet lengths | `decode_pkt_len_spec` |
 | Object ids passed to Git are plain hex names, taken from the right bytes | `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` |
@@ -478,9 +544,12 @@ verified decision that gates it:
 
 | Adapter action | Gate (verified core function) | Inputs passed | Acts only on |
 | --- | --- | --- | --- |
-| `clean` filter output (unlocked) | agent `Encrypt` → `clean_file`: `open_record` (authentic record ⇒ returned unchanged) else `seal_record` | config bytes from `.transcrypt/config`; Git `%f` bytes; stdin | `Ok` (else Git aborts) |
-| `smudge` filter output (unlocked) | agent `Decrypt` → `open_record`; then `umask_is_private` chooses plaintext or the unchanged (now authenticated) record | same config; `%f`; blob from stdin | `Ok` |
-| `clean`/`smudge` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
+| `clean` filter output (unlocked) | `Key::clean` → `clean_file` (stored key) or agent `Encrypt` (private): `open_record` (authentic record ⇒ returned unchanged) else `seal_record` | config bytes from `.transcrypt/config`; Git `%f` bytes; stdin | `Ok` (else Git aborts) |
+| `smudge` filter output | `smudge_action` (no envelope ⇒ refuse; other config or locked ⇒ keep the record; own config ⇒ open), then `open_record`; private mode: `umask_is_private` chooses plaintext or the authenticated record | same config; `%f`; blob from stdin | `Ok` |
+| `clean` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
+| Key loading | `authenticate_config` with the stored key (else locked), or agent `Ping` | stored 64-byte key; current config | `Ok` |
+| Protected-file selection | `parse_attr_record` per path, in order, response consumed exactly; `is_reserved_path` | raw paths sent to `check-attr -z --stdin filter` (`--cached`, worktree, or a commit's temporary index) | `protected = true` |
+| Pre-commit re-encryption (`seal_staged`) | `open_record` (staged record at its path: nothing to do; else at the `HEAD` source path of a local move), `parse_file_header` (plaintext), then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` listing; sequencing state | only local, non-sequencing changes |
 | Agent framing | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, lengths | proved roundtrip |
 | Git filter-process framing | `decode_pkt_len` for every packet; then the same conversion as the per-file filters | 4-byte pkt-line headers from Git; `command=`/`pathname=` values | `Ok` (else the process ends and Git fails) |
 | Agent dispatch | `authorize_agent_request` before the body is read; peer UID check | opcode, supplied config, startup config, path, length | `Ok(op)` from a same-UID peer |
@@ -488,18 +557,18 @@ verified decision that gates it:
 | `unlock` / `init` | `authenticate_config` / `initialize_config` | config bytes / fresh salt | `Ok`, before any persistent effect |
 | Index and tree listings | `parse_index_entry`, then `is_object_id` on `entry[7..path_start-3]` | each NUL-delimited `ls-files --stage -z` record, or `ls-tree -r -z` record rewritten to that shape (path copied verbatim) | `Ok` and `true` (else refuse) |
 | Object reads | `is_object_id` | oid from the parsed snapshot | `true`; one `cat-file --batch` per process; reply header must re-serialize exactly as `<oid> blob <size>`, size ≤ 16 MiB, trailing LF checked |
-| `verify-index` | `check_attr_response_ok`, then agent `Decrypt` per entry (or `record_envelope_ok` while locked) | exact `check-attr` request; snapshot paths; blobs by oid | `true` / `Ok` for every entry |
+| `verify-index` | selection (above), then `open_record` per entry (or, while locked, `record_envelope_ok` and no other index/`HEAD` path with the same blob) | snapshot paths; blobs by oid | `true` / `Ok` for every entry |
 | `hydrate` publish | agent `Decrypt`, then `hydrate_action`, all entries before any write; stamp equality | blob by snapshot oid; worktree bytes and stamp via held dirfd | `Ok(Publish)` for all; `Keep` untouched |
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action`; stamp equality | worktree bytes and stamp, blob by oid, reseal output | `Ok(Flush)`; `Keep` untouched |
 | Re-index after hydrate/lock | none (bookkeeping); listing compared with the verified snapshot afterwards | verified protected paths, raw, via `update-index -z --stdin` | listing unchanged |
-| `audit` / `pre-push` | `parse_index_entry`, `is_object_id`, `parse_config`, `record_envelope_ok`, agent `Decrypt` when it serves that config | `ls-tree` per commit; blobs by oid | every protected entry `true`/`Ok` |
-| `rekey` staging | agent `Decrypt` of each staged record, equality with the worktree, then `seal_record` under the new config (`encrypt_file`); `initialize_config` for the new config | staged blobs by oid, worktree bytes, fresh salt | all `Ok`, before any index or agent change |
+| `audit` / `pre-push` | `parse_index_entry`, `is_object_id`, `parse_config`, selection with the commit's attribute files, `record_envelope_ok`, no blob moved from a deleted path, `open_record` when the key authenticates that config | `ls-tree`/`diff-tree` per commit; blobs by oid | every protected entry `true`/`Ok` |
+| `rekey` staging | `open_record` of each staged record, equality with the worktree, then `seal_record` under the new config (`encrypt_file`); `initialize_config` for the new config; config written by `write_repository_file` (dirfd, no symlinks) | staged blobs by oid, worktree bytes, fresh salt | all `Ok`, before any index or credential change |
+| `protect` / `unprotect` / `init` / `migrate` | selection before and after the `.gitattributes` edit (written by `write_repository_file`); `seal_staged` with the newly selected paths; `open_record` before staging plaintext on `unprotect`; reserved metadata refused | attribute files; staged blobs | all `Ok`, or the edit is reverted |
 | `uninstall` | `lock` (above), then `record_envelope_ok` for every protected worktree file | worktree bytes | all `true` before removing filters |
 | `doctor` | none (read-only checks of Git config, attributes, hooks, `check_index`) | — | reports only |
 | Merge driver | agent `Decrypt` (`open_record`) of ours and theirs at `%P` (base: empty if it does not open), `git merge-file`, agent `Encrypt` (`clean_file`) of the result | Git's `%O %A %B` files, `%P` path | both `Ok` (else `ours` is left unchanged and Git records a conflict) |
 | Diff driver | `record_envelope_ok`, then agent `Decrypt` (`open_record`) of each record side at its own path | Git's external diff arguments | `Ok` (else Git stops the diff) |
 | `hydrate` during a merge | unmerged paths: `record_envelope_ok`, agent `Decrypt`, `hydrate_action`; effective filter checked for every protected path | worktree bytes | `Ok(Publish)` |
-| Protected file selection | `is_protected_path` | index/tree path bytes | — |
 
 The Lean lifecycle models (`Lifecycle.lean`) reproduce the hydrate, lock and
 verify loops in this order. Review rule: a new effect in the adapter must

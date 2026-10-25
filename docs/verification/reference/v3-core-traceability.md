@@ -9,11 +9,12 @@ must be changed to comply with that contract, not vice versa.
 | Config bytes 0..54, magic, salt, verifier | `transcrypt-v3-core::{encode_config_prefix,encode_config,decode_config_exact,parse_config}` | core unit tests, `vectors.tsv` | `encode_config_refines`, `decode_config_exact_spec`, `parse_config_spec`, `parse_config_encode_config` |
 | File header bytes 0..21, minimum 38 | `transcrypt-v3-core::{encode_file_header,decode_file_header_exact,parse_file_header}` | core unit tests, Rust negative tests | `encode_file_header_refines`, `decode_file_header_exact_spec`, `parse_file_header_spec` |
 | Argon2id v19 fixed params/64B key | `transcrypt-v3::derive_key` | Python argon2-cffi vector | External assumption (A9/A10) |
-| Canonical protected path | `transcrypt-v3-core::{is_protected_path,is_canonical_protected_path}` | Rust path tests, raw `%f` Git test | `is_canonical_protected_path_spec` |
+| Canonical path policy (suffix-free; reserved metadata refused) | `transcrypt-v3-core::{is_reserved_path,is_canonical_protected_path}` | Rust path tests, raw `%f` Git test, arbitrary-pattern workflow test | `is_canonical_protected_path_spec`, `is_reserved_path_spec` |
 | Deterministic, path-bound AES-SIV sealing | `transcrypt-v3-core::seal_record` via `Keyed` | OpenSSL-backed vectors, `keyed_satisfies_the_realizes_contract` | `seal_record_spec` (relative to `Realizes`) |
 | Metadata binding and fail closed | `transcrypt-v3-core::{authenticate_config,open_record}` | tampering, wrong password, cross-path and foreign-record tests | `authenticate_config_spec`, `open_record_spec`, `open_record_complete` |
 | Credential authorization | `transcrypt-v3-core::authorize_agent_request`, `session::{start,serve,transaction}` | hostile-client and stale-socket tests | `authorize_agent_request_spec` |
-| Staged tree safety | `transcrypt-v3-core::check_attr_response_ok`, `main::verify_index`, Git hook | attribute-precedence, forged object, blob-swap tests | `check_attr_response_ok_spec`, `check_attr_paths`, `verifyPlan_spec` |
+| Protected-file selection and staged tree safety | `transcrypt-v3-core::parse_attr_record`, `git::protected_flags`, `lifecycle::check_index`, pre-commit hook | nested attributes, forged object, blob-swap, hostile-move tests | `parse_attr_record_spec`, `attrFlagsModel_sound`, `attrFlagsModel_complete`, `verifyPlan_spec` |
+| Smudge decision | `transcrypt-v3-core::smudge_action`, `main::Filters::convert` | stale-key, old-history, tamper tests | `smudge_action_spec`, `smudgeModel_spec` |
 | Clone hydration | `transcrypt-v3-core::hydrate_action`, `main::hydrate` | clone, staged-only index, preflight, interruption, crash-leftover tests | `hydrate_action_spec`, `hydratePlan_spec` |
 | Lock | `transcrypt-v3-core::lock_action`, `main::lock`, `session::stop` | unstaged-edit refusal, interrupted-lock resume | `lock_action_spec`, `lockEntry_spec` |
 
@@ -118,8 +119,8 @@ snapshot-integrity test alone is still not verification.
 
 ## Experimental v3 pathname binding (no wire-core changes)
 
-The actual v3 adapter now authenticates the canonical raw Git-relative
-`*.secret` filename as AES-SIV AD component 3. Git's `%f` provides the
+The actual v3 adapter authenticates the canonical raw Git-relative path of
+every attribute-selected file as AES-SIV AD component 3. Git's `%f` provides the
 argument to clean/smudge; staged index names are the authoritative input for
 verify-index, hydrate and lock. The credential-agent IPC transports the same
 raw bytes. The independent Python vector fixture tests the 3-element AD

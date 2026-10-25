@@ -1,28 +1,41 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
-**Last reconciled:** 2026-10-25 (after the third hardening pass, H-16 to H-27). **Branch:** `work/m2-nul-safe-path-enumeration`.
-Always begin by checking the working tree and latest commits; this file is a
-continuity aid, not a claim about later changes.
+**Last reconciled:** 2026-10-25, after the product-charter campaign
+(attribute selection, stored-key unlock, renames, migration, review F-01
+to F-04). **Branch:** `work/m2-nul-safe-path-enumeration`. Always begin by
+checking the working tree and latest commits; this file is a continuity
+aid, not a claim about later changes.
 
-## Product direction vs current implementation
+## Product direction and current implementation
 
-**Read [V3-PRODUCT-CHARTER](V3-PRODUCT-CHARTER.md) first.** The maintainer's
-primary goal is authenticated ciphertext **in public Git** combined with
-transparent plaintext **in an unlocked local checkout**; local-at-rest and
-same-UID privacy are optional rather than hard prerequisites. Arbitrary Git
-attribute patterns, default persistent local unlock, normal Git rename and a
-one-time legacy transition are now high-priority targets. The previous
-security-hardening stopping criterion is superseded: continually reassess
-security, correctness, usability, simplicity, portability and proofs.
+**Read [V3-PRODUCT-CHARTER](V3-PRODUCT-CHARTER.md) first.** The goal is
+authenticated ciphertext **in public Git** with transparent plaintext **in
+an unlocked local checkout**. Local-at-rest and same-UID privacy are an
+optional mode, not prerequisites.
 
-**Current source `861975a` is not yet that UX:** the existing v3 uses
-`*.secret`, a required memory-only agent and default private-permission
-hardening. Keep describing those accurately until changed. The format uses
-Argon2id + AES-SIV with exact canonical Git path binding. Maintain the
-independent v3 byte specification and existing source-derived Lean proofs;
-never change cipher semantics silently or import legacy CBC into the proved
-core. Treat the [independent review triage](V3-REVIEW-TRIAGE.md), particularly
-F-02/F-03, as actionable engineering inputs.
+The implementation now follows it:
+- **Selection by `.gitattributes`.** `protect PATTERN` writes
+  `PATTERN transcrypt` (a committed macro for
+  `filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text`).
+  Git's `check-attr` answers are parsed by the verified core. The path
+  policy is suffix-free, except for the reserved `.transcrypt/`,
+  `.gitattributes` and `.gitmodules`.
+- **Stored-key unlock.** `unlock` stores the derived key in
+  `$GIT_COMMON_DIR/transcrypt-v3/key` (0600, not in `git config`). Every
+  use authenticates the current config with it, so a pulled rekey makes it
+  stale. `unlock --private` is the old memory-only agent plus 0600
+  plaintext.
+- **Renames.** The pre-commit hook re-encrypts local `git mv`s (and seals
+  plaintext staged around the filter). It never re-encrypts content that
+  came from a commit (no laundering), and keyless checks refuse moved
+  records.
+- **Migration.** `migrate` converts a Bash v2 checkout.
+- **Safe writes.** Every v3 write to a repository file goes through
+  `write_repository_file` (the F-02 fix).
+
+The wire format is unchanged (profile 1). Maintain the independent v3 byte
+specification and the source-derived Lean proofs. Never change cipher
+semantics silently or import legacy CBC into the proved core.
 
 ## Where things are
 
@@ -39,12 +52,12 @@ F-02/F-03, as actionable engineering inputs.
 | Wire/AAD/Git behavior | `docs/verification/specs/V3-AUTHENTICATED-P0.md` |
 | Verified pure core (codec + every decision) | `rust/crates/transcrypt-v3-core/src/lib.rs` |
 | Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-v3/src/lib.rs` |
-| Git adapter, agent, fd-relative FS | `rust/crates/transcrypt-v3/src/{main,git,worktree,setup,audit,session,fsat}.rs` (module map in `main.rs`) |
+| Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-v3/src/{main,lifecycle,credential,git,worktree,setup,audit,migrate,session,fsat}.rs` (module map in `main.rs`) |
 | Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
-| Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Index,Frame,Protocol,Lifecycle}.lean` |
+| Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle}.lean` |
 | Theorem ledger | `proofs/aeneas/v3/PROOF-STATUS.md` |
-| Tests | `rust/crates/transcrypt-v3/tests/{git_lifecycle,adversarial,v3_vectors,v3_differential}.rs`, `tests/v3/reference/` (`differential.py` regenerates the OpenSSL/argon2 corpus) |
+| Tests | `rust/crates/transcrypt-v3/tests/{workflows,git_lifecycle,adversarial,v3_vectors,v3_differential}.rs`, `tests/v3/reference/` (`differential.py` regenerates the OpenSSL/argon2 corpus); Bash v2: `tests/v2`, `tests/v3` (bats) |
 
 ## Verified state
 
@@ -94,10 +107,10 @@ stable, but reordering loops inside a proved function renames them.
 - Unnamed hypotheses: refer by type with `‹_›` instead of `rename_i` where
   possible.
 
-## Adapter invariants (current baseline; revise intentionally under the charter)
+## Adapter invariants
 
-These came out of the hardening campaign (`V3-SECURITY-REVIEW.md` §5); each
-has a regression test in `tests/adversarial.rs`.
+Each has a regression test in `tests/adversarial.rs`, `tests/workflows.rs`
+or `tests/git_lifecycle.rs`.
 
 - Read Git objects only by object id, from one parsed snapshot, through
   `git_blob` (one shared `cat-file --batch` with exact reply framing,
@@ -105,17 +118,19 @@ has a regression test in `tests/adversarial.rs`.
 - Create Git subprocesses only with `git_command` (literal pathspecs, no
   replace refs). Never `git add -- <path>` with repository-derived paths;
   re-index with `update-index -z --stdin`.
+- Decide what is protected only with `protected_flags` / `protected_entries`
+  (Git's attributes, parsed by `parse_attr_record`); never match patterns
+  in Rust.
 - Replace a worktree file only through `Protected::replace` with the stamp
-  from the read that justified it, while holding `staging_dir` (its
-  `flock`).
-- Release plaintext only through the agent's `open_record`. While locked,
-  filters may only pass through inputs accepted by `record_envelope_ok`.
-- **Current code:** smudge emits plaintext only when `umask_is_private()`;
-  otherwise Git receives the record and hooks hydrate with mode 0600. This
-  is an implementation detail of the **current strict privacy default**, not
-  a requirement to retain it in the proposed ordinary-local-plaintext mode.
-  Any replacement must preserve public-Git encryption correctness and make
-  opt-in strict mode truthful.
+  from the read that justified it, while holding `staging_dir`. Write any
+  other repository file only through `write_repository_file`.
+- Get the key only through `credential::Key` (stored key authenticated
+  against the current config, or the private agent). Release plaintext
+  only through `open_record`. Without a key, clean passes through only
+  inputs accepted by `record_envelope_ok`; smudge follows `smudge_action`.
+- The pre-commit hook re-encrypts only local changes (`seal_staged`: staged
+  blob ≠ `HEAD`'s, no merge/rebase in progress, rename source gone from the
+  index). Never extend it to content from commits.
 - `hydrate` replaces only files that are authentic records for their path,
   and re-indexes only files holding the staged plaintext.
 - Run every subprocess through `run_bounded` (directly or via `git`,
@@ -123,66 +138,58 @@ has a regression test in `tests/adversarial.rs`.
 
 ## Product state (checkpoint)
 
-**Commands.** `init`, `unlock`, `hydrate`, `status`, `doctor`,
-`verify-index`, `audit`, `lock`, `rekey`, `uninstall`.
+**Commands.** `init [PATTERN…]`, `protect`, `unprotect`, `unlock
+[--private]`, `status`, `doctor`, `lock`, `rekey`, `hydrate`,
+`verify-index`, `audit`, `migrate`, `uninstall`.
 
 **Git integration.**
 - Long-running `filter-process`, with per-file `clean`/`smudge` as the
   fallback.
-- Merge and diff drivers.
+- Merge and diff drivers, selected by the committed macro.
 - Hooks:
-  - `pre-commit` (`verify-index`) and `pre-push` (`audit`) are required;
-  - `post-checkout`, `post-merge` and `post-rewrite` (`hydrate --auto`) are
-    optional.
+  - `pre-commit` (seal and verify) and `pre-push` (`audit`) are required;
+  - `pre-merge-commit` runs the read-only `verify-index` on merge commits;
+  - `post-checkout`, `post-merge` and `post-rewrite` (`hydrate --auto`) only
+    act in private mode.
 - Server-side: `contrib/v3/pre-receive` and
-  `contrib/v3/check-remote-enforcement`.
+  `contrib/v3/check-remote-enforcement` (canary with its own nested
+  attributes).
 
-**Supported layouts.** Ordinary checkouts, linked worktrees (one shared
-agent; `lock` flushes all of them) and submodules.
+**Supported layouts.** Ordinary checkouts, linked worktrees (one shared key;
+`lock` flushes all of them), submodules, bare repositories (audit).
 
-**Plaintext permissions.**
-- Git never writes plaintext readable by others (umask-aware smudge).
-- `hydrate` and the clean filter make plaintext private.
-
-**Gates at this checkpoint (all passing).**
-- 105 Rust tests.
+**Gates at this checkpoint.**
+- Rust: 118 tests in `transcrypt-v3`, plus the workspace.
+- Bash: 218 bats tests.
 - Python vectors, the differential corpus and the Git transport tests.
 - Snapshot verify/compare.
-- Tracked Lean build (1750 jobs); 36 headline theorems on standard axioms.
-- Darwin type-check.
+- Tracked Lean build; axiom audit (see PROOF-STATUS).
 
 The branch is unpushed: push needs the owner's credentials.
 
-## Next tasks (product-directed; resume after each checkpoint)
+## Next tasks (resume after each checkpoint)
 
-1. Read the [charter](V3-PRODUCT-CHARTER.md) and the
-   [independent review triage](V3-REVIEW-TRIAGE.md). Reproduce/repair **F-02
-   rekey symlink overwrite** and **F-03 git-mv path binding** with the compiled
-   Rust CLI. These are correctness/security problems, not optional workstation
-   privacy features. Check current HEAD first: the report was against `861975a`.
-2. Make **arbitrary Git `.gitattributes`-selected paths** the true policy.
-   Generalize the production Rust and its Aeneas-derived Lean proof to
-   canonical Git paths without a hardcoded `.secret` suffix; verify staged
-   selection, keyless audit limitations, historical paths, and renames.
-3. Make **local persistent derived credential** the default. `.git/config`
-   is acceptable, or a private local sidecar if it gives clearer/simpler
-   semantics; never commit keys. No agent required in everyday use. Keep
-   session-only memory agent and stricter local permission checks optional.
-4. Make normal Git operations transparent under ordinary umasks. The user is
-   responsible for local plaintext visibility; ensure there is no *public*
-   plaintext publication through normally configured encryption filters.
-5. Build a **recoverable one-time Bash v2 → Rust v3 transition** preserving
-   arbitrary selected paths. Document historical exposure; no runtime legacy
-   cipher decoder or Bash v3 requirement.
-6. Preserve compiled Aeneas/Lean source-derived proofs, update actual
-   adapter-to-core assumptions and rerun regression/differential/fault tests.
-   Obtain outside crypto/adapter review before security-sensitive release.
+1. **External review (R-01)** of the crypto adapter, credential handling,
+   selection and rebind logic; the internal review is in
+   [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md).
+2. **Move the rebind decision into the verified core.** `seal_staged`'s
+   choice (open at path / seal plaintext / reseal a local move / refuse)
+   is a pure function of a few booleans and two `open_record` results.
+   Extract it and prove "never re-encrypts content from a commit".
+3. **Renames across branches** conflict as modify/delete, because Git's
+   content-based rename detection cannot match path-bound ciphertext
+   (tested, documented). A rename-aware merge driver cannot help, since Git
+   never calls it. A future option is a `status`/`hydrate` hint that pairs
+   the deleted and added files by decrypted content.
+4. **Prove `protected_flags` follows `attrFlagsModel`** (A4 narrowing), and
+   model the stored-key load (authenticate before use).
+5. **Optional:** an idle timeout for the private-mode agent.
 
 Remote enforcement is an **optional organizational control** (A13), not a
 hard dependency for using the product. Keyless enforcement detects obvious
-plaintext/structure, not forged authentication (A14). Same-UID adversaries,
-rollback, deterministic equality and unlocked-worktree visibility are stated
-bounds rather than default hardening targets.
+plaintext/structure and unbound moves, not forged authentication (A14).
+Same-UID adversaries, rollback, deterministic equality and unlocked-worktree
+visibility are stated bounds rather than default hardening targets.
 
 After each meaningful task, independently select the next improvement with
 best real-world value. A green test suite or exhausted previous agent backlog

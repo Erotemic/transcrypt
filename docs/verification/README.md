@@ -1,6 +1,6 @@
 # Transcrypt: product vision, protocol and verification
 
-**Status (2026-10-25 source snapshot `861975a`):** the experimental Rust
+**Status (2026-10-25):** the experimental Rust
 v3 lifecycle exists; the Aeneas-extracted wire and decision core have
 compiled refinement theorems, while the effectful Git/OS adapter and crypto
 implementations remain explicitly assumed/tested rather than fully proved.
@@ -10,13 +10,11 @@ non-goals. The [roadmap](V3-ROADMAP.md), [proof ledger]
 [handoff](V3-HANDOFF.md) track implementation and evidence. Historical
 numbered documents describe earlier, potentially conflicting design choices.
 
-**Important planned change:** generic `.gitattributes`-selected protected
-paths, persistent local credentials by default, optional memory-only/private
-mode, transparent ordinary Git flows and a one-time v2 migration. The current
-Rust snapshot **does not yet implement those new defaults**; it uses
-`*.secret` and a mandatory in-memory agent. The independent review and its
-[disposition](V3-REVIEW-TRIAGE.md) contain actionable defects, not an
-exemption from correcting the code.
+**Current defaults:** files are selected by `.gitattributes` patterns, the
+derived key is stored locally by `unlock` (with an optional memory-only
+private mode), `git mv` is re-encrypted at commit, and `migrate` converts
+Bash v2 repositories. The independent review's findings and their fixes
+are in the [disposition](V3-REVIEW-TRIAGE.md).
 
 ## Secure-first v3 implementation (experimental)
 

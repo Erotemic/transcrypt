@@ -1,6 +1,6 @@
 # Transcrypt v3: active product and verification roadmap
 
-**Intent updated 2026-10-25; implementation checkpoint `861975a`.** This is
+**Intent updated 2026-10-25; implementation checkpoint: the product-charter campaign (P0–P4 done).** This is
 the active plan for the Rust v3 product on
 `work/m2-nul-safe-path-enumeration`. The [maintainer product charter]
 (V3-PRODUCT-CHARTER.md) governs goals, non-goals, trusted boundaries and
@@ -129,22 +129,25 @@ verified" or "cryptographic security has been proved from first principles."
       - idempotent unlock/lock;
       - clean makes new secrets private.
 
-### Next product milestones, ranked by expected value
+### Product-charter campaign (2026-10-25, after `d8436c6`)
 
-See [V3-PRODUCT-CHARTER](V3-PRODUCT-CHARTER.md) for the requirements and
-[V3-REVIEW-TRIAGE](V3-REVIEW-TRIAGE.md) for the independent findings against
-`861975a`. These priorities are **not** a fixed stop list; rerank after each
-substantive implementation result.
+| Track | Goal | Status and evidence |
+| --- | --- | --- |
+| **P0: real adapter defects** | F-02 rekey symlink write; F-03 `git mv`; F-04 ignored chmod | **Done.** F-02 reproduced with the compiled CLI, fixed by one symlink-refusing repository-file writer; F-03 fixed by the pre-commit rebind (local changes only, no laundering) and keyless checks; F-04 resolved. See [triage](V3-REVIEW-TRIAGE.md) |
+| **P1: arbitrary protected paths** | Git `.gitattributes` selection in production and verified core | **Done.** Suffix-free path policy and `parse_attr_record` proved; `protect`/`unprotect`; per-commit policy in `audit`; workflow tests for `.env`, directories, globs, quoted/non-UTF-8 names, executables, nested rules, exclusions |
+| **P2: persistent unlock by default** | Stored derived key, no daemon; memory-only agent optional | **Done.** `.git/transcrypt-v3/key` (0600, outside `git config`), stale after a pulled rekey; `--private` keeps the agent; identical ciphertext in both modes (tested) |
+| **P3: transparent Git use** | Ordinary operations under ordinary umasks | **Done** for checkout, switch, merge, rebase, diff, stash, restore, rename, worktrees, submodules; private mode keeps its 0600 promise |
+| **P4: migration and Bash map** | Recoverable one-time v2-to-v3 conversion | **Done.** `migrate`, tested against the real Bash script; Bash F-01 fixed; [correspondence](V3-BASH-CORRESPONDENCE.md) updated |
+| **P5: proof correspondence** | Extend source-derived proofs to the new decisions | **Done for the core** (path policy, attribute records, smudge, two-mode index entries) and models (attribute loop, smudge); next: the rebind decision and the stored-key load |
+| **P6: release qualification** | Independent crypto/adapter review | **Not complete** (R-01) |
 
-| Track | Goal | Acceptance condition | Current status |
-| --- | --- | --- | --- |
-| **P0: real adapter defects** | Reproduce and fix `.transcrypt/config.rekey` symlink/outside write; make path-bound `git mv` recoverably correct | Compiled Rust attack regressions fail before and pass after; no out-of-repo mutation; renamed object decrypts in fresh clone | **Independent review reports F-02/F-03; no fix assumed** |
-| **P1: arbitrary protected paths** | Replace `*.secret` selection in production and verified core with Git's exact `.gitattributes` semantics | `.env`, exact names and arbitrary patterns stage correctly; audit and attributes check historical committed policy; raw-byte paths and renames tested; Lean refinement updated | **Not implemented** |
-| **P2: persistent unlock by default** | Local-only scoped derived credential, no persistent agent required for normal Git; memory-only agent remains optional | Unlock once, restart shell/reboot/processes, then ordinary checkout/commit/diff work without prompting or special hooks; same cipher bytes and checked gates in either mode | **Not implemented** |
-| **P3: transparent Git use** | Ordinary checkout, restore, switch, merge, rebase, diff, status and rename without mandatory `0600` or private umask | Real-Git integration on supported platforms with permissive umask; optional private mode still enforces its own promise; no loss of local edits | **Current implementation has strict privacy defaults** |
-| **P4: migration and Bash map** | Recoverable one-time v2-to-v3 conversion, preserving arbitrary intended patterns and documenting old history | End-to-end legacy source → v3 fresh clone and rekey tests, failure rollback and recovery instructions; no v2 crypto imported into proved v3 | **Missing** |
-| **P5: proof correspondence** | Preserve existing source-derived proofs, extend to generalized selection and any new credential/adapter decisions | Pinned Aeneas extraction, Lean theorems on invoked core, independent spec plus explicit unchanged Git/crypto/OS assumptions | **Established for current `*.secret` core; future adaptations open** |
-| **P6: release qualification** | Independent crypto/adapter review and honest conditional claims | Review confirmed on the new code/profile and important defects resolved; reproducible tests and assumption ledger | **Not complete** |
+### Next milestones, ranked by expected value
+
+1. External review (R-01) of the new selection, credential and rebind code.
+2. The rebind decision (`seal_staged`) as a verified core function.
+3. A hint for cross-branch rename conflicts (Git cannot pair path-bound records; documented limitation).
+4. A4 narrowing for `protected_flags` and the stored-key load.
+5. Optional: private-agent idle timeout.
 
 **Parallel optional tracks:** server/CI audits for organizations requiring
 remote policy enforcement; session-only credential/strict-local-privacy mode;
@@ -152,9 +155,10 @@ Git-platform portability and performance; possible independently written Bash
 v3 once its crypto/dependency feasibility is resolved. None is allowed to
 compromise the main Rust product promise or silently weaken v3 authentication.
 
-**Legacy finding F-01 is real:** maintained Bash-v2 users should be warned
-and given a fix/transition path. This is not a reason to teach verified v3 to
-decrypt legacy CBC.
+**Legacy finding F-01 was real and is fixed in the Bash script** (decrypt
+and salt check instead of the prefix); users of existing installs should run
+`transcrypt --upgrade` and audit older history. This is not a reason to
+teach verified v3 to decrypt legacy CBC.
 
 ## Scope discipline and risk decisions
 

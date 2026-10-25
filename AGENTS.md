@@ -9,11 +9,12 @@ for incompatible default behaviors.
 - **Main promise:** user-selected files are authenticated ciphertext in public
   Git history. An unlocked local checkout behaves normally. Local-at-rest
   secrecy is not a default security guarantee.
-- **Preferred future UX:** arbitrary patterns via Git `.gitattributes`,
-  persistent derived credential in local-only Git state by default, optional
-  session-only memory agent and strict local privacy. As of snapshot `861975a`,
-  these new defaults **are not yet implemented**; don't document them as
-  current CLI behavior.
+- **Default UX (implemented):** arbitrary patterns via Git `.gitattributes`
+  (`protect PATTERN` or `PATTERN transcrypt`), the derived key stored in
+  `.git/transcrypt-v3/key` by `unlock`, and an optional `--private` mode
+  (memory-only agent, 0600 plaintext). `migrate` converts Bash v2
+  repositories. Check [the handoff](docs/verification/V3-HANDOFF.md) for the
+  current state before changing any of it.
 - **Keep real bugs in scope:** a plaintext staging bypass, wrong authentication
   context, attacker-controlled write, data loss or broken ordinary rename is
   not waived because a local privacy feature is optional.

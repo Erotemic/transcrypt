@@ -6,10 +6,9 @@ reported as the same kind of evidence. See the active
 [v3 roadmap](V3-ROADMAP.md), the theorem-level
 [proof status](../../proofs/aeneas/v3/PROOF-STATUS.md) and the
 [trust-ordered assumption register](V3-ASSUMPTIONS.md), and the
-[maintainer's product charter](V3-PRODUCT-CHARTER.md). Existing proofs are
-about the source at the stated snapshot, including the present `*.secret`
-policy; **they do not certify unimplemented arbitrary-pattern or persistent-
-credential defaults**.
+[maintainer's product charter](V3-PRODUCT-CHARTER.md). The proofs are about
+the current source: attribute-based selection with a suffix-free path policy.
+Where the key is stored is adapter code; no proof covers it (A17).
 
 Evidence levels:
 
@@ -37,22 +36,25 @@ Evidence levels:
 | P-03 | Git objects are read only by plain object ids from one snapshot | **PROVED** `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` (the adapter's slice is the record's oid); **TESTED** revision-syntax and pathspec-magic filenames (`adversarial.rs`) | The Rust slice expression itself is reviewed (A4) |
 | P-04 | Git filter-protocol framing | **PROVED** `decode_pkt_len_spec` (exactly `PktLenAccepted`); **TESTED** `long_running_filter_protocol` | Key/value lines and chunking are adapter code (A4) |
 | G-06 | No plaintext reaches a remote from commits that skipped `pre-commit` | **PROVED** `record_envelope_ok_spec`, `opensTo_envelopeOk` (keyless check accepts every genuine record); **TESTED** `pre-push` refusal, keyless `audit` in a never-unlocked clone and a bare repository | Deployment of the hook or a server-side audit (A13); forged envelopes (A14) |
-| P-01 | Canonical protected-path policy | **PROVED** `is_canonical_protected_path_spec` = spec `CanonicalProtectedPath` (via `List.splitOn`) | — |
+| P-01 | Canonical path policy: any canonical Git path except reserved metadata (`.transcrypt/…`, `.gitattributes`, `.gitmodules`) | **PROVED** `is_canonical_protected_path_spec` = spec `CanonicalProtectedPath` (via `List.splitOn`), `is_reserved_path_spec` = spec `Reserved`, with `matches_at_spec`, `ends_with_spec` | — |
+| P-05 | Protected-file selection: Git's attribute answers are parsed exactly | **PROVED** `parse_attr_record_spec` (accepts exactly the spec's `AttrRecordAt` for the requested path, both directions; `protected` iff the value is `transcrypt-v3`), `find_nul_spec`; **SPEC PROVED** `attrResponse_recordAt`, `attrRecordAt_unique`; **PROVED (model)** `attrFlagsModel_sound`, `attrFlagsModel_complete` (the adapter's record loop recovers exactly the per-path verdicts); **TESTED** `arbitrary_patterns_protect_exactly_the_selected_files` | Git's attribute evaluation (A19) |
 | C-01 | Deterministic Argon2id + AES-SIV bytes match independent vectors | **TESTED** `tests/v3/reference/check_vectors.py`, Rust vector tests; differential corpus vs OpenSSL AES-SIV and reference Argon2id (`differential.py`, `v3_differential.rs`: 22 lengths, raw-byte paths, exhaustive tampering/truncation/extension/context changes) | External review (R-01) |
 | C-02 | Config authenticated; ordered path-bound AD; no plaintext without authentication | **PROVED** `authenticate_config_spec`, `seal_record_spec`, `open_record_spec`, `open_record_complete` relative to `Realizes`; **TESTED** `keyed_satisfies_the_realizes_contract` for the production primitive | AES-SIV security (A10) |
 | C-03 | Agent performs only authorized operations under the authenticated config | **PROVED** `authorize_agent_request_spec`, request framing `decode_frame_header_encode`; **TESTED** hostile-client suite | Same-UID boundary (A6) |
 | G-01 | init/clone/unlock/hydrate/clean/commit/lock/re-unlock | **TESTED** `git_lifecycle.rs` | — |
-| G-02 | Staged index verified (not HEAD); effective filter; no transplant | **PROVED (model)** `verifyPlan_spec`, `check_attr_paths` + **PROVED** `check_attr_response_ok_spec`; **TESTED** attribute-precedence, blob-swap, foreign-repository, truncated/extended record tests | Git semantics (A7) |
+| G-02 | Staged index verified (not HEAD); selection by staged attributes; no transplant | **PROVED (model)** `verifyPlan_spec`, `attrFlagsModel_sound`; **PROVED** `parse_attr_record_spec`, `parse_index_entry_spec` (`100644`/`100755` only); **TESTED** nested-attribute, blob-swap, hostile-move, foreign-repository, truncated/extended record tests | Git semantics (A7, A19) |
 | G-03 | Crash safety of multi-file operations | **PROVED (model)** hydrate decides every file before writing (all-or-nothing on errors) and replaces a worktree file only if it is exactly an authentic record at its path, by exactly that record's plaintext (`hydratePlan_spec`); lock only discards recoverable plaintext (`lockEntry_spec`); **TESTED** SIGKILL fault injection at 12 points of `lock`/`hydrate`, interrupted resume, crash leftovers confined to private staging, stamp-checked replacement, operation lock | Same-UID race window between stamp check and rename (A8, A12) |
-| G-04 | Derived key absent from disk while unlocked | **TESTED / DESIGN** private agent, 0600 socket in 0700 dir, stale-socket tests | Swap/core-dump hardening (A8) |
-| G-08 | Git never writes plaintext readable by other users | **TESTED** `git_never_writes_plaintext_readable_by_others` (checkout, merge, rebase, stash, restore under `umask 022`/`077`); design in the spec's smudge rule | Git's umask behavior (A15); files users create themselves (A8) |
+| G-04 | Private mode: derived key absent from disk while unlocked | **TESTED / DESIGN** private agent, 0600 socket in 0700 dir, stale-socket tests | Swap/core-dump hardening (A8) |
+| G-08 | Private mode: Git never writes plaintext readable by other users | **TESTED** `git_never_writes_plaintext_readable_by_others` (checkout, merge, rebase, stash, restore under `umask 022`/`077`); design in the spec's smudge rule | Git's umask behavior (A15); files users create themselves (A8) |
+| G-SM | Smudge never presents non-record bytes as a protected file; opens only its own config's records | **PROVED** `smudge_action_spec` (= spec `smudgeSpec`), `smudgeSpec_keep_envelope`; **PROVED (model)** `smudgeModel_spec` (output is the unchanged envelope or authenticated plaintext); **TESTED** stale-key and old-history checkouts | The adapter follows the model (A4) |
 | G-09 | Missing local protection and unprotected remotes are detectable | **TESTED** `doctor_detects_missing_protection`, `remote_enforcement_check_detects_unprotected_remotes` | Deployment (A13) |
 | G-05 | Lock never destroys uncommitted plaintext | **PROVED** `lock_action_spec`, **PROVED (model)** `lockEntry_spec` (resealing through the idempotent clean); **TESTED** unstaged-edit refusal, stamp-checked replacement | — |
 | G-07 | Clean stores only genuine records; locked filters never emit anything but an unchanged v3 envelope | **PROVED (model)** `cleanModel_spec`, `cleanModel_genuine`, `cleanModel_idempotent`, `lockedFilterModel_spec`; **TESTED** `clean_is_idempotent_and_still_refuses_foreign_records`, locked checkout tests | The adapter follows the models (A4); forged envelopes while locked (A14) |
-| G-SEL | Any arbitrary Git-attribute-selected pathname gets authenticated public-Git ciphertext | **OPEN**: current proven `CanonicalProtectedPath` requires `*.secret`; new core/refinement and staged historical policy semantics needed | A16 |
-| G-KEY | Persistent local credential is default, agent is optional, identical v3 bytes in both modes | **OPEN**: session-agent contract tested; persistent storage implementation not present | A17; local key access trusted by design |
-| G-MV | Normal rename produces an authenticated record for destination path or a clear recoverable failure | **OPEN**: independent Git `mv` reproduction, real Rust v3 regression pending | A18; adapter semantics |
-| G-MIG | Explicit recoverable one-time Bash v2 → v3 transition | **OPEN**: documented manual process only | Git/OS adapter transaction assumptions; historical v2 risk |
+| G-SEL | Any Git-attribute-selected pathname gets authenticated public-Git ciphertext | **PROVED** P-01, P-05, C-02 for the core; **TESTED** `.env`, directories, `**`, custom globs, quoted and non-UTF-8 names, executables, nested attributes, exclusions, per-commit audit policy (`workflows.rs`) | A16, A19 |
+| G-KEY | Stored key is the default, the agent optional, identical v3 bytes in both modes | **TESTED** `assert_unlocked` lifecycle, `stored_key_unlock_needs_no_agent_and_follows_the_umask`, `stored_and_private_modes_encrypt_identically`, `pulled_rekey_makes_the_stored_key_stale_until_unlock` | A17; local key access trusted by design |
+| G-MV | Normal rename produces an authenticated record for the destination path or a clear recoverable failure; hostile moves are not laundered | **TESTED** `renames_are_re_encrypted_for_their_new_path`, `locked_renames_and_unbound_moves_are_refused`, hostile move in `git_lifecycle`; re-encryption goes through `open_record`/`seal_record` (C-02) | A18; a Lean model of `seal_staged` is the next step |
+| G-MIG | Explicit recoverable one-time Bash v2 → v3 transition | **TESTED** `bash_v2_repositories_migrate_to_v3` against the real Bash script (refusal of uncommitted work, pattern preservation, fresh-clone unlock); `rewrite_attributes` unit test | Git/OS adapter transaction assumptions; historical v2 risk |
+| F-02 | Repository files v3 writes never follow committed symlinks | **TESTED** `rekey_never_writes_through_committed_symlinks`, `protected_parent_symlinks_cannot_redirect_lock_or_hydrate`; design: one writer (`write_repository_file`) | Same-UID races (A8) |
 | B-01 | Standalone Bash conforms to v3 | **OPEN / DEFERRED** (V7) | Bash AES-SIV dependency decision |
 | R-01 | Independent algorithm, threat and adapter security review | **REVIEW (internal)** [V3-SECURITY-REVIEW.md](V3-SECURITY-REVIEW.md) | External review before security-sensitive release |
 
@@ -61,7 +63,7 @@ Evidence levels:
 - [x] W-02 through W-06 each have a compiled theorem referring to the actual
       extracted Rust function, including the public slice boundary.
 - [x] The invoked pure decision seam (path, config binding, seal/open,
-      agent authorization, attribute check, hydrate/lock) has proofs naming
+      agent authorization, attribute parsing, smudge, hydrate/lock) has proofs naming
       the same functions the running adapter calls (C-02, C-03, G-02, G-05).
 - [x] All Rust v3 unit, Git integration, adversarial and independent crypto
       vector tests pass; CI rebuilds the tracked Lean, audits axioms and

@@ -113,9 +113,10 @@ tracked plaintext in history silently. Supply an intelligible conversion path
 and inspectable diagnostics. Git's filter invocation and remote hooks are
 external contracts; do not promise a guarantee for an unconfigured clone.
 
-**Current implementation differs:** as of source `861975a`, experimental Rust
-v3 only treats `*.secret` as protected. Generalized selection is a high-priority
-**future implementation**, not an existing feature.
+**Implementation status:** implemented after `d8436c6` (Git-attribute
+selection with the `transcrypt` macro, `protect`/`unprotect`, per-commit
+attribute evaluation in `audit`, a suffix-free verified path policy). See
+[A16/A19](V3-ASSUMPTIONS.md) for what is proved, tested and assumed.
 
 ### Credential behavior: the planned contract
 
@@ -134,10 +135,12 @@ reason to reimpose a daemon. Neither option strengthens the protection of an
 already compromised local machine. A memory-only agent remains a valid
 optional mode, not the required/default architecture.
 
-**Current implementation differs:** as of `861975a`, Rust v3 uses only an
-in-memory agent and enforces private worktree writes. These remain valid
-experimental behaviors until deliberately refactored and tested. They are not
-the promised default user experience.
+**Implementation status:** implemented after `d8436c6`. The derived key is
+stored in a private sidecar, `$GIT_COMMON_DIR/transcrypt-v3/key` (0600, not
+in `git config`, shared by worktrees). This was chosen over `.git/config`
+because it is equally simple and is not shown by `git config --list`. The
+memory-only agent and private worktree permissions are the optional
+`--private` mode. See [A17/A6](V3-ASSUMPTIONS.md).
 
 ## 3. Non-goals and deliberately optional protections
 

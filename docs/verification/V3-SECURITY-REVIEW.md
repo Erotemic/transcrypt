@@ -5,9 +5,8 @@
 > (reviewed source commit `861975a`) and
 > [product-scoped disposition](V3-REVIEW-TRIAGE.md). It reports a real Bash v2
 > plaintext bypass and credible v3 rekey-symlink and Git-rename defects.
-> **Do not assume F-02/F-03 were fixed by this documentation overlay.** The
-> reviewer did not execute the compiled Rust v3 binary; reproduction and
-> current-code testing are required. Local-file mode findings must be
+> F-01 to F-04 were reproduced and fixed in the product-charter campaign
+> (H-28 to H-33 below; dispositions in the triage). Local-file mode findings must be
 > interpreted using the [maintainer charter](V3-PRODUCT-CHARTER.md), in which
 > unlocked-local-workstation secrecy is not a default product goal. This
 > later assessment must not be erased by the older internal "Accepted"
@@ -152,6 +151,40 @@ clean `git status` after hydrate).
   - Rollback resistance.
   - Hiding equality of plaintexts at a path.
   - Independent review: still outstanding (R-01).
+
+## 7. Product-charter campaign (2026-10-25, after `d8436c6`)
+
+| ID | Severity | Finding | Fix and evidence |
+| --- | --- | --- | --- |
+| H-28 | High (write outside the repository) | Review **F-02**, reproduced with the compiled binary. `rekey` wrote `.transcrypt/config.rekey` with a path-based write, following a committed symlink, then renamed it over the config, which became a symlink. | Every write to a repository file v3 maintains goes through `write_repository_file`: dirfd resolution with `O_NOFOLLOW`, an exclusive temporary in the private staging directory, then `renameat`. Test `rekey_never_writes_through_committed_symlinks`. |
+| H-29 | Medium (undecryptable commits) | Review **F-03**. `git mv` keeps the blob bound to the old path. With the key, the hook refused the commit (confusing); while locked, the envelope-only check accepted it (an undecryptable record at the new path). | The pre-commit hook re-encrypts local moves, including directories and unprotected→protected moves. The keyless `verify-index` refuses a record that is another path's blob; the keyless `audit` refuses records moved without re-encryption. Tests in `workflows.rs`. |
+| H-30 | High (path binding defeated), found during implementation | A first version of the rebind re-encrypted any staged record that opened at another `HEAD` path. A hostile commit that moved one secret's ciphertext onto another path would have been **laundered** into a genuine record at the user's next commit, defeating path binding. | Rebind only local changes: the staged blob must differ from `HEAD`'s, no merge/cherry-pick/revert/rebase may be in progress, and the source path must be gone from the index. Content from commits is checked, never repaired. Regression in `git_lifecycle` ("must not launder the moved record"). |
+| H-31 | Low | Review **F-04**: in private mode the clean filter ignored a failed `chmod`. | The default mode no longer changes permissions; private mode propagates the error. |
+| H-32 | High (legacy) | Review **F-01**: the Bash v2 clean filter and pre-commit hook treated the `U2FsdGVk` prefix as proof of encryption. | Ciphertext is accepted only if it decrypts under the key and embeds the per-path salt (commit `c3c2bc8`; bats regressions). |
+| H-33 | Medium (selection) | A `.gitattributes` pattern such as `*` would select `.gitattributes` itself; Git would then read ciphertext as the policy. | `.transcrypt/`, every `.gitattributes` and `.gitmodules` are reserved in the verified path policy. Clean refuses them with an explanation, and `protect` reverts such a pattern. Test `protect_and_unprotect_change_the_policy_explicitly`. |
+
+Attack review of the new surface:
+- **Selection.** v3 never matches patterns. Git's answers are parsed by
+  `parse_attr_record`, which is proved to accept exactly the requested
+  paths in order. A malformed answer fails closed.
+- **Local overrides.** A `filter` rule in `.git/info/attributes` or a global
+  attributes file can unprotect files locally. That is an informed user's
+  choice (A19): `doctor` fails on it, the hook warns, and a server audit
+  still refuses the plaintext.
+- **Stored key.**
+  - It is created exclusively with mode 0600 in the checked 0700 directory,
+    renamed into place, and read with `O_NOFOLLOW` at exactly 64 bytes.
+  - It authenticates the current config before every use, so a config
+    swapped in the worktree is never used with it.
+  - It is readable by anything running as the user, which the charter
+    accepts (A17).
+- **Smudge.** Non-record bytes are refused, so plaintext committed around
+  the filter is not shown as a protected file. Other configs' records stay
+  encrypted (old history). A record of this config that does not
+  authenticate fails the command, with instructions for the `git mv` case.
+- **Migration.** It never modifies plaintext. It refuses uncommitted work
+  and still-encrypted v2 files, rolls back the attribute rewrite, the hook
+  and `init` on failure, and never deletes the v2 password.
 
 ## Review package
 
