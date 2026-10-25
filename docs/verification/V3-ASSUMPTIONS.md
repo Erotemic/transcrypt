@@ -77,8 +77,8 @@ one.
 
 ### A4 — Adapter-to-core correspondence
 
-- **Claim:** the effectful adapter (`main.rs`, `session.rs`, `lib.rs`,
-  `fsat.rs`) passes the core the right bytes (exact Git path, on-disk config,
+- **Claim:** the effectful adapter (`main.rs`, `git.rs`, `worktree.rs`,
+  `setup.rs`, `audit.rs`, `session.rs`, `lib.rs`, `fsat.rs`) passes the core the right bytes (exact Git path, on-disk config,
   staged record), acts only on `Ok` results, and acts on the *same* bytes it
   checked.
 - **Trust boundary:** our unverified Rust.
@@ -389,7 +389,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 
 ## Adapter call-site table (A4)
 
-Each effect in `rust/crates/transcrypt-v3/src/{main,session,lib}.rs` and the
+Each effect in `rust/crates/transcrypt-v3/src/{main,git,worktree,setup,audit,session,fsat,lib}.rs` and the
 verified decision that gates it:
 
 | Adapter action | Gate (verified core function) | Inputs passed | Acts only on |

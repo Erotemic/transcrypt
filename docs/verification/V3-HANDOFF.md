@@ -25,7 +25,7 @@ authoritative: Rust is changed to meet it, never the reverse.
 | Wire/AAD/Git behavior | `docs/verification/specs/V3-AUTHENTICATED-P0.md` |
 | Verified pure core (codec + every decision) | `rust/crates/transcrypt-v3-core/src/lib.rs` |
 | Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-v3/src/lib.rs` |
-| Git adapter, agent, fd-relative FS | `rust/crates/transcrypt-v3/src/{main,session,fsat}.rs` |
+| Git adapter, agent, fd-relative FS | `rust/crates/transcrypt-v3/src/{main,git,worktree,setup,audit,session,fsat}.rs` (module map in `main.rs`) |
 | Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
 | Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Index,Frame,Protocol,Lifecycle}.lean` |

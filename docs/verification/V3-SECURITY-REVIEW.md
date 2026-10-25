@@ -137,7 +137,7 @@ For the external review (R-01), in reading order:
    `proofs/lean/Transcrypt/V3Policy.lean`.
 4. Implementation map: core `rust/crates/transcrypt-v3-core/src/lib.rs`;
    primitives `rust/crates/transcrypt-v3/src/lib.rs` (`Keyed`,
-   `derive_key`, `clean_file`); adapter `src/main.rs`; agent
+   `derive_key`, `clean_file`); adapter `src/{main,git,worktree,setup,audit}.rs`; agent
    `src/session.rs`; fd-relative filesystem `src/fsat.rs`; adapter call-site
    table in V3-ASSUMPTIONS.
 5. Adversarial evidence: `rust/crates/transcrypt-v3/tests/{adversarial,git_lifecycle}.rs`.
