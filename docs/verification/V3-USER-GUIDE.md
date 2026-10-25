@@ -33,8 +33,10 @@ git commit -m "Add token"
 ```
 
 `init` refuses to run if `.transcrypt/`, `.gitattributes` or a foreign
-`pre-commit` or `pre-push` hook already exists. It leaves the repository
-**unlocked**.
+`pre-commit` or `pre-push` hook already exists, or if a `*.secret` file is
+already tracked (in the index or `HEAD`): such files are plaintext in
+history, and v3 cannot encrypt the past. Remove them from history and rotate
+those secrets first. It leaves the repository **unlocked**.
 
 ## Clone and unlock
 

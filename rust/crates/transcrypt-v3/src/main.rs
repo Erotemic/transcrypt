@@ -399,6 +399,16 @@ fn init(root: &Path, password: Zeroizing<Vec<u8>>) -> Result<(), String> {
         return Err(".gitattributes already exists; this POC requires a new attributes policy".into());
     }
     check_hook_available(root)?;
+    // Files already tracked as `*.secret` are plaintext in the index (and in
+    // history): enabling v3 would not encrypt them and would only appear to.
+    let mut tracked: Vec<Vec<u8>> = indexed_files(root)?.into_iter().map(|e| e.path).collect();
+    if git(root, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]).is_ok() {
+        tracked.extend(tree_files(root, "HEAD")?.into_iter().map(|e| e.path));
+    }
+    if let Some(path) = tracked.iter().find(|p| protected_path(p)) {
+        return Err(format!("{} is already tracked unencrypted; remove *.secret files from the index \
+            and history (and rotate their secrets) before enabling v3", String::from_utf8_lossy(path)));
+    }
     let hook_preexisted = HOOKS.map(|(name, _)| fs::symlink_metadata(hook_path(root, name)).is_ok());
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;

@@ -95,7 +95,9 @@ trusted state and is outside this POC.
 ## Stateful lifecycle and key management
 
 - `init`: require an ordinary Git repository, no `.transcrypt` or
-  `.gitattributes`, and no conflicting `pre-commit` or `pre-push` hook.
+  `.gitattributes`, no conflicting `pre-commit` or `pre-push` hook, and no
+  `*.secret` path in the index or the `HEAD` tree (those are plaintext in
+  history; enabling v3 would only appear to protect them).
   Generate metadata, install Git filters, install the local `pre-commit`
   (`verify-index`) and `pre-push` (`audit` of the pushed commits) hooks, and
   stage the public config and

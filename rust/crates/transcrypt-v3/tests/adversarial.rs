@@ -597,3 +597,25 @@ fn hydrate_makes_existing_plaintext_private() {
     assert_eq!(fs::metadata(repo.join("a.secret")).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
 }
+
+/// `init` refuses a repository that already tracks `*.secret` files: they
+/// are plaintext in the index and history, and v3 would only appear to
+/// protect them.
+#[test]
+fn init_refuses_secrets_already_tracked_in_plaintext() {
+    let scratch = Scratch::new("pretracked");
+    let repo = scratch.root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    run(&repo, "git", &["init", "-q"], None);
+    run(&repo, "git", &["config", "user.name", "Example"], None);
+    run(&repo, "git", &["config", "user.email", "example@example.test"], None);
+    fs::write(repo.join("old.secret"), b"PLAINTEXT IN HISTORY\n").unwrap();
+    run(&repo, "git", &["add", "old.secret"], None);
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    assert!(err.contains("old.secret") && err.contains("already tracked"), "{err}");
+    run(&repo, "git", &["commit", "-qm", "plaintext secret"], None);
+    run(&repo, "git", &["rm", "-q", "--cached", "old.secret"], None);
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    assert!(err.contains("old.secret"), "{err}");
+    assert!(!repo.join(".transcrypt").exists());
+}
