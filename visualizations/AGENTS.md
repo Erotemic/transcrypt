@@ -36,4 +36,19 @@ The user wants an editable, explanatory Manim animation in the style of the
   PDF link is a security proof.
 - Maintain visual/tier parity across Manim, SVG, HTML and PDF. Test a static
   no-Manim export plus a video-embedding scenario, and render-check the PDF.
+- For routine iteration, use `make preview SCENE=...`, `make scene SCENE=...`,
+  or `make pdf`/`make pdf SLIDE=...`. Do not run `make all` just to validate
+  one scene or a static PDF; preserve Manim partial-movie caches.
+- Publishing a scene to HTML requires a *complete* MP4, never a `--still` or
+  `--animation` fragment. PDF-only exports must not regenerate gallery or HTML.
 - Do not describe your own reporting contract inside user-facing reports.
+
+## Interactive presentation rule
+
+The HTML presentation must behave as a click-to-advance slide show, not a
+monolithic video player. Keep the named beats from `Diagram.beats` as actual
+Manim `next_section` boundaries. `make scene SCENE=<id>` stages only that
+scene's section MP4s; HTML automatically plays the selected beat section on
+advance and freezes at its final frame. If section media is missing or stale,
+use exact per-beat SVG states with the same keyboard/click navigation. PDF
+export remains static and must never invoke Manim.

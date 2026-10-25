@@ -81,3 +81,21 @@ body[data-theme="light"] .slide { --fg:#182b3c; --sub:#576d7f; --card:#fff; --ha
 @media (max-width:800px) { .presenter-name { display:none; } .presenter-controls { margin:auto; } .slide .subtitle { line-height:1.25; } .layout-split .split-aside .mini-evidence .op-basis { display:none; } }
 @media (max-height:650px) { .presenter-bar { height:42px; } .presentation { height:calc(100vh - 65px); } .slide { max-height:calc(100vh - 90px); width:min(calc((100vh - 90px)*16/9),calc(100vw - 28px)); } }
 @media print { .presenter-bar,.progress,.notes-panel,.shortcut-hint { display:none!important; } body { overflow:visible; background:#fff; } .presentation { display:block; height:auto; padding:0; } .slide,.slide[hidden] { display:block!important; width:16in; height:9in; max-height:none; break-after:page; box-shadow:none; border:none; border-radius:0; } }
+
+/* A beat is a completed visual state, not a full scene movie with a play button. */
+.visual-media { position:relative; width:100%; height:100%; min-height:0; min-width:0; }
+.cover-art .visual-media { aspect-ratio:16/9; }
+.visual-media .diagram-picture,
+.visual-media .scene-video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+.visual-media .scene-video[hidden],
+.visual-media .diagram-picture[hidden] { display:none!important; }
+.beat-tracker { position:absolute; left:3.5%; right:3.5%; bottom:6.2%;
+  display:flex; align-items:center; gap:1.1%; font-size:clamp(9px,.75vw,14px);
+  background:var(--card); border:1px solid var(--hair); border-radius:6px;
+  padding:3px 9px; height:clamp(24px,3.2%,34px); color:var(--sub); z-index:4; }
+.beat-number { flex:none; font-variant-numeric:tabular-nums; font-weight:750; color:var(--accent); }
+.beat-caption { flex:1; min-width:0; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; }
+.beat-tier { flex:none; font-size:.88em; color:var(--tier,var(--accent));
+  font-weight:750; max-width:30%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#counter { min-width:204px; }
+.presentation .slide { cursor:pointer; }

@@ -27,8 +27,8 @@ points = ["A source-derived theorem is not a proof of its external dependencies.
 
 [[slide]]
 id = "selection"
+media = "video"
 layout = "split"
-media = "diagram"
 scene = "selection"
 beat = "today"
 title = "What actually gets protected?"
@@ -68,6 +68,7 @@ points = ["The conditional theorem fixes core record behavior.", "AES-SIV correc
 
 [[slide]]
 id = "record"
+media = "video"
 layout = "diagram"
 scene = "record"
 beat = "last"
@@ -118,6 +119,7 @@ points = ["Commit/flush must precede forgetting a key.", "Native filesystem beha
 
 [[slide]]
 id = "attack"
+media = "video"
 layout = "diagram"
 scene = "attack"
 beat = "last"
@@ -138,7 +140,7 @@ points = ["Source-derived theorems refer to extracted Rust functions.", "Model l
 [[slide]]
 id = "contract"
 layout = "split"
-media = "diagram"
+media = "video"
 scene = "contract"
 beat = "last"
 title = "Read the actual open-record theorem"
@@ -148,6 +150,7 @@ points = ["The theorem governs production-core branching and bytes.", "It does n
 
 [[slide]]
 id = "refinement"
+media = "video"
 layout = "diagram"
 scene = "proof"
 beat = "last"

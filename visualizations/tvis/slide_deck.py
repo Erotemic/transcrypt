@@ -7,7 +7,7 @@ claim; every operation badge is read directly from the shared scene plan.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 import json
 from pathlib import Path
@@ -34,10 +34,17 @@ class Slide:
     beat: str = 'last'
     media: str = 'diagram'
     points: tuple[str, ...] = ()
+    steps: str = 'single'  # 'all' -> click through every planned beat
 
     @property
     def diagram(self):
         return self.scene.diagram()
+
+    @property
+    def beat_names(self) -> tuple[str, ...]:
+        if self.steps == 'all':
+            return self.diagram.beat_names()
+        return (self.beat,)
 
     @property
     def active_operation(self) -> str | None:
@@ -81,20 +88,48 @@ def load_slides(path: Path = SLIDES_FILE) -> SlideDeck:
             raise ValueError(f'slide {slide_id}: media must be diagram or video')
         if not isinstance(item.get('title'), str) or not item['title'].strip():
             raise ValueError(f'slide {slide_id}: title is required')
+        steps = item.get('steps', 'all' if media == 'video' else 'single')
+        if steps not in {'all', 'single'}:
+            raise ValueError(f'slide {slide_id}: steps must be all or single')
         points = item.get('points', [])
         if not isinstance(points, list) or any(not isinstance(p, str) for p in points):
             raise ValueError(f'slide {slide_id}: points must be a list of strings')
         slides.append(Slide(slide_id, layout, item['title'], scene,
                             item.get('kicker', ''), item.get('subtitle', ''), beat,
-                            media, tuple(points)))
+                            media, tuple(points), steps))
     if not slides:
         raise ValueError('presentation requires at least one slide')
     return SlideDeck(metadata['title'], metadata.get('subtitle', ''),
                      metadata.get('footer', ''), tuple(slides))
 
 
-def _svg_url(slide: Slide, theme: str) -> str:
-    picture = render_svg(slide.diagram, beat=slide.beat, theme=theme).encode('utf-8')
+def select_slides(deck: SlideDeck, *, scene_ids: tuple[str, ...]=(),
+                  slide_ids: tuple[str, ...]=()) -> SlideDeck:
+    """Return a focused deck without changing the authored order or layouts."""
+    if scene_ids and slide_ids:
+        raise ValueError('select either scenes or slides, not both')
+    if not scene_ids and not slide_ids:
+        return deck
+    if scene_ids:
+        from tvis.catalog import get_scene
+        for scene_id in scene_ids:
+            get_scene(scene_id)  # Reject typos rather than generating an empty PDF.
+        wanted = set(scene_ids)
+        selected = tuple(slide for slide in deck.slides if slide.scene.id in wanted)
+    else:
+        available = {slide.id for slide in deck.slides}
+        missing = set(slide_ids) - available
+        if missing:
+            raise ValueError('unknown slide(s): ' + ', '.join(sorted(missing)))
+        wanted = set(slide_ids)
+        selected = tuple(slide for slide in deck.slides if slide.id in wanted)
+    if not selected:
+        raise ValueError('selection contains no presentation slides')
+    return replace(deck, slides=selected)
+
+
+def _svg_url(slide: Slide, theme: str, beat: str | None = None) -> str:
+    picture = render_svg(slide.diagram, beat=beat or slide.beat, theme=theme).encode('utf-8')
     return 'data:image/svg+xml;base64,' + base64.b64encode(picture).decode('ascii')
 
 
@@ -107,7 +142,7 @@ def _operations(slide: Slide, limit: int = 6) -> str:
         ev = node.evidence
         active = ' active-operation' if node.key == slide.active_operation else ''
         cards.append(
-            f'<div class="op-card tier-{ev.level}{active}">'
+            f'<div class="op-card tier-{ev.level}{active}" data-op-node="{escape(node.key)}">'
             f'<div class="op-title">{escape(node.title)}</div>'
             f'<div class="op-tier">{escape(EVIDENCE_LABELS[ev.level])}</div>'
             f'<div class="op-basis">{escape(ev.basis)} · {escape(ev.note)}</div></div>'
@@ -118,21 +153,24 @@ def _operations(slide: Slide, limit: int = 6) -> str:
 
 
 def _visual(slide: Slide, poster: str, video_scenes: set[str]) -> str:
-    scene = escape(slide.scene.id)
-    still = f'<img class="diagram-picture" src="{poster}" alt="{escape(slide.diagram.title)}: {escape(slide.beat)}">'
-    if slide.media == 'video' and slide.scene.id in video_scenes:
-        # The video URL is injected lazily on slide activation, not loaded all at once.
-        return (f'<video class="scene-video" data-scene="{scene}" poster="{poster}" '
-                f'controls playsinline preload="none" aria-label="Manim animation: {escape(slide.title)}">'
-                'Your browser does not support embedded MP4 video.</video>')
-    if slide.media == 'video':
-        return still + '<span class="fallback-note">Static beat · render Manim to enable motion</span>'
-    return still
+    """Present still snapshots or auto-play one self-contained Manim beat.
+
+    A scene's monolithic MP4 is intentionally never offered as an HTML player.
+    Each click advances one beat (matching the DKPS manim-slides interaction).
+    Without section clips, the same clicks show exact plan-derived SVG states.
+    """
+    still = (f'<img class="diagram-picture" src="{poster}" '
+             f'alt="{escape(slide.diagram.title)}: {escape(slide.beat)}">')
+    video = ('<video class="scene-video" muted playsinline preload="none" hidden '
+             f'aria-label="Current animation beat of {escape(slide.title)}"></video>')
+    note = ('<span class="fallback-note">SVG beat snapshots · render scene for motion</span>'
+            if slide.media == 'video' and slide.steps == 'all'
+            and slide.scene.id not in video_scenes else '')
+    return f'<div class="visual-media">{still}{video}{note}</div>'
 
 
 def _slide_html(slide: Slide, index: int, total: int, theme: str,
-                video_scenes: set[str]) -> str:
-    poster = _svg_url(slide, theme)
+                video_scenes: set[str], poster: str) -> str:
     picture = _visual(slide, poster, video_scenes)
     bullets = ''.join(f'<li>{escape(p)}</li>' for p in slide.points)
     sub = f'<p class="subtitle">{escape(slide.subtitle)}</p>' if slide.subtitle else ''
@@ -160,41 +198,102 @@ def _slide_html(slide: Slide, index: int, total: int, theme: str,
         body = (f'<div class="statement-body">{title}<ul class="points">{bullets}</ul>'
                 f'<div class="statement-rail"><span>DATA</span><span>PROOF</span>'
                 f'<span>DEPENDENCIES</span></div></div>')
+    beat_bar = ''
+    if len(slide.beat_names) > 1:
+        beat_bar = ('<div class="beat-tracker" aria-live="polite">'
+                    '<span class="beat-number" data-role="beat-number"></span>'
+                    '<span class="beat-caption" data-role="beat-caption"></span>'
+                    '<span class="beat-tier" data-role="beat-tier"></span>'
+                    '</div>')
     return (f'<section class="slide layout-{slide.layout}" id="slide-{escape(slide.id)}"'
             f' data-slide-id="{escape(slide.id)}" data-scene="{escape(slide.scene.id)}" '
+            f' data-media="{escape(slide.media)}" '
             f'aria-label="Slide {index}: {escape(slide.title)}" hidden>'
-            f'{body}<footer class="slide-footer"><span>Scene: {escape(slide.scene.id)} · Evidence applies per operation</span>'
+            f'{body}{beat_bar}<footer class="slide-footer"><span>Scene: {escape(slide.scene.id)} · Evidence applies per operation</span>'
             f'<span>{index:02d} / {total:02d}</span></footer></section>')
 
 
-def render_html(deck: SlideDeck, target: Path, *, theme: str = 'dark',
-                videos: Mapping[str, Path] | None = None, embed_videos: bool = False) -> Path:
-    """Presentation HTML with heterogeneous slide layouts and actual video tags.
+def _beat_status_label(status: str) -> str:
+    return {
+        'explainer': 'EXPLANATION', 'implemented': 'IN CODE: NO PROOF',
+        'proved': 'SOURCE-DERIVED PROOF', 'modeled': 'LEAN MODEL',
+        'tested': 'RUNTIME TESTED', 'assumed': 'TRUSTED EXTERNAL',
+        'planned': 'DESIGN GOAL', 'open': 'NOT YET PROVED',
+    }[status]
 
-    ``embed_videos=True`` base64-inlines MP4s once per scene, yielding a single
-    distributable HTML file. The default uses relative MP4 sidecars to avoid a
-    huge HTML. A scene with no video receives a faithful SVG still, not fake motion.
+
+def _state_payload(slide: Slide, theme: str, image_cache: dict) -> list[dict]:
+    plan = slide.diagram
+    operations = plan.node_map()
+    result = []
+    for name in slide.beat_names:
+        _nodes, _links, stage, _index = plan.state(name)
+        active = stage.processing.node if stage.processing else None
+        node = operations.get(active) if active else None
+        evidence = node.evidence if node else None
+        key = (slide.scene.id, name)
+        if key not in image_cache:
+            image_cache[key] = _svg_url(slide, theme, name)
+        flow = ''
+        if stage.processing:
+            flow = f'{stage.processing.before} → {stage.processing.after}'
+        elif stage.packet:
+            link = plan.link_map()[stage.packet]
+            flow = (f'{operations[link.origin].title} → '
+                    f'{stage.packet_label or link.label} → {operations[link.destination].title}')
+        result.append({
+            'name': name, 'caption': stage.caption,
+            'poster': image_cache[key], 'status': stage.status,
+            'flow': flow, 'active': active,
+            'tier': (evidence.level if evidence else ''),
+            'evidence': (EVIDENCE_LABELS[evidence.level] if evidence
+                         else _beat_status_label(stage.status)),
+        })
+    return result
+
+
+def render_html(deck: SlideDeck, target: Path, *, theme: str = 'dark',
+                segments: Mapping[str, Mapping[str, Path]] | None = None,
+                embed_videos: bool = False) -> Path:
+    """Export a click-through HTML deck; no full-scene movie controls.
+
+    Manim sections, when available, automatically play one beat and freeze at
+    its final frame. No staged media? Each click swaps in the exact SVG state.
+    ``embed_videos`` inlines each *beat* MP4 once, for offline portability.
     """
-    palette(theme)  # Reject an invalid theme before writing an artifact.
-    videos = videos or {}
-    video_urls = {}
-    for scene, path in videos.items():
-        source = Path(path)
-        if not source.is_file() or not source.stat().st_size:
-            continue
-        if embed_videos:
-            video_urls[scene] = ('data:video/mp4;base64,' +
-                                 base64.b64encode(source.read_bytes()).decode('ascii'))
-        else:
-            # Relative paths also work when the entire directory is moved.
-            video_urls[scene] = source.relative_to(target.parent).as_posix() if source.is_relative_to(target.parent) else source.name
-    sections = '\n'.join(_slide_html(slide, i, len(deck.slides), theme, set(video_urls))
-                         for i, slide in enumerate(deck.slides, start=1))
-    video_json = json.dumps(video_urls, ensure_ascii=True).replace('<', '\\u003c')
-    notes_json = json.dumps({s.id: {'narration': s.scene.narration,
-                                    'sources': list(s.scene.sources),
-                                    'proofs': list(s.scene.proof_anchors)}
-                             for s in deck.slides}, ensure_ascii=True).replace('<', '\\u003c')
+    palette(theme)
+    segments = segments or {}
+    clip_urls = {}
+    for scene, beats in segments.items():
+        scene_urls = {}
+        for beat, path in beats.items():
+            source = Path(path)
+            if not source.is_file() or not source.stat().st_size:
+                continue
+            if embed_videos:
+                url = ('data:video/mp4;base64,'
+                       + base64.b64encode(source.read_bytes()).decode('ascii'))
+            elif source.is_relative_to(target.parent):
+                url = source.relative_to(target.parent).as_posix()
+            else:
+                url = source.name
+            scene_urls[beat] = url
+        if scene_urls:
+            clip_urls[scene] = scene_urls
+    image_cache = {}
+    step_map = {s.id: _state_payload(s, theme, image_cache) for s in deck.slides}
+    sections = '\n'.join(
+        _slide_html(slide, i, len(deck.slides), theme, set(clip_urls),
+                    step_map[slide.id][0]['poster'])
+        for i, slide in enumerate(deck.slides, start=1))
+    def as_json(value) -> str:
+        return json.dumps(value, ensure_ascii=True).replace('<', '\\u003c')
+    steps_json = as_json(step_map)
+    video_json = as_json(clip_urls)
+    notes_json = as_json({s.id: {'narration': s.scene.narration,
+                                 'sources': list(s.scene.sources),
+                                 'proofs': list(s.scene.proof_anchors)}
+                          for s in deck.slides})
     css = (VIS_ROOT / 'tvis/assets/presentation.css').read_text(encoding='utf-8')
     js = (VIS_ROOT / 'tvis/assets/presentation.js').read_text(encoding='utf-8')
     html = (f'<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
@@ -202,16 +301,25 @@ def render_html(deck: SlideDeck, target: Path, *, theme: str = 'dark',
             f'<title>{escape(deck.title)}</title><style>{css}</style></head>'
             f'<body data-theme="{theme}"><header class="presenter-bar">'
             f'<div class="presenter-name">TRANSCRYPT <span>V3</span> / TRUST AT EVERY OPERATION</div>'
-            f'<div class="presenter-controls"><button id="prev" type="button" aria-label="Previous slide">‹</button>'
+            f'<div class="presenter-controls">'
+            f'<button id="prev-slide" type="button" title="Previous slide (Shift+Left)" '
+            f'aria-label="Previous slide">«</button>'
+            f'<button id="prev" type="button" title="Previous beat (Left)" '
+            f'aria-label="Previous beat">‹</button>'
             f'<span id="counter" aria-live="polite"></span>'
-            f'<button id="next" type="button" aria-label="Next slide">›</button>'
+            f'<button id="next" type="button" title="Next beat (Right or click)" '
+            f'aria-label="Next beat">›</button>'
+            f'<button id="next-slide" type="button" title="Next slide (Shift+Right)" '
+            f'aria-label="Next slide">»</button>'
             f'<button id="notes-button" type="button" title="Speaker notes (N)">Notes</button>'
-            f'<button id="fullscreen" type="button" title="Fullscreen (F)">Fullscreen</button></div></header>'
+            f'<button id="fullscreen" type="button" title="Fullscreen (F)">Fullscreen</button>'
+            f'</div></header>'
             f'<main class="presentation" id="presentation">{sections}</main>'
             f'<div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>'
             f'<aside class="notes-panel" id="notes-panel" hidden><h3>Presenter notes · <span id="notes-title"></span></h3>'
             f'<p id="notes-text"></p><p class="notes-sources" id="notes-sources"></p></aside>'
-            f'<p class="shortcut-hint">← / → navigate · Space play/pause · N notes · F fullscreen</p>'
+            f'<p class="shortcut-hint">Click / → / Space: next beat · ← back · Shift+←/→: slide · R: replay beat · N notes</p>'
+            f'<script type="application/json" id="step-data">{steps_json}</script>'
             f'<script type="application/json" id="video-data">{video_json}</script>'
             f'<script type="application/json" id="notes-data">{notes_json}</script>'
             f'<script>{js}</script></body></html>')

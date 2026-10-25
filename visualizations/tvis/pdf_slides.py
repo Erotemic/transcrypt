@@ -162,7 +162,7 @@ def _bullet_list(c, points, x, top, width, colors, fonts, *, size=12, gap=9,
 
 
 def _page(c, slide: Slide, number: int, total: int, theme: str, video_present: bool,
-          colors: dict, fonts):
+          colors: dict, fonts, html_name: str):
     regular, bold = fonts
     c.setFillColor(_color(colors['background'])); c.rect(0,0,PAGE_W,PAGE_H,fill=1,stroke=0)
     c.setStrokeColor(_color(colors['surface_soft'])); c.setLineWidth(1.0)
@@ -175,7 +175,7 @@ def _page(c, slide: Slide, number: int, total: int, theme: str, video_present: b
               color=colors['guest'],bg=colors['surface_soft'],max_w=260,size=9)
         # Local relative URL works when the PDF and index.html are hosted in
         # the same directory. Some file:// PDF viewers block local URI opens.
-        c.linkURL(f'index.html#slide-{slide.id}',(606,9,879,35),relative=0)
+        c.linkURL(f'{html_name}#slide-{slide.id}',(606,9,879,35),relative=0)
     if slide.layout=='cover':
         c.setFillColor(_color(colors['guest'])); c.setFont(bold, 12)
         c.drawString(49,458,slide.kicker)
@@ -218,7 +218,7 @@ def _page(c, slide: Slide, number: int, total: int, theme: str, video_present: b
 
 
 def render_pdf(deck: SlideDeck, target: Path, *, theme: str='dark',
-               video_scenes: set[str] | None=None) -> Path:
+               video_scenes: set[str] | None=None, html_name: str='index.html') -> Path:
     """Generate a paged, static PDF from same evidence plans and slide layout."""
     try:
         from reportlab.pdfgen.canvas import Canvas
@@ -232,7 +232,7 @@ def render_pdf(deck: SlideDeck, target: Path, *, theme: str='dark',
     c.setAuthor('Transcrypt visualizations')
     c.setSubject('Static presentation companion; videos play in adjacent HTML')
     for i,slide in enumerate(deck.slides,1):
-        _page(c,slide,i,len(deck.slides),theme,slide.scene.id in (video_scenes or set()),colors,fonts)
+        _page(c,slide,i,len(deck.slides),theme,slide.scene.id in (video_scenes or set()),colors,fonts,html_name)
         c.showPage()
     c.save()
     return target

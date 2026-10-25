@@ -26,7 +26,8 @@ BUILD = VIS_ROOT / '.build'
 
 def render_command(scene_id: str, *, quality: str = 'l', still: bool = False,
                    theme: str = 'dark', speed: float = 1.0,
-                   animation: str | None = None, open_result: bool = False) -> tuple[list[str], dict[str, str]]:
+                   animation: str | None = None, open_result: bool = False,
+                   no_cache: bool = False, save_sections: bool = False) -> tuple[list[str], dict[str, str]]:
     """Return command data; no shell interpolation and no ambient Manim import."""
     scene = get_scene(scene_id)
     if quality not in {'l', 'm', 'h', 'p'}:
@@ -41,9 +42,15 @@ def render_command(scene_id: str, *, quality: str = 'l', still: bool = False,
             raise ValueError('--animation must be N or N,M (zero-based Manim play indices)')
         if len(parts) == 2 and int(parts[1]) < int(parts[0]):
             raise ValueError('--animation end cannot precede start')
-    cmd = [sys.executable, '-m', 'manim', '-q'+quality, '--disable_caching',
+    cmd = [sys.executable, '-m', 'manim', '-q'+quality,
            '--media_dir', str(BUILD / 'media'),
            '-o', scene_id, scene.file, scene.class_name]
+    if save_sections:
+        if still or animation is not None:
+            raise ValueError('--save_sections requires a complete video render')
+        cmd.insert(3, '--save_sections')
+    if no_cache:
+        cmd.insert(3, '--disable_caching')
     if still:
         cmd.insert(3, '-s')
     if open_result:
@@ -56,11 +63,12 @@ def render_command(scene_id: str, *, quality: str = 'l', still: bool = False,
     return cmd, env
 
 
-def _render(args, *, scene_id: str | None = None) -> int:
+def _render(args, *, scene_id: str | None = None, save_sections: bool = False) -> int:
     scene_id = scene_id or args.scene
     cmd, env = render_command(scene_id, quality=args.quality, still=args.still,
                               theme=args.theme, speed=args.speed,
-                              animation=args.animation, open_result=args.open_result)
+                              animation=args.animation, open_result=args.open_result,
+                              no_cache=getattr(args, 'no_cache', False), save_sections=save_sections)
     print('$ '+shlex.join(cmd), flush=True)
     if args.dry_run:
         return 0
@@ -69,6 +77,27 @@ def _render(args, *, scene_id: str | None = None) -> int:
               'uv sync --extra manim --extra test', file=sys.stderr)
         return 2
     return subprocess.run(cmd, cwd=VIS_ROOT, env=env, check=False).returncode
+
+
+def _render_and_publish(args) -> int:
+    """Render one complete scene, or reuse its current clip, for HTML playback."""
+    if args.still or args.animation is not None:
+        raise ValueError('--publish requires a full video; use render without --publish for still/partial clips')
+    from tvis.presentation import publish_scene, find_manim_video
+
+    def render_one(scene_id: str) -> Path:
+        result = _render(args, scene_id=scene_id, save_sections=True)
+        if result:
+            raise RuntimeError(f'failed to render {scene_id} (exit code {result})')
+        return find_manim_video(scene_id, args.quality)
+
+    if args.dry_run:
+        return _render(args, save_sections=True)
+    target, changed = publish_scene(
+        args.scene, quality=args.quality, theme=args.theme, speed=args.speed,
+        force=args.force or args.open_result, render_scene=render_one)
+    print(('Updated' if changed else 'Reused') + f' video: {target}', flush=True)
+    return 0
 
 
 def _all(args) -> int:
@@ -80,11 +109,11 @@ def _all(args) -> int:
     if args.dry_run:
         _, scenes = load_catalog()
         for scene in scenes:
-            _render(args, scene_id=scene.id)
+            _render(args, scene_id=scene.id, save_sections=True)
         return 0
 
     def render_scene(scene_id: str) -> Path:
-        returncode = _render(args, scene_id=scene_id)
+        returncode = _render(args, scene_id=scene_id, save_sections=True)
         if returncode:
             raise RuntimeError(f'failed to render {scene_id} (exit code {returncode})')
         return find_manim_video(scene_id, args.quality)
@@ -98,7 +127,7 @@ def _all(args) -> int:
     print(f'Presentation: {output}', flush=True)
     from tvis.presentation import PRESENTATION
     if (PRESENTATION/'presentation.pdf').is_file() and args.format in {'pdf','both'}:
-        print(f'PDF presentation: {PRESENTATION / 'presentation.pdf'}', flush=True)
+        print(f"PDF presentation: {PRESENTATION / 'presentation.pdf'}", flush=True)
     if args.open_result:
         import webbrowser
         webbrowser.open(output.as_uri())
@@ -137,6 +166,11 @@ def make_parser() -> argparse.ArgumentParser:
     presentation.add_argument('--theme',choices=['dark','light'],default='dark')
     presentation.add_argument('--format',choices=['html','pdf','both'],default='both')
     presentation.add_argument('--embed-videos',action='store_true',help='also output standalone embedded.html with base64 MP4s')
+    subset = presentation.add_mutually_exclusive_group()
+    subset.add_argument('--scene', help='only slides for this scene ID')
+    subset.add_argument('--scenes', nargs='+', metavar='ID', help='only slides for these scene IDs')
+    subset.add_argument('--slide', help='only the named slide ID')
+    subset.add_argument('--slides', nargs='+', metavar='ID', help='only these slide IDs')
     preview = commands.add_parser('preview', help='instant SVG preview of any beat (no Manim)')
     preview.add_argument('scene', help='scene ID or all')
     preview.add_argument('--beat', default='last', help='zero-based number, named beat, or last')
@@ -157,8 +191,13 @@ def make_parser() -> argparse.ArgumentParser:
         cmd.add_argument('--animation', help='Manim play indices: N or N,M')
         cmd.add_argument('--open', dest='open_result', action='store_true', help='Manim -p (open local viewer)')
         cmd.add_argument('--dry-run', action='store_true', help='print command without rendering')
+        cmd.add_argument('--no-cache', action='store_true', help='disable Manim partial-movie caching')
+        if name == 'render':
+            cmd.add_argument('--publish', action='store_true',
+                             help='stage one full scene in the HTML deck and reuse if unchanged')
+        if name in ('render', 'all'):
+            cmd.add_argument('--force', action='store_true', help='render even if the staged clip is current')
         if name == 'all':
-            cmd.add_argument('--force', action='store_true', help='rerender every Manim scene')
             cmd.add_argument('--format', choices=['html','pdf','both'], default='both', help='slide presentation export formats')
             cmd.add_argument('--embed-videos', action='store_true', help='also generate fully self-contained embedded.html')
         if name == 'watch':
@@ -209,12 +248,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == 'present':
             from tvis.presentation import export_presentation
-            paths=export_presentation(theme=args.theme,formats=args.format,embed_videos=args.embed_videos)
+            scene_ids = (args.scene,) if args.scene else tuple(args.scenes or ())
+            slide_ids = (args.slide,) if args.slide else tuple(args.slides or ())
+            paths=export_presentation(theme=args.theme,formats=args.format,
+                                      embed_videos=args.embed_videos,
+                                      scene_ids=scene_ids, slide_ids=slide_ids)
             for kind,path in paths.items():
                 print(f'{kind}: {path}')
             return 0
         if args.action == 'render':
-            return _render(args)
+            return _render_and_publish(args) if args.publish else _render(args)
         if args.action == 'all':
             return _all(args)
         if args.action == 'deck':

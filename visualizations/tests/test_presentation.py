@@ -24,17 +24,24 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(next(s for s in deck.slides if s.id=='unlock').active_operation,
                          'store')
 
-    def test_self_contained_html_with_embedded_clip_and_source_notes(self):
+    def test_beat_slideshow_and_embedded_segment_clips(self):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)
-            sample=path/'clean.mp4'
-            data=b'fake-mp4-bytes-for-tests-only'
+            sample=path/'clean-0.mp4'
+            data=b'fake-section-mp4-bytes-for-tests-only'
             sample.write_bytes(data)
             deck=load_slides()
-            html_file=render_html(deck,path/'embedded.html',videos={'clean':sample},embed_videos=True)
+            clean = next(s for s in deck.slides if s.id=='clean')
+            self.assertGreater(len(clean.beat_names),2)
+            intro = next(s for s in deck.slides if s.id=='intro')
+            self.assertEqual(len(intro.beat_names),1)
+            html_file=render_html(deck,path/'embedded.html',
+                                  segments={'clean':{clean.beat_names[0]:sample}},
+                                  embed_videos=True)
             html=html_file.read_text()
             self.assertIn('data:video/mp4;base64,' + base64.b64encode(data).decode(),html)
-            self.assertIn('data-scene="clean"',html)
+            self.assertIn('id="step-data"',html)
+            self.assertIn('id="video-data"',html)
             self.assertIn('class="scene-video"',html)
             self.assertIn('layout-cinema',html)
             self.assertIn('layout-evidence',html)
@@ -43,6 +50,9 @@ class PresentationTests(unittest.TestCase):
             self.assertIn('TRUSTED: CRYPTO',html)
             self.assertIn('requestFullscreen',html)
             self.assertIn('ArrowRight',html)
+            self.assertIn('event.code === \'Space\'',html)
+            self.assertIn('next beat',html)
+            self.assertNotIn(' controls playsinline',html)
             self.assertNotIn('https://',html)
             self.assertNotIn('http://',html)
             self.assertNotIn('file://',html)
@@ -51,16 +61,19 @@ class PresentationTests(unittest.TestCase):
             self.assertIn('open_record_spec',notes)
             self.assertIn('Realizes',notes)
 
-    def test_html_sidecars_and_missing_media_degrade_to_exact_diagram(self):
+    def test_html_sidecars_and_missing_media_keep_clickable_svg_steps(self):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)
             videos=path/'videos'; videos.mkdir()
-            (videos/'clone.mp4').write_bytes(b'video-data')
+            sample=videos/'clone-beat.mp4'; sample.write_bytes(b'video-data')
             deck=load_slides()
-            html=render_html(deck,path/'index.html',videos={'clone':videos/'clone.mp4'}).read_text()
-            self.assertIn('videos/clone.mp4',html)
-            self.assertIn('Static beat · render Manim to enable motion',html)
+            clone = next(s for s in deck.slides if s.id=='clone')
+            html=render_html(deck,path/'index.html',
+                             segments={'clone':{clone.beat_names[0]:sample}}).read_text()
+            self.assertIn('videos/clone-beat.mp4',html)
+            self.assertIn('SVG beat snapshots',html)
             self.assertIn('data:image/svg+xml;base64,',html)
+            self.assertIn('data-role="beat-caption"',html)
             self.assertNotIn('data:video/mp4;base64,',html)
             self.assertIn('data-slide-id="trust-boundary"',html)
 
