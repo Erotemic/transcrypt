@@ -80,6 +80,8 @@ well with live narration or a separately recorded TTS track.
 | `record` | Exact 22-byte header, SIV tag and content | codec proof + crypto assumption |
 | `clone` | Clone, authenticated unlock and hydration | proof + native-effects assumption |
 | `attack` | Changed, misplaced or misbound records | conditional protocol proof |
+| `inventory` | **Named production Rust functions actually proved** versus lifecycle models | 3 source-derived groups + model |
+| `contract` | **Worked `open_record_spec` theorem:** Ok, Authentication failure, other refusals, and `Realizes` premise | conditional source-derived proof |
 | `proof` | Rust -> Charon/Aeneas -> Lean vs independent specification | proof and translation assumption |
 | `lifecycle` | Proved plan models are not verified native file writes | model proof + A4 |
 | `assumptions` | A1/A2 versus A3/A4/A5/A7/A8/A9/A10/A13/A14 | explicit boundary |
@@ -100,6 +102,11 @@ outside that proof; `DESIGN GOAL` to future functionality. In particular:
 - The illustrated baseline still restricts protection to `*.secret` and uses
   an in-memory agent. Arbitrary Git patterns and persistent local unlock are
   **vision** scenes, not completed implementation claims.
+
+For a **complete named inventory** and a worked theorem translated into plain English,
+read [`PROOF-ATLAS.md`](PROOF-ATLAS.md). The video now has dedicated
+`inventory` and `contract` scenes instead of relying on a generic
+"formally verified" label.
 
 All canonical facts and caveats are in
 `../docs/verification/V3-PROOF-COVERAGE.md`,

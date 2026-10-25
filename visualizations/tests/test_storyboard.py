@@ -17,7 +17,7 @@ from tvis.svg_preview import CANVAS_W, CANVAS_H, render_svg
 
 
 IDS = ('legend', 'selection', 'clean', 'record', 'clone', 'attack',
-       'proof', 'lifecycle', 'assumptions', 'offline', 'roadmap')
+       'inventory', 'contract', 'proof', 'lifecycle', 'assumptions', 'offline', 'roadmap')
 
 
 class StoryboardTests(unittest.TestCase):
@@ -83,6 +83,24 @@ class StoryboardTests(unittest.TestCase):
         self.assertIn('open_record_spec', proof_scene.proof_anchors)
         self.assertTrue(any('Realizes' in s.narration for s in validate_catalog()))
         self.assertTrue(any(b.status == 'modeled' for b in get_scene('lifecycle').diagram().beats))
+
+    def test_inventory_does_not_conflate_source_proofs_and_adapter_models(self):
+        inventory = get_scene('inventory')
+        self.assertTrue({'encode_file_header_refines', 'open_record_spec',
+                         'hydratePlan_spec', 'decode_pkt_len_spec'} <= set(inventory.proof_anchors))
+        nodes = inventory.diagram().node_map()
+        self.assertEqual(nodes['codec'].role, 'proved')
+        self.assertEqual(nodes['crypto'].role, 'proved')
+        self.assertEqual(nodes['lifecycle'].role, 'policy')
+        self.assertEqual(inventory.diagram().beats[-1].status, 'modeled')
+        contract = get_scene('contract')
+        self.assertIn('Realizes', contract.narration)
+        self.assertEqual(contract.diagram().node_map()['primitive'].role, 'assumed')
+        self.assertTrue(any(b.status == 'assumed' for b in contract.diagram().beats))
+        atlas = (VIS_ROOT/'PROOF-ATLAS.md').read_text()
+        self.assertIn('open_record_spec', atlas)
+        self.assertIn('A4', atlas)
+        self.assertIn('A5', atlas)
 
     def test_record_xray_reveals_bytes_and_never_a_public_key(self):
         p = get_scene('record').diagram()

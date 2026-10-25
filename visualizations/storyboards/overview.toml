@@ -73,6 +73,28 @@ sources = ["proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verificat
 proof_anchors = ["open_record_spec", "open_record_complete"]
 
 [[scene]]
+id = "inventory"
+file = "tvis/scenes/inventory.py"
+class = "ProvenFunctionInventory"
+plan = "tvis.plans.inventory"
+status = "source-derived-proof"
+claim = "Concrete inventory of proved production Rust codecs, protocol decisions and parsers, distinguished from Lean-only lifecycle models."
+narration = "What exactly has been formalized? Not the whole application. First, the actual Rust implementation of the fifty five byte config codec and twenty two byte file header codec has full refinement theorems covering arbitrary fields, correct length and magic handling, and round trips. Second, actual Rust functions that parse staged Git index entries, check canonical currently dot secret paths, validate object identifiers, interpret Git attribute replies, decode filter packet lengths and agent message headers, and authorize agent requests have Lean theorems. Third, the actual Rust record sealing and opening functions are proved correct under the explicit Realizes contract on the external crypto primitives. Fourth, there are proofs about Lean models of hydrate, lock, verify index, and clean filtering. Those last models call proved core functions but are not translations of the Git and operating system adapter. The labels are intentionally different. If a slide tells you a complete Git checkout is green, that overstates the evidence. If a slide says RustCrypto is proved, it is wrong. Read the exact theorem names here, then compare the source in the proof atlas."
+sources = ["proofs/aeneas/v3/PROOF-STATUS.md", "proofs/aeneas/v3/V3Wire/Verification/Codec.lean", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "proofs/aeneas/v3/V3Wire/Verification/Path.lean", "proofs/aeneas/v3/V3Wire/Verification/Index.lean", "proofs/aeneas/v3/V3Wire/Verification/Pkt.lean", "proofs/aeneas/v3/V3Wire/Verification/Lifecycle.lean", "docs/verification/V3-PROOF-COVERAGE.md"]
+proof_anchors = ["encode_file_header_refines", "parse_index_entry_spec", "decode_pkt_len_spec", "open_record_spec", "hydratePlan_spec"]
+
+[[scene]]
+id = "contract"
+file = "tvis/scenes/contract.py"
+class = "OpenRecordContract"
+plan = "tvis.plans.contract"
+status = "source-derived-proof"
+claim = "Actual Aeneas-translated Rust open_record has a conditional Lean WP.spec theorem: success returns exactly authenticated bytes, authentication failure zeroes output, other refusals preserve output; Realizes is an external assumption."
+narration = "Let us look at a single theorem instead of vague statements about verification. The actual Rust function is open record, translated into Lean by Aeneas. The theorem is called open_record_spec, and its first explicit argument is h colon Realizes inst prims sigma. That is not a proved property of RustCrypto; it is a premise. The theorem covers every input of the stated types. If open record returns success, its output satisfies OpensTo for the exact configuration, pathname, and record supplied. If it returns Authentication error, it zeroes the output and proves the record was not an authentic sealing of any same length plaintext at this path. Other failure branches identify what was wrong and keep the output untouched. A full weakest precondition specification also excludes panics and divergence in the translated computation. What is not being proved? That AES SIV is unforgeable, that the RustCrypto code correctly realizes its abstract contract, that Git invokes the filter for every selected file, or that native filesystem operations follow the modeled plan. Those distinct premises are where future security analysis must concentrate."
+sources = ["proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "proofs/lean/Transcrypt/V3Policy.lean", "docs/verification/V3-ASSUMPTIONS.md", "proofs/aeneas/v3/PROOF-STATUS.md"]
+proof_anchors = ["open_record_spec", "open_record_complete"]
+
+[[scene]]
 id = "proof"
 file = "tvis/scenes/proof.py"
 class = "RustLeanRefinement"

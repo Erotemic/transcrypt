@@ -20,8 +20,8 @@ PLAN=Diagram(
              layer_focus='header',status='proved'),
         Beat('tag', 'The next 16 bytes carry the SIV tag; correctness of RustCrypto is an external contract.',
              layer_focus='tag',status='assumed'),
-        Beat('content', 'The remaining bytes are encrypted content; config and exact Git path are authenticated data.',
-             layer_focus='ciphertext',status='proved'),
+        Beat('content', 'The remaining bytes are specified encrypted payload; the crypto primitive must honor config and exact-path associated data.',
+             layer_focus='ciphertext',status='assumed'),
         Beat('public', 'The public observer receives the entire record, not the decryption key.',
              links=('publish',),packet='publish',packet_label='record bytes',status='implemented'),
     ), footer='Fields are concatenated on disk; the nested rectangles are successive explanatory zooms, not nested encryption.')
