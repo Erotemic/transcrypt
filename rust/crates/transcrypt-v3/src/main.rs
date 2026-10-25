@@ -36,10 +36,17 @@ fn run() -> Result<(), String> {
     // Git substitutes `%f` as a single shell-quoted argument. Preserve raw
     // Unix pathname bytes: env::args() would reject valid non-UTF8 Git paths.
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let action = args.first().and_then(|x| x.to_str()).ok_or(
-        "usage: transcrypt-v3 init|unlock|lock|clean <git-path>|smudge <git-path>|verify-index|hydrate")?;
+    let action = args.first().and_then(|x| x.to_str()).ok_or(USAGE)?;
+    if matches!(action, "help" | "--help" | "-h") {
+        println!("{HELP}");
+        return Ok(());
+    }
     let root = repo_root()?;
     match action {
+        "status" => {
+            if args.len() != 1 { return Err("status takes no arguments".into()); }
+            status(&root)
+        },
         "init" | "unlock" => {
             if args.len() > 2 || (args.len() == 2 && args[1].to_str() != Some("--password-stdin")) {
                 return Err("init/unlock accept only optional --password-stdin".into());
@@ -61,8 +68,82 @@ fn run() -> Result<(), String> {
                 _ => unreachable!(),
             }
         },
-        _ => Err("unknown v3 operation".into()),
+        _ => Err(format!("unknown v3 operation; {USAGE}")),
     }
+}
+
+const USAGE: &str = "usage: transcrypt-v3 init|unlock|hydrate|status|verify-index|lock|help \
+    (clean/smudge <git-path> are invoked by Git)";
+
+const HELP: &str = "\
+transcrypt-v3: authenticated, path-bound encryption of *.secret files in Git.
+
+Typical workflow
+  transcrypt-v3 init        create .transcrypt/config, filters and hook; then commit
+                            .transcrypt/config and .gitattributes
+  transcrypt-v3 unlock      authenticate the passphrase and start the in-memory key agent
+  transcrypt-v3 hydrate     decrypt the staged *.secret files into the worktree
+                            (needed once after cloning or unlocking a locked checkout)
+  transcrypt-v3 status      show lock state and each protected file's worktree state
+  transcrypt-v3 verify-index
+                            check every staged *.secret is ciphertext for its own path
+                            (also run by the installed pre-commit hook)
+  transcrypt-v3 lock        replace plaintext by the committed ciphertext and stop the agent;
+                            refuses if any protected file has uncommitted changes
+
+Options
+  --password-stdin          (init, unlock) read the passphrase from stdin instead of the terminal
+
+Files matching *.secret are encrypted with AES-256-SIV under a key derived by
+Argon2id; each record is bound to the repository config and its exact Git path.
+Renaming a protected file re-encrypts it. Equal plaintexts at the same path give
+equal ciphertexts. See docs/verification/V3-USER-GUIDE.md.";
+
+/// Read-only summary for users. Never decrypts unless the agent is live,
+/// and never writes to the worktree, index or credential directory.
+fn status(root: &Path) -> Result<(), String> {
+    let config = match load_config(root) {
+        Ok(config) => config,
+        Err(e) => {
+            println!("repository: not initialized for v3 ({e})");
+            return Ok(());
+        }
+    };
+    let unlocked = session::request(root, &config, Operation::Ping, &[], &[]).is_ok();
+    println!("repository: v3 config {}", hex(&transcrypt_v3::config_id(&config)[..4]));
+    println!("session:    {}", if unlocked { "unlocked (in-memory key agent running)" } else { "locked" });
+    let mut counts = [0usize; 4];
+    for (mode, path) in indexed_files(root)? {
+        if !protected_path(&path) { continue; }
+        let name = String::from_utf8_lossy(&path).into_owned();
+        let state = (|| -> Result<&str, String> {
+            if mode != b"100644" { return Ok("unsupported mode"); }
+            let object = git_show(root, &path)?;
+            let dest = require_regular_under(root, &indexed_path(&path)?)?;
+            let worktree = read_limited(fs::File::open(&dest).map_err(|_| "unreadable")?, MAX_RECORD)?;
+            if worktree == object { return Ok("ciphertext"); }
+            if !unlocked { return Ok("modified or plaintext"); }
+            let plaintext = session::request(root, &config, Operation::Decrypt, &path, &object)?;
+            Ok(if worktree == plaintext { "plaintext" } else { "modified" })
+        })().unwrap_or("error");
+        counts[match state { "ciphertext" => 0, "plaintext" => 1, "modified" | "modified or plaintext" => 2, _ => 3 }] += 1;
+        println!("  {state:<22} {name}");
+    }
+    println!("protected:  {} ciphertext, {} plaintext, {} modified, {} other",
+        counts[0], counts[1], counts[2], counts[3]);
+    let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let loose = untracked.split(|b| *b == 0).filter(|p| protected_path(p)).count();
+    if loose > 0 {
+        println!("warning:    {loose} untracked *.secret file(s); `git add` them or lock will refuse");
+    }
+    if unlocked && counts[0] > 0 {
+        println!("hint:       run `transcrypt-v3 hydrate` to decrypt ciphertext in the worktree");
+    }
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn output(mut command: Command) -> Result<Vec<u8>, String> {

@@ -256,3 +256,25 @@ fn foreign_truncated_and_plaintext_index_entries_fail_closed() {
     fs::remove_file(repo.join("copy.secret")).unwrap();
     run(&repo, bin(), &["verify-index"], None);
 }
+
+#[test]
+fn help_and_status_report_state_without_changing_anything() {
+    let mut scratch = Scratch::new("status");
+    let help = String::from_utf8(run(&scratch.root, bin(), &["help"], None)).unwrap();
+    assert!(help.contains("transcrypt-v3 unlock") && help.contains("*.secret"));
+    let repo = scratch.repo("repo");
+    let text = |repo: &Path| String::from_utf8(run(repo, bin(), &["status"], None)).unwrap();
+    let unlocked = text(&repo);
+    assert!(unlocked.contains("session:    unlocked"), "{unlocked}");
+    assert!(unlocked.contains("2 plaintext"), "{unlocked}");
+    fs::write(repo.join("a.secret"), b"edited\n").unwrap();
+    fs::write(repo.join("new.secret"), b"untracked\n").unwrap();
+    let edited = text(&repo);
+    assert!(edited.contains("modified") && edited.contains("1 untracked"), "{edited}");
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"edited\n", "status is read-only");
+    fs::remove_file(repo.join("new.secret")).unwrap();
+    fs::write(repo.join("a.secret"), b"alpha plaintext\n").unwrap();
+    run(&repo, bin(), &["lock"], None);
+    let locked = text(&repo);
+    assert!(locked.contains("session:    locked") && locked.contains("2 ciphertext"), "{locked}");
+}

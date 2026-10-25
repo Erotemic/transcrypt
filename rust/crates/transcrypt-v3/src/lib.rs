@@ -253,4 +253,56 @@ mod tests {
         assert!(validate_protected_path(&std::vec![b'x'; MAX_PATH + 1]).is_err());
     }
 
+
+    /// Each clause of the Lean `Realizes` contract (assumption A5) checked
+    /// directly on the production `Keyed` primitive, over many lengths,
+    /// paths and single-bit tamperings. Byte-exactness against an
+    /// independent implementation is covered by `tests/v3_vectors.rs`.
+    #[test]
+    fn keyed_satisfies_the_realizes_contract() {
+        let (config, key) = fixture();
+        let keyed = Keyed::new(&key);
+        let config: [u8; CONFIG_LEN] = config;
+        // seal_config / open_config agree, and the stored tag is the seal.
+        let prefix: [u8; CONFIG_PREFIX_LEN] = config[..CONFIG_PREFIX_LEN].try_into().unwrap();
+        let mut tag = [0u8; TAG_LEN];
+        assert!(keyed.seal_config(&prefix, &mut tag));
+        assert_eq!(&tag[..], &config[CONFIG_PREFIX_LEN..]);
+        assert!(keyed.open_config(&prefix, &tag));
+        for bit in 0..(TAG_LEN * 8) {
+            let mut bad = tag;
+            bad[bit / 8] ^= 1 << (bit % 8);
+            assert!(!keyed.open_config(&prefix, &bad));
+        }
+        // config_id is the keyless SHA-256 truncation.
+        assert_eq!(keyed.config_id(&config), Sha256::digest(config)[..ID_LEN]);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+        for len in [0usize, 1, 15, 16, 17, 255, 1000] {
+            let pt: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            let path = format!("d{}/f.secret", next() % 7);
+            let mut sealed = vec![0u8; len + TAG_LEN];
+            assert!(keyed.seal_file(&config, path.as_bytes(), &pt, &mut sealed));
+            assert_eq!(sealed.len(), len + TAG_LEN, "length preserved");
+            // Completeness: a genuine sealing of a right-sized plaintext opens to it.
+            let mut out = vec![0xaau8; len];
+            assert!(keyed.open_file(&config, path.as_bytes(), &sealed, &mut out));
+            assert_eq!(out, pt);
+            // Soundness: wrong output size, wrong path or config, or any tampering fails.
+            assert!(!keyed.open_file(&config, path.as_bytes(), &sealed, &mut vec![0u8; len + 1]));
+            assert!(!keyed.seal_file(&config, path.as_bytes(), &pt, &mut vec![0u8; len + TAG_LEN + 1]));
+            assert!(!keyed.open_file(&config, b"other.secret", &sealed, &mut out));
+            let mut other = config;
+            other[CONFIG_LEN - 1] ^= 1;
+            assert!(!keyed.open_file(&other, path.as_bytes(), &sealed, &mut out));
+            let flip = (next() as usize) % (sealed.len() * 8);
+            let mut tampered = sealed.clone();
+            tampered[flip / 8] ^= 1 << (flip % 8);
+            assert!(!keyed.open_file(&config, path.as_bytes(), &tampered, &mut out));
+            // Determinism: the same inputs seal to the same bytes.
+            let mut again = vec![0u8; len + TAG_LEN];
+            assert!(keyed.seal_file(&config, path.as_bytes(), &pt, &mut again));
+            assert_eq!(again, sealed);
+        }
+    }
 }
