@@ -499,6 +499,10 @@ one.
 - **Evidence:** TESTED on Git 2.43 (CI 2.34) through every selection test;
   the temporary-index technique works in bare repositories (server hook
   tests).
+- **Hardening:** v3 runs its attribute queries with
+  `core.ignorecase=false`, so selection never depends on the file system;
+  while a v3 config exists, the top-level `.gitattributes` must define the
+  `transcrypt` macro (hook, audit, doctor).
 - **Residual (ACCEPTED):** local override files apply only locally: a
   `filter` rule in `.git/info/attributes` or the global attributes file can
   unprotect a file in this checkout, so local checks pass while a server

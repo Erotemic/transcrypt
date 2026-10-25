@@ -317,6 +317,10 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 - **Sparse checkouts and submodules.** A sparse checkout may leave out
   `.transcrypt/`; the staged config is used. Submodules have their own
   `.gitattributes`: run `init`/`protect` inside them.
+- **Keep the macro.** The top-level `.gitattributes` must keep the
+  `[attr]transcrypt …` line while the repository uses v3; the hook and the
+  audit refuse commits without it. Patterns match case-sensitively on every
+  system: write them with the files' exact case.
 - **Hunk selection treats protected files as binary.** `git add -p`,
   `git checkout -p` and `git stash -p` work on Git's internal form of a
   file, which is the ciphertext. Stage protected files whole.

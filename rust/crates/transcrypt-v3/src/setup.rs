@@ -9,7 +9,8 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
-use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+use std::os::unix::{ffi::OsStrExt, fs::{OpenOptionsExt, PermissionsExt}};
+use zeroize::Zeroizing;
 use transcrypt_v3::{initialize_config, unlock_config, SecretKey};
 use transcrypt_v3_core::{parse_file_header, SALT_LEN};
 use crate::{
@@ -27,7 +28,12 @@ pub(crate) const HOOKS_BYPASSED: &str = "core.hooksPath is set, so Git does not 
 /// Whether Git is configured to run hooks from somewhere other than
 /// `.git/hooks`, where v3 installs its checks.
 pub(crate) fn hooks_bypassed(root: &Path) -> bool {
-    git(root, &["config", "core.hooksPath"]).map(|v| !v.trim_ascii().is_empty()).unwrap_or(false)
+    let Ok(value) = git(root, &["config", "--path", "core.hooksPath"]) else { return false };
+    let value = String::from_utf8_lossy(&value).trim().to_owned();
+    if value.is_empty() { return false; }
+    let configured = root.join(&value);
+    let ours = common_dir(root).join("hooks");
+    configured.canonicalize().ok() != ours.canonicalize().ok()
 }
 
 fn shell_quote(text: &str) -> String {
@@ -58,7 +64,7 @@ fn expected_config() -> Result<[(&'static str, String); 7], String> {
 /// encrypted (`filter`), diffed and merged decrypted (`diff`, `merge`, local
 /// drivers; a checkout without them sees binary files), and never
 /// line-ending converted (`-text`: Git would convert the ciphertext).
-const MACRO: &[u8] = b"[attr]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text";
+pub(crate) const MACRO: &[u8] = b"[attr]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text";
 const MACRO_COMMENT: &[u8] = b"# transcrypt-v3: files matching a pattern marked `transcrypt` are encrypted in Git";
 /// The local attribute line that older versions wrote to
 /// `.git/info/attributes`; the macro replaces it.
@@ -110,10 +116,27 @@ fn hook_script(command: &str) -> Result<String, String> {
 /// then rewrites it for this binary).
 fn ours(name: &str, command: &str, text: &str) -> bool {
     let legacy = if name == "pre-commit" { Some("verify-index") } else { None };
-    let Some(line) = text.strip_prefix("#!/bin/sh\nexec '").and_then(|t| t.strip_suffix('\n')) else { return false };
-    let Some((path, rest)) = line.rsplit_once("' ") else { return false };
-    !path.contains('\n') && path.ends_with("transcrypt-v3")
-        && [Some(command), legacy].into_iter().flatten().any(|c| rest == c)
+    let Some(line) = text.strip_prefix("#!/bin/sh\nexec ").and_then(|t| t.strip_suffix('\n')) else { return false };
+    let Some((path, rest)) = shell_unquote(line) else { return false };
+    // The exact form v3 writes, for a binary named transcrypt-v3.
+    Path::new(&path).file_name().is_some_and(|n| n == "transcrypt-v3")
+        && [Some(command), legacy].into_iter().flatten()
+            .any(|c| rest == c && line == format!("{} {c}", shell_quote(&path)))
+}
+
+/// Split `'quoted' rest` as `shell_quote` writes it (`'` inside as `'\''`).
+fn shell_unquote(line: &str) -> Option<(String, &str)> {
+    let mut path = String::new();
+    let mut rest = line.strip_prefix('\'')?;
+    loop {
+        let end = rest.find('\'')?;
+        path.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix("\\''") {
+            Some(more) => { path.push('\''); rest = more; },
+            None => return Some((path, rest.strip_prefix(' ')?)),
+        }
+    }
 }
 
 fn hook_path(root: &Path, name: &str) -> PathBuf {
@@ -144,7 +167,12 @@ fn install_hooks(root: &Path) -> Result<(), String> {
         let path = hook_path(root, name);
         let script = hook_script(command)?;
         if let Ok(text) = fs::read_to_string(&path) {
-            if text == script { continue; }
+            if text == script {
+                // Git skips a hook that is not executable.
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                    .map_err(|e| format!("cannot make the {name} hook executable: {e}"))?;
+                continue;
+            }
             if !ours(name, command, &text) { continue; }
             fs::remove_file(&path).map_err(|e| format!("cannot replace the {name} hook: {e}"))?;
         } else if fs::symlink_metadata(&path).is_ok() {
@@ -192,7 +220,7 @@ fn activate(root: &Path, config: &[u8], key: &SecretKey, private: bool, idle: Op
 /// `.gitattributes`, filters and hooks, the key stored (or the private
 /// agent started), and then `protect` for each pattern.
 pub(crate) fn init(root: &Path, options: &Options) -> Result<(), String> {
-    let rollback = init_with_rollback(root, options)?;
+    let rollback = init_with_rollback(root, options, None)?;
     if !options.patterns.is_empty() {
         if let Err(e) = protect(root, &options.patterns) {
             rollback.run();
@@ -247,12 +275,15 @@ impl Rollback {
 
 /// Initialize (without protecting anything yet); on failure everything is
 /// rolled back, on success the caller gets the rollback for later steps.
-pub(crate) fn init_with_rollback(root: &Path, options: &Options) -> Result<Rollback, String> {
+pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Option<Zeroizing<Vec<u8>>>)
+    -> Result<Rollback, String>
+{
     if fs::symlink_metadata(root.join(".transcrypt")).is_ok() {
         return Err(".transcrypt already exists: this repository is set up; run `transcrypt-v3 unlock`".into());
     }
     check_hook_available(root)?;
-    let password = passphrase(options.password_stdin, true)?;
+    // Asked before anything is written: an interrupted prompt changes nothing.
+    let password = match password { Some(p) => p, None => passphrase(options.password_stdin, true)? };
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
     let (config, key) = initialize_config(&password, &salt)?;
@@ -266,7 +297,7 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options) -> Result<Rollb
     let staging = staging_dir(root)?;
     let result = (|| -> Result<(), String> {
         write_repository_file(root, &staging, Path::new(".transcrypt/config"), &config)?;
-        edit_attributes(root, &staging, |_| Ok(()))?;
+        edit_attributes(root, &staging, true, |_| Ok(()))?;
         install_filters(root)?;
         install_hooks(root)?;
         activate(root, &config, &key, options.private, options.timeout)?;
@@ -390,6 +421,19 @@ fn check_selects(root: &Path, patterns: &[Vec<u8>]) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether an attributes file defines v3's own `transcrypt` macro. While a
+/// v3 config exists, the top-level `.gitattributes` must: without it, every
+/// `PATTERN transcrypt` rule silently selects nothing (a file overwritten,
+/// deleted, or taken from a branch made before `init`).
+pub(crate) fn defines_our_macro(text: &[u8]) -> bool {
+    text.split(|b| *b == b'\n').any(|line| line.trim_ascii() == MACRO)
+}
+
+/// The error for a missing macro.
+pub(crate) const MACRO_MISSING: &str = "the top-level .gitattributes no longer defines the `transcrypt` macro, \
+    so files marked `transcrypt` would be stored unencrypted; restore it (`transcrypt-v3 protect` with any \
+    of your patterns re-adds it), or remove .transcrypt/ to stop using v3";
+
 /// Whether an attribute line defines the `transcrypt` macro.
 fn defines_macro(line: &[u8]) -> bool {
     let line = line.trim_ascii();
@@ -413,7 +457,7 @@ pub(crate) fn macro_disabled(root: &Path) -> Result<Option<String>, String> {
         request.push(0);
     }
     if entries.is_empty() { return Ok(None); }
-    let response = git_with_input(root, &["check-attr", "--cached", "-z", "--stdin", "transcrypt"], &request)?;
+    let response = git_with_input(root, &["-c", "core.ignorecase=false", "check-attr", "--cached", "-z", "--stdin", "transcrypt"], &request)?;
     let marked = response.split(|b| *b == 0).collect::<Vec<_>>().chunks(3)
         .any(|r| r.len() == 3 && r[1] == b"transcrypt" && r[2] == b"set");
     if !marked { return Ok(None); }
@@ -445,7 +489,7 @@ type Line = Vec<u8>;
 
 /// Rewrite the top-level `.gitattributes` through `edit` (after making
 /// sure it defines the `transcrypt` macro), write it safely and stage it.
-fn edit_attributes(root: &Path, staging: &Staging, edit: impl FnOnce(&mut Vec<Line>) -> Result<(), String>)
+fn edit_attributes(root: &Path, staging: &Staging, stage: bool, edit: impl FnOnce(&mut Vec<Line>) -> Result<(), String>)
     -> Result<(), String>
 {
     let existing = find_protected(root, Path::new(".gitattributes"))?
@@ -481,6 +525,7 @@ fn edit_attributes(root: &Path, staging: &Staging, edit: impl FnOnce(&mut Vec<Li
                 use a narrower pattern", String::from_utf8_lossy(path)));
         }
     }
+    if !stage { return Ok(()); }
     git(root, &["add", "--", ".gitattributes"]).map(|_| ())
 }
 
@@ -526,7 +571,7 @@ pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> 
     let undo = AttributesUndo::capture(root)?;
     let result = (|| -> Result<(), String> {
         let staging = staging_dir(root)?;
-        edit_attributes(root, &staging, |existing| {
+        edit_attributes(root, &staging, true, |existing| {
             for line in lines {
                 if !existing.contains(&line) { existing.push(line); }
             }
@@ -568,7 +613,7 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
     let undo = AttributesUndo::capture(root)?;
     let result = (|| -> Result<Vec<Vec<u8>>, String> {
         let staging = staging_dir(root)?;
-        edit_attributes(root, &staging, |existing| {
+        edit_attributes(root, &staging, false, |existing| {
             for line in &lines {
                 let n = existing.len();
                 existing.retain(|l| l != line);
@@ -579,7 +624,11 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
             }
             Ok(())
         })?;
-        let still: Vec<Vec<u8>> = staged_protected(root, indexed_files(root)?)?.into_iter().map(|e| e.path).collect();
+        // The new rules are in the worktree only; the index (rules included)
+        // changes in one update at the end, so an interruption never leaves
+        // the rule removed while the records are still staged.
+        let still: Vec<Vec<u8>> = protected_entries(root, indexed_files(root)?, Attributes::Worktree)?
+            .into_iter().map(|e| e.path).collect();
         // Decrypt everything before changing any file or index entry.
         let mut released = Vec::new();
         for staged in before.into_iter().filter(|e| !still.contains(&e.path)) {
@@ -602,9 +651,9 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
             index_info.extend_from_slice(&staged.path);
             index_info.push(0);
         }
-        if !index_info.is_empty() {
-            git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
-        }
+        let rules = find_protected(root, Path::new(".gitattributes"))?.ok_or("missing .gitattributes")?.read()?.0;
+        index_info.extend_from_slice(format!("100644 {}\t.gitattributes\0", hash_object(root, &rules)?).as_bytes());
+        git_with_input(root, &["update-index", "-z", "--add", "--index-info"], &index_info)?;
         Ok(released.into_iter().map(|(staged, _)| staged.path).collect())
     })();
     let released = match result {
@@ -728,10 +777,23 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         content trusted under the current config:");
     for (staged, _, found) in &stale {
         let name = String::from_utf8_lossy(&staged.path).into_owned();
-        let origin = git(root, &["log", "-1", "--format=%h by %an: %s", "HEAD", "--", &name])
-            .map(|o| String::from_utf8_lossy(&o).trim().to_owned()).unwrap_or_default();
-        eprintln!("  {name} (config {}; last changed in {})", crate::hex(&found[..4]),
-            if origin.is_empty() { "the staged changes".to_owned() } else { origin });
+        // Where the staged blob came from: `HEAD`'s last change to the path
+        // only if `HEAD` has this very blob there; otherwise it is staged.
+        let in_head = blobs_at(root, &staged.path)?.contains(&staged.oid)
+            && git(root, &["rev-parse", "-q", "--verify", &format!("HEAD:{name}")])
+                .is_ok_and(|o| String::from_utf8_lossy(&o).trim() == staged.oid);
+        let origin = if in_head {
+            git(root, &["log", "-1", "--format=%h by %an: %s", "HEAD", "--", &name])
+                .map(|o| format!("committed in {}", String::from_utf8_lossy(&o).trim())).unwrap_or_default()
+        } else {
+            let pending: Vec<String> = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "REVERT_HEAD"].iter()
+                .filter_map(|r| git(root, &["log", "-1", "--format=%h by %an: %s", r]).ok()
+                    .map(|o| format!("{r} {}", String::from_utf8_lossy(&o).trim())))
+                .collect();
+            if pending.is_empty() { "staged, not committed: origin unknown".to_owned() }
+            else { format!("staged, not committed; in progress: {}", pending.join("; ")) }
+        };
+        eprintln!("  {name} (config {}; {origin})", crate::hex(&found[..4]));
     }
     if !options.yes {
         let confirmed = !options.password_stdin && rpassword::prompt_password("Type yes to continue: ")
@@ -870,7 +932,9 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         });
     }
     for (name, command) in HOOKS.into_iter().filter(|(name, _)| hook_required(name)) {
-        let installed = fs::read_to_string(hook_path(root, name)).ok() == hook_script(command).ok();
+        let path = hook_path(root, name);
+        let installed = fs::read_to_string(&path).ok() == hook_script(command).ok()
+            && fs::metadata(&path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
         report(installed, &format!("{name} hook installed"));
     }
     report(!hooks_bypassed(root), "Git runs the hooks in .git/hooks (core.hooksPath unset)");

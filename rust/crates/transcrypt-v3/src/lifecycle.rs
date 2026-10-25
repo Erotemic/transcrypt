@@ -57,7 +57,12 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
     let entries = parse_listing(&listing)?;
     match entries.iter().find(|e| e.path == b".transcrypt/config") {
         Some(e) if e.regular && git_blob(root, &e.oid)? == config => {},
-        _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree".into()),
+        _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree \
+            (an interrupted `rekey`? `git reset` undoes a staged rekey)".into()),
+    }
+    let top = entries.iter().find(|e| e.path == b".gitattributes" && e.regular);
+    if !top.map(|e| git_blob(root, &e.oid)).transpose()?.is_some_and(|text| crate::setup::defines_our_macro(&text)) {
+        return Err(crate::setup::MACRO_MISSING.into());
     }
     let head = head_files(root)?;
     let head_oid: HashMap<&[u8], &str> = head.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
@@ -77,8 +82,9 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
     for (path, oid) in changed.iter().filter(|(p, _)| !protected.iter().any(|e| e.path == *p)) {
         if is_record(oid)? {
             return Err(format!("{} holds an encrypted record but is not protected (moved to an unprotected \
-                name?): nothing would ever decrypt it there. Protect that name, move the file back, or \
-                stage its plaintext", String::from_utf8_lossy(path)));
+                name? or a pattern that matches it only case-insensitively: v3 matches case-sensitively, \
+                so write it with the file's exact case): nothing would ever decrypt it there. Protect that \
+                name, move the file back, or stage its plaintext", String::from_utf8_lossy(path)));
         }
         if head_oid.get(path.as_slice()).is_some_and(|old| is_record(old).unwrap_or(false)) {
             drifted.push(path);
@@ -88,6 +94,10 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
     // (`git lfs track` writing `filter=lfs`) silently lost its protection;
     // `unprotect` and `-filter` exclusions are deliberate and allowed.
     let values = filter_values(root, &drifted, Attributes::Staged)?;
+    for (path, value) in drifted.iter().zip(&values).filter(|(_, v)| !other_filter(v)) {
+        eprintln!("transcrypt-v3: note: {} was encrypted in HEAD and is now staged unencrypted (`filter` is {}): \
+            it is no longer selected by .gitattributes", String::from_utf8_lossy(path), String::from_utf8_lossy(value));
+    }
     if let Some((path, value)) = drifted.iter().zip(values).find(|(_, v)| other_filter(v)) {
         return Err(format!("{} was encrypted and would now be stored unencrypted for the filter `{}`: a \
             .gitattributes rule (e.g. from `git lfs track`) overrides `transcrypt`. Narrow that rule, or \

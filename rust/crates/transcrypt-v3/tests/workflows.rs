@@ -1014,3 +1014,71 @@ fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
     run(&repo, "git", &["sparse-checkout", "disable"], None);
 
 }
+
+/// Fifth review F1/F2/F3: a migration whose passphrase step fails changes
+/// nothing; losing the `transcrypt` macro (an overwritten `.gitattributes`)
+/// is refused by the hook and the audit; selection is case-sensitive on
+/// every clone, so a pattern matching only case-insensitively fails closed.
+#[test]
+fn interrupted_migration_lost_macro_and_case_sensitivity() {
+    let mut scratch = Scratch::new("review5");
+    let repo = scratch.git_repo("migrate");
+    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
+    fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    let hook = fs::read(repo.join(".git/hooks/pre-commit")).unwrap();
+    run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(b"short\n"));
+    assert_eq!(fs::read(repo.join(".gitattributes")).unwrap(), b"*.key filter=crypt diff=crypt merge=crypt\n");
+    assert_eq!(fs::read(repo.join(".git/hooks/pre-commit")).unwrap(), hook, "Bash hook untouched");
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+
+    let repo = scratch.git_repo("macro");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"S=1\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    fs::write(repo.join(".gitattributes"), b"*.png binary\n").unwrap();
+    let err = run_fails(&repo, "git", &["commit", "-qam", "clobber"], None);
+    assert!(err.contains("no longer defines the `transcrypt` macro"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-am", "clobber"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+    assert!(err.contains("no longer defines the `transcrypt` macro"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+
+    run(&repo, "git", &["config", "core.ignorecase", "true"], None);
+    fs::write(repo.join("PROD.ENV"), b"P=1\n").unwrap();
+    run(&repo, "git", &["add", "PROD.ENV"], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "upper"], None);
+    assert!(err.contains("PROD.ENV holds an encrypted record but is not protected") && err.contains("case"), "{err}");
+}
+
+/// Fifth review F5/F6: a foreign one-line hook that merely ends in
+/// `transcrypt-v3` is never taken for ours; a non-executable v3 hook is
+/// reported by `doctor` and repaired by `unlock`; a new passphrase must be
+/// one line.
+#[test]
+fn foreign_hooks_executable_bits_and_one_line_passphrases() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut scratch = Scratch::new("hooks5");
+    let repo = scratch.git_repo("repo");
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(b"long enough passphrase\n\n"));
+    assert!(err.contains("one line"), "{err}");
+    fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+    let foreign = "#!/bin/sh\nexec '/opt/ci/run-lint-and-transcrypt-v3' pre-commit\n";
+    fs::write(repo.join(".git/hooks/pre-commit"), foreign).unwrap();
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    assert!(err.contains("not the v3 hook"), "{err}");
+    assert_eq!(fs::read_to_string(repo.join(".git/hooks/pre-commit")).unwrap(), foreign);
+    fs::remove_file(repo.join(".git/hooks/pre-commit")).unwrap();
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    for hook in ["pre-commit", "pre-push"] {
+        fs::set_permissions(repo.join(".git/hooks").join(hook), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let out = String::from_utf8(exec(&repo, bin(), &["doctor"], None).stdout).unwrap();
+    assert!(out.contains("FAIL pre-commit hook installed"), "{out}");
+    run(&repo, bin(), &["unlock"], None);
+    assert!(exec(&repo, bin(), &["doctor"], None).status.success());
+}

@@ -861,6 +861,8 @@ fn doctor_detects_missing_protection() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL pre-push hook installed"));
     fs::write(&hook, saved).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
     for (key, value) in [("core.hooksPath", "/nonexistent"), ("filter.transcrypt-v3.process", "cat"),
                          ("filter.transcrypt-v3.required", "false")] {
         let original = exec(&repo, "git", &["config", key], None).stdout;

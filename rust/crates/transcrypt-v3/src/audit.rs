@@ -210,6 +210,14 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     // (`git lfs track` writing `filter=lfs`) silently lost its protection.
     let was_record: Vec<&Staged> = unprotected.iter().copied()
         .filter(|e| modified.iter().any(|(p, _)| *p == e.path)).collect();
+    // While a v3 config exists, the policy must define the `transcrypt`
+    // macro (checked when either changes).
+    if config_oid.is_some() && (config_changed || attributes_changed) {
+        let top = attributes.iter().find(|(p, _)| p == b".gitattributes");
+        if !top.map(|(_, oid)| git_blob(root, oid)).transpose()?.is_some_and(|t| crate::setup::defines_our_macro(&t)) {
+            return Err(format!("commit {commit}: {}", crate::setup::MACRO_MISSING));
+        }
+    }
     if protected.is_empty() && moved_away.is_empty() && was_record.is_empty() { return Ok(()); }
     if let Some(config_oid) = &config_oid {
         let id = transcrypt_v3::config_id(&git_blob(root, config_oid)?);

@@ -264,11 +264,14 @@ pub(crate) struct Filters<'a> {
     root: &'a Path,
     current: Option<(Vec<u8>, Option<Key>)>,
     stored: Option<Option<Key>>,
+    /// The staged config, when a sparse checkout leaves `.transcrypt/` out
+    /// of the worktree (the index does not change within a Git command).
+    staged_config: Option<Vec<u8>>,
 }
 
 impl<'a> Filters<'a> {
     pub(crate) fn new(root: &'a Path) -> Filters<'a> {
-        Filters { root, current: None, stored: None }
+        Filters { root, current: None, stored: None, staged_config: None }
     }
 
     /// One clean or smudge conversion of the file at `git_path`.
@@ -281,7 +284,12 @@ impl<'a> Filters<'a> {
                 String::from_utf8_lossy(git_path)));
         }
         transcrypt_v3::validate_protected_path(git_path)?;
-        let config = load_config(self.root)?;
+        let config = if fs::symlink_metadata(self.root.join(".transcrypt")).is_ok() {
+            load_config(self.root)?
+        } else {
+            if self.staged_config.is_none() { self.staged_config = Some(load_config(self.root)?); }
+            self.staged_config.clone().unwrap_or_default()
+        };
         if self.current.as_ref().map(|(c, _)| c) != Some(&config) {
             let key = Key::load(self.root, &config)?;
             self.current = Some((config, key));
@@ -536,5 +544,8 @@ pub(crate) fn passphrase(from_stdin: bool, new: bool) -> Result<Zeroizing<Vec<u8
         value
     };
     if bytes.len() < 16 { return Err("v3 requires a passphrase of at least 16 bytes".into()); }
+    if new && bytes.iter().any(|b| *b == b'\n' || *b == b'\r') {
+        return Err("a new passphrase must be one line (give it once on stdin)".into());
+    }
     Ok(bytes)
 }

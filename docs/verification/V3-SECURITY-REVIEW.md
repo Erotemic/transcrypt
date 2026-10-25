@@ -228,6 +228,34 @@ The reviewer's overall judgment is now part of the design rules:
 - **Least fragile:** the verified core, `lock`/`hydrate`, odd paths, and the
   audit and pre-receive hooks held up in every round.
 
+A fifth round found seven more. Its central observation was that each
+targeted fix had left a sibling path open, so two structural invariants now
+replace per-case checks:
+
+1. **Interruption fails closed.** Every refusal and every prompt comes
+   before the first write, and effects are ordered so that a kill at any
+   point leaves a state that still encrypts or that the hook refuses.
+2. **While a v3 config exists, the top-level `.gitattributes` defines the
+   `transcrypt` macro.** The hook, the audit and `doctor` enforce this.
+   Attribute queries also run with `core.ignorecase=false`, so every clone
+   selects the same files.
+
+| ID | Severity | Finding | Fix and evidence |
+| --- | --- | --- | --- |
+| H-58 | High (plaintext committed) | Ctrl-C at `migrate`'s passphrase prompt left the v2 rules rewritten (macro undefined, v3 not set up) and Bash's hook set aside, so the next commit was plaintext. | Invariant 1: the passphrase is read first, then Bash's hook is set aside, v3 is initialized, the rules are rewritten and the files re-encrypted. Test `interrupted_migration_lost_macro_and_case_sensitivity`. |
+| H-59 | Medium (plaintext committed) | Overwriting, deleting or merging away `.gitattributes` silently unprotected everything, and nothing warned. | Invariant 2, in the hook (refused) and the audit; the hook also notes every file that was encrypted in `HEAD` and is now staged unencrypted. Same test. |
+| H-60 | Medium (plaintext in mixed teams) | Selection depended on `core.ignorecase`: `PROD.ENV` matched `*.env` on macOS but not on Linux. | Case-sensitive attribute queries; a file Git encrypted but v3 does not select fails closed, with a hint about case. Same test. |
+| H-61 | Low–Medium (misleading trust decision) | `reencrypt` credited a staged blob to `HEAD`'s last commit. | Origin shown only when `HEAD` has that blob; otherwise "staged, not committed", naming any merge/pick/rebase in progress. |
+| H-62 | Low | A one-line foreign hook ending in `transcrypt-v3` was taken for ours. | Exact un-quoting and re-quoting of the path; the file name must be `transcrypt-v3`. Test `foreign_hooks_executable_bits_and_one_line_passphrases`. |
+| H-63 | Low (truthfulness; reopened H-35) | Non-executable v3 hooks counted as installed. | `doctor` checks the executable bit; `unlock` restores it. Same test. |
+| H-64 | Low | An interrupted `unprotect` could leave the rule removed while records stayed staged; an interrupted `rekey` gave wrong advice. | `unprotect` stages the rules and released files in one index update. The config-mismatch error suggests `git reset`. |
+
+Smaller:
+- The sparse-checkout config is read once per Git command, not per file
+  (16 s to fast for 1000 files).
+- A new passphrase must be one line.
+- `core.hooksPath` pointing at `.git/hooks` is no longer reported.
+
 Attack review of the new surface:
 - **Selection.** v3 never matches patterns. Git's answers are parsed by
   `parse_attr_record`, which is proved to accept exactly the requested

@@ -418,7 +418,9 @@ pub(crate) enum Attributes<'a> {
 /// files, macros, `.git/info/attributes`); the whole answer is parsed by the
 /// verified core (`parse_attr_response`), which requires the records to
 /// name exactly the requested paths, in order, and nothing else. Paths go to
-/// Git as raw bytes (`-z --stdin`), so any valid Unix name works.
+/// Git as raw bytes (`-z --stdin`), so any valid Unix name works. Patterns
+/// match case-sensitively (`core.ignorecase=false`) so that every clone, on
+/// every file system, selects the same files.
 pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<bool>, String> {
     if paths.is_empty() { return Ok(Vec::new()); }
     if paths.iter().any(|path| path.is_empty() || path.contains(&0)) {
@@ -430,7 +432,7 @@ pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) ->
         request.push(0);
     }
     let mut command = git_command(Some(root));
-    command.arg("check-attr");
+    command.args(["-c", "core.ignorecase=false", "check-attr"]);
     match from {
         Attributes::Staged => { command.arg("--cached"); },
         Attributes::Worktree => {},
@@ -458,7 +460,7 @@ pub(crate) fn filter_values(root: &Path, paths: &[&[u8]], from: Attributes) -> R
         request.push(0);
     }
     let mut command = git_command(Some(root));
-    command.arg("check-attr");
+    command.args(["-c", "core.ignorecase=false", "check-attr"]);
     match from {
         Attributes::Staged => { command.arg("--cached"); },
         Attributes::Worktree => {},
