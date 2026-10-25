@@ -42,6 +42,18 @@ def fullFileHeaderDecoderGoal
           (input.val.map (fun b => b.val)).take 6 != Transcrypt.V3Wire.fileMagic
       | core.result.Result.Err transcrypt_v3_core.FormatError.Length => False)
 
+/-- A bounded array write is read back at the same natural index.  This
+    isolates the only list rewrite required by the two identifier-loop proofs;
+    the proof never unfolds the 16/22-byte concrete array contents. -/
+private theorem read_after_set
+    {n : Aeneas.Std.Usize}
+    (xs : Aeneas.Std.Array Aeneas.Std.U8 n)
+    (pos : Aeneas.Std.Usize) (k : Nat) (x : Aeneas.Std.U8)
+    (hpos : pos.val = k) (hk : k < xs.length) :
+    (xs.set pos x).val[k]! = x := by
+  change (xs.val.set pos.val x)[k]! = x
+  exact List.set_getElem!_eq xs.val pos.val k x ⟨hk, hpos⟩
+
 /-- The production magic-byte loop advances and writes the expected byte at
     every in-range position. The `WP.spec` postcondition also rules out panic
     or divergence for that single step. -/
@@ -97,13 +109,15 @@ theorem extracted_header_id_step
   have hdst : 6 + j.val < out.length := by omega
   simp only [CoreModels.core.slice.Slice.len,
     CoreModels.rust_primitives.slice.slice_length]
-  -- Restrict the list simplifier to its safe rewrites: its full rule set
-  -- recursively expands the 22-byte array term in the final postcondition.
-  -- The fallback uses the precise Aeneas indexed-update lemma.
+  -- The terminal WP obligation is a single read-after-write equation.
+  -- Rewrite *only* the local symbolic-execution equalities: unlike
+  -- wildcard simplification, this cannot expand the concrete arrays recursively.
   step* by
-    first
-    | solve | simp_lists +safe [*]
-    | solve | grind [Aeneas.Std.Array.getElem!_Nat_set_eq]
+    simp_all only [] <;>
+      (first
+        | solve | (apply read_after_set <;> omega)
+        | solve | omega
+        | solve | agrind)
 
 /-- The generated file-header decoder's data-copy step extracts precisely
     the corresponding byte from an arbitrary fixed-width input record. -/
@@ -134,8 +148,10 @@ theorem extracted_header_decode_id_step
   simp only [CoreModels.core.slice.Slice.len,
     CoreModels.rust_primitives.slice.slice_length]
   step* by
-    first
-    | solve | simp_lists +safe [*]
-    | solve | grind [Aeneas.Std.Array.getElem!_Nat_set_eq]
+    simp_all only [] <;>
+      (first
+        | solve | (apply read_after_set <;> omega)
+        | solve | omega
+        | solve | agrind)
 
 end Transcrypt.V3Verification
