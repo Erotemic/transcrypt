@@ -273,4 +273,26 @@ theorem opensTo_envelopeOk (s : Suite) {config path record pt : List Nat}
   refine ⟨hlen, ?_⟩
   exact decode_file_header_encode _ _ (s.digest16_length config) (by simp [s.siv_length])
 
+/-! ## Git long-running filter protocol framing (local IPC with Git) -/
+
+/-- The value of a lowercase hexadecimal digit. -/
+def hexValue (c : Nat) : Option Nat :=
+  if 48 ≤ c ∧ c ≤ 57 then some (c - 48)
+  else if 97 ≤ c ∧ c ≤ 102 then some (c - 87)
+  else none
+
+/-- The largest pkt-line: 4 length digits and 65516 data bytes. -/
+def maxPktLen : Nat := 65520
+
+/-- A pkt-line header: four lowercase hexadecimal digits giving the total
+    packet length, big-endian. -/
+def PktLen (header : List Nat) (n : Nat) : Prop :=
+  ∃ d0 d1 d2 d3, header.map hexValue = [some d0, some d1, some d2, some d3] ∧
+    n = ((d0 * 16 + d1) * 16 + d2) * 16 + d3
+
+/-- The headers the filter protocol uses: a flush packet (`0000`) or a data
+    packet with at least one data byte and at most `maxPktLen` in total. -/
+def PktLenAccepted (header : List Nat) (n : Nat) : Prop :=
+  PktLen header n ∧ (n = 0 ∨ (5 ≤ n ∧ n ≤ maxPktLen))
+
 end Transcrypt.V3Policy

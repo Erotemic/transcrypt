@@ -31,6 +31,7 @@ include = [
   "transcrypt_v3_core::decode_be_u32",
   "transcrypt_v3_core::is_object_id",
   "transcrypt_v3_core::record_envelope_ok",
+  "transcrypt_v3_core::decode_pkt_len",
 ]
 # hax 0.4.2 requires scenario outputs to remain *inside* the Rust workspace.
 # Two levels above this crate is rust/, the workspace root.

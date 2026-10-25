@@ -1544,4 +1544,104 @@ def record_envelope_ok
         bytes_eq s s1
       | core.result.Result.Err _ => ok false
 
+/-- [transcrypt_v3_core::MAX_PKT_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 665:0-665:37
+    Visibility: public -/
+@[global_simps, irreducible] def MAX_PKT_LEN : Std.Usize := 65520#usize
+
+/-- [transcrypt_v3_core::decode_pkt_len]: loop body 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-686:5
+    Visibility: public -/
+@[rust_loop_body]
+def decode_pkt_len_loop.body
+  (header : Array Std.U8 4#usize) (value : Std.Usize) (ok1 : Bool)
+  (i : Std.Usize) :
+  RustM (ControlFlow (Std.Usize × Bool × Std.Usize) (Std.Usize × Bool))
+  := do
+  if ok1
+  then
+    if i < 4#usize
+    then
+      let c ← Array.index_usize header i
+      let (value1, ok2) ←
+        if c >= 48#u8
+        then
+          if c <= 57#u8
+          then
+            do
+            let i1 ← value * 16#usize
+            let i2 ← c - 48#u8
+            let i3 ← lift (UScalar.cast .Usize i2)
+            let value2 ← i1 + i3
+            ok (value2, true)
+          else
+            if c >= 97#u8
+            then
+              if c <= 102#u8
+              then
+                do
+                let i1 ← value * 16#usize
+                let i2 ← c - 97#u8
+                let i3 ← i2 + 10#u8
+                let i4 ← lift (UScalar.cast .Usize i3)
+                let value2 ← i1 + i4
+                ok (value2, true)
+              else ok (value, false)
+            else ok (value, false)
+        else
+          if c >= 97#u8
+          then
+            if c <= 102#u8
+            then
+              do
+              let i1 ← value * 16#usize
+              let i2 ← c - 97#u8
+              let i3 ← i2 + 10#u8
+              let i4 ← lift (UScalar.cast .Usize i3)
+              let value2 ← i1 + i4
+              ok (value2, true)
+            else ok (value, false)
+          else ok (value, false)
+      let i1 ← i + 1#usize
+      ok (cont (value1, ok2, i1))
+    else ok (done (value, true))
+  else ok (done (value, false))
+
+/-- [transcrypt_v3_core::decode_pkt_len]: loop 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-686:5
+    Visibility: public -/
+@[rust_loop]
+def decode_pkt_len_loop
+  (header : Array Std.U8 4#usize) (value : Std.Usize) (ok1 : Bool)
+  (i : Std.Usize) :
+  RustM (Std.Usize × Bool)
+  := do
+  loop
+    (fun (value1, ok2, i1) => decode_pkt_len_loop.body header value1 ok2 i1)
+    (value, ok1, i)
+
+/-- [transcrypt_v3_core::decode_pkt_len]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 672:0-691:1
+    Visibility: public -/
+def decode_pkt_len
+  (header : Array Std.U8 4#usize) :
+  RustM (core.result.Result Std.Usize Refusal)
+  := do
+  let (value, ok1) ← decode_pkt_len_loop header 0#usize true 0#usize
+  if ok1
+  then
+    if value != 0#usize
+    then
+      if value <= 4#usize
+      then ok (core.result.Result.Err Refusal.Request)
+      else
+        if value > MAX_PKT_LEN
+        then ok (core.result.Result.Err Refusal.Request)
+        else ok (core.result.Result.Ok value)
+    else
+      if value > MAX_PKT_LEN
+      then ok (core.result.Result.Err Refusal.Request)
+      else ok (core.result.Result.Ok value)
+  else ok (core.result.Result.Err Refusal.Request)
+
 end transcrypt_v3_core

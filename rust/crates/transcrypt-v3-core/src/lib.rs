@@ -661,6 +661,35 @@ pub fn record_envelope_ok(record: &[u8], id: &[u8; ID_LEN]) -> bool {
     }
 }
 
+/// Largest pkt-line Git sends or accepts: 4 length digits plus 65516 data bytes.
+pub const MAX_PKT_LEN: usize = 65520;
+
+/// Decode the 4-byte header of a pkt-line in Git's long-running filter
+/// protocol: lowercase hexadecimal total length (header included). `Ok(0)`
+/// is a flush packet; otherwise the length is between 5 and `MAX_PKT_LEN`.
+/// Lengths 1 to 4 (special or empty packets, which the filter protocol never
+/// uses), uppercase or other digits, and oversized lengths are refused.
+pub fn decode_pkt_len(header: &[u8; 4]) -> Result<usize, Refusal> {
+    let mut value = 0;
+    let mut ok = true;
+    let mut i = 0;
+    while ok && i < 4 {
+        let c = header[i];
+        if c >= b'0' && c <= b'9' {
+            value = value * 16 + (c - b'0') as usize;
+        } else if c >= b'a' && c <= b'f' {
+            value = value * 16 + (c - b'a' + 10) as usize;
+        } else {
+            ok = false;
+        }
+        i += 1;
+    }
+    if !ok || (value != 0 && value <= 4) || value > MAX_PKT_LEN {
+        return Err(Refusal::Request);
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -947,6 +976,17 @@ mod tests {
         record[0] ^= 1;
         assert!(!record_envelope_ok(&record, &id));
         assert!(!record_envelope_ok(b"plaintext that is long enough to pass the size bound", &id));
+    }
+
+    #[test]
+    fn pkt_line_lengths() {
+        assert_eq!(decode_pkt_len(b"0000"), Ok(0));
+        assert_eq!(decode_pkt_len(b"0005"), Ok(5));
+        assert_eq!(decode_pkt_len(b"00ff"), Ok(255));
+        assert_eq!(decode_pkt_len(b"fff0"), Ok(MAX_PKT_LEN));
+        for bad in [b"0001", b"0004", b"fff1", b"ffff", b"00FF", b"00g0", b" 005", b"-005"] {
+            assert_eq!(decode_pkt_len(bad), Err(Refusal::Request), "{bad:?}");
+        }
     }
 
     #[test]

@@ -33,7 +33,7 @@ fn shell_quote(text: &str) -> String {
 }
 
 /// The Git filter configuration this binary installs.
-fn expected_filters() -> Result<[(&'static str, String); 3], String> {
+fn expected_filters() -> Result<[(&'static str, String); 4], String> {
     let bin = env::current_exe().map_err(|_| "cannot resolve current executable")?;
     let path = bin.to_str().ok_or("executable path must be UTF-8")?;
     let program = shell_quote(path);
@@ -41,6 +41,8 @@ fn expected_filters() -> Result<[(&'static str, String); 3], String> {
         ("filter.transcrypt-v3.clean", format!("{program} clean %f")),
         ("filter.transcrypt-v3.smudge", format!("{program} smudge %f")),
         ("filter.transcrypt-v3.required", "true".into()),
+        // Preferred by Git when present: one process per Git command.
+        ("filter.transcrypt-v3.process", format!("{program} filter-process")),
     ])
 }
 
@@ -71,8 +73,6 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         },
         Err(e) => report(false, &e),
     }
-    report(effective("filter.transcrypt-v3.process").is_none(),
-        "no filter.transcrypt-v3.process overrides the clean/smudge filters");
     // Attributes a *new* file would get (the worktree .gitattributes).
     for probe in ["transcrypt-v3-probe.secret", "a/b/transcrypt-v3-probe.secret"] {
         let attr = git(root, &["check-attr", "filter", "--", probe]).unwrap_or_default();
@@ -273,7 +273,7 @@ pub(crate) fn unlock(root: &Path, password: Zeroizing<Vec<u8>>, auto_hydrate: bo
     // Unlocking is complete; hydration is a separate, all-or-nothing step
     // whose refusal must not hide the fact that the agent is now running.
     match hydrate(root) {
-        Ok(()) => eprintln!("Unlocked v3 and decrypted the protected worktree files."),
+        Ok(n) => eprintln!("Unlocked v3 and decrypted {n} protected file(s) (mode 0600)."),
         Err(e) => eprintln!("Unlocked v3, but hydration changed nothing: {e}\n\
             Inspect with `transcrypt-v3 status`, then run `transcrypt-v3 hydrate`."),
     }

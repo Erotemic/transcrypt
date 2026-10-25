@@ -9,6 +9,8 @@
 //! - `worktree.rs`: race-free protected-file access and private staging.
 //! - `setup.rs`: init, unlock, filters, hooks, ignore rules, `doctor`.
 //! - `audit.rs`: keyless history audit and the pre-push hook.
+//! - `process.rs`: Git's long-running filter protocol (one filter process
+//!   per Git command).
 //! - `session.rs`: the in-memory credential agent; `fsat.rs`: dirfd I/O.
 #[cfg(not(unix))]
 compile_error!("transcrypt-v3 POC requires Unix for 0600/0700 local credential permissions");
@@ -26,6 +28,7 @@ use zeroize::Zeroizing;
 mod audit;
 mod fsat;
 mod git;
+mod process;
 mod session;
 mod setup;
 mod worktree;
@@ -107,6 +110,10 @@ fn run() -> Result<(), String> {
             let password = passphrase(stdin)?;
             if action == "init" { init(&root, password) } else { unlock(&root, password, auto_hydrate) }
         },
+        "filter-process" => {
+            if args.len() != 1 { return Err("filter-process takes no arguments".into()); }
+            process::serve(&root)
+        },
         "clean" | "smudge" => {
             if args.len() != 2 { return Err("Git filter requires exactly one %f pathname".into()); }
             filter(&root, action == "clean", args[1].as_bytes())
@@ -121,7 +128,7 @@ fn run() -> Result<(), String> {
             match action {
                 "lock" => lock(&root),
                 "verify-index" => verify_index_command(&root),
-                "hydrate" => hydrate(&root),
+                "hydrate" => hydrate(&root).map(|n| eprintln!("Hydration complete: {n} file(s) decrypted.")),
                 "serve" => session::serve(&root, &load_config(&root)?),
                 _ => unreachable!(),
             }
@@ -325,10 +332,21 @@ fn lock(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The per-file Git filter (`clean %f` / `smudge %f`): stdin to stdout.
 fn filter(root: &Path, clean: bool, git_path: &[u8]) -> Result<(), String> {
+    let input = Zeroizing::new(read_limited(io::stdin(), MAX_RECORD)?);
+    let output = convert(root, clean, git_path, input)?;
+    io::stdout().write_all(&output).map_err(|_| "cannot write output")?;
+    Ok(())
+}
+
+/// One clean or smudge conversion of the file at `git_path`, shared by the
+/// per-file filters and the long-running `filter-process`.
+fn convert(root: &Path, clean: bool, git_path: &[u8], input: Zeroizing<Vec<u8>>)
+    -> Result<Zeroizing<Vec<u8>>, String>
+{
     transcrypt_v3::validate_protected_path(git_path)?;
     let config = load_config(root)?;
-    let input = Zeroizing::new(read_limited(io::stdin(), MAX_RECORD)?);
     if session::request(root, &config, Operation::Ping, &[], &[]).is_err() {
         // Locked (no agent serves this config): without the key neither
         // filter can change a record, so both pass a record envelope of
@@ -340,29 +358,24 @@ fn filter(root: &Path, clean: bool, git_path: &[u8]) -> Result<(), String> {
         if !record_envelope_ok(&input, &transcrypt_v3::config_id(&config)) {
             return Err("v3 session is locked; run unlock".into());
         }
-        io::stdout().write_all(&input).map_err(|_| "cannot write output")?;
-        return Ok(());
+        return Ok(input);
     }
     // The agent's clean returns a record that already opens at this path
     // unchanged and otherwise seals with the verified core's `seal_record`,
     // which refuses any other v3 record (double encryption); `open_record`
     // releases plaintext only after authenticating it under this config and
     // exact Git path.
-    let result = if clean {
-        session::request(root, &config, Operation::Encrypt, git_path, &input)?
-    } else {
-        let plaintext = session::request(root, &config, Operation::Decrypt, git_path, &input)?;
-        if !umask_is_private() {
-            // Git would create this file readable by other users. Emit the
-            // record, now authenticated, unchanged; the post-checkout hook
-            // (or `hydrate`) publishes the plaintext with mode 0600.
-            io::stdout().write_all(&input).map_err(|_| "cannot write output")?;
-            return Ok(());
-        }
-        plaintext
-    };
-    io::stdout().write_all(&result).map_err(|_| "cannot write output")?;
-    Ok(())
+    if clean {
+        return session::request(root, &config, Operation::Encrypt, git_path, &input);
+    }
+    let plaintext = session::request(root, &config, Operation::Decrypt, git_path, &input)?;
+    if !umask_is_private() {
+        // Git would create this file readable by other users. Emit the
+        // record, now authenticated, unchanged; the post-checkout hook (or
+        // `hydrate`) publishes the plaintext with mode 0600.
+        return Ok(input);
+    }
+    Ok(plaintext)
 }
 
 /// Whether files Git creates now are private to this user. Git creates
@@ -458,9 +471,11 @@ fn auto_hydrate(root: &Path) -> Result<(), String> {
     if session::request(root, &config, Operation::Ping, &[], &[]).is_err() {
         return Ok(());
     }
-    if let Err(e) = hydrate(root) {
-        eprintln!("transcrypt-v3: automatic hydration skipped: {e}\n\
-            Inspect with `transcrypt-v3 status`, then run `transcrypt-v3 hydrate`.");
+    match hydrate(root) {
+        Ok(0) => {},
+        Ok(n) => eprintln!("transcrypt-v3: decrypted {n} file(s) with mode 0600."),
+        Err(e) => eprintln!("transcrypt-v3: automatic hydration skipped: {e}\n\
+            Inspect with `transcrypt-v3 status`, then run `transcrypt-v3 hydrate`."),
     }
     Ok(())
 }
@@ -472,7 +487,7 @@ fn auto_hydrate(root: &Path) -> Result<(), String> {
 /// left as it is, only made private. Nothing but an authentic record is ever
 /// replaced, so no edit can be lost, and replacing a record by its plaintext
 /// loses nothing (clean seals it back to the same record).
-fn hydrate(root: &Path) -> Result<(), String> {
+fn hydrate(root: &Path) -> Result<usize, String> {
     let staging = staging_dir(root)?;
     let config = load_config(root)?;
     // Authenticate ALL staged protected objects, the staged metadata and the
@@ -539,6 +554,5 @@ fn hydrate(root: &Path) -> Result<(), String> {
     // without `--add` cannot stage an untracked file. `reindex` verifies that
     // no staged blob or mode changed, even when index != HEAD.
     reindex(root, &verified.listing, &refresh)?;
-    eprintln!("Hydration complete: {published} file(s) decrypted.");
-    Ok(())
+    Ok(published)
 }

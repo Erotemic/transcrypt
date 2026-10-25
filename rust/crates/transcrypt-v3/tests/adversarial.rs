@@ -877,11 +877,15 @@ fn doctor_detects_missing_protection() {
     fs::write(&hook, saved).unwrap();
     for (key, value) in [("core.hooksPath", "/nonexistent"), ("filter.transcrypt-v3.process", "cat"),
                          ("filter.transcrypt-v3.required", "false")] {
+        let original = exec(&repo, "git", &["config", key], None).stdout;
         run(&repo, "git", &["config", key, value], None);
         assert!(!exec(&repo, bin(), &["doctor"], None).status.success(), "{key}");
-        run(&repo, "git", &["config", "--unset", key], None);
+        if original.is_empty() {
+            run(&repo, "git", &["config", "--unset", key], None);
+        } else {
+            run(&repo, "git", &["config", key, String::from_utf8(original).unwrap().trim_end()], None);
+        }
     }
-    run(&repo, "git", &["config", "filter.transcrypt-v3.required", "true"], None);
     fs::write(repo.join(".git/info/attributes"), b"*.secret -filter\n").unwrap();
     let out = exec(&repo, bin(), &["doctor"], None);
     assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL a new transcrypt-v3-probe.secret"));
@@ -949,4 +953,65 @@ fn agent_survives_random_hostile_frames() {
         }
     }
     assert_eq!(agent_request(&repo, b'D', &config, b"a.secret", &record).unwrap(), b"alpha plaintext\n");
+}
+
+fn pkt(data: &[u8]) -> Vec<u8> {
+    [format!("{:04x}", data.len() + 4).as_bytes(), data].concat()
+}
+
+fn read_pkt(r: &mut impl Read) -> Option<Vec<u8>> {
+    let mut h = [0u8; 4];
+    r.read_exact(&mut h).unwrap();
+    let n = usize::from_str_radix(std::str::from_utf8(&h).unwrap(), 16).unwrap();
+    if n == 0 { return None; }
+    let mut d = vec![0u8; n - 4];
+    r.read_exact(&mut d).unwrap();
+    Some(d)
+}
+
+fn read_until_flush(r: &mut impl Read) -> Vec<u8> {
+    let mut all = Vec::new();
+    while let Some(d) = read_pkt(r) { all.extend(d); }
+    all
+}
+
+/// The long-running filter speaks Git's protocol exactly: it converts files
+/// through the same gates as the per-file filters, refuses (and survives)
+/// oversized or invalid requests, and stops on a malformed packet.
+#[test]
+fn long_running_filter_protocol() {
+    let mut scratch = Scratch::new("process");
+    let repo = scratch.repo("repo");
+    let record = staged(&repo, "a.secret");
+    let mut child = Command::new("sh").args(["-c", &format!("umask 077 && exec '{}' filter-process", bin())])
+        .current_dir(&repo).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let mut to = child.stdin.take().unwrap();
+    let mut from = child.stdout.take().unwrap();
+    to.write_all(&[pkt(b"git-filter-client\n"), pkt(b"version=2\n"), b"0000".to_vec(),
+        pkt(b"capability=clean\n"), pkt(b"capability=smudge\n"), pkt(b"capability=delay\n"), b"0000".to_vec()].concat()).unwrap();
+    assert_eq!(read_until_flush(&mut from), b"git-filter-server\nversion=2\n");
+    assert_eq!(read_until_flush(&mut from), b"capability=clean\ncapability=smudge\n");
+    let mut request = |command: &str, path: &[u8], content: &[u8]| -> (Vec<u8>, Vec<u8>) {
+        let mut frame = [pkt(format!("command={command}\n").as_bytes()), pkt(&[b"pathname=", path, b"\n"].concat()), b"0000".to_vec()].concat();
+        for chunk in content.chunks(65516) { frame.extend(pkt(chunk)); }
+        frame.extend(b"0000");
+        to.write_all(&frame).unwrap();
+        let status = read_until_flush(&mut from);
+        if status != b"status=success\n" { return (status, Vec::new()); }
+        let body = read_until_flush(&mut from);
+        assert!(read_until_flush(&mut from).is_empty());
+        (status, body)
+    };
+    assert_eq!(request("smudge", b"a.secret", &record), (b"status=success\n".to_vec(), b"alpha plaintext\n".to_vec()));
+    assert_eq!(request("clean", b"a.secret", b"alpha plaintext\n").1, record);
+    // A record moved to another path does not authenticate there.
+    assert_eq!(request("smudge", b"dir/b.secret", &record).0, b"status=error\n");
+    assert_eq!(request("clean", b"../x.secret", b"x").0, b"status=error\n");
+    // Oversized content is read to its end and refused; the session goes on.
+    assert_eq!(request("clean", b"a.secret", &vec![b'x'; 16 * 1024 * 1024 + 39]).0, b"status=error\n");
+    assert_eq!(request("smudge", b"a.secret", &record).1, b"alpha plaintext\n");
+    // A malformed packet ends the process with an error.
+    to.write_all(b"00G0").unwrap();
+    drop(to);
+    assert!(!child.wait().unwrap().success());
 }
