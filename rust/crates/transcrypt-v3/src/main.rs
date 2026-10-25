@@ -8,7 +8,7 @@ use std::{
     ffi::OsString,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::{Command, ExitCode, Stdio},
 };
 #[cfg(unix)]
 use std::os::unix::{ffi::{OsStrExt, OsStringExt}, fs::OpenOptionsExt};
@@ -377,6 +377,52 @@ fn protected_path(path: &[u8]) -> bool {
     path.rsplit(|x| *x == b'/').next().unwrap_or(path).ends_with(b".secret")
 }
 
+/// Check Git's *effective* staged filter policy, not just the contents of the
+/// committed root .gitattributes file. Per-directory attributes and the
+/// checkout-local .git/info/attributes take precedence over that file.
+/// `--cached` evaluates staged .gitattributes, while -z/--stdin transports
+/// exact path bytes, including newlines and non-UTF8 names.
+fn verify_staged_filter_attributes(root: &Path, paths: &[&[u8]]) -> Result<(), String> {
+    if paths.is_empty() { return Ok(()); }
+    if paths.iter().any(|path| path.is_empty() || path.contains(&0)) {
+        return Err("invalid indexed protected path".into());
+    }
+    let mut command = Command::new("git");
+    command.current_dir(root)
+        .args(["check-attr", "--cached", "-z", "--stdin", "filter"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|_| "cannot run Git staged attribute check")?;
+    {
+        let mut stdin = child.stdin.take().ok_or("Git attribute input pipe missing")?;
+        for path in paths {
+            stdin.write_all(path).and_then(|_| stdin.write_all(&[0]))
+                .map_err(|_| "cannot send protected paths to Git attribute checker")?;
+        }
+    }
+    let result = child.wait_with_output()
+        .map_err(|_| "cannot read Git staged attribute check")?;
+    if !result.status.success() {
+        return Err(format!("Git staged attribute check failed: {}",
+            String::from_utf8_lossy(&result.stderr)));
+    }
+    let fields: Vec<_> = result.stdout.split(|b| *b == 0).collect();
+    let expected_fields = paths.len().checked_mul(3)
+        .and_then(|n| n.checked_add(1))
+        .ok_or("too many protected Git paths")?;
+    if fields.last().map(|field| field.is_empty()) != Some(true) || fields.len() != expected_fields {
+        return Err("malformed Git staged attribute response".into());
+    }
+    for (expected, triple) in paths.iter().zip(fields[..fields.len() - 1].chunks_exact(3)) {
+        if triple[0] != *expected || triple[1] != &b"filter"[..] ||
+            triple[2] != &b"transcrypt-v3"[..] {
+            return Err("protected staged path does not have the required effective transcrypt-v3 filter".into());
+        }
+    }
+    Ok(())
+}
+
 fn verify_index(root: &Path) -> Result<(), String> {
     let config = load_config(root)?;
     if git_show(root, b".transcrypt/config")? != config {
@@ -386,7 +432,20 @@ fn verify_index(root: &Path) -> Result<(), String> {
         return Err("staged .gitattributes differs from required v3 policy".into());
     }
     session::request(root, &config, Operation::Ping, &[], &[])?;
-    for (mode, path) in indexed_files(root)? {
+    let entries = indexed_files(root)?;
+    for (mode, path) in &entries {
+        if (path.as_slice() == &b".transcrypt/config"[..] ||
+            path.as_slice() == &b".gitattributes"[..]) && mode.as_slice() != &b"100644"[..] {
+            return Err("public v3 metadata is not a regular staged file".into());
+        }
+    }
+    let protected: Vec<_> = entries.iter()
+        .filter(|(_, path)| protected_path(path))
+        .map(|(_, path)| path.as_slice())
+        .collect();
+    // Fail before any decryption if the effective Git filter changed.
+    verify_staged_filter_attributes(root, &protected)?;
+    for (mode, path) in entries {
         if !protected_path(&path) { continue; }
         if mode != b"100644" {
             return Err("protected path is not a regular file in staged index".into());

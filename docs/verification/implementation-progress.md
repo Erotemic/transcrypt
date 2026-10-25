@@ -417,3 +417,21 @@ path is rejected rather than releasing another file's plaintext.
 - Remaining substantial proof obligations: extracted Rust wire loops,
   authenticated crypto-adapter correspondence, and Git/OS lifecycle
   transactional/ownership properties.
+
+### 2026-10-24 — Effective staged Git filter policy and codec-step proof target
+
+- Added a fail-closed `git check-attr --cached -z --stdin filter` gate to the
+  **production** `transcrypt-v3 verify-index` path, requiring the effective
+  attribute `filter=transcrypt-v3` for every protected staged pathname.
+  The root `.gitattributes` byte comparison alone missed `.git/info/attributes`
+  and nested attributes overrides. The gate parses exact raw path bytes and
+  requires staged public metadata modes to be regular 100644 files.
+- Extended actual Rust Git lifecycle tests for local info-attributes override
+  and nested staged attributes; independent real-Git contract tests exercise
+  those cases, staged/worktree divergence, and non-UTF8 names.
+- Added an **isolated** Lean `CodecSteps.lean` workbench with source-derived
+  single-iteration obligations for the actual Aeneas-generated encoder and
+  decoder loops, plus a focused build script. These are **not** a completed
+  whole-function refinement and are pending compilation on Lean 4.31.0.
+- No v3 wire-format, Aeneas-generated snapshot, algorithm or password
+  derivation changes. Crypto and Git effects remain stated trusted boundaries.

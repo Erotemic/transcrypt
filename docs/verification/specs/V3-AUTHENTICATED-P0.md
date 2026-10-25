@@ -188,3 +188,14 @@ Only the live credential agent performs encryption/decryption. It should not
 be confused with a verified enclave: same-UID processes can use the socket,
 OS process inspection and swap are outside the core proof boundary, and
 start/stop plus Git file operations are not yet modeled transactionally.
+
+### Effective staged filter policy (adapter acceptance contract)
+
+Before `verify-index` reports success or `hydrate`/`lock` may proceed, each
+protected tracked pathname MUST have effective staged Git attribute
+`filter=transcrypt-v3`. The adapter MUST compute that attribute with Git's
+own `check-attr --cached -z --stdin` semantics, not infer it solely from the
+root `.gitattributes` blob; local info attributes and nested staged attributes
+can override the root. Protected index entries MUST be ordinary 100644 files;
+the staged root `.gitattributes` and `.transcrypt/config` MUST also have regular
+file modes. A local hook is an integrity aid, not a server-side trust anchor.

@@ -160,3 +160,14 @@ On verified Rust changes, run `translate-v3-core.sh`, then
 `python3 proofs/aeneas/v3_snapshot.py compare`; update the snapshot only
 with the explicit reviewed `refresh` command. CI both builds the checked-in
 proof package and independently regenerates/compares the extracted Lean.
+
+### Experimental source-derived codec step obligations
+
+```
+bash proofs/aeneas/build-v3-codec-steps.sh
+```
+
+This separate, opt-in Lean 4.31 target checks proofs directly about the
+Aeneas-generated loop *bodies*. It is not part of the proven tracked
+`V3Wire` library until successfully compiled, and is **not** sufficient
+for complete encoder/decoder functional refinement.

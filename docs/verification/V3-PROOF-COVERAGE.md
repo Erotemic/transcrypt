@@ -28,7 +28,7 @@ Evidence levels:
 | C-01 | Deterministic Argon2id + AES-SIV v3 bytes match independent vectors | **TESTED**, `tests/v3/reference/check_vectors.py`, Rust vector tests; user confirmed latest build/test cycle worked | External algorithm/security review and environment assumptions |
 | C-02 | Authenticated config, ordered path-bound AAD, no plaintext release on failed authentication | **TESTED / TRUSTED**, pure adapter and negative-path tests, Python path-substitution tests | Extract invoked precondition/authorization logic, prove it against abstract AEAD contract; review actual library usage |
 | G-01 | Initialize, clone, unlock/hydrate, clean, commit, lock, re-unlock | **TESTED**, Rust Git lifecycle suite; user-confirmed fixes | Define exact trusted Git/FS semantics and failure boundaries |
-| G-02 | Staged index bytes/paths validated, not HEAD; symlink/path and path-transplant rejection | **TESTED**, lifecycle and raw `%f` byte-transport tests | Targeted adversarial fault/race tests and invoked decision proof |
+| G-02 | Staged index bytes/paths validated, not HEAD; symlink/path and path-transplant rejection | **TESTED**, lifecycle, raw `%f`, and effective staged-filter-attribute checks, including local/nested overrides | Targeted adversarial fault/race tests and invoked decision proof |
 | G-03 | Crash-safe, atomic multi-file updates | **OPEN**; per-file temp/rename and preflight are implemented | Harden/journal or narrow guarantee; add interrupted-lock/hydration tests |
 | G-04 | Derived key absent from disk while unlocked | **TESTED / DESIGN**, private credential agent and restricted socket | Same-UID/socket, swap, crash and zeroization threat review; not Lean-proved |
 | B-01 | Standalone Bash conforms to authenticated v3 spec | **OPEN / DEFERRED**; existing Bash maintains legacy modes | Separate Bash port, review and common vectors; no false proof inheritance |
@@ -69,3 +69,25 @@ test**, **which code revision**, and **which trust assumptions**.
 On each new theorem or material adapter change, update this table and
 `proofs/aeneas/v3/PROOF-STATUS.md` in the same commit. Do not include routine
 `#print axioms` or mass theorem inventories in normal Lean builds.
+
+### Staged attribute override boundary (2026-10-24)
+
+The `verify-index` Rust adapter now checks **the effective `filter` attribute
+for every protected staged Git pathname** using `git check-attr --cached -z
+--stdin filter`, parsing exactly three NUL-delimited fields per request. This
+catches local `.git/info/attributes`, nested staged `.gitattributes`, and
+checkout/index attribute divergence that a byte comparison of the root
+`.gitattributes` alone cannot catch. It rejects wrong filter values before
+any staged secret is decrypted. Staged metadata itself must have mode 100644.
+
+**Evidence status:** independent *real Git* attribute-precedence tests are
+passed locally; compiled Rust lifecycle tests are the acceptance gate on the
+user's toolchain. Git's interpretation of attributes and absence of concurrent
+same-UID modification are trusted external assumptions; a `--no-verify`
+commit can bypass any local pre-commit hook. This is **not** a new Lean proof.
+
+The `CodecSteps.lean` workbench targets three actual Aeneas-generated loop
+body definitions, including per-byte writes for arbitrary input bytes. These
+obligations are **candidates**, not counted as PROVED or imported into the
+normal tracked proof build until the focused Lean target compiles. W-04 and
+W-05 remain OPEN pending whole-loop theorems.

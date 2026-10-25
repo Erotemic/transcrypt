@@ -93,3 +93,13 @@ compare then explicitly refresh the snapshot as described in
 
 **Decision rule:** spend effort on meaningful proofs connected to shipped
 Rust or exploitable lifecycle failures, not on increasing theorem counts.
+
+### Next source-derived codec proof target
+
+After applying the staged-attribute hardening, run the focused workbench build
+`bash proofs/aeneas/build-v3-codec-steps.sh`. On success, lift the per-step
+write/extract facts into termination and content invariants for both generated
+file-header loops, then prove the *complete* `encode_file_header` function
+refines the independent 22-byte format. Do not claim whole-codec refinement
+from the per-step lemmas alone. The normal tracked build is deliberately not
+dependent on the new workbench until its proofs are confirmed.

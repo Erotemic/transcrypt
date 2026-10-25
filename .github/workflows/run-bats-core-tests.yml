@@ -120,6 +120,9 @@ jobs:
       - name: Verify raw Git %f pathname transport
         run: python -m unittest discover -s tests/v3/reference -p 'test_git_filter_paths.py' -v
 
+      - name: Verify staged Git attributes and local override precedence
+        run: python -m unittest discover -s tests/v3/reference -p 'test_git_staged_attributes.py' -v
+
   feasibility-probe:
     # D-01/D-02 evidence (docs/verification/reference/d01-d02-feasibility.md):
     # record which cryptographic primitives the allowed Bash/OpenSSL runtime

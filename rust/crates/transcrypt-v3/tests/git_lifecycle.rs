@@ -70,6 +70,25 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     assert!(object.starts_with(b"TV3F\0\x01"));
     assert!(!object.windows(7).any(|w| w == b"private"));
     let ledger_object = run(&source, "git", &["show", "HEAD:ledger.secret"], None);
+    // The staged root policy can be correct while .git/info/attributes
+    // silently overrides the effective filter. Refuse that checkout.
+    let info_attrs = source.join(".git/info/attributes");
+    fs::write(&info_attrs, b"*.secret -filter\n").unwrap();
+    run_fails(&source, bin, &["verify-index"], None);
+    run_fails(&source, bin, &["lock"], None);
+    assert_in_memory_session(&source, true);
+    fs::remove_file(&info_attrs).unwrap();
+    run(&source, bin, &["verify-index"], None);
+    // A nested staged attributes file also takes precedence, even if the
+    // worktree .gitattributes subsequently differs from the staged policy.
+    fs::create_dir(source.join("nested")).unwrap();
+    fs::write(source.join("nested/.gitattributes"), b"*.secret -filter\n").unwrap();
+    fs::write(source.join("nested/invoice.secret"), b"must never be staged plaintext\n").unwrap();
+    run(&source, "git", &["add", "nested/.gitattributes", "nested/invoice.secret"], None);
+    run_fails(&source, bin, &["verify-index"], None);
+    run(&source, "git", &["reset", "-q", "--", "nested/.gitattributes", "nested/invoice.secret"], None);
+    fs::remove_dir_all(source.join("nested")).unwrap();
+    run(&source, bin, &["verify-index"], None);
     run(&temp, "git", &["clone", "-q", "source", "clone"], None);
     assert_eq!(fs::read(clone.join("account.secret")).unwrap(), object);
     assert_eq!(fs::read(clone.join("ledger.secret")).unwrap(), ledger_object);

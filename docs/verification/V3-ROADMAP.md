@@ -74,6 +74,9 @@ verified" or "cryptographic security has been proved from first principles."
 - [ ] First choose the smallest generated loop, preferably
       `encode_file_header`, and state a theorem about its *returned bytes*.
       It must quantify over arbitrary valid config IDs, not only fixed magic.
+      A provisional step-level workbench is in
+      `proofs/aeneas/v3/V3Wire/Verification/CodecSteps.lean`; its compilation
+      and then the *whole-loop* theorem are still required.
 - [ ] Establish a reusable Aeneas array/`RustM` correspondence lemma. Reuse
       that lemma for `encode_config` and each decoder; do not build separate
       near-duplicate proof frameworks.
