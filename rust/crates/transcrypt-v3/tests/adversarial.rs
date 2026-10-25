@@ -674,3 +674,29 @@ unsafe fn libc_fcntl_clear_cloexec(fd: i32) {
     const F_SETFD: i32 = 2;
     fcntl(fd, F_SETFD, 0);
 }
+
+/// Editor and merge copies of secrets (`a.secret~`, `.a.secret.swp`,
+/// `a.secret.orig`) are plaintext but not protected: they are ignored
+/// locally, reported by status, and refused by the push audit.
+#[test]
+fn editor_and_merge_copies_of_secrets_are_caught() {
+    let mut scratch = Scratch::new("copies");
+    let repo = scratch.repo("repo");
+    for name in ["a.secret~", "dir/.b.secret.swp", "a.secret.orig"] {
+        fs::write(repo.join(name), b"PLAINTEXT COPY\n").unwrap();
+    }
+    // Ignored by `git add -A` in an unlocked checkout.
+    run(&repo, "git", &["add", "-A"], None);
+    assert!(run(&repo, "git", &["diff", "--cached", "--name-only"], None).is_empty());
+    // Reported by status even when force-added, and refused by audit.
+    run(&repo, "git", &["add", "-f", "a.secret.orig"], None);
+    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    assert!(status.contains("a.secret.orig is NOT encrypted"), "{status}");
+    run(&repo, "git", &["commit", "-qm", "backup copy"], None);
+    let err = run_fails(&repo, bin(), &["audit"], None);
+    assert!(err.contains("a.secret.orig") && err.contains("copy of a secret"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    for name in ["a.secret~", "dir/.b.secret.swp", "a.secret.orig"] {
+        let _ = fs::remove_file(repo.join(name));
+    }
+}

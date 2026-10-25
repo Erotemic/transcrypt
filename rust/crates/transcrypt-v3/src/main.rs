@@ -185,7 +185,7 @@ fn status(root: &Path) -> Result<(), String> {
     // Protection is exactly the lowercase suffix `.secret`.
     let tracked = git(root, &["ls-files", "-z"])?;
     for path in tracked.split(|b| *b == 0).chain(untracked.split(|b| *b == 0)) {
-        if !protected_path(path) && path.to_ascii_lowercase().ends_with(b".secret") {
+        if !protected_path(path) && (path.to_ascii_lowercase().ends_with(b".secret") || plaintext_copy_name(path)) {
             println!("warning:    {} is NOT encrypted (only names ending in lowercase .secret are)",
                 String::from_utf8_lossy(path));
         }
@@ -391,6 +391,7 @@ fn activate_session(root: &Path, config: &[u8], key: &transcrypt_v3::SecretKey, 
     let result: Result<(), String> = (|| {
         install_filters(root)?;
         install_hook(root)?;
+        exclude_plaintext_copies(root)?;
         if stage { git(root, &["add", "--", ".transcrypt/config", ".gitattributes"])?; }
         Ok(())
     })();
@@ -833,6 +834,46 @@ fn protected_path(path: &[u8]) -> bool {
     transcrypt_v3_core::is_protected_path(path)
 }
 
+/// Names that editors and merge tools give to copies of a `*.secret` file.
+/// Such copies hold plaintext but are not protected, so `git add -A` would
+/// commit them unencrypted. A heuristic backstop, not a guarantee.
+const COPY_SUFFIXES: [&[u8]; 10] = [
+    b".secret~", b".secret.swp", b".secret.swo", b".secret.swx", b".secret.orig",
+    b".secret.bak", b".secret.tmp", b".secret.rej", b".secret.save", b".secret#",
+];
+
+fn plaintext_copy_name(path: &[u8]) -> bool {
+    COPY_SUFFIXES.iter().any(|suffix| path.ends_with(suffix))
+}
+
+/// Ignore those copies in this checkout (`.git/info/exclude`, never committed).
+fn exclude_plaintext_copies(root: &Path) -> Result<(), String> {
+    const MARKER: &str = "# transcrypt-v3: editor and merge copies of *.secret files hold plaintext";
+    let info = root.join(".git/info");
+    if fs::symlink_metadata(&info).is_err() {
+        fs::create_dir(&info).map_err(|e| format!("cannot create .git/info: {e}"))?;
+    }
+    let path = info.join("exclude");
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.is_file() => return Err("unsafe .git/info/exclude".into()),
+        _ => {},
+    }
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|line| line == MARKER) { return Ok(()); }
+    let mut block = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') { block.push('\n'); }
+    block.push_str(MARKER);
+    block.push('\n');
+    for pattern in ["*.secret~", "*.secret.sw[a-p]", "*.secret.orig", "*.secret.bak", "*.secret.tmp",
+                    "*.secret.rej", "*.secret.save", "\\#*.secret#", ".#*.secret"] {
+        block.push_str(pattern);
+        block.push('\n');
+    }
+    fs::OpenOptions::new().append(true).create(true).open(&path)
+        .and_then(|mut f| f.write_all(block.as_bytes()))
+        .map_err(|e| format!("cannot update .git/info/exclude: {e}"))
+}
+
 /// Check Git's *effective* staged filter policy, not just the contents of the
 /// committed root .gitattributes file. Per-directory attributes and the
 /// checkout-local .git/info/attributes take precedence over that file.
@@ -949,9 +990,13 @@ fn audit(root: &Path, revs: &[OsString], keyed: bool) -> Result<Audited, String>
         }
         let commit = String::from_utf8_lossy(commit).into_owned();
         let entries = tree_files(root, &commit)?;
+        let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));
+        if let Some(copy) = entries.iter().find(|e| plaintext_copy_name(&e.path)) {
+            return Err(format!("{}: looks like an unencrypted editor or merge copy of a secret; \
+                remove it from the commit", at(&copy.path)));
+        }
         let protected: Vec<&Staged> = entries.iter().filter(|e| protected_path(&e.path)).collect();
         if protected.is_empty() { continue; }
-        let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));
         let Some(config_entry) = entries.iter().find(|e| e.path == b".transcrypt/config" && e.regular) else {
             return Err(format!("{}: *.secret file in a commit without a v3 configuration (plaintext?)",
                 at(&protected[0].path)));

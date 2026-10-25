@@ -288,7 +288,10 @@ one.
   keyless `audit` in a never-unlocked clone refuses its plaintext commit).
 - **Residual:** `git push --no-verify`; repositories that deploy neither the
   hook nor a server-side audit; a fresh clone has no hooks at all. Git
-  offers no repository-controlled enforcement.
+  offers no repository-controlled enforcement. Plaintext copies of secrets
+  under other names: the well-known editor and merge copy names are
+  excluded locally and refused by `audit`, but any other name is not
+  recognized.
 - **Next reduction:** document and ship a ready-made CI/pre-receive
   snippet.
 - **Status:** REVIEWED + TESTED; enforcement depends on deployment.

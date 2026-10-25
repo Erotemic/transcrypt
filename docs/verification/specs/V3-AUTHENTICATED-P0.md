@@ -157,7 +157,11 @@ trusted state and is outside this POC.
   pushed commits not already on the remote's tracking branches (merges,
   rebases, cherry-picks and `--no-verify` commits never ran `pre-commit`).
   A keyless audit cannot detect forged records that merely carry a valid
-  envelope.
+  envelope. As a heuristic backstop it also refuses commits containing
+  well-known editor or merge copies of protected files (`*.secret~`,
+  `*.secret.sw[pox]`, `*.secret.orig`, `.bak`, `.tmp`, `.rej`, `.save`,
+  `*.secret#`), which hold plaintext; `init`/`unlock` add these patterns to
+  `.git/info/exclude`.
 - `hydrate`: authenticate **every staged protected object** and confirm the
   staged metadata matches the worktree before exposing plaintext. Each
   protected worktree file must equal either its staged ciphertext or the

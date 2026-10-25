@@ -129,6 +129,11 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
   filter) and files you create get your umask, often readable by other
   local users. `transcrypt-v3 status` warns about such files.
 - Files larger than 16 MiB are refused.
+- **Editor and merge copies are plaintext.** `a.secret~`, `.a.secret.swp`
+  or `a.secret.orig` do not end in `.secret` and are not encrypted. `unlock`
+  adds them to `.git/info/exclude`, `status` warns about them, and the
+  pre-push audit refuses commits that contain them. Copies with other names
+  are not detected: only files ending in `.secret` are protected.
 
 ## Troubleshooting
 
