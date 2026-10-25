@@ -107,7 +107,7 @@ verified" or "cryptographic security has been proved from first principles."
 3. **A4 — adapter remainder.** Move the object-id offset into the proved
    `IndexEntry`; batch object reads through `git cat-file --batch` with a
    proved header parser; keep the call-site table current.
-4. **A7 — Git versions.** CI matrix over Git releases (≥ 2.36 for `audit`).
+4. **A7 — Git versions.** CI matrix over Git releases.
 5. **A8/A6 — same-UID** races and agent access are accepted; an optional
    agent idle timeout and an `nlink > 1` warning at lock are cheap
    follow-ups.

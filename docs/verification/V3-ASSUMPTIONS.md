@@ -164,7 +164,7 @@ one.
 
 - **Claim:**
   - `%f` passes exact path bytes.
-  - `ls-files --stage -z`, `ls-tree --format`, `check-attr --cached -z` and
+  - `ls-files --stage -z`, `ls-tree -r -z`, `check-attr --cached -z` and
     `cat-file blob` behave as documented.
   - `filter.<d>.required` is enforced.
   - `update-index --stdin` takes literal paths and never adds files.
@@ -173,8 +173,7 @@ one.
 - **Consequence:** wrong bytes authenticated, or protected files not
   filtered.
 - **Evidence:** TESTED with real Git 2.43 (raw and non-UTF-8 paths, glob and
-  magic filenames, attribute precedence, index/HEAD divergence). `audit`
-  requires Git ≥ 2.36.
+  magic filenames, attribute precedence, index/HEAD divergence).
 - **Residual:**
   - Other Git versions.
   - Attributes that transform stored bytes (`text`, `eol`, `ident`,
@@ -363,7 +362,7 @@ verified decision that gates it:
 | Agent dispatch | `authorize_agent_request` before the body is read; peer UID check | opcode, supplied config, startup config, path, length | `Ok(op)` from a same-UID peer |
 | Agent startup | `authenticate_config` | config bytes, piped key | `Ok` |
 | `unlock` / `init` | `authenticate_config` / `initialize_config` | config bytes / fresh salt | `Ok`, before any persistent effect |
-| Index and tree listings | `parse_index_entry`, then `is_object_id` on `entry[7..path_start-3]` | each NUL-delimited `ls-files --stage -z` / `ls-tree --format` record | `Ok` and `true` (else refuse) |
+| Index and tree listings | `parse_index_entry`, then `is_object_id` on `entry[7..path_start-3]` | each NUL-delimited `ls-files --stage -z` record, or `ls-tree -r -z` record rewritten to that shape (path copied verbatim) | `Ok` and `true` (else refuse) |
 | Object reads | `is_object_id` | oid from the parsed snapshot | `true`; read ≤ 16 MiB via `cat-file blob` |
 | `verify-index` | `check_attr_response_ok`, then agent `Decrypt` per entry (or `record_envelope_ok` while locked) | exact `check-attr` request; snapshot paths; blobs by oid | `true` / `Ok` for every entry |
 | `hydrate` publish | agent `Decrypt`, then `hydrate_action`, all entries before any write; stamp equality | blob by snapshot oid; worktree bytes and stamp via held dirfd | `Ok(Publish)` for all; `Keep` untouched |

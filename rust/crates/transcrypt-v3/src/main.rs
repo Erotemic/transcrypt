@@ -722,6 +722,28 @@ fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
     Ok(entries)
 }
 
+/// The blobs of a commit's tree. `ls-tree -r -z` prints `<mode> SP <type> SP
+/// <oid> TAB <path>` (every Git version; `--format` needs 2.36); each record
+/// is rewritten as `<mode> SP <oid> SP 0 TAB <path>`, with the path copied
+/// verbatim, and then parsed and checked by the verified core exactly like an
+/// index record.
+fn tree_files(root: &Path, commit: &str) -> Result<Vec<Staged>, String> {
+    let data = git(root, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
+    let mut listing = Vec::with_capacity(data.len());
+    for entry in data.split(|b| *b == 0).filter(|item| !item.is_empty()) {
+        let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed git ls-tree record")?;
+        let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
+        let [mode, _kind, oid] = fields[..] else { return Err("malformed git ls-tree record".into()) };
+        listing.extend_from_slice(mode);
+        listing.push(b' ');
+        listing.extend_from_slice(oid);
+        listing.extend_from_slice(b" 0");
+        listing.extend_from_slice(&entry[tab..]);
+        listing.push(0);
+    }
+    parse_listing(&listing)
+}
+
 fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
     parse_listing(&git(root, &["ls-files", "--stage", "-z"])?)
 }
@@ -845,10 +867,7 @@ fn audit(root: &Path, revs: &[OsString], keyed: bool) -> Result<Audited, String>
             return Err("unexpected git rev-list output".into());
         }
         let commit = String::from_utf8_lossy(commit).into_owned();
-        let listing = git(root, &["ls-tree", "-r", "-z", "--full-tree",
-            "--format=%(objectmode) %(objectname) 0%x09%(path)", &commit])
-            .map_err(|e| format!("{e} (audit requires Git 2.36 or newer)"))?;
-        let entries = parse_listing(&listing)?;
+        let entries = tree_files(root, &commit)?;
         let protected: Vec<&Staged> = entries.iter().filter(|e| protected_path(&e.path)).collect();
         if protected.is_empty() { continue; }
         let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));

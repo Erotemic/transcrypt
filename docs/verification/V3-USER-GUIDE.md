@@ -89,7 +89,7 @@ Two checks catch this:
   it checks that each secret is a v3 record for the committed config; when
   unlocked it also authenticates every record.
 
-For example, in GitHub Actions (any CI with Git ≥ 2.36 works the same way):
+For example, in GitHub Actions (any CI works the same way):
 
 ```yaml
 - uses: actions/checkout@v4
