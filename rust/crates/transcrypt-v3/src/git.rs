@@ -447,6 +447,41 @@ pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) ->
     Ok(flags)
 }
 
+/// Each path's `filter` attribute value (`unspecified`, `unset`, `set` or a
+/// driver name), for checks that only ever refuse: an answer that does not
+/// name exactly the requested paths in order is an error.
+pub(crate) fn filter_values(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<Vec<u8>>, String> {
+    if paths.is_empty() { return Ok(Vec::new()); }
+    let mut request = Vec::new();
+    for path in paths {
+        request.extend_from_slice(path);
+        request.push(0);
+    }
+    let mut command = git_command(Some(root));
+    command.arg("check-attr");
+    match from {
+        Attributes::Staged => { command.arg("--cached"); },
+        Attributes::Worktree => {},
+        Attributes::Index(file) => { command.arg("--cached").env("GIT_INDEX_FILE", file); },
+    }
+    command.args(["-z", "--stdin", "filter"]);
+    let response = run_bounded(command, Some(request), GIT_OUTPUT_LIMIT)?;
+    let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
+    if fields.len() != 3 * paths.len() + 1 || fields.last() != Some(&&b""[..]) {
+        return Err("unexpected git check-attr output".into());
+    }
+    paths.iter().zip(fields.chunks(3)).map(|(path, record)| {
+        if record[0] != *path || record[1] != b"filter" { return Err("unexpected git check-attr output".into()); }
+        Ok(record[2].to_vec())
+    }).collect()
+}
+
+/// Whether a `filter` value hands the file to another named filter driver
+/// (not unset or unspecified, which are deliberate exclusions).
+pub(crate) fn other_filter(value: &[u8]) -> bool {
+    !matches!(value, b"unspecified" | b"unset" | b"transcrypt-v3")
+}
+
 /// The entries among `entries` that Git's attributes protect.
 pub(crate) fn protected_entries(root: &Path, entries: Vec<Staged>, from: Attributes) -> Result<Vec<Staged>, String> {
     let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
@@ -458,11 +493,15 @@ pub(crate) fn protected_entries(root: &Path, entries: Vec<Staged>, from: Attribu
 /// entries for a root commit), from `diff-tree -r -z --raw` between the two
 /// trees, rewritten to the index-record shape and parsed by the verified
 /// core, and the paths it deletes with their old object ids.
-/// Paths a commit deletes, with their old object ids.
+/// Paths with their old object ids: what a commit deletes, or changes.
 pub(crate) type Deleted = Vec<(Vec<u8>, String)>;
 
-pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<(Vec<Staged>, Deleted), String> {
-    let Some(parent) = parent else { return Ok((tree_files(root, commit)?, Vec::new())) };
+/// What a commit changes: the new entries, the deleted paths and the old
+/// object ids of modified paths.
+pub(crate) type Changes = (Vec<Staged>, Deleted, Deleted);
+
+pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Changes, String> {
+    let Some(parent) = parent else { return Ok((tree_files(root, commit)?, Vec::new(), Vec::new())) };
     let data = git(root, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
     parse_diff_tree(&data)
 }
@@ -471,13 +510,14 @@ pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> 
 /// `:<old mode> <new mode> <old oid> <new oid> <status> NUL <path> NUL`, keeping
 /// the new side of every entry that is not deleted, and the deleted paths
 /// with their old object ids.
-fn parse_diff_tree(data: &[u8]) -> Result<(Vec<Staged>, Deleted), String> {
+fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
     if !data.is_empty() && data.last() != Some(&0) {
         return Err("truncated git diff-tree output".into());
     }
     let mut fields = data.split(|b| *b == 0);
     let mut listing = Vec::new();
     let mut deleted = Vec::new();
+    let mut modified = Vec::new();
     while let Some(header) = fields.next() {
         if header.is_empty() { break; }
         let path = fields.next().ok_or("malformed git diff-tree output")?;
@@ -490,7 +530,11 @@ fn parse_diff_tree(data: &[u8]) -> Result<(Vec<Staged>, Deleted), String> {
                 deleted.push((path.to_vec(), String::from_utf8_lossy(old).into_owned()));
                 continue
             },
-            b"A" | b"M" | b"T" => {},
+            b"A" => {},
+            b"M" | b"T" => {
+                if !is_object_id(old) { return Err("malformed git diff-tree output".into()); }
+                modified.push((path.to_vec(), String::from_utf8_lossy(old).into_owned()));
+            },
             _ => return Err("unexpected git diff-tree status".into()),
         }
         listing.extend_from_slice(mode);
@@ -500,7 +544,7 @@ fn parse_diff_tree(data: &[u8]) -> Result<(Vec<Staged>, Deleted), String> {
         listing.extend_from_slice(path);
         listing.push(0);
     }
-    Ok((parse_listing(&listing)?, deleted))
+    Ok((parse_listing(&listing)?, deleted, modified))
 }
 
 /// The `.transcrypt/config` blob of a commit, if it has one.
@@ -564,7 +608,7 @@ mod tests {
                     }
                 }
             }
-            if let Ok((entries, _)) = parse_diff_tree(&input) {
+            if let Ok((entries, _, _)) = parse_diff_tree(&input) {
                 for e in entries {
                     assert!(is_object_id(e.oid.as_bytes()));
                     let mut needle = e.path.clone();
@@ -580,14 +624,14 @@ mod tests {
         // The valid records parse to exactly their fields.
         let tree = parse_listing(&[tree_record(&valid_tree).unwrap().as_slice(), b"\0"].concat()).unwrap();
         assert_eq!((tree[0].regular, tree[0].oid.as_str(), tree[0].path.as_slice()), (true, oid, &b"dir/a b.secret"[..]));
-        let (diff, _) = parse_diff_tree(&valid_diff).unwrap();
+        let (diff, _, _) = parse_diff_tree(&valid_diff).unwrap();
         assert_eq!((diff[0].regular, diff[0].oid.as_str(), diff[0].path.as_slice()), (true, oid, &b"dir/a\tb.secret"[..]));
         assert_eq!(batch_blob_size(format!("{oid} blob 12\n").as_bytes(), oid), Some(12));
         for bad in ["blob 12\n", " blob 012\n", " blob +12\n", " blob 12", " tree 12\n", " missing\n"] {
             let header = if bad.starts_with(' ') { format!("{oid}{bad}") } else { bad.to_owned() };
             assert_eq!(batch_blob_size(header.as_bytes(), oid), None, "{bad:?}");
         }
-        let (kept, deleted) = parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap();
+        let (kept, deleted, _) = parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap();
         assert!(kept.is_empty() && deleted == [(b"gone.secret".to_vec(), oid.to_owned())]);
     }
 

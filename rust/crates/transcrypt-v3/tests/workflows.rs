@@ -761,7 +761,10 @@ fn work_across_a_rekey_is_kept_and_reencrypted() {
     assert!(status.contains("other config (reencrypt)"), "{status}");
     let err = run_fails(&repo, bin(), &["verify-index"], None);
     assert!(err.contains("transcrypt-v3 reencrypt"), "{err}");
-    run(&repo, bin(), &["reencrypt", "--password-stdin"], Some(PASS));
+    // An explicit decision: it lists what will be trusted and needs --yes.
+    let err = run_fails(&repo, bin(), &["reencrypt", "--password-stdin"], Some(PASS));
+    assert!(err.contains("b.env (config") && err.contains("addb") && err.contains("not confirmed"), "{err}");
+    run(&repo, bin(), &["reencrypt", "--yes", "--password-stdin"], Some(PASS));
     assert_eq!(fs::read(repo.join("b.env")).unwrap(), b"feature secret\n");
     run(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
     run(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
@@ -771,7 +774,7 @@ fn work_across_a_rekey_is_kept_and_reencrypted() {
     run(&repo, "git", &["rebase", "-q", &main], None);
     let log = String::from_utf8(run(&repo, "git", &["log", "--format=%s"], None)).unwrap();
     assert!(log.starts_with("addb\nrekey\n"), "{log}");
-    run(&repo, bin(), &["reencrypt", "--password-stdin"], Some(PASS));
+    run(&repo, bin(), &["reencrypt", "--yes", "--password-stdin"], Some(PASS));
     run(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
     run(&repo, bin(), &["verify-index"], None);
 }
@@ -895,7 +898,7 @@ fn old_branches_stay_usable_and_reencrypt_only_goes_forward() {
     // Unlocking with the old passphrase, then trying to pull the newer
     // record back under the old config, is refused.
     run(&linked, bin(), &["unlock", "--password-stdin"], Some(PASS));
-    let err = run_fails(&linked, bin(), &["reencrypt", "--password-stdin"], Some(NEW));
+    let err = run_fails(&linked, bin(), &["reencrypt", "--yes", "--password-stdin"], Some(NEW));
     assert!(err.contains("never had before"), "{err}");
 }
 
@@ -935,4 +938,79 @@ fn legacy_keys_macro_redefinitions_and_crlf() {
     run(&repo, "git", &["add", "k.key"], None);
     run(&repo, "git", &["commit", "-qm", "key"], None);
     assert!(is_record(&committed(&repo, "k.key")));
+}
+
+/// Fourth review F-1: a file encrypted in `HEAD` that a later rule hands to
+/// another filter (what `git lfs track` writes) is refused by the hook and
+/// by the audit, instead of being committed in plaintext silently.
+#[test]
+fn protection_lost_to_another_filter_is_refused() {
+    let mut scratch = Scratch::new("drift");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"A=1\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    attributes.extend_from_slice(b"*.env filter=lfs diff=lfs merge=lfs -text\n");
+    fs::write(repo.join(".gitattributes"), attributes).unwrap();
+    fs::write(repo.join("a.env"), b"A=rotated-secret\n").unwrap();
+    run(&repo, "git", &["add", ".gitattributes", "a.env"], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "track env in lfs"], None);
+    assert!(err.contains("a.env was encrypted") && err.contains("`lfs`"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "track env in lfs"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+    assert!(err.contains("now stored unencrypted for the filter `lfs`"), "{err}");
+    // Deliberately unprotecting is still allowed.
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    run(&repo, bin(), &["unprotect", "*.env"], None);
+    run(&repo, "git", &["commit", "-qm", "unprotect"], None);
+    run(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+}
+
+/// Fourth review F-2/F-3/F-4/F-6: patterns inside submodules are refused;
+/// hooks written by a binary that has since moved are recognized and
+/// rewritten by `unlock`; a sparse checkout without `.transcrypt/` keeps
+/// working; `reencrypt` is an explicit, confirmed decision.
+#[test]
+fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
+    let mut scratch = Scratch::new("review4");
+    let inner = scratch.git_repo("inner");
+    fs::write(inner.join("token.env"), b"TOKEN=1\n").unwrap();
+    run(&inner, "git", &["add", "-A"], None);
+    run(&inner, "git", &["commit", "-qm", "token"], None);
+    let outer = scratch.git_repo("outer");
+    run(&outer, "git", &["-c", "protocol.file.allow=always", "submodule", "add", "-q", "../inner", "libsec"], None);
+    run(&outer, "git", &["commit", "-qm", "submodule"], None);
+    run(&outer, bin(), &["init", "--password-stdin"], Some(PASS));
+    let err = run_fails(&outer, bin(), &["protect", "libsec/token.env"], None);
+    assert!(err.contains("inside the submodule libsec"), "{err}");
+
+    // A binary at another path installed the hooks and filters.
+    let moved = scratch.root.join("old-install");
+    fs::create_dir(&moved).unwrap();
+    let old_bin = moved.join("transcrypt-v3");
+    fs::copy(bin(), &old_bin).unwrap();
+    let repo = scratch.git_repo("moved");
+    run(&repo, old_bin.to_str().unwrap(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::remove_dir_all(&moved).unwrap();
+    run(&repo, bin(), &["unlock"], None);
+    fs::write(repo.join("a.env"), b"A\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "after moving the binary"], None);
+    assert!(is_record(&committed(&repo, "a.env")));
+    assert!(exec(&repo, bin(), &["doctor"], None).status.success());
+
+    // Sparse checkout that leaves out .transcrypt/.
+    fs::create_dir(repo.join("app")).unwrap();
+    fs::write(repo.join("app/s.env"), b"S\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "app"], None);
+    run(&repo, "git", &["sparse-checkout", "set", "app"], None);
+    assert!(!repo.join(".transcrypt").exists());
+    fs::write(repo.join("app/s.env"), b"S2\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "sparse edit"], None);
+    assert!(is_record(&committed(&repo, "app/s.env")));
+    run(&repo, "git", &["sparse-checkout", "disable"], None);
+
 }

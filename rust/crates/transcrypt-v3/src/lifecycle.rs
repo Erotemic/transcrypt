@@ -70,12 +70,29 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
         .map(|e| (e.path.clone(), e.oid.clone())).collect();
     let protected = staged_protected(root, entries)?;
     let id = transcrypt_v3::config_id(&config);
+    let is_record = |oid: &str| -> Result<bool, String> {
+        Ok(git_blob_if_record_sized(root, oid)?.is_some_and(|blob| record_envelope_ok(&blob, &id)))
+    };
+    let mut drifted: Vec<&[u8]> = Vec::new();
     for (path, oid) in changed.iter().filter(|(p, _)| !protected.iter().any(|e| e.path == *p)) {
-        if git_blob_if_record_sized(root, oid)?.is_some_and(|blob| record_envelope_ok(&blob, &id)) {
+        if is_record(oid)? {
             return Err(format!("{} holds an encrypted record but is not protected (moved to an unprotected \
                 name?): nothing would ever decrypt it there. Protect that name, move the file back, or \
                 stage its plaintext", String::from_utf8_lossy(path)));
         }
+        if head_oid.get(path.as_slice()).is_some_and(|old| is_record(old).unwrap_or(false)) {
+            drifted.push(path);
+        }
+    }
+    // A file encrypted in `HEAD` that another named filter now claims
+    // (`git lfs track` writing `filter=lfs`) silently lost its protection;
+    // `unprotect` and `-filter` exclusions are deliberate and allowed.
+    let values = filter_values(root, &drifted, Attributes::Staged)?;
+    if let Some((path, value)) = drifted.iter().zip(values).find(|(_, v)| other_filter(v)) {
+        return Err(format!("{} was encrypted and would now be stored unencrypted for the filter `{}`: a \
+            .gitattributes rule (e.g. from `git lfs track`) overrides `transcrypt`. Narrow that rule, or \
+            `transcrypt-v3 unprotect` the file deliberately", String::from_utf8_lossy(path),
+            String::from_utf8_lossy(&value)));
     }
     for staged in &protected {
         let record = git_blob(root, &staged.oid)?;
@@ -214,7 +231,7 @@ pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<u
         // `seal_action` never repairs a non-local entry; skip decrypting it
         // here (`check_index` verifies it right after).
         if !(changed && !committed) && !forced { continue; }
-        let record = git_blob(root, &staged.oid)?;
+        let record = git_blob(root, &staged.oid).map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
         let opens = key.open(&staged.path, &record).is_ok();
         let envelope = parse_file_header(&record).is_ok();
         // `protect` may force sealing plaintext, never re-encrypting a record.

@@ -105,10 +105,15 @@ fn hook_script(command: &str) -> Result<String, String> {
 }
 
 /// Whether `text` is a hook this or an earlier v3 version installed.
+/// Whether `text` is a hook that some v3 binary installed, at whatever path
+/// it was then (the binary may since have moved or been upgraded; `unlock`
+/// then rewrites it for this binary).
 fn ours(name: &str, command: &str, text: &str) -> bool {
-    let Ok(program) = program() else { return false };
     let legacy = if name == "pre-commit" { Some("verify-index") } else { None };
-    [Some(command), legacy].into_iter().flatten().any(|c| text == format!("#!/bin/sh\nexec {program} {c}\n"))
+    let Some(line) = text.strip_prefix("#!/bin/sh\nexec '").and_then(|t| t.strip_suffix('\n')) else { return false };
+    let Some((path, rest)) = line.rsplit_once("' ") else { return false };
+    !path.contains('\n') && path.ends_with("transcrypt-v3")
+        && [Some(command), legacy].into_iter().flatten().any(|c| rest == c)
 }
 
 fn hook_path(root: &Path, name: &str) -> PathBuf {
@@ -350,6 +355,14 @@ fn check_pattern(root: &Path, pattern: &[u8]) -> Result<Vec<u8>, String> {
     let shown = String::from_utf8_lossy(pattern).into_owned();
     let mut pattern = pattern;
     while let Some(rest) = pattern.strip_prefix(b"./") { pattern = rest; }
+    // A submodule never reads this repository's attributes.
+    for entry in indexed_files(root)?.into_iter().filter(|e| e.mode == "160000") {
+        if pattern.starts_with(&[entry.path.as_slice(), b"/"].concat()) || pattern == entry.path.as_slice() {
+            return Err(format!("{shown} is inside the submodule {}, which does not read this repository's \
+                .gitattributes; run `transcrypt-v3 init`/`protect` inside the submodule",
+                String::from_utf8_lossy(&entry.path)));
+        }
+    }
     if pattern.starts_with(b"!") {
         return Err(format!("{shown}: .gitattributes has no negative patterns; to exclude a file from a \
             protected pattern, add `PATH -filter -diff -merge` to .gitattributes"));
@@ -688,9 +701,9 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         eprintln!("Every staged protected file is encrypted under the current config.");
         return Ok(());
     }
-    // Only configs this branch had *before* the current one: re-sealing
-    // never moves content back under a revoked config, nor adopts a config
-    // from another branch.
+    // Configs from this branch's history other than the current one: a
+    // safety net against adopting another branch's config or newer content,
+    // not a guarantee (history is a graph; a reverted rekey reappears).
     let mut configs: Vec<(Vec<u8>, String)> = Vec::new();
     let log = git(root, &["log", "--format=%H %s", "HEAD", "--", ".transcrypt/config"])?;
     for line in String::from_utf8_lossy(&log).lines() {
@@ -708,15 +721,33 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
             (from another branch, or newer); `reencrypt` only brings forward earlier configs of this branch",
             String::from_utf8_lossy(&staged.path)));
     }
+    // An explicit trust decision: whoever holds an earlier passphrase can
+    // forge records under it, and re-sealing makes them genuine under the
+    // current config. Show where each one came from.
+    eprintln!("These staged files are encrypted under an earlier config. Re-encrypting them makes their \
+        content trusted under the current config:");
+    for (staged, _, found) in &stale {
+        let name = String::from_utf8_lossy(&staged.path).into_owned();
+        let origin = git(root, &["log", "-1", "--format=%h by %an: %s", "HEAD", "--", &name])
+            .map(|o| String::from_utf8_lossy(&o).trim().to_owned()).unwrap_or_default();
+        eprintln!("  {name} (config {}; last changed in {})", crate::hex(&found[..4]),
+            if origin.is_empty() { "the staged changes".to_owned() } else { origin });
+    }
+    if !options.yes {
+        let confirmed = !options.password_stdin && rpassword::prompt_password("Type yes to continue: ")
+            .is_ok_and(|answer| answer.trim() == "yes");
+        if !confirmed {
+            return Err("not confirmed; review those commits, then run `transcrypt-v3 reencrypt --yes`".into());
+        }
+    }
     let mut index_info = Vec::new();
     let staging = staging_dir(root)?;
     for (old, introduced) in configs.iter().filter(|(c, _)| stale.iter().any(|(_, _, f)| *f == transcrypt_v3::config_id(c))) {
         let old_id = transcrypt_v3::config_id(old);
         let names: Vec<String> = stale.iter().filter(|(_, _, f)| *f == old_id)
             .map(|(s, _, _)| String::from_utf8_lossy(&s.path).into_owned()).collect();
-        eprintln!("{} file(s) encrypted under the earlier config {} (introduced by {introduced}): {}\n\
-            Their content becomes trusted under the current config: do this only for your own work.",
-            names.len(), crate::hex(&old_id[..4]), names.join(", "));
+        eprintln!("Passphrase of config {} (introduced by {introduced}), for: {}",
+            crate::hex(&old_id[..4]), names.join(", "));
         let password = passphrase(options.password_stdin, false)?;
         let old_key = unlock_config(&password, old)?;
         for (staged, record, _) in stale.iter().filter(|(_, _, f)| *f == old_id) {

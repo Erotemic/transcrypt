@@ -205,6 +205,29 @@ committer): `reencrypt` makes records that only an earlier passphrase can
 produce genuine under the current config. It is now limited to the branch's
 own earlier configs and says so before asking for that passphrase.
 
+A fourth round re-attacked those fixes and swept everyday use end to end
+(30+ hypotheses). It confirmed six more:
+
+| ID | Severity | Finding | Fix and evidence |
+| --- | --- | --- | --- |
+| H-52 | Medium (plaintext committed) | A later rule handing an encrypted file to another filter (`git lfs track "*.env"` writes `*.env filter=lfs …`) silently stored new content in plaintext. The hook, `doctor` and the audit all passed. | A path whose `HEAD` (or parent) blob is a record of this config, and that is now unencrypted under another **named** filter, is refused by the hook and by the audit. `unprotect` and `-filter` exclusions are still allowed. Test `protection_lost_to_another_filter_is_refused`. |
+| H-53 | Medium (plaintext committed) | `protect` of a path inside a submodule reported success; submodules never read the superproject's attributes. | Refused, with "run it inside the submodule". Test `submodules_moved_binaries_sparse_checkouts_and_confirmation`. |
+| H-54 | Medium (stuck) | After the binary moved or was upgraded (package managers resolve to versioned paths), `unlock` refused the hooks it had itself installed, and nothing could be committed. | Any hook of the form `exec '…/transcrypt-v3' <v3 command>` is recognized, and `unlock` rewrites it. Same test. |
+| H-55 | Medium (stuck) | A cone-mode sparse checkout without `.transcrypt/` failed every Git command. | When the worktree has no `.transcrypt/`, the staged config is used. Same test. |
+| H-56 | Low (performance; regression from H-46) | The old-branch clean path ran two Git processes per file even for records: 71 s for `git status` over 4000 files. | It runs only for plaintext input. |
+| H-57 | Low (claim) | `reencrypt`'s "earlier configs only" was unsound once a rekey is reverted (history is a graph). | The claim is dropped (it is now described as a safety net). `reencrypt` is an explicit trust decision: it lists each record with the commit and author that brought it, and needs `--yes` (or a typed "yes"). Test `work_across_a_rekey_is_kept_and_reencrypted`. |
+
+The reviewer's overall judgment is now part of the design rules:
+- **Most fragile:** records under another config (each of the last rounds
+  found a regression there). Handled by the narrowest rules (exact Git
+  blobs only, an explicit confirmation), not by further special cases.
+- **Second:** protection depending on state outside the committed policy.
+  That covers the binary path, the worktree-only config, and attribute
+  edits by other tools. Those are now checked against the parent commit's
+  policy, which the hook and the audit share.
+- **Least fragile:** the verified core, `lock`/`hydrate`, odd paths, and the
+  audit and pre-receive hooks held up in every round.
+
 Attack review of the new surface:
 - **Selection.** v3 never matches patterns. Git's answers are parsed by
   `parse_attr_record`, which is proved to accept exactly the requested

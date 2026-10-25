@@ -175,16 +175,21 @@ encrypted, `status` says so, and `git add` refuses plaintext until you run
 keeps working, and smudge and `status` say which files are affected. Then:
 
 ```bash
-transcrypt-v3 reencrypt        # asks for the earlier passphrase
+transcrypt-v3 reencrypt        # lists the files and the commits that brought them
+transcrypt-v3 reencrypt --yes  # after review; asks for the earlier passphrase
 git commit --amend --no-edit
 ```
 
 Each such record is authenticated under the earlier config, at its own
 path, and re-encrypted under the current one; the pre-commit hook and the
-pre-push audit refuse to publish it until then. Only configs your branch
-had before its current one are accepted, so `reencrypt` never moves newer
-content back under a revoked passphrase. Do it only for your own work: the
-content becomes trusted under the current config.
+pre-push audit refuse to publish it until then. Only configs from your
+branch's history are offered, as a safety net. This is still your
+decision, because the content becomes trusted under the current config.
+Anyone who knows an earlier passphrase (for example someone you rekeyed
+to remove) can produce records under it, so re-encrypt only work you
+recognize. A `git stash` made before a rekey can be recovered the same
+way after `git stash pop`: `git checkout --theirs FILE`, `git add FILE`,
+`transcrypt-v3 reencrypt`.
 
 All worktrees of a clone share one stored key. Unlocking a worktree that
 is on a commit from before a rekey replaces it, and the other worktrees
@@ -302,6 +307,16 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 - **Old history.** Checking out a commit encrypted under an earlier config
   (before a `rekey`) leaves its protected files encrypted, unless you unlock
   with that config's passphrase.
+- **Other filters.** If another tool's rule claims a protected file (for
+  example `git lfs track "*.env"`), it would no longer be encrypted. The
+  pre-commit hook and the audit refuse that commit. Narrow the other rule,
+  or `unprotect` the file deliberately.
+- **Moving or upgrading the binary.** Git records its full path. After
+  moving it, run `transcrypt-v3 unlock` once with the new binary; it
+  rewrites the filters and hooks.
+- **Sparse checkouts and submodules.** A sparse checkout may leave out
+  `.transcrypt/`; the staged config is used. Submodules have their own
+  `.gitattributes`: run `init`/`protect` inside them.
 - **Hunk selection treats protected files as binary.** `git add -p`,
   `git checkout -p` and `git stash -p` work on Git's internal form of a
   file, which is the ciphertext. Stage protected files whole.

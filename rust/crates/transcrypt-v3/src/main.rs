@@ -62,6 +62,8 @@ pub(crate) struct Options {
     pub(crate) password_stdin: bool,
     pub(crate) private: bool,
     pub(crate) hydrate: bool,
+    /// `reencrypt`: the user already reviewed what will be trusted.
+    pub(crate) yes: bool,
     /// Private mode: forget the key after this long without use.
     pub(crate) timeout: Option<std::time::Duration>,
     pub(crate) patterns: Vec<OsString>,
@@ -115,13 +117,14 @@ fn run() -> Result<(), String> {
         "status" => { no_args(action)?; status(&root) },
         "doctor" => { no_args(action)?; doctor(&root) },
         "init" | "unlock" | "rekey" | "migrate" | "reencrypt" => {
-            let mut options = Options { password_stdin: false, private: false, hydrate: true, timeout: None,
+            let mut options = Options { password_stdin: false, private: false, hydrate: true, timeout: None, yes: false,
                 patterns: Vec::new() };
             for arg in &args[1..] {
                 match (arg.to_str(), action) {
                     (Some("--password-stdin"), _) => options.password_stdin = true,
                     (Some("--private"), "init" | "unlock" | "migrate") => options.private = true,
                     (Some("--no-hydrate"), "unlock") => options.hydrate = false,
+                    (Some("--yes"), "reencrypt") => options.yes = true,
                     (Some(flag), "init" | "unlock") if flag.starts_with("--timeout=") => {
                         options.timeout = Some(parse_duration(&flag["--timeout=".len()..])?);
                     },
@@ -223,8 +226,10 @@ Typical workflow
                             refuses if any protected file has uncommitted changes
   transcrypt-v3 rekey       change the passphrase: a new config and every protected file
                             re-encrypted, staged for you to commit
-  transcrypt-v3 reencrypt   re-encrypt staged files still encrypted under an earlier config
-                            (cherry-picked or rebased across a rekey); asks for its passphrase
+  transcrypt-v3 reencrypt [--yes]
+                            re-encrypt staged files still encrypted under an earlier config
+                            (cherry-picked or rebased across a rekey): lists them with the
+                            commits that brought them, asks for that config's passphrase
   transcrypt-v3 audit [<rev-list args>]
                             check, without the key, that every protected file in the given
                             commits (default HEAD) is v3 ciphertext; authenticates them when
@@ -300,8 +305,9 @@ impl<'a> Filters<'a> {
                 // from before a rekey) shows files the stored key decrypted:
                 // the record Git has for the path, if it opens to exactly
                 // these bytes, is their clean form.
-                if self.stored.is_none() { self.stored = Some(Key::stored(self.root)?); }
-                if let Some(stored) = self.stored.as_ref().and_then(Option::as_ref) {
+                // (Only plaintext needs this; a record goes on below.)
+                if found.is_none() && self.stored.is_none() { self.stored = Some(Key::stored(self.root)?); }
+                if let Some(stored) = self.stored.as_ref().and_then(Option::as_ref).filter(|_| found.is_none()) {
                     for oid in blobs_at(self.root, git_path)? {
                         let record = git_blob(self.root, &oid)?;
                         if parse_file_header(&record).is_ok_and(|f| f == stored.config_id())
@@ -490,6 +496,15 @@ fn config_path(root: &Path) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn load_config(root: &Path) -> Result<Vec<u8>, String> {
+    // A sparse checkout may leave `.transcrypt/` out of the worktree; the
+    // staged config is then the one in force.
+    if fs::symlink_metadata(root.join(".transcrypt")).is_err() {
+        if let Some(staged) = indexed_files(root)?.into_iter().find(|e| e.path == b".transcrypt/config" && e.regular) {
+            let bytes = git_blob(root, &staged.oid)?;
+            transcrypt_v3_core::parse_config(&bytes).map_err(|_| "invalid v3 config grammar")?;
+            return Ok(bytes);
+        }
+    }
     let bytes = fs::read(config_path(root)?).map_err(|e| format!("cannot read v3 config: {e}"))?;
     transcrypt_v3_core::parse_config(&bytes).map_err(|_| "invalid v3 config grammar")?;
     Ok(bytes)
