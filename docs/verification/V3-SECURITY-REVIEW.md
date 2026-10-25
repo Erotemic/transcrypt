@@ -59,7 +59,7 @@ threat model), **Fixed**, or **Open** (should be addressed before a release).
 | Plaintext file permissions | Git never writes plaintext readable by others: smudge releases plaintext only under a private umask and otherwise leaves ciphertext for the hooks/`hydrate` to publish at 0600 (H-16). Files the user creates follow their umask until `hydrate` makes them private; `status` warns. | Fixed (residual: user-created files) |
 | Hook bypass | `--no-verify` commits, merges and rebases are now caught by the `pre-push` audit; `git push --no-verify` and checkouts without hooks need a server-side `audit` (H-3). The clean filter (`filter.required=true`) still encrypts everything it processes. | Mitigated; residual A13 |
 | Rollback | An adversary controlling history can restore older valid records. No freshness state. | Accepted (non-goal) |
-| Linked worktrees, submodules, `.git` files | Linked worktrees are supported (H-26): one agent per repository, private staging per worktree, and `lock` flushes every worktree before stopping the agent. Submodules are unsupported. | Fixed (worktrees) |
+| Linked worktrees, submodules, `.git` files | Linked worktrees are supported (H-26): one agent per repository, private staging per worktree, and `lock` flushes every worktree before stopping the agent. A v3 repository can be a submodule (tested). | Fixed |
 
 ## 5. Hardening campaign, second pass (2026-10-25)
 

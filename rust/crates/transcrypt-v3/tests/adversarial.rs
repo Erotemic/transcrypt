@@ -1250,3 +1250,23 @@ fn linked_worktrees_share_one_unlocked_session() {
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
     scratch.repos.push(linked);
 }
+
+/// A v3 repository used as a submodule (its `.git` is a file pointing into
+/// the superproject) unlocks, hydrates privately and locks on its own.
+#[test]
+fn submodules_are_independent_v3_repositories() {
+    let mut scratch = Scratch::new("submodule");
+    let inner = scratch.repo("inner");
+    run(&inner, bin(), &["lock"], None);
+    let outer = scratch.root.join("outer");
+    fs::create_dir(&outer).unwrap();
+    run(&outer, "git", &["init", "-q"], None);
+    run(&outer, "git", &["-c", "protocol.file.allow=always", "submodule", "add", "-q", "../inner", "inner"], None);
+    let sub = outer.join("inner");
+    assert!(fs::symlink_metadata(sub.join(".git")).unwrap().is_file());
+    run(&sub, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert_eq!(fs::read(sub.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    assert_no_exposed_plaintext(&sub, "submodule");
+    run(&sub, bin(), &["lock"], None);
+    assert!(fs::read(sub.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+}

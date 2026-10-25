@@ -21,7 +21,7 @@ cargo build --release -p transcrypt-v3
 Requirements: Unix (Linux or macOS) and Git 2.34 or newer. Linked worktrees
 (`git worktree add`) share one unlocked session: `unlock` in any worktree
 serves all of them, and `lock` flushes every worktree before stopping it.
-Submodules are not supported.
+A v3 repository can also be a submodule; it is unlocked and locked on its own.
 
 ## Start protecting a repository
 
