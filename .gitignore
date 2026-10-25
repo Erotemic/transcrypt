@@ -33,3 +33,6 @@ htmlcov/
 # build time; never commit duplicate copies of these files.
 /proofs/aeneas/v3/Transcrypt/
 /proofs/aeneas/v3/Transcrypt.lean
+
+# Lake writes a dependency-free manifest for the standalone spec project.
+/proofs/lean/lake-manifest.json
