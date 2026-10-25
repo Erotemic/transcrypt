@@ -41,6 +41,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Smudge/verify release only authentic plaintext for this config and path; failure leaks nothing | `open_record_spec`, `open_record_complete`, `opensTo_unique` |
 | Agent authorization | `authorize_agent_request_spec` |
 | Effective filter attribute check | `check_attr_response_ok_spec`, `check_attr_paths` |
+| Index record parsing | `parse_index_entry_spec` |
 | Hydrate/lock never lose data; verify-index soundness | `hydrate_action_spec`, `lock_action_spec`, `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` |
 
 ## Adapter call-site review (A4)
@@ -58,6 +59,7 @@ verified decision that gates it:
 | `verify-index` | `check_attr_response_ok`, then agent `Decrypt` per entry | exact request bytes sent to `check-attr`; NUL-delimited index paths; `git show :path` blobs | `true` / `Ok` for every entry |
 | `hydrate` publish | agent `Decrypt`, then `hydrate_action`; all entries before any write | staged blob, worktree bytes via held dirfd, plaintext | `Ok(Publish)` for all; `Keep` untouched |
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action` | worktree bytes via held dirfd, staged blob, reseal output | `Ok(Flush)`; `Keep` untouched |
+| Index record parsing (paths used as AD, regular-mode check) | `parse_index_entry` | each NUL-delimited `ls-files --stage -z` record | `Ok` (malformed/unmerged ⇒ refuse) |
 | Protected file selection | `is_protected_path` | index path bytes | — |
 
 The Lean lifecycle models (`Lifecycle.lean`) reproduce the hydrate, lock and

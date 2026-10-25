@@ -29,3 +29,4 @@ open Transcrypt.V3Verification
 #print axioms check_attr_paths
 #print axioms Transcrypt.V3Policy.opensTo_unique
 #print axioms Transcrypt.V3Policy.lock_flush_recoverable
+#print axioms parse_index_entry_spec

@@ -29,6 +29,7 @@ Evidence levels:
 | W-04 | File-header encoder writes all 22 bytes | **PROVED** `encode_file_header_bytes`, `encode_file_header_refines` | — |
 | W-05 | File-header decoder rejects wrong magic, extracts id | **PROVED** `decode_file_header_exact_spec` + roundtrip | — |
 | W-06 | Public slice parsers enforce length and magic | **PROVED** `parse_config_spec`, `parse_file_header_spec` (exactly the spec's shape decoders) | — |
+| P-02 | Git index records select the authenticated path bytes and regular-mode check | **PROVED** `parse_index_entry_spec` (exactly the spec's `IndexRecord`) | — |
 | P-01 | Canonical protected-path policy | **PROVED** `is_canonical_protected_path_spec` = spec `CanonicalProtectedPath` (via `List.splitOn`) | — |
 | C-01 | Deterministic Argon2id + AES-SIV bytes match independent vectors | **TESTED** `tests/v3/reference/check_vectors.py`, Rust vector tests | External review (R-01) |
 | C-02 | Config authenticated; ordered path-bound AD; no plaintext without authentication | **PROVED** `authenticate_config_spec`, `seal_record_spec`, `open_record_spec`, `open_record_complete` relative to `Realizes`; **TESTED** `keyed_satisfies_the_realizes_contract` for the production primitive | AES-SIV security (A10) |
