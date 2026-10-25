@@ -1,5 +1,18 @@
 # Transcrypt v3: internal security review (roadmap stage V6)
 
+> **Independent assessment received 2026-10-25:** see the
+> [original source-level report](reviews/2026-10-25-independent-source-assessment.md)
+> (reviewed source commit `861975a`) and
+> [product-scoped disposition](V3-REVIEW-TRIAGE.md). It reports a real Bash v2
+> plaintext bypass and credible v3 rekey-symlink and Git-rename defects.
+> **Do not assume F-02/F-03 were fixed by this documentation overlay.** The
+> reviewer did not execute the compiled Rust v3 binary; reproduction and
+> current-code testing are required. Local-file mode findings must be
+> interpreted using the [maintainer charter](V3-PRODUCT-CHARTER.md), in which
+> unlocked-local-workstation secrecy is not a default product goal. This
+> later assessment must not be erased by the older internal "Accepted"
+> labels below.
+
 **Date:** 2026-10-25. **Scope:** the experimental Rust v3 profile on
 `work/m2-nul-safe-path-enumeration`: `transcrypt-v3-core` (verified core),
 `transcrypt-v3` (crypto adapter, credential agent, Git adapter), the wire

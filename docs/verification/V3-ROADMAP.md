@@ -1,16 +1,25 @@
-# Transcrypt v3: active roadmap and stopping criteria
+# Transcrypt v3: active product and verification roadmap
 
-**Active as of 2026-10-24; statuses reconciled 2026-10-25.** This is the primary execution plan for the
-secure-first Rust v3 proof of concept on `work/m2-nul-safe-path-enumeration`.
-The older [08 roadmap](08-roadmap-and-pr-plan.md) covers the *larger upstream
-Bash/Rust and legacy-migration campaign*, not the critical path here.
+**Intent updated 2026-10-25; implementation checkpoint `861975a`.** This is
+the active plan for the Rust v3 product on
+`work/m2-nul-safe-path-enumeration`. The [maintainer product charter]
+(V3-PRODUCT-CHARTER.md) governs goals, non-goals, trusted boundaries and
+usability tradeoffs; this roadmap tracks completion **without declaring the
+campaign finished**.
+The older [08 roadmap](08-roadmap-and-pr-plan.md) describes a broader,
+historical upstream dual-implementation program. The **one-time legacy
+migration** is now an explicit product goal here (P4), not something deferred
+merely because the earlier Bash parity plan is historical.
 
-**North star:** one minimal, deterministic, authenticated v3 format; a usable
-Rust implementation covering the full initialize/encrypt/commit/clone/unlock/
-hydrate/lock lifecycle; and *real Charon/Aeneas-to-Lean refinement proofs* of
-security-relevant production Rust logic against a separately authored spec.
-Eventually implement/review the same v3 protocol in standalone Bash, but do
-not hold up the Rust proof of concept to achieve full legacy CLI parity.
+**North star:** selected plaintext files behave like normal files in an
+unlocked checkout, while their corresponding public Git objects contain
+correct deterministic authenticated v3 ciphertext. Users select arbitrary
+paths through Git attributes, unlock persistently by default without a
+required daemon, and can opt into strict local privacy if desired. Source-
+derived Lean theorems constrain the actual Rust core under explicit crypto,
+Git, OS and translation assumptions. Legacy Bash-to-v3 *transition* must be
+safe; legacy wire interoperability is not required. A future Bash v3 may
+implement the same byte contract independently.
 
 This is an **experimental security design**, not a production security
 certification. The exact bytes and threat assumptions live in the
@@ -32,14 +41,18 @@ what is and is not established.
 | V6 — freeze, review, distribution | Threat review, reproducible tests, profile decision, honest claims | **Internal review done** ([V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md), [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md), [user guide](V3-USER-GUIDE.md)); Linux+macOS CI; **external review (R-01) outstanding** | Release blocker |
 | V7 — Bash v3 conformance | Bash implements exactly the approved v3 wire/profile | **Deferred** by policy: no reviewed Bash-feasible AES-SIV under the current dependency contract | No |
 
-**Interpretation:** stages are deliverable-based, not percentages. A passing
-snapshot hash check is not V3. Passing `lake build` of magic constants is not
-V3. A working Rust test suite is not proof of V4/V5.
+**Interpretation:** V0–V6 summarize the **existing experimental baseline**;
+they do not imply the product now meets the new charter. Further deliverables
+are tracked below. Stages are evidence-based, not percentages. A passing
+snapshot hash check is not a function proof, and a working Rust test suite
+is not an adapter proof.
 
-## Smallest valuable formalization — a defined stopping point
+## First formal-assurance milestone (not a product stopping point)
 
-The first *meaningful verified v3 milestone* is **V3 + the targeted subset of
-V4**, under stated assumptions. It does **not** require formalizing OpenSSL,
+The first *meaningful verified v3 milestone* was **V3 + the targeted subset
+of V4**, under stated assumptions. It has now been reached for the `*.secret`
+core. The product campaign continues: generalized selection, credential
+storage and adapter changes must extend/refine these guarantees as needed. It does **not** require formalizing OpenSSL,
 RustCrypto internals, Git, the kernel, or arbitrary filesystem scheduling.
 
 1. **Wire refinement (V3):** establish theorem statements about the actual
@@ -116,39 +129,38 @@ verified" or "cryptographic security has been proved from first principles."
       - idempotent unlock/lock;
       - clean makes new secrets private.
 
-### Remaining, ranked by security value (see [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md#ranked-unresolved-risks))
+### Next product milestones, ranked by expected value
 
-1. **A13 — server-side enforcement.** Plaintext from checkouts that never
-   ran `unlock` is only stopped where `audit` runs. The CI snippet and
-   `contrib/v3/pre-receive` are shipped and tested; deploying them on shared
-   remotes is the owner's decision.
-2. **R-01 — external review** of the construction, `aes-siv`, the
-   locked-filter envelope pass-through (A14) and the adapter, using the
-   [review package](V3-SECURITY-REVIEW.md#review-package). Release blocker.
-3. **A4 — adapter remainder.** The long-running filter protocol is in place
-   (pkt-line lengths proved). Remaining: move the `cat-file --batch` header
-   check, the `ls-tree`/`diff-tree` record rewriting and unmerged-entry
-   detection into the proved core (all fuzz-tested and fail-closed today),
-   and keep the call-site table current.
-4. **A7 — Git versions.** CI covers Git 2.34, 2.43 and Apple Git; extend if
-   users report others.
-5. **A8/A6 — same-UID** races and agent access are accepted; an optional
-   agent idle timeout and an `nlink > 1` warning at lock are cheap
-   follow-ups.
-6. **A3 — translator trust.** Track Aeneas/hax releases.
-7. **V7 — Bash v3.** It becomes feasible exactly when OpenSSL ≥ 3.2 is an
-   acceptable Bash dependency. OpenSSL 3.2 adds Argon2id to `openssl kdf`,
-   and AES-SIV can be composed from `openssl mac` (CMAC) and
-   `openssl enc -aes-256-ctr`, checked against `tests/v3/reference/`.
-   Ubuntu 24.04 (OpenSSL 3.0.13) and macOS (LibreSSL) do not ship it. This
-   is a user decision. Until then the Bash tool stays v2, mapped in
-   [V3-BASH-CORRESPONDENCE](V3-BASH-CORRESPONDENCE.md).
+See [V3-PRODUCT-CHARTER](V3-PRODUCT-CHARTER.md) for the requirements and
+[V3-REVIEW-TRIAGE](V3-REVIEW-TRIAGE.md) for the independent findings against
+`861975a`. These priorities are **not** a fixed stop list; rerank after each
+substantive implementation result.
+
+| Track | Goal | Acceptance condition | Current status |
+| --- | --- | --- | --- |
+| **P0: real adapter defects** | Reproduce and fix `.transcrypt/config.rekey` symlink/outside write; make path-bound `git mv` recoverably correct | Compiled Rust attack regressions fail before and pass after; no out-of-repo mutation; renamed object decrypts in fresh clone | **Independent review reports F-02/F-03; no fix assumed** |
+| **P1: arbitrary protected paths** | Replace `*.secret` selection in production and verified core with Git's exact `.gitattributes` semantics | `.env`, exact names and arbitrary patterns stage correctly; audit and attributes check historical committed policy; raw-byte paths and renames tested; Lean refinement updated | **Not implemented** |
+| **P2: persistent unlock by default** | Local-only scoped derived credential, no persistent agent required for normal Git; memory-only agent remains optional | Unlock once, restart shell/reboot/processes, then ordinary checkout/commit/diff work without prompting or special hooks; same cipher bytes and checked gates in either mode | **Not implemented** |
+| **P3: transparent Git use** | Ordinary checkout, restore, switch, merge, rebase, diff, status and rename without mandatory `0600` or private umask | Real-Git integration on supported platforms with permissive umask; optional private mode still enforces its own promise; no loss of local edits | **Current implementation has strict privacy defaults** |
+| **P4: migration and Bash map** | Recoverable one-time v2-to-v3 conversion, preserving arbitrary intended patterns and documenting old history | End-to-end legacy source → v3 fresh clone and rekey tests, failure rollback and recovery instructions; no v2 crypto imported into proved v3 | **Missing** |
+| **P5: proof correspondence** | Preserve existing source-derived proofs, extend to generalized selection and any new credential/adapter decisions | Pinned Aeneas extraction, Lean theorems on invoked core, independent spec plus explicit unchanged Git/crypto/OS assumptions | **Established for current `*.secret` core; future adaptations open** |
+| **P6: release qualification** | Independent crypto/adapter review and honest conditional claims | Review confirmed on the new code/profile and important defects resolved; reproducible tests and assumption ledger | **Not complete** |
+
+**Parallel optional tracks:** server/CI audits for organizations requiring
+remote policy enforcement; session-only credential/strict-local-privacy mode;
+Git-platform portability and performance; possible independently written Bash
+v3 once its crypto/dependency feasibility is resolved. None is allowed to
+compromise the main Rust product promise or silently weaken v3 authentication.
+
+**Legacy finding F-01 is real:** maintained Bash-v2 users should be warned
+and given a fix/transition path. This is not a reason to teach verified v3 to
+decrypt legacy CBC.
 
 ## Scope discipline and risk decisions
 
 - **Do not implement legacy-v2 features in formally verified v3.** Existing
   v2 security/regression work is maintenance, not a v3 completion gate.
-- **Do not require full Bash v3 or legacy migration to finish Rust-first V3/V4.**
+- **Do not require full Bash v3 to preserve the achieved Rust V3/V4 proofs.**
   Bash portability is an independent follow-on track under the old 08 plan.
   The CLI-only OpenSSL feasibility study found no straightforward safe
   AES-SIV implementation under the existing Bash dependency policy: do not
@@ -198,7 +210,9 @@ The checked-in extraction is under `proofs/aeneas/v3/`; never commit `.lake/`
 or `rust/proofs/aeneas/generated/`. The latest actual build/compile reports
 from the user's machine take precedence over stale file commentary.
 
-**For the next worker:** read [V3-PROOF-COVERAGE](V3-PROOF-COVERAGE.md),
+**For the next worker:** read [V3-PRODUCT-CHARTER](V3-PRODUCT-CHARTER.md),
+[V3-REVIEW-TRIAGE](V3-REVIEW-TRIAGE.md),
+[V3-PROOF-COVERAGE](V3-PROOF-COVERAGE.md),
 [V3-HANDOFF](V3-HANDOFF.md), the exact
 [experimental wire spec](specs/V3-AUTHENTICATED-P0.md), the real
 [Lean refinement module](../../proofs/aeneas/v3/V3Wire/Verification/Refinement.lean),

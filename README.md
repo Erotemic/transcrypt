@@ -14,6 +14,18 @@ them with your entire team or complicate your workflow.
 
 ![Tests](https://github.com/elasticdog/transcrypt/workflows/Tests/badge.svg)
 
+> **Product direction for Rust v3 (2026-10-25):**
+> [Read the maintainer's product charter](docs/verification/V3-PRODUCT-CHARTER.md)
+> before proposing feature or security requirements. The main goal is
+> authenticated ciphertext **in public Git** with ordinary, transparent
+> **plaintext work on unlocked local files**. Arbitrary Git-selected paths and
+> persistent local unlock are prioritized future defaults; they are **not yet
+> implemented** in this snapshot. See the
+> [independent-review disposition](docs/verification/V3-REVIEW-TRIAGE.md).
+> An independent source review also reproduced a **Bash v2 plaintext-staging
+> bypass**; consult that disposition for legacy remediation and migration
+> guidance. This docs-only overlay does **not** fix the Bash or Rust code.
+>
 > **Experimental secure-first Rust v3:** a separate authenticated Rust
 > implementation and Lean/Aeneas verification project are under active
 > development. Its protocol core is machine-checked against an independent

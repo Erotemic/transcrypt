@@ -1,5 +1,14 @@
 # 07. October 2026 security audit: required closeout matrix
 
+> **Historical planning context:** some requirements below were written
+> before the 2026-10-25 maintainer direction. The current
+> [v3 product charter](V3-PRODUCT-CHARTER.md) controls product goals,
+> default UX, non-goals and review priorities; the
+> [candidate wire specification](specs/V3-AUTHENTICATED-P0.md) controls
+> existing ciphertext bytes. This document remains useful evidence,
+> **not** an independent mandate for legacy/Bash parity or local-at-rest
+> privacy in the Rust v3 product.
+
 **All findings below are confirmed or identified against the UNRELEASED
 October 2026 Bash crypto overlay**, not against the unmodified upstream
 `transcrypt-v3` integration branch (which does not implement PBKDF2). No

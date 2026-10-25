@@ -1,5 +1,13 @@
 # Transcrypt v3 secure-first proof of concept: canonical byte contract
 
+> **Scope note (2026-10-25):** this document specifies the **existing v3
+> authenticated bytes** and the narrow experimental `*.secret` implementation.
+> The maintainer's [product charter](../V3-PRODUCT-CHARTER.md) prioritizes
+> arbitrary Git-attribute-selected paths and persistent local unlock. Those
+> features are **not implemented** by the present prototype; this notice
+> makes no wire-format change. Path binding and exact AAD remain mandatory
+> until a separately versioned, reviewed protocol says otherwise.
+
 **Status:** Proposed experimental v3 protocol. No compatibility with released
 legacy formats or the earlier `TCRYPT3:` experiment. The Rust implementation
 must be built/tested and independently reviewed before security-sensitive use.

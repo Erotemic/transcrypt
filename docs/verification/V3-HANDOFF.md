@@ -4,19 +4,32 @@
 Always begin by checking the working tree and latest commits; this file is a
 continuity aid, not a claim about later changes.
 
-## Goal / anti-goals
+## Product direction vs current implementation
 
-Deliver the smallest secure-first Rust v3 lifecycle with meaningful
-source-derived Lean refinement. V3 uses Argon2id and AES-256-CMAC-SIV,
-canonical Git pathname authentication, one context and `*.secret` files.
-Do not spend effort on legacy-v2 parity, Bash CLI porting, standalone SMT,
-broad migration or full Git/OS formalization. Keep the independent spec
-authoritative: Rust is changed to meet it, never the reverse.
+**Read [V3-PRODUCT-CHARTER](V3-PRODUCT-CHARTER.md) first.** The maintainer's
+primary goal is authenticated ciphertext **in public Git** combined with
+transparent plaintext **in an unlocked local checkout**; local-at-rest and
+same-UID privacy are optional rather than hard prerequisites. Arbitrary Git
+attribute patterns, default persistent local unlock, normal Git rename and a
+one-time legacy transition are now high-priority targets. The previous
+security-hardening stopping criterion is superseded: continually reassess
+security, correctness, usability, simplicity, portability and proofs.
+
+**Current source `861975a` is not yet that UX:** the existing v3 uses
+`*.secret`, a required memory-only agent and default private-permission
+hardening. Keep describing those accurately until changed. The format uses
+Argon2id + AES-SIV with exact canonical Git path binding. Maintain the
+independent v3 byte specification and existing source-derived Lean proofs;
+never change cipher semantics silently or import legacy CBC into the proved
+core. Treat the [independent review triage](V3-REVIEW-TRIAGE.md), particularly
+F-02/F-03, as actionable engineering inputs.
 
 ## Where things are
 
 | Concern | Canonical location |
 | --- | --- |
+| Product vision, security promise, goals/non-goals | `docs/verification/V3-PRODUCT-CHARTER.md` |
+| Independent review, scope classification and open reproductions | `docs/verification/V3-REVIEW-TRIAGE.md` |
 | Roadmap, stage status, remaining work | `docs/verification/V3-ROADMAP.md` |
 | Evidence per requirement | `docs/verification/V3-PROOF-COVERAGE.md` |
 | Trust-ordered assumptions, adapter call-site table | `docs/verification/V3-ASSUMPTIONS.md` |
@@ -81,7 +94,7 @@ stable, but reordering loops inside a proved function renames them.
 - Unnamed hypotheses: refer by type with `‹_›` instead of `rename_i` where
   possible.
 
-## Adapter invariants (do not regress)
+## Adapter invariants (current baseline; revise intentionally under the charter)
 
 These came out of the hardening campaign (`V3-SECURITY-REVIEW.md` §5); each
 has a regression test in `tests/adversarial.rs`.
@@ -97,9 +110,12 @@ has a regression test in `tests/adversarial.rs`.
   `flock`).
 - Release plaintext only through the agent's `open_record`. While locked,
   filters may only pass through inputs accepted by `record_envelope_ok`.
-- Smudge may emit plaintext only when `umask_is_private()`; otherwise Git
-  must receive the (authenticated) record. Plaintext files are otherwise
-  written only by `hydrate` (0600).
+- **Current code:** smudge emits plaintext only when `umask_is_private()`;
+  otherwise Git receives the record and hooks hydrate with mode 0600. This
+  is an implementation detail of the **current strict privacy default**, not
+  a requirement to retain it in the proposed ordinary-local-plaintext mode.
+  Any replacement must preserve public-Git encryption correctness and make
+  opt-in strict mode truthful.
 - `hydrate` replaces only files that are authentic records for their path,
   and re-indexes only files holding the staged plaintext.
 - Run every subprocess through `run_bounded` (directly or via `git`,
@@ -137,20 +153,39 @@ agent; `lock` flushes all of them) and submodules.
 
 The branch is unpushed: push needs the owner's credentials.
 
-## Next tasks
+## Next tasks (product-directed; resume after each checkpoint)
 
-See the ranked list in `V3-ROADMAP.md` ("Remaining"). Owner decisions and
-external work first:
-1. Deploy `contrib/v3/pre-receive` or the CI `audit` on shared remotes, and
-   confirm with `check-remote-enforcement` (A13).
-2. External review R-01, using the review package in `V3-SECURITY-REVIEW.md`.
-3. Decide whether OpenSSL ≥ 3.2 is an acceptable Bash dependency (unblocks
-   a Bash v3, stage V7).
+1. Read the [charter](V3-PRODUCT-CHARTER.md) and the
+   [independent review triage](V3-REVIEW-TRIAGE.md). Reproduce/repair **F-02
+   rekey symlink overwrite** and **F-03 git-mv path binding** with the compiled
+   Rust CLI. These are correctness/security problems, not optional workstation
+   privacy features. Check current HEAD first: the report was against `861975a`.
+2. Make **arbitrary Git `.gitattributes`-selected paths** the true policy.
+   Generalize the production Rust and its Aeneas-derived Lean proof to
+   canonical Git paths without a hardcoded `.secret` suffix; verify staged
+   selection, keyless audit limitations, historical paths, and renames.
+3. Make **local persistent derived credential** the default. `.git/config`
+   is acceptable, or a private local sidecar if it gives clearer/simpler
+   semantics; never commit keys. No agent required in everyday use. Keep
+   session-only memory agent and stricter local permission checks optional.
+4. Make normal Git operations transparent under ordinary umasks. The user is
+   responsible for local plaintext visibility; ensure there is no *public*
+   plaintext publication through normally configured encryption filters.
+5. Build a **recoverable one-time Bash v2 → Rust v3 transition** preserving
+   arbitrary selected paths. Document historical exposure; no runtime legacy
+   cipher decoder or Bash v3 requirement.
+6. Preserve compiled Aeneas/Lean source-derived proofs, update actual
+   adapter-to-core assumptions and rerun regression/differential/fault tests.
+   Obtain outside crypto/adapter review before security-sensitive release.
 
-Implementable, lower value:
-- move the `ls-tree`/`diff-tree` record rewriting, the unmerged-entry
-  detection and the `cat-file --batch` header check into the proved core;
-- an optional agent idle timeout.
+Remote enforcement is an **optional organizational control** (A13), not a
+hard dependency for using the product. Keyless enforcement detects obvious
+plaintext/structure, not forged authentication (A14). Same-UID adversaries,
+rollback, deterministic equality and unlocked-worktree visibility are stated
+bounds rather than default hardening targets.
 
-**Decision rule:** spend effort on proofs connected to shipped Rust or on
-exploitable lifecycle failures, not on theorem counts.
+After each meaningful task, independently select the next improvement with
+best real-world value. A green test suite or exhausted previous agent backlog
+is a checkpoint, **not the final product stopping condition**. If an
+execution session ends, leave the exact next action and any open test/proof
+failures rather than declaring the product done.

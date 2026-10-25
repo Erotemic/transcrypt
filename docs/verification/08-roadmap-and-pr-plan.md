@@ -1,5 +1,14 @@
 # 08. Phased delivery, dependencies, and upstream PR strategy
 
+> **Historical planning context:** some requirements below were written
+> before the 2026-10-25 maintainer direction. The current
+> [v3 product charter](V3-PRODUCT-CHARTER.md) controls product goals,
+> default UX, non-goals and review priorities; the
+> [candidate wire specification](specs/V3-AUTHENTICATED-P0.md) controls
+> existing ciphertext bytes. This document remains useful evidence,
+> **not** an independent mandate for legacy/Bash parity or local-at-rest
+> privacy in the Rust v3 product.
+
 > **Scope note (2026-10-24):** This document remains the historical,
 > Bash-inclusive upstream/legacy roadmap. It does **not** represent the
 > current Rust-first v3 execution state. The active v3 milestone gates and

@@ -1,5 +1,14 @@
 # 05. Machine-checked Rust refinement and assurance boundaries
 
+> **Historical planning context:** some requirements below were written
+> before the 2026-10-25 maintainer direction. The current
+> [v3 product charter](V3-PRODUCT-CHARTER.md) controls product goals,
+> default UX, non-goals and review priorities; the
+> [candidate wire specification](specs/V3-AUTHENTICATED-P0.md) controls
+> existing ciphertext bytes. This document remains useful evidence,
+> **not** an independent mandate for legacy/Bash parity or local-at-rest
+> privacy in the Rust v3 product.
+
 **This is a proof plan, not proof output.** The goal is a line of evidence
 from independently written mathematical definitions to **actual Rust source**,
 not to an independent handwritten Rust-like Lean reimplementation.

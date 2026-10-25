@@ -5,7 +5,11 @@ regression, an extraction check and a cryptographic assumption from being
 reported as the same kind of evidence. See the active
 [v3 roadmap](V3-ROADMAP.md), the theorem-level
 [proof status](../../proofs/aeneas/v3/PROOF-STATUS.md) and the
-[trust-ordered assumption register](V3-ASSUMPTIONS.md).
+[trust-ordered assumption register](V3-ASSUMPTIONS.md), and the
+[maintainer's product charter](V3-PRODUCT-CHARTER.md). Existing proofs are
+about the source at the stated snapshot, including the present `*.secret`
+policy; **they do not certify unimplemented arbitrary-pattern or persistent-
+credential defaults**.
 
 Evidence levels:
 
@@ -45,10 +49,14 @@ Evidence levels:
 | G-09 | Missing local protection and unprotected remotes are detectable | **TESTED** `doctor_detects_missing_protection`, `remote_enforcement_check_detects_unprotected_remotes` | Deployment (A13) |
 | G-05 | Lock never destroys uncommitted plaintext | **PROVED** `lock_action_spec`, **PROVED (model)** `lockEntry_spec` (resealing through the idempotent clean); **TESTED** unstaged-edit refusal, stamp-checked replacement | — |
 | G-07 | Clean stores only genuine records; locked filters never emit anything but an unchanged v3 envelope | **PROVED (model)** `cleanModel_spec`, `cleanModel_genuine`, `cleanModel_idempotent`, `lockedFilterModel_spec`; **TESTED** `clean_is_idempotent_and_still_refuses_foreign_records`, locked checkout tests | The adapter follows the models (A4); forged envelopes while locked (A14) |
+| G-SEL | Any arbitrary Git-attribute-selected pathname gets authenticated public-Git ciphertext | **OPEN**: current proven `CanonicalProtectedPath` requires `*.secret`; new core/refinement and staged historical policy semantics needed | A16 |
+| G-KEY | Persistent local credential is default, agent is optional, identical v3 bytes in both modes | **OPEN**: session-agent contract tested; persistent storage implementation not present | A17; local key access trusted by design |
+| G-MV | Normal rename produces an authenticated record for destination path or a clear recoverable failure | **OPEN**: independent Git `mv` reproduction, real Rust v3 regression pending | A18; adapter semantics |
+| G-MIG | Explicit recoverable one-time Bash v2 → v3 transition | **OPEN**: documented manual process only | Git/OS adapter transaction assumptions; historical v2 risk |
 | B-01 | Standalone Bash conforms to v3 | **OPEN / DEFERRED** (V7) | Bash AES-SIV dependency decision |
 | R-01 | Independent algorithm, threat and adapter security review | **REVIEW (internal)** [V3-SECURITY-REVIEW.md](V3-SECURITY-REVIEW.md) | External review before security-sensitive release |
 
-## Minimal completion gate
+## Historical first-core completion gate (achieved; not the product finish line)
 
 - [x] W-02 through W-06 each have a compiled theorem referring to the actual
       extracted Rust function, including the public slice boundary.

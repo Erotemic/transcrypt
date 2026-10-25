@@ -1,9 +1,20 @@
 # Transcrypt v3 user guide (experimental Rust)
 
+> **Current CLI behavior, not the final product defaults.** Source snapshot
+> `861975a` requires `*.secret` paths, a running memory-only credential agent,
+> and private worktree permissions. The maintainer's
+> [product charter](V3-PRODUCT-CHARTER.md) instead prioritizes arbitrary
+> Git-selected paths, persistent local unlock and ordinary Git behavior.
+> These changes are **planned**, not available in this guide's CLI. See the
+> [independent review triage](V3-REVIEW-TRIAGE.md) before relying on rekey or
+> protected-file rename in a security-sensitive repository.
+
 `transcrypt-v3` encrypts every Git-tracked file whose name ends in `.secret`.
-Encryption happens in Git's clean filter, so the repository, its history and
-every remote only ever contain authenticated ciphertext. Your worktree holds
-plaintext while the repository is unlocked.
+In a correctly configured checkout, encryption happens through Git's clean
+filter and selected staged files become authenticated ciphertext. This is
+**not** a guarantee about past plaintext history, clones where filters were
+never installed, deliberate filter bypass or unrelated/unselected files.
+Your worktree holds plaintext while the repository is unlocked.
 
 > **Status.** Experimental. The protocol core is machine-checked against an
 > independent specification (see [what is proved](#what-is-and-is-not-proved)),
@@ -143,9 +154,16 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
 
 ## What to expect
 
-- **Renames re-encrypt.** Each ciphertext is bound to its exact Git path, so a
-  record moved to another path does not decrypt. `git mv` re-runs the clean
-  filter and works normally.
+- **Protected renames are not yet transparent in this prototype.** A
+  ciphertext is bound to its exact Git path. Contrary to an earlier version
+  of this guide, **`git mv` normally reuses the old staged blob without
+  re-running the clean filter**. Moving that blob to a new path can leave an
+  undecryptable record, and a keyless envelope check cannot authenticate its
+  new path. Do not treat a bare `git mv` of a protected file as a completed,
+  safe re-encryption. While unlocked, `git add --renormalize` may reapply the
+  filter to plaintext at the new path; **verify the staged object with the
+  key and test a fresh clone before relying on it**. A robust transparent
+  rename/rebind workflow is a tracked product requirement (A18/F-03).
 - **Equal plaintexts leak equality** at the same path in the same repository
   (deterministic encryption keeps Git diffs and merges stable).
 - **`git diff` shows decrypted changes while unlocked** (use `--ext-diff`
@@ -155,7 +173,8 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
   files differ.
 - **Rollback is not detected.** Someone who controls your Git history can
   restore an older valid version of a secret.
-- **The key lives in a local agent process** reachable through a mode-0600
+- **Current implementation:** the key lives in a local agent process
+  reachable through a mode-0600
   socket in `.git/transcrypt-v3/`. Other programs running as your Unix user
   can use it while the repository is unlocked. The key is never written to
   disk.
@@ -163,7 +182,8 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
   `unlock`, or a server without `transcrypt-v3 audit` is not checked. The
   clean filter still encrypts everything it processes. If `core.hooksPath`
   is set, Git ignores `.git/hooks`; `status` warns about this.
-- **Files you create follow your umask.** Transcrypt never lets Git write
+- **Current strict-local-privacy behavior:** files you create follow your
+  umask. Transcrypt never lets Git write
   plaintext readable by others, and makes a secret you create private as
   soon as you `git add` it (or at the next `hydrate`). Until then a new file
   created with `umask 022` is readable by other local users; `status` warns,
@@ -189,6 +209,14 @@ For scripts, `init` and `unlock` accept `--password-stdin`.
 | `refusing to push` / `not v3 ciphertext for its configuration (plaintext?)` | A commit contains an unencrypted secret: rewrite it out of the unpushed history (for example `git rebase -i`), and rotate the secret if it was ever pushed |
 
 ## What is and is not proved
+
+The current verified core uses the current `*.secret` selection policy and
+session agent, not the future arbitrary pattern selector or persistent local
+credential mode. The user selecting files, Git's filter invocation, the
+unverified effectful adapter and RustCrypto remain conditional. The charter's
+local-at-rest non-goal does not weaken the existing cryptographic integrity
+requirements or excuse an out-of-repository write.
+
 
 The pure Rust protocol core (`rust/crates/transcrypt-v3-core`) is translated
 to Lean by Charon/Aeneas and proved against an independent specification:

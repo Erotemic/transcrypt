@@ -1,8 +1,13 @@
 # 01. Requirements, security goals, and threat model
 
-**Document status:** normative TARGET contract, pending agreement on the
-cryptographic profile. These are design requirements, not statements about the
-present code. Requirement IDs must remain stable across reviews.
+**Document status:** historical requirement set from the earlier dual-Bash/
+Rust design campaign. Some requirements (mandatory two-way Bash parity,
+local-credential threat assumptions, path-binding choices, and release gates)
+conflict with the updated 2026-10-25 maintainer direction. The authoritative
+*current product and threat model* is
+[V3-PRODUCT-CHARTER](V3-PRODUCT-CHARTER.md). The separate v3 byte spec still
+controls actual authenticated bytes. Keep the legacy R-01–R-28 IDs for
+traceability; do not silently treat every line below as a live blocker.
 
 ## 1. Product requirement
 

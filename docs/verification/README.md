@@ -1,31 +1,41 @@
-# Transcrypt: interoperable Bash/Rust protocol and verification plan
+# Transcrypt: product vision, protocol and verification
 
-**Status: secure-first Rust v3 lifecycle implemented; source-derived Lean
-extraction tracked and compiling; complete codec and security-decision
-refinement open (2026-10-24).** The active plan is [V3-ROADMAP](V3-ROADMAP.md),
-with an obligation-by-obligation [proof ledger](V3-PROOF-COVERAGE.md) and a
-short [handoff](V3-HANDOFF.md). The original numbered documents remain as
-historical requirements and the larger Bash/interoperability roadmap; they
-are **not** the current Rust-first completion checklist.
+**Status (2026-10-25 source snapshot `861975a`):** the experimental Rust
+v3 lifecycle exists; the Aeneas-extracted wire and decision core have
+compiled refinement theorems, while the effectful Git/OS adapter and crypto
+implementations remain explicitly assumed/tested rather than fully proved.
+The [product charter](V3-PRODUCT-CHARTER.md) governs intended defaults and
+non-goals. The [roadmap](V3-ROADMAP.md), [proof ledger]
+(V3-PROOF-COVERAGE.md), [assumption register](V3-ASSUMPTIONS.md) and
+[handoff](V3-HANDOFF.md) track implementation and evidence. Historical
+numbered documents describe earlier, potentially conflicting design choices.
+
+**Important planned change:** generic `.gitattributes`-selected protected
+paths, persistent local credentials by default, optional memory-only/private
+mode, transparent ordinary Git flows and a one-time v2 migration. The current
+Rust snapshot **does not yet implement those new defaults**; it uses
+`*.secret` and a mandatory in-memory agent. The independent review and its
+[disposition](V3-REVIEW-TRIAGE.md) contain actionable defects, not an
+exemption from correcting the code.
 
 ## Secure-first v3 implementation (experimental)
 
-The primary current target is the new [byte-exact v3 AES-SIV / Argon2id
-specification](specs/V3-AUTHENTICATED-P0.md) and its two Rust crates,
-`transcrypt-v3-core` and `transcrypt-v3`. This is a deliberately small
-full-lifecycle proof of concept, **not an approved cryptographic protocol
-or a formally verified executable**. Independent Python test vectors and
-Rust Git integration tests are supplied. The production Rust core has already
-been translated with pinned Charon/Aeneas and has compiled magic/version
-correspondence theorems; **full generated encoder/decoder refinement remains
-open**. The Bash v3 implementation is deferred. Legacy v2 parity work is not
-the immediate development priority.
+The current implementation is an experimental [byte-exact v3 AES-SIV /
+Argon2id candidate](specs/V3-AUTHENTICATED-P0.md) with Rust crates
+`transcrypt-v3-core` and `transcrypt-v3`. Independent reference vectors and
+real-Git tests accompany source-derived Lean refinements of the codec and
+pure decision core. This is **not a formally verified executable or an
+independently audited release**. The next product work is guided by the
+[charter](V3-PRODUCT-CHARTER.md), not by repeating the narrow first proof
+of concept or pursuing parity with legacy-v2 cryptography.
 
 ## The intended result
 
-The *active* target is one Rust-first, byte-exact protocol and a scoped
-machine-checked proof development; the *long-term* target additionally has
-two independently maintained interoperable implementations. The current
+The *active* target is a highly usable Rust-first, byte-exact authenticated
+protocol and a scoped machine-checked proof development. A future independent
+Bash v3 implementation is desirable **if feasible without diluting security
+or portability**, but is not a Rust-v3 release prerequisite. One-time
+legacy-to-v3 migration is more important than legacy wire compatibility. The current
 formalization is not blocked on writing the Bash v3 implementation. It uses a
 public, implementation-independent specification and one machine-checked proof
 development about the Rust implementation's translated
@@ -53,21 +63,23 @@ Rust design is not promoted into the protocol simply to make proofs easy.
 
 ## Read in this order
 
-For the current Rust-first work, start with the first three rows. Consult the
+For the current Rust-first work, read the product charter first. Consult the
 original numbered plans for longer-term Bash interoperability, historical
 audit findings, and source decisions.
 
 | Document | Purpose | Type |
 |---|---|---|
-| [Active v3 roadmap](V3-ROADMAP.md) | Clear stages, dependencies, proof stopping point, and next exact action | **Current plan** |
+| [V3 product charter](V3-PRODUCT-CHARTER.md) | Normative intended UX, public-Git threat model, goals and non-goals | **Maintainer direction** |
+| [Independent security review disposition](V3-REVIEW-TRIAGE.md) | Separate implementation bugs from legacy, optional local and deployment concerns | Active review triage |
+| [Active v3 roadmap](V3-ROADMAP.md) | Current product milestones, statuses, proof evidence and next action | **Current plan** |
 | [V3 proof coverage](V3-PROOF-COVERAGE.md) | Source-derived Lean theorems vs tests vs trusted assumptions | **Current status** |
 | [V3 handoff](V3-HANDOFF.md) | Working branch, file map, commands, continuity rules | **Current handoff** |
-| [01 - Scope and adversary](01-requirements-and-threat-model.md) | Assets, attackers, required security properties, non-goals | Normative target |
+| [01 - historical scope and adversary](01-requirements-and-threat-model.md) | Earlier requirements, including some superseded defaults | Historical reference |
 | [02 - Protocol decisions](02-protocol-and-wire-format.md) | Inputs, public metadata, wire versioning, cryptographic design gate, byte-level spec checklist | Draft for approval |
-| [03 - Git operation semantics](03-git-state-machine.md) | Clean/smudge, staged tree, init, unlock, rekey, migration, rollback, cache, worktrees | Normative target |
+| [03 - historical Git operation plan](03-git-state-machine.md) | Earlier clean/smudge, transaction and migration requirements | Historical reference; check charter |
 | [04 - Implementation layout](04-dual-implementation-architecture.md) | Bash crosswalk and Rust crate boundaries | Engineering plan |
 | [05 - Verification](05-formal-verification.md) | Independent Lean spec, Aeneas extraction, theorem plan, trusted interfaces | Proof plan |
-| [06 - Interoperability and CI](06-conformance-and-ci.md) | Exact acceptance matrices and required automation | Test plan |
+| [06 - interoperability and CI](06-conformance-and-ci.md) | Earlier two-implementation acceptance matrix | Historical/test reference |
 | [07 - Audit closeout](07-audit-remediation.md) | Traceable disposition for every October 2026 audit finding | Remediation plan |
 | [08 - Execution and PRs](08-roadmap-and-pr-plan.md) | Historical full Bash/Rust/upstream program, dependencies and gates | Long-range plan (superseded for active Rust v3) |
 | [09 - Hand review](09-bash-traceability-and-review.md) | Hand-auditable mapping and change-review checklist | Review procedure |
@@ -99,6 +111,12 @@ Rust v2 envelope crate. Those implementation changes are distinct from the
 **unreleased** `TCRYPT3` prototype and do not finalize a secure v3 format.
 
 ## Project rules
+
+The [maintainer charter](V3-PRODUCT-CHARTER.md) takes precedence over older
+product scope and agent stopping criteria. Rules below about Bash release
+process and two-way interoperability govern that *later* independent track,
+not the Rust v3 product's default UX or one-time transition requirement.
+
 
 1. Specify externally observable success **and failure** behavior first.
 2. Treat format versions as immutable after release. An incompatible change

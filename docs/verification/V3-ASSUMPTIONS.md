@@ -4,6 +4,11 @@
 2026-10-25.** Every guarantee about the Rust v3 implementation is
 conditional on the assumptions below. Identifiers are stable: A1–A10 keep
 their meaning, and A11–A14 were added when this campaign surfaced them.
+A16–A18 below track **new product obligations, not implemented protections**.
+Older security-hardening priorities may be superseded by the current
+[product charter](V3-PRODUCT-CHARTER.md); the source-derived proof status and
+existing assumption meanings are not superseded.
+
 Assumptions are listed from **least trusted** (our own newest code) to
 **most trusted** (standard cryptographic hardness).
 
@@ -34,7 +39,10 @@ one.
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
 | A13 | History is audited before it reaches others (deployment) | REVIEWED; depends on deployment |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
-| A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git) |
+| A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); **not a required default v3 privacy guarantee** |
+| A16 | Arbitrary Git-selected protected paths correspond to actual enforced/index policy | **OPEN / PLANNED** (current Rust still matches `*.secret`) |
+| A17 | Persistent local-derived credential retrieval is correct, local-only and mode-independent | **OPEN / PLANNED** (current Rust requires an agent) |
+| A18 | Path-bound renames preserve ability to decrypt at the new path | **OPEN** (independent real-Git reproduction shows `git mv` does not re-clean) |
 
 ## Detailed register
 
@@ -347,31 +355,98 @@ one.
   the test runs on every CI platform.
 - **Status:** TESTED.
 
-## Ranked unresolved risks
+### A16 — Generalized Git attribute selection (planned)
 
-Ranked by exploitability × impact under the threat model (a non-root
-attacker controlling the remote and history, not the user's account), then
-by cost.
+- **Claim sought:** for any valid Git pathname selected by the relevant
+  staged/committed `.gitattributes` rules, every normal clean/decrypt/index
+  decision operates on that exact path, not just on `*.secret`.
+- **Trust boundary:** Git's attribute selection, staged tree/index and our
+  Rust attribute adapter; future verified canonical-path selection core.
+- **Consequence if false:** expected protected plaintext enters the public
+  index/history, or a protected record is checked under the wrong path.
+- **Evidence:** current tests/proofs apply only to the restricted suffix
+  policy; this generalized obligation is **not yet proved or implemented**.
+- **Residual:** Git does not promise correct filtering in an unconfigured
+  clone or after intentional user bypass; keyless checks cannot prove a tag.
+- **Next reduction:** source-generalize the core; prove correspondence to an
+  independent Git-path selection spec; test arbitrary patterns, historical
+  commits, nested attributes, raw byte names and adversarial staged state.
+- **Status:** OPEN / PLANNED.
 
-1. **Plaintext from checkouts without v3 filters (A13).** Most likely real
-   leak: a collaborator commits a `*.secret` in a clone that never ran
-   `unlock`. *Strongest next action:* deploy `contrib/v3/pre-receive` or the
-   CI `audit` step on every shared remote (a deployment decision; both are
-   shipped and tested).
-2. **No external review (R-01, A9).** *Action:* independent cryptographic
-   and adapter review using [the review package](V3-SECURITY-REVIEW.md#review-package).
-3. **Same-UID processes (A6, A8).** Any program running as the user can use
-   the unlocked agent or race file contents. Requires a privilege boundary
-   to fix. *Action:* document; optional idle timeout.
-4. **Plaintext permissions.** Fixed structurally for everything Git writes
-   (H-16, A15); only files a user creates under a permissive umask remain
-   readable until `hydrate`. *Action:* none cheap.
-5. **Unverified adapter remainder (A4).** *Action:* move the `cat-file
-   --batch` header check into the proved core; replace per-file filter
-   spawns with Git's long-running filter protocol (performance, so that
-   hooks stay fast enough to keep enabled).
-6. **Git-version drift (A7).** *Action:* CI matrix over Git versions.
-7. **Rollback and equality leakage (A10).** Protocol limits, accepted.
+### A17 — Persistent local unlock (planned)
+
+- **Claim sought:** the derived, repo-scoped key is saved only to local Git
+  state (never public committed state), is read exactly for the selected repo
+  and config, and produces the same authenticated v3 ciphertext as session
+  mode without requiring a resident agent.
+- **Trust boundary:** local config/file access, credential parsing, Git
+  worktrees and crypto adapter.
+- **Consequence if false:** credential leaks to public history, wrong repo
+  unlock, unexpected failed operations, or mismatched ciphertext.
+- **Evidence:** existing memory-only agent tests, **not** tests of a
+  persistent implementation.
+- **Residual:** other processes able to read the unlocked user's local Git
+  state can use the derived key. This is accepted for default local mode.
+- **Next reduction:** compare `.git/config` against local sidecar on simplicity
+  and safety; implement persistent default and optional session-only mode;
+  test clone/reboot/worktree/rekey/credential separation end to end.
+- **Status:** OPEN / PLANNED.
+
+### A18 — Authenticated path rebinding on rename
+
+- **Claim sought:** a supported normal Git rename preserves plaintext
+  recoverability while re-sealing under the destination path, or fails
+  before accepting a broken staged record.
+- **Trust boundary:** Git `mv` staging behavior, path-bound AES-SIV
+  associated data, filter/adapter handling and verified index.
+- **Consequence if false:** valid source ciphertext is committed at a new
+  path and cannot be decrypted there; keyless framing will miss it.
+- **Evidence:** the [independent 2026-10-25 assessment]
+  (reviews/2026-10-25-independent-source-assessment.md) reproduced that
+  Git `mv` reuses the old blob; the Rust end-to-end exploit was not run.
+- **Residual:** read/write and index changes between rebind checks.
+- **Next reduction:** real Rust regression, reliable rebind/rename operation
+  consistent with everyday Git, and corresponding verified policy where
+  worthwhile. Never silently discard history or pretend envelope checks
+  verify the new path.
+- **Status:** OPEN pending current-source verification / implementation.
+
+## Ranked unresolved risks and *product* opportunities
+
+Rank by violation of [the declared product promise](V3-PRODUCT-CHARTER.md),
+realistic impact and effort, not by local-at-rest hardening alone. An
+independent source report is evidence, not a tested fix in current HEAD.
+
+1. **F-02: possible out-of-repository write on `rekey`** (A4/A8): highest
+   priority candidate; reproduce using the real Rust CLI against a malicious
+   tracked symlink, and use no-follow atomic replacement. See
+   [review triage](V3-REVIEW-TRIAGE.md).
+2. **F-03: `git mv` creates path-bound but now undecryptable records**
+   (A18/A4): test real Rust end to end, make renames transparent and recoverable.
+3. **Missing arbitrary protected paths** (A16): the central feature gap. A
+   suffix-only filter is an unacceptable limit on the target user workflow.
+4. **Persistent local unlock and transparent Git** (A17): eliminate the
+   default agent dependency and mandatory private-umask ceremony, retaining
+   those features as optional strict mode.
+5. **Adapter correctness** (A4/A7/A8): keep indexed object/policy
+   correspondence accurate as new selection, rename and credential paths
+   are introduced; formalize the consequential pure decisions and test the
+   effectful remainder.
+6. **External crypto/adapter review** (A5/A9/R-01): required for credible
+   release claims. Differential vectors reduce, but do not discharge, the
+   trusted-library boundary.
+7. **Bash v2 transition**: independent F-01 represents a genuine legacy
+   plaintext-release risk. Provide mitigation and recoverable migration;
+   do not import the legacy cipher into the v3 verified core.
+8. **Optional organization policy** (A13/A14): CI/server hooks and keyed
+   authenticity policy are deployment options, not fundamental requirements
+   for an individual's transparent Git workflow. Keyless audit still only
+   detects obvious plaintext/structure.
+9. **Optional workstation privacy** (A6/A8/A15): other local users or the
+   same UID may read the unlocked user's plaintext/credential as documented.
+   Strict local mode may promise `0600`; default mode makes no such promise.
+10. **Inherent wire limits** (A10): offline guessing for weak passwords,
+    deterministic equality, object metadata and historical rollback.
 
 ## Discharged by proof
 

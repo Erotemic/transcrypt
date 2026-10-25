@@ -1,5 +1,12 @@
 # 10. Decision register: what is agreed and what must be decided
 
+> **Current maintainer direction (2026-10-25):** consult the
+> [v3 product charter](V3-PRODUCT-CHARTER.md). Generic Git attribute selection,
+> persistent local-derived credentials as the default, an optional in-memory
+> agent/private-workstation mode and recoverable one-time legacy transition
+> are the current product goals. The historical Bash dependency and
+> local-at-rest decisions below do not override them.
+>
 > **Historical decision register:** These proposed choices were written
 > before the narrow Rust-first Argon2id/AES-SIV v3 prototype. Some conflict
 > with the current experimental v3 candidate (especially D-03 Argon2id,

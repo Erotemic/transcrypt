@@ -1,5 +1,14 @@
 # 04. Two implementations, one specification
 
+> **Historical planning context:** some requirements below were written
+> before the 2026-10-25 maintainer direction. The current
+> [v3 product charter](V3-PRODUCT-CHARTER.md) controls product goals,
+> default UX, non-goals and review priorities; the
+> [candidate wire specification](specs/V3-AUTHENTICATED-P0.md) controls
+> existing ciphertext bytes. This document remains useful evidence,
+> **not** an independent mandate for legacy/Bash parity or local-at-rest
+> privacy in the Rust v3 product.
+
 The design is deliberately asymmetric in assurance, **symmetric in protocol**.
 Bash remains the minimal runtime distribution. Rust is optional and may offer
 stronger code-level assurance and a more convenient hardened secret-handling
