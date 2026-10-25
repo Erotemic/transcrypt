@@ -169,9 +169,11 @@ The branch is unpushed: push needs the owner's credentials.
 
 ## Next tasks (resume after each checkpoint)
 
-1. **External review (R-01)** of the crypto adapter, credential handling,
-   selection and rebind logic; the internal review is in
-   [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md).
+1. **Keep the adversarial agent review rounds going** on each new change
+   (rounds so far: H-28 to H-44 in
+   [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md)). The external human review
+   (R-01) is deliberately the **final** step, after engineering and proofs
+   are pushed as far as they go; it is not a blocker for ongoing work.
 2. **Done:** the rebind decision is the verified `seal_action`
    (`sealSpec_repairs_only_local`). Remaining: show the adapter computes its
    inputs (`local`, `moved`) correctly.
