@@ -155,6 +155,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     };
     let rollback: Rollback = match init_with_rollback(root, options, Some(password)) {
         Ok(rollback) => rollback,
+        Err(e) if resuming => return Err(format!("{e}; rerun `transcrypt-v3 migrate` to complete the conversion")),
         Err(e) => { undo(&rewritten); return Err(format!("{e}; the conversion was rolled back")); },
     };
     let result = (|| -> Result<(), String> {
@@ -197,6 +198,16 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
         crate::lifecycle::verify_index_command(root)
     })();
     if let Err(e) = result {
+        if resuming {
+            // Undo only this run's changes: the interrupted state it resumed
+            // from stays resumable.
+            if let Ok(staging) = staging_dir(root) {
+                for (relative, original) in &rewritten {
+                    let _ = write_repository_file(root, &staging, relative, original);
+                }
+            }
+            return Err(format!("{e}; fix that, then rerun `transcrypt-v3 migrate` to complete the conversion"));
+        }
         rollback.run();
         undo(&rewritten);
         return Err(format!("{e}; the conversion was rolled back"));

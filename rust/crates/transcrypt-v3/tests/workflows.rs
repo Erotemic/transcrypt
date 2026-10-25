@@ -271,7 +271,7 @@ fn renames_are_re_encrypted_for_their_new_path() {
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("renamed or invalid") && status.contains("staged unencrypted"), "{status}");
     let err = run_fails(&repo, "git", &["diff", "--cached", "-M"], None);
-    assert!(err.contains("run `git add renamed.secret`"), "{err}");
+    assert!(err.contains("run `git add --renormalize -- renamed.secret`"), "{err}");
     let err = run_err(&repo, "git", &["commit", "-qm", "moves"], None);
     assert!(err.contains("re-encrypting renamed.secret for its new name (it was a.secret)"), "{err}");
     assert!(err.contains("encrypting vault/notes.txt"), "{err}");
@@ -282,10 +282,12 @@ fn renames_are_re_encrypted_for_their_new_path() {
     assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
     let out = String::from_utf8(run(&repo, bin(), &["audit"], None)).unwrap();
     assert!(out.contains("all authenticated"), "{out}");
-    // `git add` after the move re-encrypts right away (Git re-cleans the
-    // renamed file), so `git diff --cached` works before committing too.
+    // `git add --renormalize` after the move re-encrypts right away, so
+    // `git diff --cached` works before committing too. (A plain `git add`
+    // re-cleans only if Git notices the file changed, which a move within
+    // the same second as the last write may not show.)
     run(&repo, "git", &["mv", "renamed.secret", "again.secret"], None);
-    run(&repo, "git", &["add", "again.secret"], None);
+    run(&repo, "git", &["add", "--renormalize", "--", "again.secret"], None);
     let diff = String::from_utf8(run(&repo, "git", &["diff", "--cached", "-M"], None)).unwrap();
     assert!(diff.contains("again.secret") && !diff.contains("TV3F"), "{diff}");
     run(&repo, bin(), &["verify-index"], None);
@@ -957,10 +959,10 @@ fn protection_lost_to_another_filter_is_refused() {
     fs::write(repo.join("a.env"), b"A=rotated-secret\n").unwrap();
     run(&repo, "git", &["add", ".gitattributes", "a.env"], None);
     let err = run_fails(&repo, "git", &["commit", "-qm", "track env in lfs"], None);
-    assert!(err.contains("a.env was encrypted") && err.contains("`lfs`"), "{err}");
+    assert!(err.contains("a.env") && err.contains("`lfs`"), "{err}");
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "track env in lfs"], None);
     let err = run_fails(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
-    assert!(err.contains("now stored unencrypted for the filter `lfs`"), "{err}");
+    assert!(err.contains("a.env") && err.contains("`lfs`"), "{err}");
     // Deliberately unprotecting is still allowed.
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
     run(&repo, bin(), &["unprotect", "*.env"], None);
@@ -1174,4 +1176,76 @@ fn interrupted_commands_converge_when_rerun() {
     let err = run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
     assert!(err.contains("PROD.ENV is still v2 ciphertext"), "{err}");
     assert!(!repo.join(".transcrypt").exists(), "rolled back");
+}
+
+/// Seventh review F1/F2: a rule aimed at the macro probe's own path does
+/// not satisfy the macro check (real paths are checked too); `--amend`
+/// is judged against the commit's parent, as the audit does.
+#[test]
+fn probe_spoofs_and_amends_are_refused() {
+    let mut scratch = Scratch::new("review7");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::write(repo.join("a.env"), b"S=1\n").unwrap();
+    fs::write(repo.join("x.env"), b"X=1\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    let original = fs::read(repo.join(".gitattributes")).unwrap();
+    let mut attributes = original.clone();
+    attributes.extend_from_slice(b"[attr]transcrypt -text\ntranscrypt-v3-probe/probe filter=transcrypt-v3\n");
+    fs::write(repo.join(".gitattributes"), attributes).unwrap();
+    fs::write(repo.join("a.env"), b"NEWSECRET\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "spoof"], None);
+    assert!(err.contains("does not set filter=transcrypt-v3"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "spoof"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+    assert!(err.contains("does not set filter=transcrypt-v3"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    // Amend: remove x.env in one commit, then amend it back in under an
+    // lfs rule, unencrypted.
+    run(&repo, "git", &["rm", "-q", "x.env"], None);
+    run(&repo, "git", &["commit", "-qm", "remove x"], None);
+    let mut attributes = original;
+    attributes.extend_from_slice(b"x.env filter=lfs\n");
+    fs::write(repo.join(".gitattributes"), attributes).unwrap();
+    fs::write(repo.join("x.env"), b"X=plain\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    let err = run_fails(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
+    assert!(err.contains("x.env") && err.contains("`lfs`"), "{err}");
+}
+
+/// Seventh review F3: a resumed migration that fails again stays
+/// resumable, and a third run completes it.
+#[test]
+fn a_failed_resume_of_migrate_stays_resumable() {
+    let mut scratch = Scratch::new("resume2");
+    let repo = scratch.git_repo("repo");
+    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
+    fs::write(repo.join("a.key"), b"v2 secret\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    let shim = scratch.root.join("shim");
+    fs::create_dir(&shim).unwrap();
+    let real_git = String::from_utf8(run(&repo, "sh", &["-c", "command -v git"], None)).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let migrate_with = |action: &str| {
+        fs::write(shim.join("git"), format!("#!/bin/sh\ncase \"$*\" in *--renormalize*) {action};; esac\nexec {} \"$@\"\n",
+            real_git.trim())).unwrap();
+        fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
+        let mut child = Command::new(bin()).args(["migrate", "--password-stdin"]).current_dir(&repo)
+            .env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(PASS).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    assert!(!migrate_with("kill -9 $PPID; exit 1").status.success());
+    let out = migrate_with("exit 1");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("rerun"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(repo.join(".transcrypt/config").exists(), "still resumable");
+    run(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
+    assert!(is_record(&staged(&repo, "a.key")));
 }

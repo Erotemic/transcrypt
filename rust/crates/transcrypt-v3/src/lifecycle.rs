@@ -61,13 +61,24 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
             (an interrupted `rekey`? `git reset` undoes a staged rekey)".into()),
     }
     let top = entries.iter().find(|e| e.path == b".gitattributes" && e.regular).map(|e| e.oid.as_str());
+    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
     if !macro_resolves(root, &git_dir(root), top)? {
         return Err(crate::setup::MACRO_MISSING.into());
     }
+    if let Some(problem) = marked_unfiltered(root, &paths, Attributes::Staged)? {
+        return Err(problem);
+    }
     let head = head_files(root)?;
+    // With `--amend` (and squash/fixup) the commit's parent is `HEAD^`; its
+    // files count too, as they do for the audit, which compares with the
+    // parent.
+    let parent = if git(root, &["rev-parse", "-q", "--verify", "HEAD^1^{commit}"]).is_ok() {
+        tree_files(root, "HEAD^1")?
+    } else { Vec::new() };
+    let parent_oid: HashMap<&[u8], &str> = parent.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
     let head_oid: HashMap<&[u8], &str> = head.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
     let mut elsewhere: HashMap<String, Vec<u8>> = HashMap::new();
-    for entry in head.iter().chain(entries.iter()) {
+    for entry in head.iter().chain(entries.iter()).chain(parent.iter()) {
         elsewhere.entry(entry.oid.clone()).or_insert_with(|| entry.path.clone());
     }
     let changed: Vec<(Vec<u8>, String)> = entries.iter()
@@ -86,7 +97,8 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
                 so write it with the file's exact case): nothing would ever decrypt it there. Protect that \
                 name, move the file back, or stage its plaintext", String::from_utf8_lossy(path)));
         }
-        if head_oid.get(path.as_slice()).is_some_and(|old| is_record(old).unwrap_or(false)) {
+        if head_oid.get(path.as_slice()).or(parent_oid.get(path.as_slice()))
+            .is_some_and(|old| is_record(old).unwrap_or(false)) {
             drifted.push(path);
         }
     }

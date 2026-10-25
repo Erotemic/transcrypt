@@ -326,6 +326,11 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
     })();
     drop(staging);
     if let Err(e) = result {
+        // A resumed initialization keeps the state it resumed from, so that
+        // it can be rerun again.
+        if interrupted.is_some() {
+            return Err(format!("{e}; rerun to complete the initialization"));
+        }
         rollback.run();
         return Err(format!("{e}; initialization rolled back"));
     }

@@ -152,7 +152,7 @@ or `unlock --private`.
 record. When you commit, the pre-commit hook re-encrypts a renamed file for
 its new path (directories too), and encrypts a file moved in from an
 unprotected name. To make `git diff --cached` show the change before
-committing, `git add` the new path. While locked, a renamed protected file
+committing, run `git add --renormalize -- NEWPATH`. While locked, a renamed protected file
 cannot be re-encrypted, so the commit is refused until you unlock.
 
 `lock` refuses if any protected file has uncommitted or untracked changes,
@@ -334,7 +334,7 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 | --- | --- |
 | `this checkout is locked; run transcrypt-v3 unlock` | No key: `transcrypt-v3 unlock` |
 | `the stored key does not match .transcrypt/config (it was rekeyed?)` | Someone changed the passphrase: `transcrypt-v3 unlock` with the new one |
-| `this record does not open at PATH` | A file you moved with `git mv`: `git add PATH` (or commit). Otherwise a commit moved or altered the record (broken or hostile); do not merge it, or restore the file from a good commit |
+| `this record does not open at PATH` | A file you moved with `git mv`: `git add --renormalize -- PATH` (or commit). Otherwise a commit moved or altered the record (broken or hostile); do not merge it, or restore the file from a good commit |
 | `PATH holds the encrypted OTHER: a renamed or copied protected file must be committed while unlocked` | Unlock, then commit; the hook re-encrypts it |
 | `PATH is encrypted for another config (from before a rekey?)` / `other config (reencrypt)` | `transcrypt-v3 reencrypt` with that config's passphrase, then commit |
 | `.gitattributes already defines the transcrypt macro differently` | Remove or rename that `[attr]transcrypt` line; v3 needs the macro to set the filter |

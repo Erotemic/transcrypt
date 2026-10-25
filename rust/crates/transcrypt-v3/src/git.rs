@@ -509,6 +509,47 @@ pub(crate) fn macro_resolves(root: &Path, index_dir: &Path, top: Option<&str>) -
     Ok(result?.first() == Some(&true))
 }
 
+/// A path marked `transcrypt` whose `filter` is neither `transcrypt-v3` nor
+/// explicitly unset: the macro is broken for it, whatever any probe says
+/// (a rule can target the probe's own path). `None` when there is none.
+pub(crate) fn marked_unfiltered(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Option<String>, String> {
+    if paths.is_empty() { return Ok(None); }
+    let mut request = Vec::new();
+    for path in paths {
+        request.extend_from_slice(path);
+        request.push(0);
+    }
+    let mut command = git_command(Some(root));
+    command.args(["-c", "core.ignorecase=false", "check-attr"]);
+    match from {
+        Attributes::Staged => { command.arg("--cached"); },
+        Attributes::Worktree => {},
+        Attributes::Index(file) => { command.arg("--cached").env("GIT_INDEX_FILE", file); },
+    }
+    command.args(["-z", "--stdin", "transcrypt", "filter"]);
+    let response = run_bounded(command, Some(request), GIT_OUTPUT_LIMIT)?;
+    let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
+    if fields.len() != 6 * paths.len() + 1 {
+        return Err("unexpected git check-attr output".into());
+    }
+    for (path, record) in paths.iter().zip(fields.chunks(6)) {
+        if record[0] != *path || record[1] != b"transcrypt" || record[3] != *path || record[4] != b"filter" {
+            return Err("unexpected git check-attr output".into());
+        }
+        if record[2] == b"set" && !matches!(record[5], b"transcrypt-v3" | b"unset") {
+            let name = String::from_utf8_lossy(path);
+            return Ok(Some(if record[5] == b"unspecified" {
+                format!("{name}: {}", crate::setup::MACRO_MISSING)
+            } else {
+                format!("{name} is marked `transcrypt`, but another rule gives it the filter `{}` (from \
+                    `git lfs track`?), so it would be stored unencrypted; narrow that rule",
+                    String::from_utf8_lossy(record[5]))
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// The entries among `entries` that Git's attributes protect.
 pub(crate) fn protected_entries(root: &Path, entries: Vec<Staged>, from: Attributes) -> Result<Vec<Staged>, String> {
     let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();

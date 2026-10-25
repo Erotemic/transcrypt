@@ -219,6 +219,13 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
             return Err(format!("commit {commit}: {}", crate::setup::MACRO_MISSING));
         }
     }
+    if config_oid.is_some() {
+        let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
+        // The policy index holds this commit's attributes (loaded above).
+        if let Some(problem) = crate::git::marked_unfiltered(root, &paths, Attributes::Index(&state.policy.file))? {
+            return Err(format!("commit {commit}: {problem}"));
+        }
+    }
     if protected.is_empty() && moved_away.is_empty() && was_record.is_empty() { return Ok(()); }
     if let Some(config_oid) = &config_oid {
         let id = transcrypt_v3::config_id(&git_blob(root, config_oid)?);

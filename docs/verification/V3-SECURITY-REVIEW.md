@@ -282,6 +282,25 @@ had one root, so two rules now extend the invariants:
 | H-68 | Low | `reencrypt` asked for a second earlier passphrase after it had already written files. | All passphrases are asked for and checked first. |
 | H-69 | Low (incomplete migration) | `migrate` skipped v2 files Bash selected only case-insensitively. | `migrate` refuses to finish (and rolls back) while any staged file is still v2 ciphertext. Same test. |
 
+A seventh round checked convergence. Nothing above Low was left: no route
+for a protected file's plaintext past the hook or the audit without a
+deliberate act. Its three Low findings are fixed:
+
+| ID | Severity | Finding | Fix and evidence |
+| --- | --- | --- | --- |
+| H-70 | Low (policy integrity) | A rule aimed at the macro probe's fixed path (`transcrypt-v3-probe/probe filter=transcrypt-v3`), next to a redefinition, satisfied the macro check. | Real paths are checked too: every staged or committed path marked `transcrypt` must get `filter=transcrypt-v3`, or be explicitly `-filter`. Another named filter is reported as such. Test `probe_spoofs_and_amends_are_refused`. |
+| H-71 | Low (hook/audit disagreement) | With `--amend` (squash, fixup) the hook compared with `HEAD`, the audit with the parent. | The hook also counts `HEAD^`'s files. Same test. |
+| H-72 | Low (convergence) | A resumed `init`/`migrate` that failed again rolled back the earlier run's setup, leaving a non-resumable state. | A failed resume undoes only its own changes and says to rerun. Test `a_failed_resume_of_migrate_stays_resumable`. |
+| H-73 | Low (flaky advice, found by a flaky test) | After `git mv`, a plain `git add` re-cleans only if Git notices a stat change, which a move in the same second as the last write may not show. | The advice (smudge error, user guide) is now `git add --renormalize -- PATH`, which always re-cleans. |
+
+The hooks remain *stricter* than the audit in three deliberate ways:
+- they refuse a record copied (not moved) to an unprotected name;
+- they refuse a symlinked `.transcrypt/config`;
+- they refuse a rule selecting reserved paths.
+
+The audit can only judge what history shows; the hooks also guard local
+mistakes.
+
 Attack review of the new surface:
 - **Selection.** v3 never matches patterns. Git's answers are parsed by
   `parse_attr_record`, which is proved to accept exactly the requested

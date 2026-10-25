@@ -372,7 +372,7 @@ impl<'a> Filters<'a> {
                 let plaintext = key.open(git_path, &input).map_err(|_| {
                     let name = String::from_utf8_lossy(git_path);
                     format!("this record does not open at {name}: it was moved from another path or altered. \
-                        If you moved it yourself (`git mv`), run `git add {name}` or commit, which re-encrypts \
+                        If you moved it yourself (`git mv`), run `git add --renormalize -- {name}` or commit, which re-encrypts \
                         it; if it came from a commit, that commit is broken or hostile")
                 })?;
                 if key.private() && !umask_is_private() {
