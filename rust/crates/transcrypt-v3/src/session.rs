@@ -145,6 +145,13 @@ fn check_socket(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Bound a stalled or broken peer (either end) instead of hanging forever.
+fn set_timeouts(stream: &UnixStream) -> Result<(), String> {
+    let limit = Some(Duration::from_secs(120));
+    stream.set_read_timeout(limit).and_then(|_| stream.set_write_timeout(limit))
+        .map_err(|_| "cannot set the credential socket timeouts".into())
+}
+
 fn reply(stream: &mut UnixStream, response: Result<Vec<u8>, String>) -> io::Result<()> {
     let (status, data) = match response {
         Ok(value) => (0u8, value),
@@ -171,11 +178,7 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
     let mut stream = connect(&dir)?.map_err(|_| "v3 credential agent is not running; run unlock")?;
     // Plaintext is about to be sent to, or accepted from, this peer.
     same_user(&stream)?;
-    // Bound a broken local peer rather than hanging a Git operation forever.
-    stream.set_read_timeout(Some(Duration::from_secs(120)))
-        .map_err(|_| "cannot set agent read timeout")?;
-    stream.set_write_timeout(Some(Duration::from_secs(120)))
-        .map_err(|_| "cannot set agent write timeout")?;
+    set_timeouts(&stream)?;
     // Frame layout is defined (and proved to roundtrip) by the verified core.
     sigpipe_blocked(|| {
         stream.write_all(&encode_frame_header(op as u8, config, path_bytes.len() as u32))?;
@@ -376,10 +379,7 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
         }
         let mut stream = match listener.accept() { Ok((s, _)) => s, Err(_) => break };
         // A stalled client must not hold the single-threaded agent forever.
-        stream.set_read_timeout(Some(Duration::from_secs(120)))
-            .map_err(|_| "cannot set agent inbound timeout")?;
-        stream.set_write_timeout(Some(Duration::from_secs(120)))
-            .map_err(|_| "cannot set agent outbound timeout")?;
+        set_timeouts(&stream)?;
         if same_user(&stream).is_err() { continue; }
         match transaction(&mut stream, config, &key) {
             Ok(true) => break,

@@ -509,8 +509,10 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         },
         Err(e) => report(false, &e),
     }
+    let entries = indexed_files(root);
+    let top = entries.as_ref().ok().and_then(|e| e.iter().find(|e| e.path == b".gitattributes")).map(|e| e.oid.clone());
     if config.is_ok() {
-        match indexed_files(root).and_then(|entries| staged_protected(root, entries)) {
+        match entries.and_then(|entries| staged_protected(root, entries)) {
             Ok(protected) if protected.is_empty() => println!("note no tracked file is protected yet: \
                 `transcrypt-v3 protect PATTERN` (for example .env)"),
             Ok(protected) => println!("note {} tracked file(s) protected by .gitattributes", protected.len()),
@@ -530,7 +532,6 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         report(installed, &format!("{name} hook installed"));
     }
     report(!hooks_bypassed(root), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
-    let top = indexed_files(root).ok().and_then(|e| e.into_iter().find(|e| e.path == b".gitattributes")).map(|e| e.oid);
     report(macro_resolves(root, &git_dir(root), top.as_deref()).unwrap_or(false),
         "the `transcrypt` macro sets filter=transcrypt-v3 for the next commit");
     // Attribute files outside the repository apply only here, and could
