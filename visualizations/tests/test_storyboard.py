@@ -17,8 +17,8 @@ from tvis.svg_preview import CANVAS_W, CANVAS_H, render_svg
 
 
 IDS = ('legend', 'selection', 'unlock', 'clean', 'crypto', 'record',
-       'rename', 'audit', 'clone', 'lock', 'attack', 'inventory',
-       'contract', 'proof', 'lifecycle', 'assumptions', 'offline', 'roadmap')
+       'rename', 'audit', 'clone', 'lock', 'attack', 'status', 'inventory',
+       'contract', 'proof', 'lifecycle', 'adapter', 'assumptions', 'offline', 'roadmap')
 
 
 class StoryboardTests(unittest.TestCase):

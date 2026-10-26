@@ -22,7 +22,7 @@ class FastBuildTests(unittest.TestCase):
                          ['intro', 'clean', 'sealing', 'closing'])
         self.assertEqual([slide.id for slide in select_slides(deck, slide_ids=('sealing',)).slides],
                          ['sealing'])
-        self.assertEqual(len(deck.slides), 20)
+        self.assertEqual(len(deck.slides), 22)
         with self.assertRaisesRegex(ValueError, 'unknown scene'):
             select_slides(deck, scene_ids=('does-not-exist',))
         with self.assertRaisesRegex(ValueError, 'unknown slide'):

@@ -4,7 +4,7 @@
 [deck]
 title = "Transcrypt v3 | Data movement and evidence"
 subtitle = "Selected plaintext through public Git history and back"
-footer = "Source snapshot 16cc957 · Proofs are scoped; Git, OS and cryptography remain explicit premises"
+footer = "Source snapshot 88001fd · Proofs are scoped; Git, OS and cryptography remain explicit premises"
 
 [[slide]]
 id = "intro"
@@ -24,6 +24,18 @@ title = "How to read the trust labels"
 kicker = "TWO INDEPENDENT AXES"
 subtitle = "Packet color describes data. The badge below an operation describes its assurance basis."
 points = ["A source-derived theorem is not a proof of its external dependencies.", "A green decision is not evidence that Git or the OS performed an effect."]
+
+[[slide]]
+id = "milestones"
+layout = "evidence"
+media = "diagram"
+steps = "all"
+scene = "status"
+beat = "review"
+title = "What is complete, and what is not?"
+kicker = "ROADMAP CHECKPOINT / OCT 25, 2026"
+subtitle = "V0-V5 and P0-P5 achieved for their scoped goals; R-01 external review remains open."
+points = ["Source-derived core and Lean lifecycle models are different proof tiers.", "P5 is complete for core correspondence, not the effectful adapter.", "V6 internal done; P6 external review pending; V7 Bash v3 deferred."]
 
 [[slide]]
 id = "selection"
@@ -170,6 +182,18 @@ subtitle = "Proved core logic, modeled scheduling and tested native effects cann
 points = ["The model expresses legal sequencing.", "The actual writer/hook has separate tests and assumptions."]
 
 [[slide]]
+id = "adapter-correspondence"
+layout = "cinema"
+media = "video"
+steps = "all"
+scene = "adapter"
+beat = "target"
+title = "The remaining A4 input problem"
+kicker = "SOURCE PROOF / NATIVE ADAPTER"
+subtitle = "Follow Git facts to a proved decision; the origin and effects of those facts remain separately trusted."
+points = ["Git selection and cat-file framing: A7 / A19 / A4.", "seal_action_spec proves what to do with supplied move facts.", "Stored-key selection and stamp-checked effects are tested, not source-proved."]
+
+[[slide]]
 id = "trust-boundary"
 layout = "evidence"
 scene = "assumptions"
@@ -197,7 +221,7 @@ beat = "last"
 title = "Improve correspondence, not slogans"
 kicker = "ASSURANCE ROADMAP"
 subtitle = "Pattern selection, stored-key unlock, migration and rename handling are already implemented."
-points = ["Prove more of the real effectful adapter.", "Review external cryptographic dependencies.", "Harden and attest audit deployment where required."]
+points = ["Narrow A4 where data is passed into proved core gates.", "Obtain external R-01 cryptographic/adapter review.", "Verify optional remote audit deployment where required."]
 
 [[slide]]
 id = "closing"
