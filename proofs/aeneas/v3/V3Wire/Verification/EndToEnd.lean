@@ -39,6 +39,9 @@ record that authenticates at a `HEAD` path it was moved from.
 The listings are sorted by path (the verified parse checks it), so lookups
 are binary searches, and lookups by object id go through object orders that
 the adapter sorts and `object_order_ok` checks.
+`hook_accepts_only_authenticated_ciphertext_given_history` adds A24 (the
+history the incremental hook trusts was checked) and concludes that every
+selected entry authenticates.
 -/
 
 open CoreModels Aeneas
@@ -261,7 +264,9 @@ structure HookRun (g : GitState) (index head parent response : Slice U8)
   /-- Each check's path is the entry's path field (`listing_fields`). -/
   fields : ∀ e ∈ entries, ∃ f, listing_fields index ends e.index = ok (core.option.Option.Some f) ∧
     sliceBytes e.path = (sliceBytes index).extract f.path_start.val f.end.val
-  settled : ∀ e ∈ entries, e.settled = (inHead.val[e.index.val]! && inParent.val[e.index.val]!)
+  /-- An entry counts as settled only if both `HEAD` and `HEAD^1` hold it
+      (the adapter also requires unchanged attribute files and config). -/
+  settled : ∀ e ∈ entries, e.settled = true → (inHead.val[e.index.val]! && inParent.val[e.index.val]!) = true
   elsewhere : ∀ e ∈ entries,
     blob_elsewhere index ends iorder e.index head hends horder parent pends porder = ok e.elsewhere
 
@@ -286,7 +291,9 @@ structure HookRun (g : GitState) (index head parent response : Slice U8)
 
     The three snapshots are sorted (`Sorted`: each path once, as Git lists
     them; the parse refuses a crafted tree that repeats a path), so
-    "unchanged since `HEAD`" names the one entry `HEAD` has at that path. -/
+    "unchanged since `HEAD`" names the one entry `HEAD` has at that path.
+    With A24 the settled case authenticates too
+    (`hook_accepts_only_authenticated_ciphertext_given_history`). -/
 theorem hook_accepts_only_authenticated_ciphertext (g : GitState)
     (index head parent response : Slice U8) (ends0 ends hends0 hends pends0 pends : Slice Usize)
     (iorder horder porder : Slice Usize)
@@ -355,14 +362,16 @@ theorem hook_accepts_only_authenticated_ciphertext (g : GitState)
   rw [hek, List.getElem?_eq_getElem hk, Option.some.injEq] at hy
   subst hy
   rw [hyp] at hpath
-  -- `settled` is exactly `Settled`.
+  -- A settled entry is `Settled`.
   have hall : all.val[k]! = true := by
     rw [hrun.all_true, getElem!_pos _ k (by simp; omega)]; simp
-  have hsett : e.settled = true ↔ Settled g.head g.parent g.index[k] := by
-    rw [hrun.settled e he, hek, Bool.and_eq_true, hinH.2.2 k _ hk (List.getElem?_eq_getElem hk),
-      hinP.2.2 k _ hk (List.getElem?_eq_getElem hk)]
-    simp only [hall, hfk, true_and]
-    rfl
+  have hsett : e.settled = true → Settled g.head g.parent g.index[k] := by
+    intro hs
+    have := hrun.settled e he hs
+    rw [hek, Bool.and_eq_true, hinH.2.2 k _ hk (List.getElem?_eq_getElem hk),
+      hinP.2.2 k _ hk (List.getElem?_eq_getElem hk)] at this
+    simp only [hall, hfk, true_and] at this
+    exact this
   -- `elsewhere` is exactly `BlobElsewhere`.
   have hels : e.elsewhere = true ↔ BlobElsewhere [g.index, g.head, g.parent] g.index[k] := by
     have := spec_result (blob_elsewhere_spec hL hLs hIo hH hHs hHo hP hPs hPo e.index (by omega))
@@ -375,7 +384,7 @@ theorem hook_accepts_only_authenticated_ciphertext (g : GitState)
     · right
       have := (hacc.2 (fun h => h.2 hs)).1
       rw [hid] at this
-      exact ⟨hs.1, hsett.mp hs.2, this⟩
+      exact ⟨hs.1, hsett hs.2, this⟩
     · left
       obtain ⟨pt, hpt⟩ := hacc.1 ⟨hkey, hs⟩
       rw [hpath] at hpt
@@ -385,8 +394,58 @@ theorem hook_accepts_only_authenticated_ciphertext (g : GitState)
     rw [hid] at henv
     refine ⟨henv, ?_⟩
     rcases hse with hs | hs
-    · exact Or.inl (hsett.mp hs)
+    · exact Or.inl (hsett hs)
     · exact Or.inr (fun hb => by rw [← hels] at hb; rw [hs] at hb; exact absurd hb (by simp))
+
+/-! ## Settled entries and the checked history -/
+
+/-- **A24 (checked history).** Every entry of `HEAD` whose path the
+    committed attributes select is a record that authenticates at its path
+    under the committed configuration. It holds when `HEAD` was accepted by
+    this hook or by the keyed audit under the same attributes and
+    configuration: the hook counts an entry as settled only while no
+    attribute file or the configuration changed since `HEAD` and `HEAD^1`,
+    and `HEAD` is sorted (each path once), so the entry that held the blob
+    is the only one at that path (`Sorted.holds_oid`). -/
+def HeadAuthentic (σ : Suite) (config : List Nat) (g : GitState) : Prop :=
+  ∀ y ∈ g.head, Selected (g.filter y.path) →
+    ∃ content, g.blob y.oid = some content ∧ ∃ pt, OpensTo σ config y.path content pt
+
+/-- **With the key and a checked history, every selected entry
+    authenticates.** Under the hypotheses of
+    `hook_accepts_only_authenticated_ciphertext` and A24, an accepted commit
+    made with the key, incremental or not, stores at every path the
+    committed attributes select a record that authenticates at that path. -/
+theorem hook_accepts_only_authenticated_ciphertext_given_history (g : GitState)
+    (index head parent response : Slice U8) (ends0 ends hends0 hends pends0 pends : Slice Usize)
+    (iorder horder porder : Slice Usize)
+    (flags0 flags all inHead0 inHead inParent0 inParent : Slice Bool) (entries : List HookEntry)
+    (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (incremental : Bool)
+    (hR : Realizes inst prims σ)
+    (hid : wireBytes id = σ.digest16 (wireBytes config))
+    (hindex : GitListing index g.index) (hhead : GitListing head g.head) (hparent : GitListing parent g.parent)
+    (hattr : GitAttributes g response)
+    (hobj : ∀ e ∈ entries, ∃ x, g.index[e.index.val]? = some x ∧ GitObject g x.oid e.record)
+    (hcfg : ∃ c ∈ g.index, c.path = ascii ".transcrypt/config" ∧ c.Regular ∧ g.blob c.oid = some (wireBytes config))
+    (hrun : HookRun g index head parent response ends0 ends hends0 hends pends0 pends iorder horder porder
+      flags0 flags all inHead0 inHead inParent0 inParent entries)
+    (hcheck : hookPlan inst prims config id true incremental entries = ok true)
+    (hhist : HeadAuthentic σ (wireBytes config) g) :
+    ∀ x ∈ g.index, Selected (g.filter x.path) →
+      Selectable x ∧ ∃ content, g.blob x.oid = some content ∧ ∃ pt, OpensTo σ (wireBytes config) x.path content pt := by
+  obtain ⟨-, -, h⟩ := hook_accepts_only_authenticated_ciphertext g index head parent response ends0 ends hends0
+    hends pends0 pends iorder horder porder flags0 flags all inHead0 inHead inParent0 inParent entries config id
+    true incremental hR hid hindex hhead hparent hattr hobj hcfg hrun hcheck
+  intro x hx hsx
+  obtain ⟨hsel, content, hc, hk, -⟩ := h x hx hsx
+  refine ⟨hsel, content, hc, ?_⟩
+  rcases hk rfl with hop | ⟨-, ⟨⟨y, hy, hyo, hyp⟩, -⟩, -⟩
+  · exact hop
+  · obtain ⟨c', hc', pt, hpt⟩ := hhist y hy (hyp ▸ hsx)
+    rw [hyo, hc, Option.some.injEq] at hc'
+    subst hc'
+    rw [hyp] at hpt
+    exact ⟨pt, hpt⟩
 
 /-! ## The key the hook uses -/
 

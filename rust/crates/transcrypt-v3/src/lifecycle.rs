@@ -107,11 +107,13 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
 }
 
 /// `check_index` of `snapshot`; with `incremental` (the pre-commit hook),
-/// protected entries unchanged since both `HEAD` and `HEAD^1` get the
-/// keyless checks only. They are already in history, so authenticating
-/// them again on every commit would prevent nothing (`HEAD^1` counts
-/// because `--amend` makes it the parent); `verify-index`, `hydrate`,
-/// `lock`, merge commits and the audit still authenticate everything.
+/// protected entries unchanged since both `HEAD` and `HEAD^1` (*settled*)
+/// get the keyless checks only. They are already in history, so
+/// authenticating them again on every commit would prevent nothing
+/// (`HEAD^1` counts because `--amend` makes it the parent); `verify-index`,
+/// `hydrate`, `lock`, merge commits and the audit still authenticate
+/// everything. Nothing is settled while an attribute file or the config
+/// differs from `HEAD` or `HEAD^1`: a newly selected file was never checked.
 fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, key: Option<&Key>, incremental: bool)
     -> Result<Verified, String>
 {
@@ -169,12 +171,21 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
             `transcrypt-v3 unprotect` the file deliberately", String::from_utf8_lossy(path),
             String::from_utf8_lossy(&value)));
     }
+    // An entry unchanged since `HEAD` and `HEAD^1` was checked when it was
+    // committed only if the selection and the config were the same then:
+    // count entries as settled only while no attribute file or config changed.
+    let policy = |entries: &[Staged]| -> Vec<(Vec<u8>, String)> {
+        entries.iter().filter(|e| is_attributes_file(&e.path) || e.path == b".transcrypt/config")
+            .map(|e| (e.path.clone(), e.oid.clone())).collect()
+    };
+    let staged_policy = policy(entries);
+    let same_policy = staged_policy == policy(&head.entries) && staged_policy == policy(&parent.entries);
     // The keyless move check looks blobs up by object id (`blob_elsewhere`).
     let mut orders: Option<[Vec<usize>; 3]> = None;
     for i in protected {
         let staged = &entries[i];
         // Unchanged since `HEAD` and `HEAD^1`: already in history.
-        let settled = in_head[i] && in_parent[i];
+        let settled = same_policy && in_head[i] && in_parent[i];
         let record = git_blob(root, &staged.oid)?;
         let name = staged.name();
         match parse_file_header(&record) {

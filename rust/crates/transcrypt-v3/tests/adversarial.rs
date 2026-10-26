@@ -1215,3 +1215,23 @@ fn trees_listing_a_path_twice_are_refused() {
     }
 }
 
+/// An entry unchanged since `HEAD` and `HEAD^1` counts as already checked
+/// only while the selection is unchanged: a record copied to an unprotected
+/// name in history and protected afterwards was never authenticated there,
+/// so the hook authenticates it (as the audit does) and refuses it.
+#[test]
+fn newly_protected_files_are_authenticated_by_the_hook() {
+    let mut scratch = Scratch::new("newlyprotected");
+    let repo = scratch.repo("repo");
+    let record = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD:a.secret"], None)).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("100644,{},c.data", record.trim())], None);
+    run(&repo, "git", &["commit", "-qm", "copy", "--no-verify"], None);
+    fs::write(repo.join("README"), b"edited\n").unwrap();
+    commit(&repo, &["README"], "unrelated");
+    let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    attributes.extend_from_slice(b"*.data transcrypt\n");
+    fs::write(repo.join(".gitattributes"), attributes).unwrap();
+    run(&repo, "git", &["add", ".gitattributes"], None);
+    let err = run_fails(&repo, bin(), &["pre-commit"], None);
+    assert!(err.contains("c.data") && err.contains("authentication failed"), "{err}");
+}
