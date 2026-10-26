@@ -440,6 +440,17 @@ pub(crate) fn hash_object(root: &Path, bytes: &[u8]) -> Result<String, String> {
     object_id(git_with_input(root, &["hash-object", "-w", "--no-filters", "--stdin"], bytes)?)
 }
 
+/// Write `bytes` as a blob and append its `update-index -z --index-info`
+/// record for `path` to `info`.
+pub(crate) fn push_blob_record(root: &Path, info: &mut Vec<u8>, mode: &str, path: &[u8], bytes: &[u8])
+    -> Result<(), String>
+{
+    info.extend_from_slice(format!("{mode} {}\t", hash_object(root, bytes)?).as_bytes());
+    info.extend_from_slice(path);
+    info.push(0);
+    Ok(())
+}
+
 fn object_id(output: Vec<u8>) -> Result<String, String> {
     let oid = String::from_utf8_lossy(&output).trim_end().to_owned();
     if !is_object_id(oid.as_bytes()) { return Err("malformed git hash-object output".into()); }

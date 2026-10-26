@@ -181,7 +181,7 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
 
 /// The files of commit `rev`; none when there is no such commit (`HEAD`
 /// before the first commit, `HEAD^1` of a root commit).
-fn commit_files(root: &Path, rev: &str) -> Result<Vec<Staged>, String> {
+pub(crate) fn commit_files(root: &Path, rev: &str) -> Result<Vec<Staged>, String> {
     if git(root, &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]).is_err() {
         return Ok(Vec::new());
     }
@@ -328,11 +328,7 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
                 plaintext
             },
         };
-        let sealed = key.clean(&staged.path, &plaintext)?;
-        let oid = hash_object(root, &sealed)?;
-        index_info.extend_from_slice(format!("{} {oid}\t", staged.mode).as_bytes());
-        index_info.extend_from_slice(&staged.path);
-        index_info.push(0);
+        push_blob_record(root, &mut index_info, &staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
         count += 1;
     }
     if count > 0 {

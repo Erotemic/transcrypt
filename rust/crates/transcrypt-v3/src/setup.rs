@@ -256,13 +256,7 @@ impl Rollback {
             let _ = fs::remove_file(root.join(".transcrypt/config"));
             let _ = fs::remove_dir(root.join(".transcrypt"));
         }
-        match (&self.attributes_before, staging_dir(root)) {
-            (Some(before), Ok(staging)) => {
-                let _ = write_repository_file(root, &staging, Path::new(".gitattributes"), before);
-            },
-            (None, _) => { let _ = fs::remove_file(root.join(".gitattributes")); },
-            _ => {},
-        }
+        restore_worktree_attributes(root, self.attributes_before.as_deref());
         for ((name, command), preexisted) in HOOKS.into_iter().zip(self.hook_preexisted) {
             let hook = hook_path(root, name);
             if !preexisted && fs::read_to_string(&hook).is_ok_and(|t| ours(name, command, &t)) {
@@ -273,6 +267,29 @@ impl Rollback {
         let _ = credential::forget(root);
         let _ = session::stop(root, &self.config);
     }
+}
+
+/// The top-level `.gitattributes` in the worktree, if any.
+fn worktree_attributes(root: &Path) -> Result<Option<Vec<u8>>, String> {
+    find_protected(root, Path::new(".gitattributes"))?.map(|f| f.read().map(|(bytes, _)| bytes.to_vec())).transpose()
+}
+
+/// Put the worktree's top-level `.gitattributes` back as `before` (`None`:
+/// there was none); best effort.
+fn restore_worktree_attributes(root: &Path, before: Option<&[u8]>) {
+    match before {
+        Some(bytes) => if let Ok(staging) = staging_dir(root) {
+            let _ = write_repository_file(root, &staging, Path::new(".gitattributes"), bytes);
+        },
+        None => { let _ = fs::remove_file(root.join(".gitattributes")); },
+    }
+}
+
+/// A fresh salt and the config and key it gives with `password`.
+fn new_config(password: &[u8]) -> Result<([u8; transcrypt_v3_core::CONFIG_LEN], SecretKey), String> {
+    let mut salt = [0u8; SALT_LEN];
+    getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
+    initialize_config(password, &salt)
 }
 
 /// Whether `.transcrypt` exists but `HEAD` has no config: an interrupted
@@ -306,17 +323,12 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
                 `git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`"))?;
             (transcrypt_v3::config_array(existing)?.to_owned(), key)
         },
-        None => {
-            let mut salt = [0u8; SALT_LEN];
-            getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
-            initialize_config(&password, &salt)?
-        },
+        None => new_config(&password)?,
     };
     let rollback = Rollback {
         root: root.to_owned(),
         config: config.to_vec(),
-        attributes_before: find_protected(root, Path::new(".gitattributes"))?
-            .map(|f| f.read().map(|(bytes, _)| bytes.to_vec())).transpose()?,
+        attributes_before: worktree_attributes(root)?,
         hook_preexisted: HOOKS.map(|(name, _)| fs::symlink_metadata(hook_path(root, name)).is_ok()),
     };
     let staging = staging_dir(root)?;
@@ -324,7 +336,7 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
         if interrupted.is_none() {
             write_repository_file(root, &staging, Path::new(".transcrypt/config"), &config)?;
         }
-        edit_attributes(root, &staging, true, |_| Ok(()))?;
+        edit_attributes(root, &staging, false, |_| Ok(()))?;
         install_filters(root)?;
         install_hooks(root)?;
         activate(root, &config, &key, options.private, options.timeout)?;
@@ -390,18 +402,13 @@ struct AttributesUndo {
 impl AttributesUndo {
     fn capture(root: &Path) -> Result<AttributesUndo, String> {
         Ok(AttributesUndo {
-            worktree: find_protected(root, Path::new(".gitattributes"))?
-                .map(|f| f.read().map(|(bytes, _)| bytes.to_vec())).transpose()?,
+            worktree: worktree_attributes(root)?,
             staged: indexed_files(root)?.into_iter().find(|e| e.path == b".gitattributes").map(|e| (e.mode, e.oid)),
         })
     }
 
     fn restore(&self, root: &Path) {
-        match (&self.worktree, staging_dir(root)) {
-            (Some(bytes), Ok(staging)) => { let _ = write_repository_file(root, &staging, Path::new(".gitattributes"), bytes); },
-            (None, _) => { let _ = fs::remove_file(root.join(".gitattributes")); },
-            _ => {},
-        }
+        restore_worktree_attributes(root, self.worktree.as_deref());
         let _ = match &self.staged {
             Some((mode, oid)) => git_with_input(root, &["update-index", "-z", "--index-info"],
                 format!("{mode} {oid}\t.gitattributes\0").as_bytes()),
@@ -414,17 +421,15 @@ impl AttributesUndo {
 /// `.gitattributes` patterns to files only, relative to the top-level
 /// directory, without `./`, and has no negation: refuse what would silently
 /// select nothing.
-fn check_pattern(root: &Path, pattern: &[u8]) -> Result<Vec<u8>, String> {
+fn check_pattern(root: &Path, submodules: &[Vec<u8>], pattern: &[u8]) -> Result<Vec<u8>, String> {
     let shown = String::from_utf8_lossy(pattern).into_owned();
     let mut pattern = pattern;
     while let Some(rest) = pattern.strip_prefix(b"./") { pattern = rest; }
     // A submodule never reads this repository's attributes.
-    for entry in indexed_files(root)?.into_iter().filter(|e| e.mode == "160000") {
-        if pattern.starts_with(&[entry.path.as_slice(), b"/"].concat()) || pattern == entry.path.as_slice() {
-            return Err(format!("{shown} is inside the submodule {}, which does not read this repository's \
-                .gitattributes; run `transcrypt-v3 init`/`protect` inside the submodule",
-                String::from_utf8_lossy(&entry.path)));
-        }
+    if let Some(sub) = submodules.iter().find(|sub| pattern.strip_prefix(sub.as_slice())
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))) {
+        return Err(format!("{shown} is inside the submodule {}, which does not read this repository's \
+            .gitattributes; run `transcrypt-v3 init`/`protect` inside the submodule", String::from_utf8_lossy(sub)));
     }
     if pattern.starts_with(b"!") {
         return Err(format!("{shown}: .gitattributes has no negative patterns; to exclude a file from a \
@@ -436,6 +441,16 @@ fn check_pattern(root: &Path, pattern: &[u8]) -> Result<Vec<u8>, String> {
             for everything below it"));
     }
     Ok(pattern.to_vec())
+}
+
+/// The key, and each of `patterns` checked, with its `.gitattributes` line.
+fn checked_patterns(root: &Path, patterns: &[OsString]) -> Result<(Key, Vec<Vec<u8>>, Vec<Line>), String> {
+    let config = load_config(root)?;
+    let key = Key::require(root, &config)?;
+    let submodules: Vec<Vec<u8>> = indexed_files(root)?.into_iter().filter(|e| e.mode == "160000").map(|e| e.path).collect();
+    let patterns = patterns.iter().map(|p| check_pattern(root, &submodules, p.as_bytes())).collect::<Result<Vec<_>, _>>()?;
+    let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<_, _>>()?;
+    Ok((key, patterns, lines))
 }
 
 /// After `.gitattributes` was edited: a pattern that names an existing file
@@ -474,8 +489,7 @@ type Line = Vec<u8>;
 fn edit_attributes(root: &Path, staging: &Staging, stage: bool, edit: impl FnOnce(&mut Vec<Line>) -> Result<(), String>)
     -> Result<(), String>
 {
-    let existing = find_protected(root, Path::new(".gitattributes"))?
-        .map(|f| f.read().map(|(bytes, _)| bytes.to_vec())).transpose()?.unwrap_or_default();
+    let existing = worktree_attributes(root)?.unwrap_or_default();
     let mut lines: Vec<Line> = existing.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
     if lines.last().is_some_and(Vec::is_empty) { lines.pop(); }
     // Another definition of the macro would silently replace ours (Git uses
@@ -546,10 +560,7 @@ fn protect_line(pattern: &[u8]) -> Result<Line, String> {
 /// patterns now select (the pre-commit hook would do it at the next commit
 /// anyway; doing it now makes `git status` and `git diff --cached` honest).
 pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
-    let config = load_config(root)?;
-    let key = Key::require(root, &config)?;
-    let patterns = patterns.iter().map(|p| check_pattern(root, p.as_bytes())).collect::<Result<Vec<_>, _>>()?;
-    let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<Vec<_>, _>>()?;
+    let (key, patterns, lines) = checked_patterns(root, patterns)?;
     let undo = AttributesUndo::capture(root)?;
     let result = (|| -> Result<(), String> {
         let staging = staging_dir(root)?;
@@ -587,18 +598,14 @@ pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> 
 /// released is decrypted first; on any error `.gitattributes` and the index
 /// are restored.
 pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
-    let config = load_config(root)?;
-    let key = Key::require(root, &config)?;
-    let patterns = patterns.iter().map(|p| check_pattern(root, p.as_bytes())).collect::<Result<Vec<_>, _>>()?;
-    let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<Vec<_>, _>>()?;
+    let (key, _, lines) = checked_patterns(root, patterns)?;
     let before = staged_protected(root, indexed_files(root)?)?;
     let undo = AttributesUndo::capture(root)?;
     let result = (|| -> Result<Vec<Vec<u8>>, String> {
         let staging = staging_dir(root)?;
         // The staged rules: an interrupted `unprotect` already removed the
         // line from the worktree file but not from the index.
-        let staged_rules = indexed_files(root)?.into_iter().find(|e| e.path == b".gitattributes")
-            .map(|e| git_blob(root, &e.oid)).transpose()?.unwrap_or_default();
+        let staged_rules = undo.staged.as_ref().map(|(_, oid)| git_blob(root, oid)).transpose()?.unwrap_or_default();
         edit_attributes(root, &staging, false, |existing| {
             for line in &lines {
                 let n = existing.len();
@@ -613,34 +620,27 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
         // The new rules are in the worktree only; the index (rules included)
         // changes in one update at the end, so an interruption never leaves
         // the rule removed while the records are still staged.
-        let still: Vec<Vec<u8>> = protected_entries(root, indexed_files(root)?, Attributes::Worktree)?
-            .into_iter().map(|e| e.path).collect();
+        let paths: Vec<&[u8]> = before.iter().map(|e| e.path.as_slice()).collect();
+        let still = protected_flags(root, &paths, Attributes::Worktree)?;
         // Decrypt everything before changing any file or index entry.
         let mut released = Vec::new();
-        for staged in before.into_iter().filter(|e| !still.contains(&e.path)) {
+        for (staged, _) in before.iter().zip(still).filter(|(_, still)| !still) {
             let plaintext = open_staged(root, &key, &staged)?;
             released.push((staged, plaintext));
         }
         // A worktree file that still holds the record gets its plaintext
         // (harmless if a later step fails); the index changes last.
         for (staged, plaintext) in &released {
-            if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
-                let (worktree, stamp) = target.read()?;
-                if *worktree == git_blob(root, &staged.oid)? {
-                    target.replace(&staging, plaintext, &stamp, key.private())?;
-                }
-            }
+            replace_if_holds(root, &staging, &staged.path, &git_blob(root, &staged.oid)?, plaintext, key.private())?;
         }
         let mut index_info = Vec::new();
         for (staged, plaintext) in &released {
-            index_info.extend_from_slice(format!("{} {}\t", staged.mode, hash_object(root, plaintext)?).as_bytes());
-            index_info.extend_from_slice(&staged.path);
-            index_info.push(0);
+            push_blob_record(root, &mut index_info, &staged.mode, &staged.path, plaintext)?;
         }
-        let rules = find_protected(root, Path::new(".gitattributes"))?.ok_or("missing .gitattributes")?.read()?.0;
-        index_info.extend_from_slice(format!("100644 {}\t.gitattributes\0", hash_object(root, &rules)?).as_bytes());
+        let rules = worktree_attributes(root)?.ok_or("missing .gitattributes")?;
+        push_blob_record(root, &mut index_info, "100644", b".gitattributes", &rules)?;
         git_with_input(root, &["update-index", "-z", "--add", "--index-info"], &index_info)?;
-        Ok(released.into_iter().map(|(staged, _)| staged.path).collect())
+        Ok(released.into_iter().map(|(staged, _)| staged.path.clone()).collect())
     })();
     let released = match result {
         Ok(released) => released,
@@ -673,28 +673,22 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     let mut plaintexts = Vec::new();
     for staged in &verified.protected {
         let plaintext = old_key.open(&staged.path, &git_blob(root, &staged.oid)?)?;
-        let unchanged = match find_protected(root, &indexed_path(&staged.path)?)? {
-            Some(target) => *target.read()?.0 == *plaintext,
-            None => false,
-        };
+        let unchanged = find_protected(root, &indexed_path(&staged.path)?)?.map(|t| t.read()).transpose()?
+            .is_some_and(|(worktree, _)| *worktree == *plaintext);
         if !unchanged {
             return Err(format!("{} has uncommitted changes (or was deleted); commit or discard them before \
                 rekeying", String::from_utf8_lossy(&staged.path)));
         }
         plaintexts.push((staged, plaintext));
     }
-    let mut salt = [0u8; SALT_LEN];
-    getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
-    let (config, key) = initialize_config(&password, &salt)?;
+    let (config, key) = new_config(&password)?;
     // The new records, written as Git objects, and one index update.
     let mut index_info = Vec::new();
     for (staged, plaintext) in &plaintexts {
         let record = transcrypt_v3::encrypt_file(&config, &key, &staged.path, plaintext)?;
-        index_info.extend_from_slice(format!("{} {}\t", staged.mode, hash_object(root, &record)?).as_bytes());
-        index_info.extend_from_slice(&staged.path);
-        index_info.push(0);
+        push_blob_record(root, &mut index_info, &staged.mode, &staged.path, &record)?;
     }
-    index_info.extend_from_slice(format!("100644 {}\t.transcrypt/config\0", hash_object(root, &config)?).as_bytes());
+    push_blob_record(root, &mut index_info, "100644", b".transcrypt/config", &config)?;
     git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
     let undo = "; run `git reset` to undo the staged rekey";
     write_repository_file(root, &staging, Path::new(".transcrypt/config"), &config)
@@ -739,19 +733,21 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
     // Configs from this branch's history other than the current one: a
     // safety net against adopting another branch's config or newer content,
     // not a guarantee (history is a graph; a reverted rekey reappears).
-    let mut configs: Vec<(Vec<u8>, String)> = Vec::new();
+    type Id = [u8; transcrypt_v3_core::ID_LEN];
+    let mut configs: Vec<(Vec<u8>, Id, String)> = Vec::new();
     let log = git(root, &["log", "--format=%H %s", "HEAD", "--", ".transcrypt/config"])?;
     for line in String::from_utf8_lossy(&log).lines() {
         let (commit, subject) = line.split_once(' ').unwrap_or((line, ""));
         if let Some(oid) = config_blob(root, commit)? {
             let bytes = git_blob(root, &oid)?;
             if bytes != config && transcrypt_v3_core::parse_config(&bytes).is_ok()
-                && !configs.iter().any(|(c, _)| *c == bytes) {
-                configs.push((bytes, format!("{} {subject}", &commit[..commit.len().min(12)])));
+                && !configs.iter().any(|(c, _, _)| *c == bytes) {
+                let id = transcrypt_v3::config_id(&bytes);
+                configs.push((bytes, id, format!("{} {subject}", &commit[..commit.len().min(12)])));
             }
         }
     }
-    if let Some((staged, _, _)) = stale.iter().find(|(_, _, f)| !configs.iter().any(|(c, _)| transcrypt_v3::config_id(c) == *f)) {
+    if let Some((staged, _, _)) = stale.iter().find(|(_, _, f)| !configs.iter().any(|(_, id, _)| id == f)) {
         return Err(format!("{} is encrypted under a config this branch never had before its current one \
             (from another branch, or newer); `reencrypt` only brings forward earlier configs of this branch",
             String::from_utf8_lossy(&staged.path)));
@@ -761,13 +757,12 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
     // current config. Show where each one came from.
     eprintln!("These staged files are encrypted under an earlier config. Re-encrypting them makes their \
         content trusted under the current config:");
+    let head = commit_files(root, "HEAD")?;
     for (staged, _, found) in &stale {
         let name = String::from_utf8_lossy(&staged.path).into_owned();
         // Where the staged blob came from: `HEAD`'s last change to the path
         // only if `HEAD` has this very blob there; otherwise it is staged.
-        let in_head = blobs_at(root, &staged.path)?.contains(&staged.oid)
-            && git(root, &["rev-parse", "-q", "--verify", &format!("HEAD:{name}")])
-                .is_ok_and(|o| String::from_utf8_lossy(&o).trim() == staged.oid);
+        let in_head = head.iter().any(|e| e.path == staged.path && e.oid == staged.oid);
         let origin = if in_head {
             git(root, &["log", "-1", "--format=%h by %an: %s", "HEAD", "--", &name])
                 .map(|o| format!("committed in {}", String::from_utf8_lossy(&o).trim())).unwrap_or_default()
@@ -790,14 +785,13 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
     }
     // Every earlier passphrase is asked for and checked before any write.
     let mut keys = Vec::new();
-    for (old, introduced) in configs.iter().filter(|(c, _)| stale.iter().any(|(_, _, f)| *f == transcrypt_v3::config_id(c))) {
-        let old_id = transcrypt_v3::config_id(old);
-        let names: Vec<String> = stale.iter().filter(|(_, _, f)| *f == old_id)
+    for (old, old_id, introduced) in configs.iter().filter(|(_, id, _)| stale.iter().any(|(_, _, f)| f == id)) {
+        let names: Vec<String> = stale.iter().filter(|(_, _, f)| f == old_id)
             .map(|(s, _, _)| String::from_utf8_lossy(&s.path).into_owned()).collect();
         eprintln!("Passphrase of config {} (introduced by {introduced}), for: {}",
             crate::hex(&old_id[..4]), names.join(", "));
         let password = passphrase(options.password_stdin, false)?;
-        keys.push((old, old_id, unlock_config(&password, old)?));
+        keys.push((old, *old_id, unlock_config(&password, old)?));
     }
     let mut index_info = Vec::new();
     let staging = staging_dir(root)?;
@@ -805,20 +799,24 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         for (staged, record, _) in stale.iter().filter(|(_, _, f)| f == old_id) {
             let plaintext = transcrypt_v3::decrypt_file(old, old_key, &staged.path, record)
                 .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
-            let sealed = key.clean(&staged.path, &plaintext)?;
-            index_info.extend_from_slice(format!("{} {}\t", staged.mode, hash_object(root, &sealed)?).as_bytes());
-            index_info.extend_from_slice(&staged.path);
-            index_info.push(0);
-            if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
-                let (worktree, stamp) = target.read()?;
-                if *worktree == *record {
-                    target.replace(&staging, &plaintext, &stamp, key.private())?;
-                }
-            }
+            push_blob_record(root, &mut index_info, &staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
+            replace_if_holds(root, &staging, &staged.path, record, &plaintext, key.private())?;
         }
     }
     git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
     eprintln!("Re-encrypted {} file(s) under the current config; they are staged. Commit them.", stale.len());
+    Ok(())
+}
+
+/// Replace the worktree file of `path` by `contents` if it still holds
+/// exactly `expected` (a missing file is left alone).
+fn replace_if_holds(root: &Path, staging: &Staging, path: &[u8], expected: &[u8], contents: &[u8], private: bool)
+    -> Result<(), String>
+{
+    if let Some(target) = find_protected(root, &indexed_path(path)?)? {
+        let (worktree, stamp) = target.read()?;
+        if *worktree == *expected { target.replace(staging, contents, &stamp, private)?; }
+    }
     Ok(())
 }
 
@@ -896,8 +894,10 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
     };
     let config = load_config(root);
     report(config.is_ok(), "committed .transcrypt/config is a valid v3 config");
-    let state = config.as_ref().ok().map(|c| credential::state(root, c)).transpose()?;
-    let key = config.as_ref().ok().map(|c| Key::load(root, c)).transpose()?.flatten();
+    let (state, key) = match &config {
+        Ok(config) => { let (state, key) = credential::lookup(root, config)?; (Some(state), key) },
+        Err(_) => (None, None),
+    };
     // Filters and drivers, as Git will resolve them (any config scope).
     let effective = |key: &str| git(root, &["config", "--get", key]).ok()
         .map(|v| String::from_utf8_lossy(&v).trim_end().to_owned());

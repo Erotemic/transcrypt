@@ -104,7 +104,7 @@ pub(crate) fn state(root: &Path, config: &[u8]) -> Result<State, String> {
 }
 
 /// How this checkout is unlocked for `config`, with the key when it is.
-fn lookup(root: &Path, config: &[u8]) -> Result<(State, Option<Key>), String> {
+pub(crate) fn lookup(root: &Path, config: &[u8]) -> Result<(State, Option<Key>), String> {
     let key = |stored| Some(Key { root: root.to_owned(), config: config.to_vec(), stored });
     if let Some((stored_config, secret)) = read_stored(root)? {
         return Ok(if stored_config == config && authenticate_config(config, &secret).is_ok() {

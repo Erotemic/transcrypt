@@ -427,8 +427,8 @@ fn status(root: &Path) -> Result<(), String> {
         }
     };
     println!("repository: v3 config {}", hex(&transcrypt_v3::config_id(&config)[..4]));
-    let key = Key::load(root, &config)?;
-    println!("key:        {}", match credential::state(root, &config)? {
+    let (state, key) = credential::lookup(root, &config)?;
+    println!("key:        {}", match state {
         State::Unlocked { private: false } => "unlocked (stored in .git/transcrypt-v3/key)",
         State::Unlocked { private: true } => "unlocked (private: held in memory by an agent)",
         State::Locked => "locked",
