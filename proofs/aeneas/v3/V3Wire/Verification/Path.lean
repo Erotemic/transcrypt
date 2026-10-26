@@ -8,73 +8,13 @@ namespace Transcrypt.V3Verification
 open transcrypt_v3_core
 
 /-!
-Functional refinement of the production path policy: the byte-matching
-helpers `matches_at` and `ends_with`, the reserved-metadata test
+Functional refinement of the production path policy: the suffix test
+`ends_with` (over `matches_at`, proved in `Bytes`), the reserved-metadata test
 `is_reserved_path`, `component_ok` and the canonical-path scan
 `is_canonical_protected_path`, each against `Transcrypt.V3Policy`.
 -/
 
-/-! ## `matches_at` and `ends_with` -/
-
-theorem matches_at_loop_spec (bytes expected : Slice U8) (a : Usize)
-    (hj : a.val + expected.length ≤ bytes.length) (k : Usize) (hk : k.val ≤ expected.length)
-    (h : MatchesUpTo bytes.val expected.val a.val k.val) :
-    matches_at_loop bytes a expected k ⦃ r =>
-      r = true ↔ MatchesUpTo bytes.val expected.val a.val expected.length ⦄ := by
-  unfold matches_at_loop
-  apply compare_loop _ (fun n => MatchesUpTo bytes.val expected.val a.val n) expected.length _ _ k hk h
-  intro m hm hc
-  unfold matches_at_loop.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  have hrl : bytes.length = bytes.val.length := rfl
-  have hel : expected.length = expected.val.length := rfl
-  step*
-  · have hne := ‹(_ != _) = true›
-    simp only [bne_iff_ne, ne_eq] at hne
-    simp only [Bool.false_eq_true, false_iff]
-    intro hall
-    apply hne
-    have := hall m.val (by omega)
-    rw [getElem!_pos bytes.val (a.val + m.val) (by omega),
-      getElem!_pos expected.val m.val (by omega)] at this
-    rw [i2_post2, i3_post2, ← this]
-    simp only [i1_post]
-  · refine ⟨k1_post, by omega, ?_⟩
-    rw [k1_post]
-    apply hc.step
-    have hne := ‹¬(_ != _) = true›
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
-    rw [getElem!_pos bytes.val (a.val + m.val) (by omega),
-      getElem!_pos expected.val m.val (by omega)]
-    rw [i2_post2, i3_post2] at hne
-    simpa only [i1_post] using hne
-
-/-- `matches_at bytes at expected` holds iff `at` is within `bytes` and
-    `expected` is a prefix of `bytes[at..]`. -/
-@[step]
-theorem matches_at_spec (bytes : Slice U8) (a : Usize) (expected : Slice U8) :
-    matches_at bytes a expected ⦃ r => r = true ↔
-      (a.val ≤ bytes.length ∧ sliceBytes expected <+: (sliceBytes bytes).drop a.val) ⦄ := by
-  unfold matches_at
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  have hrl : bytes.length = bytes.val.length := rfl
-  have hel : expected.length = expected.val.length := rfl
-  step*
-  · simp only [Bool.false_eq_true, false_iff, not_and]
-    intro hle hp
-    have := hp.length_le
-    simp only [sliceBytes, List.length_map, List.length_drop] at this
-    scalar_tac
-  · rename_i hge
-    have hlen : a.val + expected.length ≤ bytes.length := by scalar_tac
-    have hale : a.val ≤ bytes.length := by omega
-    apply WP.spec_mono (matches_at_loop_spec bytes expected a hlen 0#usize (by simp)
-      (MatchesUpTo.zero _ _ _))
-    intro r hr
-    rw [hr, sliceBytes, sliceBytes, map_prefix_drop_iff _ _ _ (by omega)]
-    constructor
-    · intro hm; exact ⟨hale, by omega, hm⟩
-    · intro hm; exact hm.2.2
+/-! ## `ends_with` -/
 
 /-- `ends_with bytes suffix` holds iff `suffix` is a suffix of `bytes`. -/
 @[step]

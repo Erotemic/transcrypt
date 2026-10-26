@@ -89,12 +89,8 @@ pub fn encode_config(config: &Config) -> [u8; CONFIG_LEN] {
 /// out salt and tag. Authentication is a separate step
 /// (`authenticate_config`) performed *after* this structural parse.
 pub fn decode_config_exact(input: &[u8; CONFIG_LEN]) -> Result<Config, FormatError> {
-    let mut i = 0;
-    while i < CONFIG_MAGIC.len() {
-        if input[i] != CONFIG_MAGIC[i] {
-            return Err(FormatError::Magic);
-        }
-        i += 1;
+    if !matches_at(input, 0, &CONFIG_MAGIC) {
+        return Err(FormatError::Magic);
     }
     let mut salt = [0u8; SALT_LEN];
     let mut j = 0;
@@ -147,12 +143,8 @@ pub fn encode_file_header(id: &[u8; ID_LEN]) -> [u8; FILE_HEADER_LEN] {
 /// least `TAG_LEN` body bytes follow; authenticating the complete record is
 /// the caller's job.
 pub fn decode_file_header_exact(input: &[u8; FILE_HEADER_LEN]) -> Result<[u8; ID_LEN], FormatError> {
-    let mut i = 0;
-    while i < FILE_MAGIC.len() {
-        if input[i] != FILE_MAGIC[i] {
-            return Err(FormatError::Magic);
-        }
-        i += 1;
+    if !matches_at(input, 0, &FILE_MAGIC) {
+        return Err(FormatError::Magic);
     }
     let mut id = [0u8; ID_LEN];
     let mut j = 0;

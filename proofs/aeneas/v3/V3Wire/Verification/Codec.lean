@@ -1,4 +1,4 @@
-import V3Wire.Verification.Copy
+import V3Wire.Verification.Bytes
 import V3Wire.Verification.Refinement
 import Transcrypt.V3WireCodec
 
@@ -235,14 +235,14 @@ theorem encode_config_bytes (c : Config) :
 
 /-! ## Decoders -/
 
-theorem decode_file_header_exact_loop0_loop0_spec (input : Std.Array U8 22#usize)
+theorem decode_file_header_exact_loop_spec (input : Std.Array U8 22#usize)
     (base id : Std.Array U8 16#usize) (j : Usize) (hj : j.val ≤ 16)
     (h : Copied id.val base.val input.val 0 6 j.val) :
-    decode_file_header_exact_loop0_loop0 input id j ⦃ r => Copied r.val base.val input.val 0 6 16 ⦄ := by
-  unfold decode_file_header_exact_loop0_loop0
+    decode_file_header_exact_loop input id j ⦃ r => Copied r.val base.val input.val 0 6 16 ⦄ := by
+  unfold decode_file_header_exact_loop
   apply copy_loop (val := fun o : Std.Array U8 16#usize => o.val) (bound := 16) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
-  unfold decode_file_header_exact_loop0_loop0.body
+  unfold decode_file_header_exact_loop.body
   have hsrc : input.length = 22 := by simp
   have ho : o.length = 16 := by simp
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
@@ -256,14 +256,14 @@ theorem decode_file_header_exact_loop0_loop0_spec (input : Std.Array U8 22#usize
     simp only [i1_post, hs]
   · simp; omega
 
-theorem decode_config_exact_loop0_loop0_spec (input : Std.Array U8 55#usize)
+theorem decode_config_exact_loop0_spec (input : Std.Array U8 55#usize)
     (base salt : Std.Array U8 32#usize) (j : Usize) (hj : j.val ≤ 32)
     (h : Copied salt.val base.val input.val 0 7 j.val) :
-    decode_config_exact_loop0_loop0 input salt j ⦃ r => Copied r.val base.val input.val 0 7 32 ⦄ := by
-  unfold decode_config_exact_loop0_loop0
+    decode_config_exact_loop0 input salt j ⦃ r => Copied r.val base.val input.val 0 7 32 ⦄ := by
+  unfold decode_config_exact_loop0
   apply copy_loop (val := fun o : Std.Array U8 32#usize => o.val) (bound := 32) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
-  unfold decode_config_exact_loop0_loop0.body
+  unfold decode_config_exact_loop0.body
   have hsrc : input.length = 55 := by simp
   have ho : o.length = 32 := by simp
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
@@ -278,14 +278,14 @@ theorem decode_config_exact_loop0_loop0_spec (input : Std.Array U8 55#usize)
     simp only [i1_post, hs]
   · simp; omega
 
-theorem decode_config_exact_loop0_loop1_spec (input : Std.Array U8 55#usize)
+theorem decode_config_exact_loop1_spec (input : Std.Array U8 55#usize)
     (base tag : Std.Array U8 16#usize) (j : Usize) (hj : j.val ≤ 16)
     (h : Copied tag.val base.val input.val 0 39 j.val) :
-    decode_config_exact_loop0_loop1 input tag j ⦃ r => Copied r.val base.val input.val 0 39 16 ⦄ := by
-  unfold decode_config_exact_loop0_loop1
+    decode_config_exact_loop1 input tag j ⦃ r => Copied r.val base.val input.val 0 39 16 ⦄ := by
+  unfold decode_config_exact_loop1
   apply copy_loop (val := fun o : Std.Array U8 16#usize => o.val) (bound := 16) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
-  unfold decode_config_exact_loop0_loop1.body
+  unfold decode_config_exact_loop1.body
   have hsrc : input.length = 55 := by simp
   have ho : o.length = 16 := by simp
   have hID := TAG_LEN_val
@@ -298,11 +298,24 @@ theorem decode_config_exact_loop0_loop1_spec (input : Std.Array U8 55#usize)
     simp only [i_post, hP]
   · simp; omega
 
-theorem take_ne_of_getElem!_ne {l M : List U8} {n i : Nat} (hi : i < n) (hn : n ≤ l.length)
-    (h : l[i]! ≠ M[i]!) : l.take n ≠ M := by
+/-- `matches_at input 0 magic`, for an input at least as long as the magic,
+    says exactly whether the input starts with the magic. -/
+theorem matches_magic_iff (input M : List U8) (h : M.length ≤ input.length) :
+    (0 ≤ input.length ∧ M.map (·.val) <+: (input.map (·.val)).drop 0) ↔
+      MatchesUpTo input M 0 M.length := by
+  rw [map_prefix_drop_iff _ _ _ (Nat.zero_le _)]
+  exact ⟨fun h' => h'.2.2, fun hm => ⟨Nat.zero_le _, by omega, hm⟩⟩
+
+theorem take_ne_of_not_matches {l M : List U8} (h : ¬ MatchesUpTo l M 0 M.length) :
+    l.take M.length ≠ M := by
   intro heq
   apply h
-  rw [← heq, getElem!_pos (l.take n) i (by simp; omega), getElem!_pos l i (by omega),
+  intro k hk
+  have hl : k < l.length := by
+    have := congrArg List.length heq
+    simp at this
+    omega
+  rw [Nat.zero_add, ← heq, getElem!_pos l k hl, getElem!_pos (l.take M.length) k (by simp; omega),
     List.getElem_take]
 
 theorem eq_append_of_matches_copied {inp M id base : List U8}
@@ -318,46 +331,6 @@ theorem eq_append_of_matches_copied {inp M id base : List U8}
       hc.get_in (by omega) (by omega) (by omega)]
     congr 1
     omega
-
-theorem decode_file_header_exact_loop0_spec (input : Std.Array U8 22#usize) (i : Usize)
-    (hi : i.val ≤ 6) (h : MatchesUpTo input.val FILE_MAGIC.val 0 i.val) :
-    decode_file_header_exact_loop0 input i ⦃ r => match r with
-      | core.result.Result.Ok id => input.val = FILE_MAGIC.val ++ id.val
-      | core.result.Result.Err FormatError.Magic => input.val.take 6 ≠ FILE_MAGIC.val
-      | core.result.Result.Err FormatError.Length => False ⦄ := by
-  unfold decode_file_header_exact_loop0
-  apply compare_loop _ (fun n => MatchesUpTo input.val FILE_MAGIC.val 0 n) 6 _ _ i hi h
-  intro j hj hm
-  unfold decode_file_header_exact_loop0.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  have hsrc : input.length = 22 := by simp
-  have hM := FILE_MAGIC_length
-  simp only [lift, bind_tc_ok]
-  split
-  · step*
-    · have hne := ‹(_ != _) = true›
-      rw [i2_post2, i3_post2] at hne
-      have hne' : input.val[j.val] ≠ FILE_MAGIC.val[j.val] := by simpa using hne
-      apply take_ne_of_getElem!_ne (i := j.val) (by omega) (by simp)
-      rw [getElem!_pos input.val j.val i2, getElem!_pos FILE_MAGIC.val j.val i3]
-      exact hne'
-    · have hne := ‹¬(_ != _) = true›
-      rw [i2_post2, i3_post2] at hne
-      have hne' : input.val[j.val] = FILE_MAGIC.val[j.val] :=
-        (UScalar.eq_equiv _ _).2 (by simpa using hne)
-      refine ⟨i4_post, by omega, ?_⟩
-      rw [i4_post]
-      apply hm.step
-      rw [Nat.zero_add, getElem!_pos input.val j.val i2, getElem!_pos FILE_MAGIC.val j.val i3]
-      exact hne'
-  · rename_i hge
-    have hj6 : j.val = 6 := by
-      have : ¬ j.val < 6 := by simpa using hge
-      omega
-    step with decode_file_header_exact_loop0_loop0_spec input (Array.repeat 16#usize 0#u8) as ⟨ id1, h1 ⟩
-    · exact Copied.zero _ _ _ _
-    rw [hj6] at hm
-    exact eq_append_of_matches_copied (by simp) (by simpa using hm) (by simpa using h1)
 
 theorem eq_append3_of_matches_copied {inp M s t bs bt : List U8}
     (hlen : inp.length = M.length + s.length + t.length)
@@ -381,49 +354,6 @@ theorem eq_append3_of_matches_copied {inp M s t bs bt : List U8}
     simp
     omega
 
-theorem decode_config_exact_loop0_spec (input : Std.Array U8 55#usize) (i : Usize)
-    (hi : i.val ≤ 7) (h : MatchesUpTo input.val CONFIG_MAGIC.val 0 i.val) :
-    decode_config_exact_loop0 input i ⦃ r => match r with
-      | core.result.Result.Ok c => input.val = CONFIG_MAGIC.val ++ c.salt.val ++ c.tag.val
-      | core.result.Result.Err FormatError.Magic => input.val.take 7 ≠ CONFIG_MAGIC.val
-      | core.result.Result.Err FormatError.Length => False ⦄ := by
-  unfold decode_config_exact_loop0
-  apply compare_loop _ (fun n => MatchesUpTo input.val CONFIG_MAGIC.val 0 n) 7 _ _ i hi h
-  intro j hj hm
-  unfold decode_config_exact_loop0.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  have hsrc : input.length = 55 := by simp
-  have hM := CONFIG_MAGIC_length
-  simp only [lift, bind_tc_ok]
-  split
-  · step*
-    · have hne := ‹(_ != _) = true›
-      rw [i2_post2, i3_post2] at hne
-      have hne' : input.val[j.val] ≠ CONFIG_MAGIC.val[j.val] := by simpa using hne
-      apply take_ne_of_getElem!_ne (i := j.val) (by omega) (by simp)
-      rw [getElem!_pos input.val j.val i2, getElem!_pos CONFIG_MAGIC.val j.val i3]
-      exact hne'
-    · have hne := ‹¬(_ != _) = true›
-      rw [i2_post2, i3_post2] at hne
-      have hne' : input.val[j.val] = CONFIG_MAGIC.val[j.val] :=
-        (UScalar.eq_equiv _ _).2 (by simpa using hne)
-      refine ⟨i4_post, by omega, ?_⟩
-      rw [i4_post]
-      apply hm.step
-      rw [Nat.zero_add, getElem!_pos input.val j.val i2, getElem!_pos CONFIG_MAGIC.val j.val i3]
-      exact hne'
-  · rename_i hge
-    have hj7 : j.val = 7 := by
-      have : ¬ j.val < 7 := by simpa using hge
-      omega
-    step with decode_config_exact_loop0_loop0_spec input (Array.repeat 32#usize 0#u8) as ⟨ s1, h1 ⟩
-    · exact Copied.zero _ _ _ _
-    step with decode_config_exact_loop0_loop1_spec input (Array.repeat 16#usize 0#u8) as ⟨ t1, h2 ⟩
-    · exact Copied.zero _ _ _ _
-    rw [hj7] at hm
-    exact eq_append3_of_matches_copied (by simp) (by simpa using hm) (by simpa using h1)
-      (by simpa using h2)
-
 /-- The production exact file-header decoder accepts exactly the magic
     followed by an arbitrary identifier, and returns that identifier. -/
 @[step]
@@ -431,8 +361,18 @@ theorem decode_file_header_exact_spec (input : Std.Array U8 22#usize) :
     decode_file_header_exact input ⦃ r => match r with
       | core.result.Result.Ok id => input.val = FILE_MAGIC.val ++ id.val
       | core.result.Result.Err FormatError.Magic => input.val.take 6 ≠ FILE_MAGIC.val
-      | core.result.Result.Err FormatError.Length => False ⦄ :=
-  decode_file_header_exact_loop0_spec input 0#usize (by simp) (MatchesUpTo.zero _ _ _)
+      | core.result.Result.Err FormatError.Length => False ⦄ := by
+  unfold decode_file_header_exact
+  simp only [lift, bind_tc_ok]
+  step with matches_at_spec as ⟨ b, hb ⟩
+  have hm := matches_magic_iff input.val FILE_MAGIC.val (by simp)
+  simp only [sliceBytes, Array.to_slice, Slice.length] at hb hm
+  split
+  · step with decode_file_header_exact_loop_spec input (Array.repeat 16#usize 0#u8) as ⟨ id1, h1 ⟩
+    · exact Copied.zero _ _ _ _
+    exact eq_append_of_matches_copied (by simp) (by simpa using hm.1 (hb.1 ‹_›))
+      (by simpa using h1)
+  · simpa using take_ne_of_not_matches (fun h => ‹¬b = true› (hb.2 (hm.2 h)))
 
 /-- The production exact config decoder accepts exactly the magic followed by
     an arbitrary salt and tag, and returns them. -/
@@ -441,8 +381,20 @@ theorem decode_config_exact_spec (input : Std.Array U8 55#usize) :
     decode_config_exact input ⦃ r => match r with
       | core.result.Result.Ok c => input.val = CONFIG_MAGIC.val ++ c.salt.val ++ c.tag.val
       | core.result.Result.Err FormatError.Magic => input.val.take 7 ≠ CONFIG_MAGIC.val
-      | core.result.Result.Err FormatError.Length => False ⦄ :=
-  decode_config_exact_loop0_spec input 0#usize (by simp) (MatchesUpTo.zero _ _ _)
+      | core.result.Result.Err FormatError.Length => False ⦄ := by
+  unfold decode_config_exact
+  simp only [lift, bind_tc_ok]
+  step with matches_at_spec as ⟨ b, hb ⟩
+  have hm := matches_magic_iff input.val CONFIG_MAGIC.val (by simp)
+  simp only [sliceBytes, Array.to_slice, Slice.length] at hb hm
+  split
+  · step with decode_config_exact_loop0_spec input (Array.repeat 32#usize 0#u8) as ⟨ s1, h1 ⟩
+    · exact Copied.zero _ _ _ _
+    step with decode_config_exact_loop1_spec input (Array.repeat 16#usize 0#u8) as ⟨ t1, h2 ⟩
+    · exact Copied.zero _ _ _ _
+    exact eq_append3_of_matches_copied (by simp) (by simpa using hm.1 (hb.1 ‹_›))
+      (by simpa using h1) (by simpa using h2)
+  · simpa using take_ne_of_not_matches (fun h => ‹¬b = true› (hb.2 (hm.2 h)))
 
 /-! ## Slice-boundary parsers -/
 

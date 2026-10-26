@@ -8,10 +8,11 @@ open transcrypt_v3_core
 
 /-!
 Functional refinement of the production v3 byte-comparison decisions: byte
-equality and the hydrate/lock lifecycle decisions. Each theorem names the Aeneas-generated translation and
-relates its complete result to the independent specification in
-`Transcrypt.V3Policy`; as `WP.spec` triples they also exclude panics and
-divergence.
+equality, prefix matching at an offset (`matches_at`) and the
+hydrate/lock/seal lifecycle decisions. Each theorem names the
+Aeneas-generated translation and relates its complete result to the
+independent specification in `Transcrypt.V3Policy`; as `WP.spec` triples
+they also exclude panics and divergence.
 -/
 
 theorem bytes_eq_loop_spec (a b : Slice U8) (hlen : a.length = b.length) (i : Usize)
@@ -77,6 +78,68 @@ theorem map_prefix_drop_iff (l p : List U8) (j : Nat) (hj : j ≤ l.length) :
     have := hm k (by simpa using h1)
     rw [getElem!_pos l (j + k) (by simp at h1; omega), getElem!_pos p k (by simpa using h1)] at this
     rw [this]
+
+/-! ## `matches_at` -/
+
+theorem matches_at_loop_spec (bytes expected : Slice U8) (a : Usize)
+    (hj : a.val + expected.length ≤ bytes.length) (k : Usize) (hk : k.val ≤ expected.length)
+    (h : MatchesUpTo bytes.val expected.val a.val k.val) :
+    matches_at_loop bytes a expected k ⦃ r =>
+      r = true ↔ MatchesUpTo bytes.val expected.val a.val expected.length ⦄ := by
+  unfold matches_at_loop
+  apply compare_loop _ (fun n => MatchesUpTo bytes.val expected.val a.val n) expected.length _ _ k hk h
+  intro m hm hc
+  unfold matches_at_loop.body
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  have hrl : bytes.length = bytes.val.length := rfl
+  have hel : expected.length = expected.val.length := rfl
+  step*
+  · have hne := ‹(_ != _) = true›
+    simp only [bne_iff_ne, ne_eq] at hne
+    simp only [Bool.false_eq_true, false_iff]
+    intro hall
+    apply hne
+    have := hall m.val (by omega)
+    rw [getElem!_pos bytes.val (a.val + m.val) (by omega),
+      getElem!_pos expected.val m.val (by omega)] at this
+    rw [i2_post2, i3_post2, ← this]
+    simp only [i1_post]
+  · refine ⟨k1_post, by omega, ?_⟩
+    rw [k1_post]
+    apply hc.step
+    have hne := ‹¬(_ != _) = true›
+    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+    rw [getElem!_pos bytes.val (a.val + m.val) (by omega),
+      getElem!_pos expected.val m.val (by omega)]
+    rw [i2_post2, i3_post2] at hne
+    simpa only [i1_post] using hne
+
+/-- `matches_at bytes at expected` holds iff `at` is within `bytes` and
+    `expected` is a prefix of `bytes[at..]`. -/
+@[step]
+theorem matches_at_spec (bytes : Slice U8) (a : Usize) (expected : Slice U8) :
+    matches_at bytes a expected ⦃ r => r = true ↔
+      (a.val ≤ bytes.length ∧ sliceBytes expected <+: (sliceBytes bytes).drop a.val) ⦄ := by
+  unfold matches_at
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  have hrl : bytes.length = bytes.val.length := rfl
+  have hel : expected.length = expected.val.length := rfl
+  step*
+  · simp only [Bool.false_eq_true, false_iff, not_and]
+    intro hle hp
+    have := hp.length_le
+    simp only [sliceBytes, List.length_map, List.length_drop] at this
+    scalar_tac
+  · rename_i hge
+    have hlen : a.val + expected.length ≤ bytes.length := by scalar_tac
+    have hale : a.val ≤ bytes.length := by omega
+    apply WP.spec_mono (matches_at_loop_spec bytes expected a hlen 0#usize (by simp)
+      (MatchesUpTo.zero _ _ _))
+    intro r hr
+    rw [hr, sliceBytes, sliceBytes, map_prefix_drop_iff _ _ _ (by omega)]
+    constructor
+    · intro hm; exact ⟨hale, by omega, hm⟩
+    · intro hm; exact hm.2.2
 
 /-! ## Lifecycle decisions -/
 
