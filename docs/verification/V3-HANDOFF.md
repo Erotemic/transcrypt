@@ -1,8 +1,11 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
-**Last reconciled:** 2026-10-25, after the product-charter campaign
-(attribute selection, stored-key unlock, renames, migration, review F-01
-to F-04). **Branch:** `work/m2-nul-safe-path-enumeration`. Always begin by
+**Last reconciled:** 2026-10-26, after the end-to-end campaign (the
+pre-commit hook's inputs, the stored-key decision and object replies moved
+into the verified core; the end-to-end statement
+[V3-SECURITY-ARGUMENT](V3-SECURITY-ARGUMENT.md)), on top of the
+product-charter campaign (attribute selection, stored-key unlock, renames,
+migration, review F-01 to F-04). **Branch:** `work/m2-nul-safe-path-enumeration`. Always begin by
 checking the working tree and latest commits; this file is a continuity
 aid, not a claim about later changes.
 
@@ -45,6 +48,7 @@ semantics silently or import legacy CBC into the proved core.
 | Independent review, scope classification and open reproductions | `docs/verification/V3-REVIEW-TRIAGE.md` |
 | Roadmap, stage status, remaining work | `docs/verification/V3-ROADMAP.md` |
 | Evidence per requirement | `docs/verification/V3-PROOF-COVERAGE.md` |
+| End-to-end statement and its hypotheses | `docs/verification/V3-SECURITY-ARGUMENT.md`, `proofs/aeneas/v3/V3Wire/Verification/EndToEnd.lean` |
 | Trust-ordered assumptions, adapter call-site table | `docs/verification/V3-ASSUMPTIONS.md` |
 | Internal security review (V6) | `docs/verification/V3-SECURITY-REVIEW.md` |
 | User documentation | `docs/verification/V3-USER-GUIDE.md` |
@@ -55,7 +59,7 @@ semantics silently or import legacy CBC into the proved core.
 | Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-v3/src/*.rs`: filters, lifecycle, credentials, Git, worktree, setup, attributes, rekey, audit, migrate, agent, fd-relative FS (module map in `main.rs`) |
 | Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
-| Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle}.lean` |
+| Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle,Snapshot,Objects,EndToEnd}.lean` |
 | Theorem ledger | `proofs/aeneas/v3/PROOF-STATUS.md` |
 | Tests | `rust/crates/transcrypt-v3/tests/{workflows,git_lifecycle,adversarial,v3_vectors,v3_differential}.rs`, `tests/v3/reference/` (`differential.py` regenerates the OpenSSL/argon2 corpus); Bash v2: `tests/v2`, `tests/v3` (bats) |
 
@@ -67,6 +71,16 @@ semantics silently or import legacy CBC into the proved core.
   Protocol theorems are relative to the explicit primitive contract
   `Realizes`. Lifecycle theorems are about Lean models of the adapter's
   loops.
+- The pre-commit hook's inputs are verified functions of Git's exact
+  listings (`Snapshot.lean`: `parse_listing`, `listing_fields`,
+  `parse_listing_attrs`, `first_unselectable`, `held_entries`,
+  `is_local_change`, `next_move_source`, `blob_elsewhere`), as are the
+  stored-key decision and `cat-file --batch` framing (`Objects.lean`).
+  `EndToEnd.lean` states what an accepted commit guarantees, with every
+  Git/crypto/adapter contract a named hypothesis
+  (`hook_accepts_only_authenticated_ciphertext`,
+  `hook_repairs_only_local_changes`,
+  `stored_key_authenticates_current_config`).
 - `bash proofs/aeneas/build-v3-tracked.sh` builds everything;
   `bash proofs/aeneas/check-v3-axioms.sh` shows only standard axioms.
 - Rust: `cargo test --workspace` (lifecycle, adversarial incl. SIGKILL fault
@@ -111,6 +125,30 @@ stable, but reordering loops inside a proved function renames them.
   spec, a new loop is an invariant proof.
 - A `bool` *value* built with `||` (e.g. `let ok = a || b;`) translates to
   Lean that does not typecheck; use `|` there (conditions are fine).
+- After `step`/`simp`, a loop's `cont` post `inv ∧ measure` is often
+  flattened to `A ∧ B ∧ … ∧ M` (with `if true` simplified): give flat
+  anonymous constructors. When the invariant is a named definition, it is
+  *not* unfolded: use `refine And.intro ?_ ?_` and `unfold` it.
+- To prove a post containing `match r with …` from a lemma, do not
+  `apply` a lemma whose post spells the `match` itself (the generated
+  matchers differ and unification fails): prove a match-free post
+  (equations `r = cont …`) and use `WP.spec_mono`.
+- `spec_result` (in `EndToEnd.lean`): from `m ⦃P⦄` and `m = ok r` obtain
+  `P r`, so theorems can take the adapter's observed results as
+  hypotheses.
+- `simp` folds `l[i] :: l.drop (i+1)` back into `l.drop i`
+  (`List.getElem_cons_drop`); use `simp only` after such a rewrite.
+- Inside `first`/`try`, multi-line parenthesized tactic blocks must align;
+  use one-line `;` chains or `case` instead. `cases h : b` does not rewrite
+  hypotheses mentioning `b`; rewrite them with `h`.
+- Prop-valued structures cannot have data fields (use `∃`). `to` is a
+  keyword (name binders `to_`).
+- A new core function whose name equals a parameter name elsewhere renames
+  that parameter in the generated code (`local_change1`): pick distinct
+  names (`is_local_change`).
+- Searches over a listing take a hint and wrap around (two `scan`s); the
+  spec only says "found / not held", while sorted listings keep a pass
+  linear.
 
 ## Adapter invariants
 
@@ -124,8 +162,14 @@ or `tests/git_lifecycle.rs`.
   replace refs). Never `git add -- <path>` with repository-derived paths;
   re-index with `update-index -z --stdin`.
 - Decide what is protected only with `protected_flags` / `protected_entries`
-  (Git's attributes, parsed by `parse_attr_record`); never match patterns
-  in Rust.
+  (Git's attributes, parsed by `parse_attr_record`), or, for an index
+  snapshot, `listing_flags` (checked against the listing's own paths);
+  never match patterns in Rust.
+- Hold index and tree snapshots as `Listing`s (the verified
+  `parse_listing`, entries from `listing_fields`), and compute the hook's
+  inputs (membership in `HEAD`/`HEAD^1`/incoming, local changes, move
+  sources, the keyless move check) only with the verified functions over
+  them; `EndToEnd.lean`'s `HookRun` lists the calls the hook relies on.
 - Replace a worktree file only through `Protected::replace` with the stamp
   from the read that justified it, while holding `staging_dir`. Write any
   other repository file only through `write_repository_file`.
@@ -172,7 +216,7 @@ or `tests/git_lifecycle.rs`.
 `lock` flushes all of them), submodules, bare repositories (audit).
 
 **Gates at this checkpoint.**
-- Rust: 140 tests across the workspace.
+- Rust: 145 tests across the workspace.
 - Bash: 218 bats tests.
 - Python vectors, the differential corpus and the Git transport tests.
 - Snapshot verify/compare.
@@ -196,19 +240,28 @@ The branch is unpushed: push needs the owner's credentials.
    (R-01) is deliberately the **final** step; it is not a blocker for
    ongoing work.
 2. **Done:** the rebind decision is the verified `seal_action`
-   (`sealSpec_repairs_only_local`). Remaining: show the adapter computes its
-   inputs (`local`, `moved`) correctly.
+   (`sealSpec_repairs_only_local`), and its inputs are verified functions
+   of Git's listings (`hook_repairs_only_local_changes`). Remaining on the
+   hook path (A4 residual, see the assumption register): a verified
+   `ls-tree` record parser instead of the `tree_record` rewrite, and the
+   unprotected-entry checks on `held_entries`.
 3. **Renames across branches** conflict as modify/delete, because Git's
    content-based rename detection cannot match path-bound ciphertext
    (tested, documented). A rename-aware merge driver cannot help, since Git
    never calls it. A future option is a `status`/`hydrate` hint that pairs
    the deleted and added files by decrypted content.
-4. **Done:** selection parsing is the verified `parse_attr_response`. Next
-   A4 narrowings: the inputs of `seal_action` and the stored-key load
-   (authenticate before use).
+4. **Done:** selection parsing is the verified `parse_attr_response` (and,
+   for the index, `parse_listing_attrs`); the stored-key load is
+   `stored_key_state` (`stored_key_authenticates_current_config`); object
+   replies are `parse_batch_header`/`blob_read`. Next A4 narrowings: the
+   inputs of smudge/hydrate/lock (worktree reads), the filter-process
+   key/value lines, and the audit's per-commit loop (an end-to-end
+   statement for `audit` like the hook's).
 5. **Done:** the private-mode agent's optional idle timeout (`--timeout`).
 6. **Performance** (release build, 10 000 files, 300 protected): a commit
-   with the hook takes 0.24 s, `git status` 0.04 s. The hook reads the
+   with the hook takes 0.24 s, a protected edit 0.27 s, a `git mv` of a
+   protected file 0.36 s (unchanged by the verified inputs, 2026-10-26),
+   `git status` 0.04 s. The hook reads the
    index once, and authenticates only entries that differ from `HEAD` or
    `HEAD^1` (the others get the keyless checks; H-74).
 7. **Simplification passes (two, reviewer-driven) are done**: shared

@@ -6,7 +6,8 @@ compiled refinement theorems, while the effectful Git/OS adapter and crypto
 implementations remain explicitly assumed/tested rather than fully proved.
 The [product charter](V3-PRODUCT-CHARTER.md) governs intended defaults and
 non-goals. The [roadmap](V3-ROADMAP.md), [proof ledger]
-(V3-PROOF-COVERAGE.md), [assumption register](V3-ASSUMPTIONS.md) and
+(V3-PROOF-COVERAGE.md), [assumption register](V3-ASSUMPTIONS.md),
+[security argument](V3-SECURITY-ARGUMENT.md) and
 [handoff](V3-HANDOFF.md) track implementation and evidence. Historical
 numbered documents describe earlier, potentially conflicting design choices.
 
@@ -71,6 +72,7 @@ audit findings, and source decisions.
 | [Independent security review disposition](V3-REVIEW-TRIAGE.md) | Separate implementation bugs from legacy, optional local and deployment concerns | Active review triage |
 | [Active v3 roadmap](V3-ROADMAP.md) | Current product milestones, statuses, proof evidence and next action | **Current plan** |
 | [V3 proof coverage](V3-PROOF-COVERAGE.md) | Source-derived Lean theorems vs tests vs trusted assumptions | **Current status** |
+| [V3 security argument](V3-SECURITY-ARGUMENT.md) | The end-to-end statement (selected paths enter Git as authenticated ciphertext) and every assumption it rests on | **Current status** |
 | [V3 handoff](V3-HANDOFF.md) | Working branch, file map, commands, continuity rules | **Current handoff** |
 | [01 - historical scope and adversary](01-requirements-and-threat-model.md) | Earlier requirements, including some superseded defaults | Historical reference |
 | [02 - Protocol decisions](02-protocol-and-wire-format.md) | Inputs, public metadata, wire versioning, cryptographic design gate, byte-level spec checklist | Draft for approval |

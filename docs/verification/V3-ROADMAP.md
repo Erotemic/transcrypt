@@ -138,16 +138,16 @@ verified" or "cryptographic security has been proved from first principles."
 | **P2: persistent unlock by default** | Stored derived key, no daemon; memory-only agent optional | **Done.** `.git/transcrypt-v3/key` (0600, outside `git config`), stale after a pulled rekey; `--private` keeps the agent; identical ciphertext in both modes (tested) |
 | **P3: transparent Git use** | Ordinary operations under ordinary umasks | **Done** for checkout, switch, merge, rebase, diff, stash, restore, rename, worktrees, submodules; private mode keeps its 0600 promise |
 | **P4: migration and Bash map** | Recoverable one-time v2-to-v3 conversion | **Done.** `migrate`, tested against the real Bash script; Bash F-01 fixed; [correspondence](V3-BASH-CORRESPONDENCE.md) updated |
-| **P5: proof correspondence** | Extend source-derived proofs to the new decisions | **Done for the core** (path policy, attribute records, smudge, two-mode index entries) and models (attribute loop, smudge); next: the rebind decision and the stored-key load |
+| **P5: proof correspondence** | Extend source-derived proofs to the new decisions | **Done for the core** (path policy, attribute records, smudge, two-mode index entries, the rebind decision and its inputs from Git's listings, the stored-key load, object replies) and models (attribute loop, smudge, the pre-commit hook end to end: [security argument](V3-SECURITY-ARGUMENT.md)); next: smudge/hydrate/lock inputs and the audit loop |
 | **P6: release qualification** | Independent crypto/adapter review | **Not complete** (R-01) |
 
 ### Next milestones, ranked by expected value
 
 1. Continued adversarial agent review of each change; the external human
    review (R-01) comes last, once everything else is done.
-2. Done: the rebind decision is the verified `seal_action`; next, its adapter inputs (A4).
+2. Done: the rebind decision is the verified `seal_action`, and its inputs are verified functions of Git's listings (`hook_repairs_only_local_changes`).
 3. A hint for cross-branch rename conflicts (Git cannot pair path-bound records; documented limitation).
-4. A4 narrowing for `protected_flags` and the stored-key load.
+4. Done: A4 narrowing for selection (`parse_listing_attrs`), the stored-key load (`stored_key_state`) and object replies; the end-to-end hook statement names the remaining contracts (A19–A23). Next: an `ls-tree` record parser, the audit's per-commit loop, the smudge/hydrate inputs.
 5. Done: private-agent idle timeout (`unlock --private --timeout=15m`).
 
 **Parallel optional tracks:** server/CI audits for organizations requiring

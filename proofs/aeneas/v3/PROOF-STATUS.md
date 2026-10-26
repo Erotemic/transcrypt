@@ -1,12 +1,12 @@
 # Formal verification ledger — production v3 core
 
-**Reconciled 2026-10-25.** Every theorem below is about the Charon/Aeneas
+**Reconciled 2026-10-26.** Every theorem below is about the Charon/Aeneas
 translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 (pinned by `SNAPSHOT.json`), stated against the independent specification in
 `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All are `WP.spec`
 triples, so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;
-`bash proofs/aeneas/check-v3-axioms.sh` confirms the 43 headline theorems use
+`bash proofs/aeneas/check-v3-axioms.sh` confirms the 60 headline theorems use
 only `propext`, `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
 `axiom`, `native_decide` or `bv_decide` occurs in any verification module
 (enforced by `v3_snapshot.py verify`).
@@ -45,7 +45,19 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
 | `Protocol` | `authorize_agent_request` | `authorize_agent_request_spec` | Exactly `authorizeSpec` |
 | `Lifecycle` | adapter sequencing models over the above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` | Hydrate replaces a worktree file only if it is exactly an authentic record for its path (the staged one, another, or, for an unmerged path, the merge result), and only by exactly that record's plaintext; any error aborts before writing; lock (resealing with the agent's idempotent clean, `cleanModel`) only discards plaintext the record restores; verify-index success ⇒ every staged record opens at its own path |
 | `Filters` | adapter filter models over `open_record`, `seal_record`, `record_envelope_ok`, `smudge_action` | `cleanModel_spec`, `cleanModel_genuine`, `cleanModel_idempotent`, `lockedFilterModel_spec`, `smudgeModel_spec` | Unlocked clean (`clean_file`) stores only genuine records: either the input already opens at this path, or it is sealed under `MaySeal`; a genuine record is returned unchanged (idempotence). The locked filters output only the unchanged input, and only if it has the v3 envelope of the config. Smudge (`smudgeModel`, including the private-mode `keepRecord` path) outputs either the unchanged input, which has the v3 file envelope within the size bound and authenticates at this path whenever `smudgeSpec` decided to open it, or exactly the plaintext it authentically opens to (`OpensTo`) at this path |
-| spec (`V3Policy`) | — | `opensTo_unique`, `seal_opens`, `lock_flush_recoverable`, `objectId_plain`, `opensTo_envelopeOk`, `indexRecord_oid`, `smudgeSpec_keep_envelope` | Spec-level consequences used above (`indexRecord_oid`: the adapter's `entry[7..path_start-3]` is the record's object id) |
+| `Snapshot` | `parse_listing` (with `record_ok`) | `parse_listing_spec` | Accepts exactly `listingBytes es` of well-formed entries (`EntryOk`: six-byte mode, object id, nonempty path, no NUL), one `ends` slot per record, and records where each ends (`ListingOf`); conversely accepts every such listing (sound and complete) |
+| `Snapshot` | `listing_fields` | `listing_fields_spec`, `FieldsOf.slices` | Record `i`'s offsets delimit exactly its object id and path, and `regular` ⇔ its mode is `100644`/`100755` |
+| `Snapshot` | `held_entries` (over `scan`, `find_entry`, `record_is`) | `held_entries_spec` (with `scan_spec`, `find_entry_spec`, `record_is_spec`) | `held[i]` ⇔ `wanted[i]` and the other listing `Holds` entry `i`'s blob at its path, whatever the search hint |
+| `Snapshot` | `is_local_change` | `is_local_change_spec` | Exactly the spec's `LocalChange` (changed since `HEAD`, not in a known incoming commit; or forced plaintext) |
+| `Snapshot` | `next_move_source` (over `move_source_from`, `move_source_at`) | `next_move_source_spec` | The first `HEAD` entry at or after `from` that is a `MoveSource` of entry `i` (same blob, other path, left the index), or `HEAD`'s length |
+| `Snapshot` | `blob_elsewhere` | `blob_elsewhere_spec` | Exactly `BlobElsewhere [index, HEAD, HEAD^1]` |
+| `Snapshot` | `parse_listing_attrs` | `parse_listing_attrs_spec` | Accepts exactly Git's `attrResponse` for the listing's own paths (sound and complete); flags are `Selected` of each value |
+| `Snapshot` | `first_unselectable` | `first_unselectable_spec` | The first flagged entry that is not `Selectable` (regular, not reserved), or the entry count |
+| `Objects` | `stored_key_state` | `stored_key_state_spec` | Exactly `storedKeySpec` (`Unlocked` only for a 119-byte file holding exactly the current config whose key authenticates it) |
+| `Objects` | `parse_batch_header` (over `decimal`) | `parse_batch_header_spec`, `batchHeader_iff` | `Some size` exactly for `BatchHeader header oid size` (the requested id, ` blob `, canonical decimal of at most 19 digits, LF) |
+| `Objects` | `blob_read` | `blob_read_spec` | Exactly `blobReadSpec` (read only within `maxRecord`) |
+| `EndToEnd` | models over the above | `hookPlan_spec`, `hook_accepts_only_authenticated_ciphertext`, `hook_repairs_only_local_changes`, `stored_key_authenticates_current_config` | The pre-commit hook's end-to-end statements, with every Git/crypto/adapter contract a named hypothesis (`GitListing` A20, `GitAttributes` A19, `GitObject` A11/A21, `Realizes` A5, `HookRun` A4); see `docs/verification/V3-SECURITY-ARGUMENT.md` |
+| spec (`V3Policy`) | — | `opensTo_unique`, `seal_opens`, `lock_flush_recoverable`, `objectId_plain`, `opensTo_envelopeOk`, `indexRecord_oid`, `smudgeSpec_keep_envelope`, `entryOk_indexRecord`, `localChange_held`, `localChange_unknown`, `storedKeySpec_unlocked`, `batchHeader_unique` | Spec-level consequences used above (`indexRecord_oid`: the adapter's `entry[7..path_start-3]` is the record's object id) |
 
 ## Explicit assumptions in the statements
 
@@ -60,6 +72,13 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
   computational assumptions (A10), not Lean theorems.
 - **Lifecycle models** follow the adapter's call order (A4, reviewed in
   `V3-ASSUMPTIONS.md`).
+- **Snapshot preconditions.** The snapshot queries are stated for a
+  listing `parse_listing` accepted (`ListingOf`); that is the only way the
+  adapter obtains `ends`.
+- **End-to-end contracts** (`EndToEnd`): `GitListing` (A20),
+  `GitAttributes` (A19), `GitObject` (A11, A21), `Realizes` (A5), the
+  observed call results `HookRun` and the per-entry model `hookPlan` (A4),
+  the sequencing state (A23); Git commits the checked index (A22).
 
 ## Not covered by Lean
 

@@ -6,7 +6,10 @@ conditional on the assumptions below. Identifiers are stable: A1–A10 keep
 their meaning, and A11–A14 were added when this campaign surfaced them.
 A16–A18 were opened by the [product charter](V3-PRODUCT-CHARTER.md) and
 the independent review, and are now implemented and tested; A19 was added
-with attribute-based selection. Older security-hardening priorities are
+with attribute-based selection. A20–A23 name the Git contracts of the
+[end-to-end security argument](V3-SECURITY-ARGUMENT.md), which now that the
+hook's inputs are computed by the verified core are the remaining
+assumptions of the pre-commit path. Older security-hardening priorities are
 superseded by the charter where they conflict (for example, private worktree
 permissions are now an optional mode); the source-derived proof status and
 existing assumption meanings are not.
@@ -30,7 +33,7 @@ one.
 | A1 | Protocol decision core is correct | PROVED |
 | A2 | Wire codec matches the spec | PROVED |
 | A3 | Charon/Aeneas/hax translation and Lean are sound | ASSUMED (pinned, reproduced) |
-| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model) + REVIEWED + TESTED |
+| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs are now verified functions |
 | A5 | `Keyed` realizes the primitive contract | TESTED (differential vs OpenSSL, exhaustive tampering) |
 | A6 | Private-mode credential agent relays core results faithfully | TESTED + REVIEWED; same-UID ACCEPTED RISK (optional mode) |
 | A7 | Git semantics | TESTED on Git 2.43; ASSUMED otherwise |
@@ -42,10 +45,14 @@ one.
 | A13 | History is audited before it reaches others (deployment) | REVIEWED; depends on deployment |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
-| A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED; selection by Git ASSUMED (A19); TESTED end to end |
-| A17 | The stored key is local-only, used only for the config it authenticates, and mode-independent | TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
-| A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision PROVED (`seal_action`); TESTED (real Git) + REVIEWED |
+| A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
+| A17 | The stored key is local-only, used only for the config it authenticates, and mode-independent | Decision PROVED (`stored_key_state`, `stored_key_authenticates_current_config`); file I/O TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
+| A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`seal_action`, `held_entries`, `is_local_change`, `next_move_source`, `hook_repairs_only_local_changes`); TESTED (real Git) + REVIEWED |
 | A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK |
+| A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record) | TESTED; parsing PROVED (`parse_listing_spec`) |
+| A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
+| A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
+| A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, cherry-pick, rebase suites) |
 
 ## Detailed register
 
@@ -117,14 +124,39 @@ one.
   - **TESTED.** Real-Git lifecycle and adversarial suites, including
     pathspec-magic and revision-syntax filenames, and SIGKILL fault
     injection.
-- **Residual:** the adapter Rust itself is not proved. The oid slice
-  `entry[7..path_start-3]` is proved to extract the object id of every
-  accepted record (`indexRecord_oid`), but the Rust slice expression itself
-  is reviewed, not extracted.
-- **Next reduction:** object reads now go through one `git cat-file --batch`
-  per process with an exact, re-serialized header check; moving that check
-  into the proved core is the remaining step.
-- **Status:** narrowed; PROVED (model) + REVIEWED + TESTED.
+  - **PROVED (source-derived inputs, 2026-10-26).** The pre-commit hook and
+    `verify-index` compute every input of their decisions with verified
+    functions over the exact Git listings: `parse_listing`,
+    `listing_fields`, `parse_listing_attrs`, `first_unselectable`,
+    `held_entries`, `is_local_change`, `next_move_source`, `blob_elsewhere`;
+    object replies are framed by `parse_batch_header` and `blob_read`; the
+    stored key by `stored_key_state`. The end-to-end theorems
+    (`hook_accepts_only_authenticated_ciphertext`,
+    `hook_repairs_only_local_changes`,
+    `stored_key_authenticates_current_config`) take the adapter's observed
+    results of these calls as hypotheses (`HookRun`), so what remains of A4
+    on this path is listed below. See [the security argument](V3-SECURITY-ARGUMENT.md).
+- **Residual:** the adapter Rust itself is not proved. On the pre-commit
+  path what remains reviewed and tested, not proved, is:
+  - that the adapter acts on the verified results as `HookRun` and the
+    models `hookPlan`/`hookEntry` say (it builds entries from
+    `listing_fields`, iterates the flagged positions, and its per-entry
+    check is at least as strict as `hookEntry`);
+  - the rewrite of `ls-tree` records to index records (`tree_record`, A20);
+  - sizing `ends` by the listing's NUL count (fails closed: the parse then
+    refuses);
+  - the equality of the staged `.transcrypt/config` blob with the
+    configuration used;
+  - reading exactly the announced object size and the trailing LF (A21);
+  - building the stored key's primitives from the file's key bytes (A17);
+  - finding the commits being brought in (A23);
+  - the extra refusals for unprotected entries (a record moved to an
+    unprotected name, a file that lost its protection), which look up old
+    blobs by path in adapter code; they only refuse, and match `audit`.
+- **Next reduction:** a verified `ls-tree` record parser (removing the
+  `tree_record` rewrite), and moving the unprotected-entry checks onto
+  `held_entries`.
+- **Status:** narrowed; PROVED (source-derived inputs, model) + REVIEWED + TESTED.
 
 ### A5 — `Keyed` realizes the primitive contract
 
@@ -400,7 +432,12 @@ one.
 - **Evidence (selection loop):** the whole answer is parsed by the
   verified `parse_attr_response` (`parse_attr_response_spec`,
   `parse_attr_response_complete`); the adapter only builds the request
-  (NUL-free paths, each NUL-terminated) and runs Git.
+  (NUL-free paths, each NUL-terminated) and runs Git. For the index (the
+  hooks, `verify-index`, `hydrate`, `lock`) the answer is checked against
+  the listing's own paths by `parse_listing_attrs`
+  (`parse_listing_attrs_spec`, both directions), so the request
+  construction is no longer trusted there; `first_unselectable` refuses a
+  selected symlink, submodule or reserved path.
 - **Pattern hygiene:** `protect` refuses patterns that select nothing
   (directories, `./`, negation) and requires a pattern naming an existing
   file to select it.
@@ -424,6 +461,13 @@ one.
   another config (records under the wrong config, refused later by
   verification); different ciphertext per mode.
 - **Evidence:**
+  - PROVED: the decision is the verified `stored_key_state`
+    (`stored_key_state_spec` = `storedKeySpec`: `Unlocked` only for a
+    119-byte file holding exactly the current config whose key
+    authenticates it, `storedKeySpec_unlocked`); composed with
+    `authenticate_config` in `stored_key_authenticates_current_config`. A
+    damaged file is refused by every command except `unlock`, which
+    replaces it (fixed 2026-10-26; it used to refuse as well).
   - Written via an exclusive 0600 temporary, `fsync` and `renameat` in the
     held, checked directory; read with `O_NOFOLLOW`, exact size required.
   - `assert_unlocked` (git_lifecycle): exactly one private 64-byte key file,
@@ -481,10 +525,16 @@ one.
     (recoverable in plaintext; tested).
 - **Proof:** the decision itself is the verified `seal_action`
   (`seal_action_spec`, `sealSpec_repairs_only_local`: only a local change
-  that does not already open is ever repaired). The adapter computes its
-  inputs: `local` from `HEAD` and the sequencing state, and `moved` from
-  `open_record` at a `HEAD` path that has left the index (A4).
-- **Status:** decision PROVED; inputs TESTED + REVIEWED.
+  that does not already open is ever repaired). Its inputs are verified
+  too: membership in `HEAD` and the incoming commits (`held_entries`), the
+  local-change input (`is_local_change` = spec `LocalChange`) and the move
+  sources (`next_move_source` = spec `MoveSource`, first at or after an
+  offset, tried in `HEAD` order). `hook_repairs_only_local_changes`
+  composes them: whatever the hook seals or rebinds is a `LocalChange`, and
+  a rebind re-encrypts only a record that authenticates at a `HEAD` path it
+  was moved from. Remaining: the sequencing state (A23), Git's listings
+  (A20), and the adapter's call sequence (A4).
+- **Status:** decision and inputs PROVED; TESTED + REVIEWED.
 
 ### A19 — Git's attribute evaluation (new)
 
@@ -510,6 +560,60 @@ one.
   files and the pre-commit hook warns.
 - **Status:** TESTED; overrides ACCEPTED RISK (an informed user's choice).
 
+### A20 — Git's listings (new)
+
+- **Claim:** `git ls-files --stage -z` prints the index being committed
+  exactly: one `mode SP oid SP 0 TAB path` record per stage-0 entry, each
+  NUL-terminated, raw path bytes, nothing else. `ls-tree -r -z` prints a
+  commit's tree, which the adapter rewrites record by record
+  (`tree_record`) to the same shape.
+- **Trust boundary:** Git; the adapter's `tree_record` rewrite (reviewed,
+  fuzz-tested in `git_output_parsers_never_panic_and_accept_only_exact_records`).
+- **Consequence if false:** the hook would check entries other than those
+  Git commits.
+- **Evidence:** TESTED by every lifecycle suite (raw and non-UTF-8 paths,
+  TABs and newlines in names); the parse PROVED both ways
+  (`parse_listing_spec`), so a listing of any other shape is refused.
+- **Status:** TESTED; parsing PROVED.
+
+### A21 — Object replies (new)
+
+- **Claim:** `git cat-file --batch` answers the requested object id, with
+  the header `<oid> SP blob SP <size> LF`, then exactly `size` bytes and an
+  LF; the adapter reads exactly those bytes.
+- **Evidence:** the header must be exactly `BatchHeader` for the requested
+  id with a canonical decimal size (`parse_batch_header_spec`; the size is
+  unique, `batchHeader_unique`); only sizes within the record bound are
+  read (`blob_read_spec`); the trailing LF is checked and a failed read
+  discards the reader. TESTED (`git_output_parsers_never_panic_and_accept_only_exact_records`,
+  all lifecycle suites).
+- **Residual:** the read of exactly `size` bytes (adapter I/O).
+- **Status:** header PROVED; content read TESTED.
+
+### A22 — The commit is the checked index (new)
+
+- **Claim:** Git records the index the `pre-commit` hook checked last
+  (after the hook's own `update-index`, Git re-reads the index), and nothing
+  else changes it before the commit is written.
+- **Consequence if false:** an index checked by the hook would differ from
+  the one committed (the audit still checks history, A13).
+- **Evidence:** TESTED by every pre-commit test, including commits with
+  sealing; a concurrent writer of the same index is outside the threat
+  model (same-UID, A8).
+- **Status:** TESTED; ASSUMED (Git's commit flow).
+
+### A23 — The commits being brought in (new)
+
+- **Claim:** during a merge, cherry-pick, revert or rebase, `MERGE_HEAD`,
+  `CHERRY_PICK_HEAD`, `REVERT_HEAD` and `REBASE_HEAD` name the commits whose
+  content the index may hold; while a rebase or `am` runs without such a
+  commit, the hook treats nothing as local.
+- **Consequence if false:** content of a commit could be treated as a local
+  change and repaired (re-encrypted), i.e. laundered.
+- **Evidence:** TESTED (`merges_are_verified_before_the_merge_commit`,
+  hostile move in `git_lifecycle`, rebase and cherry-pick suites).
+- **Status:** TESTED.
+
 ## Ranked unresolved risks and *product* opportunities
 
 Ranked by violation of [the declared product promise](V3-PRODUCT-CHARTER.md),
@@ -518,9 +622,12 @@ realistic impact and effort.
 1. **External crypto/adapter review** (A5/A9/R-01): required for credible
    release claims. Differential vectors reduce, but do not discharge, the
    trusted-library boundary.
-2. **Adapter correctness** (A4/A7/A8/A16): the new selection, rebind and
-   credential paths are tested and reviewed but not proved; the next proof
-   targets are the attribute-record loop and the rebind decision.
+2. **Adapter correctness** (A4/A7/A8/A16): the decisions and, on the
+   pre-commit path, their inputs are proved (selection, rebind inputs,
+   stored key, object replies; [security argument](V3-SECURITY-ARGUMENT.md));
+   the adapter's call sequence and I/O remain reviewed and tested. Next
+   targets: an `ls-tree` record parser, the unprotected-entry checks, and
+   the smudge/hydrate inputs.
 3. **Deployment of history audits** (A13/A14): a clone that never unlocked
    commits plaintext; only a server or CI audit stops it reaching others.
 4. **Local overrides and unconfigured clones** (A19): informed-user choices;
@@ -552,7 +659,13 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
 | Parsing Git's attribute answers (what is protected) | `parse_attr_record_spec` (both directions), `parse_attr_response_spec`, `parse_attr_response_complete` |
 | Smudge keeps only genuine envelopes; opens only its own config | `smudge_action_spec`, `smudgeSpec_keep_envelope`, `smudgeModel_spec` |
-| The pre-commit hook repairs only local changes | `seal_action_spec`, `sealSpec_repairs_only_local` |
+| The pre-commit hook repairs only local changes | `seal_action_spec`, `sealSpec_repairs_only_local`; inputs: `held_entries_spec`, `is_local_change_spec`, `next_move_source_spec`; composed in `hook_repairs_only_local_changes` |
+| Git listings are parsed exactly; each entry's fields | `parse_listing_spec` (both directions), `listing_fields_spec` |
+| Selection checked against the listing's own paths; selectability | `parse_listing_attrs_spec` (both directions), `first_unselectable_spec` |
+| Keyless move check | `blob_elsewhere_spec` |
+| Stored-key decision | `stored_key_state_spec`, `storedKeySpec_unlocked`, `stored_key_authenticates_current_config` |
+| `cat-file --batch` reply framing | `parse_batch_header_spec`, `batchHeader_unique`, `blob_read_spec` |
+| End to end: the hook accepts only authenticated ciphertext at the selected paths | `hook_accepts_only_authenticated_ciphertext` (with `hookPlan_spec`) |
 | Index record parsing | `parse_index_entry_spec` |
 | Git filter-protocol packet lengths | `decode_pkt_len_spec` |
 | Object ids passed to Git are plain hex names, taken from the right bytes | `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` |
@@ -570,17 +683,17 @@ verified decision that gates it:
 | `clean` filter output (unlocked) | `Key::clean` → `clean_file` (stored key) or agent `Encrypt` (private): `open_record` (authentic record ⇒ returned unchanged) else `seal_record` | config bytes from `.transcrypt/config`; Git `%f` bytes; stdin | `Ok` (else Git aborts) |
 | `smudge` filter output | `smudge_action` (no envelope ⇒ refuse; other config or locked ⇒ keep the record; own config ⇒ open), then `open_record`; private mode: `umask_is_private` chooses plaintext or the authenticated record | same config; `%f`; blob from stdin | `Ok` |
 | `clean` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
-| Key loading | `authenticate_config` with the stored key (else locked), or agent `Ping` | stored 64-byte key; current config | `Ok` |
+| Key loading | `stored_key_state` (with `authenticate_config` under the stored key), or agent `Ping` | stored key file (config ‖ 64-byte key); current config | `Unlocked`; `unlock` replaces a `Damaged` file |
 | Protected-file selection | `parse_attr_response` over the whole answer (one record per requested path, in order, nothing else); `is_reserved_path` | raw paths sent to `check-attr -z --stdin filter` (`--cached`, worktree, or a commit's temporary index) | `protected = true` |
-| Pre-commit re-encryption (`seal_staged`) | `seal_action` on (`open_record` at its path, local change, `parse_file_header`, `open_record` at the `HEAD` source path of a local move), then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` listing; sequencing state | `Seal` or `Rebind` only |
+| Pre-commit re-encryption (`seal_staged`) | `seal_action` on (`open_record` at its path, `is_local_change` over `held_entries` in `HEAD` and the incoming commits, `parse_file_header`, `open_record` at a `next_move_source` path), then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` and incoming listings (`parse_listing`); sequencing state | `Seal` or `Rebind` only |
 | Agent framing | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, lengths | proved roundtrip |
 | Git filter-process framing | `decode_pkt_len` for every packet; then the same conversion as the per-file filters | 4-byte pkt-line headers from Git; `command=`/`pathname=` values | `Ok` (else the process ends and Git fails) |
 | Agent dispatch | `authorize_agent_request` before the body is read; peer UID check | opcode, supplied config, startup config, path, length | `Ok(op)` from a same-UID peer |
 | Agent startup | `authenticate_config` | config bytes, piped key | `Ok` |
 | `unlock` / `init` | `authenticate_config` / `initialize_config` | config bytes / fresh salt | `Ok`, before any persistent effect |
-| Index and tree listings | `parse_index_entry`, then `is_object_id` on `entry[7..path_start-3]` | each NUL-delimited `ls-files --stage -z` record, or `ls-tree -r -z` record rewritten to that shape (path copied verbatim) | `Ok` and `true` (else refuse) |
-| Object reads | `is_object_id` | oid from the parsed snapshot | `true`; one `cat-file --batch` per process; reply header must re-serialize exactly as `<oid> blob <size>`, size ≤ 16 MiB, trailing LF checked |
-| `verify-index` | selection (above), then `open_record` per entry (or, while locked, `record_envelope_ok` and no other index/`HEAD` path with the same blob) | snapshot paths; blobs by oid | `true` / `Ok` for every entry |
+| Index and tree listings | `parse_listing` (whole listing: records, object ids), then `listing_fields` per entry | `ls-files --stage -z`, or `ls-tree -r -z` records rewritten to that shape (path copied verbatim) | `true` (else refuse) |
+| Object reads | `is_object_id`, then `parse_batch_header` and `blob_read` | oid from the parsed snapshot | `true`; one `cat-file --batch` per process; header exactly `<oid> blob <size>` (canonical decimal), `Read` only within 16 MiB, trailing LF checked |
+| `verify-index` and the hook's check | `parse_listing_attrs`, `first_unselectable`, then `open_record` per entry (incremental hook: unless `held_entries` shows it unchanged since `HEAD` and `HEAD^1`), or, while locked, `record_envelope_ok` and `blob_elsewhere` | snapshot listing; blobs by oid | `true` / `Ok` for every entry |
 | `hydrate` publish | agent `Decrypt`, then `hydrate_action`, all entries before any write; stamp equality | blob by snapshot oid; worktree bytes and stamp via held dirfd | `Ok(Publish)` for all; `Keep` untouched |
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action`; stamp equality | worktree bytes and stamp, blob by oid, reseal output | `Ok(Flush)`; `Keep` untouched |
 | Re-index after hydrate/lock | none (bookkeeping); listing compared with the verified snapshot afterwards | verified protected paths, raw, via `update-index -z --stdin` | listing unchanged |
