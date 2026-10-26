@@ -106,6 +106,11 @@ stable, but reordering loops inside a proved function renames them.
   and `simp only [..., WP.spec_ok]`.
 - Unnamed hypotheses: refer by type with `‹_›` instead of `rename_i` where
   possible.
+- Reuse the proved helpers (`matches_at`, `find_byte`, `bytes_eq`) in the
+  core instead of writing new loops: a call is one `step` with the helper's
+  spec, a new loop is an invariant proof.
+- A `bool` *value* built with `||` (e.g. `let ok = a || b;`) translates to
+  Lean that does not typecheck; use `|` there (conditions are fine).
 
 ## Adapter invariants
 
