@@ -8,7 +8,8 @@ open transcrypt_v3_core
 
 /-!
 Functional refinement of the production v3 byte-comparison decisions: byte
-equality, prefix matching at an offset (`matches_at`) and the
+equality, prefix matching at an offset (`matches_at`), byte search
+(`find_byte`) and the
 hydrate/lock/seal lifecycle decisions. Each theorem names the
 Aeneas-generated translation and relates its complete result to the
 independent specification in `Transcrypt.V3Policy`; as `WP.spec` triples
@@ -140,6 +141,52 @@ theorem matches_at_spec (bytes : Slice U8) (a : Usize) (expected : Slice U8) :
     constructor
     · intro hm; exact ⟨hale, by omega, hm⟩
     · intro hm; exact hm.2.2
+
+/-! ## `find_byte` -/
+
+/-- `j` is reached from `f` over bytes of `l` other than `c`: either within
+    `l`, or `j = f` when `f` is past the end. -/
+def ByteScan (l : List Nat) (c f j : Nat) : Prop :=
+  f ≤ j ∧ (j ≤ l.length ∨ j = f) ∧ ∀ k, f ≤ k → k < j → l[k]! ≠ c
+
+theorem find_byte_loop_spec (bytes : Slice U8) (c : U8) (f j : Usize)
+    (h : ByteScan (sliceBytes bytes) c.val f.val j.val) :
+    find_byte_loop bytes c j ⦃ r => ByteScan (sliceBytes bytes) c.val f.val r.val ∧
+      (r.val < bytes.length → (sliceBytes bytes)[r.val]! = c.val) ⦄ := by
+  unfold find_byte_loop
+  apply loop.spec_decr_nat (fun s => bytes.length - s.val)
+    (fun s => ByteScan (sliceBytes bytes) c.val f.val s.val)
+  · intro j hj
+    unfold find_byte_loop.body
+    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+    have hl := sliceBytes_length bytes
+    step*
+    · obtain ⟨h1, _, h3⟩ := hj
+      subst i1_post2
+      have hb : (sliceBytes bytes)[j.val]! ≠ c.val := by
+        have := ‹(_ != c) = true›
+        simp only [bne_iff_ne, ne_eq] at this
+        rw [sliceBytes_getElem! bytes j.val i1]
+        exact fun h0 => this (UScalar.eq_of_val_eq h0)
+      refine ⟨⟨by omega, Or.inl (by omega), fun k hk1 hk2 => ?_⟩, by omega⟩
+      rcases Nat.lt_or_ge k j.val with hlt | hge
+      · exact h3 k hk1 hlt
+      · rw [show k = j.val by omega]; exact hb
+    · refine ⟨hj, fun _ => ?_⟩
+      subst i1_post2
+      have := ‹¬(_ != c) = true›
+      simp only [bne_iff_ne, ne_eq, Decidable.not_not] at this
+      rw [sliceBytes_getElem! bytes j.val i1, this]
+  · exact h
+
+/-- `find_byte bytes from c` is the first `c` at or after `from`, or the end
+    of `bytes` (and `from` itself when `from` is past the end). -/
+@[step]
+theorem find_byte_spec (bytes : Slice U8) (f : Usize) (c : U8) :
+    find_byte bytes f c ⦃ r => ByteScan (sliceBytes bytes) c.val f.val r.val ∧
+      (r.val < bytes.length → (sliceBytes bytes)[r.val]! = c.val) ⦄ := by
+  unfold find_byte
+  exact find_byte_loop_spec bytes c f f ⟨le_refl _, Or.inr rfl, fun k h1 h2 => absurd h2 (by omega)⟩
 
 /-! ## Lifecycle decisions -/
 

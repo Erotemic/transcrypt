@@ -287,10 +287,11 @@ fn matches_at(bytes: &[u8], at: usize, expected: &[u8]) -> bool {
     true
 }
 
-/// The position of the first NUL in `bytes[from..]`, or `bytes.len()`.
-fn find_nul(bytes: &[u8], from: usize) -> usize {
+/// The position of the first `byte` in `bytes[from..]`, or `bytes.len()` if
+/// there is none (`from` itself when it is past the end).
+fn find_byte(bytes: &[u8], from: usize, byte: u8) -> usize {
     let mut j = from;
-    while j < bytes.len() && bytes[j] != 0 {
+    while j < bytes.len() && bytes[j] != byte {
         j += 1;
     }
     j
@@ -575,7 +576,7 @@ pub fn parse_attr_record(response: &[u8], start: usize, path: &[u8]) -> Result<A
         return Err(Refusal::Attribute);
     }
     let value = name + FILTER_ATTR.len() + 2;
-    let end = find_nul(response, value);
+    let end = find_byte(response, value, 0);
     if end == n {
         return Err(Refusal::Attribute);
     }
@@ -691,34 +692,16 @@ pub struct IndexEntry {
 /// adapter checks it with `is_object_id` before passing it to Git.
 pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
     let n = entry.len();
-    let mut t = 0;
-    let mut found = false;
-    while !found && t < n {
-        if entry[t] == b'\t' {
-            found = true;
-        } else {
-            t += 1;
-        }
-    }
-    if !found || t < 10 || t + 1 >= n {
+    let t = find_byte(entry, 0, b'\t');
+    // `t == n` when there is no TAB; the path after it must be nonempty.
+    if t < 10 || n - t < 2 {
         return Err(Refusal::Index);
     }
     if entry[6] != b' ' || entry[t - 2] != b' ' || entry[t - 1] != b'0' {
         return Err(Refusal::Index);
     }
-    let mut plain = true;
-    let mut executable = true;
-    let mut k = 0;
-    while k < REGULAR_MODE.len() {
-        if entry[k] != REGULAR_MODE[k] {
-            plain = false;
-        }
-        if entry[k] != EXECUTABLE_MODE[k] {
-            executable = false;
-        }
-        k += 1;
-    }
-    Ok(IndexEntry { regular: plain || executable, path_start: t + 1 })
+    let regular = matches_at(entry, 0, &REGULAR_MODE) || matches_at(entry, 0, &EXECUTABLE_MODE);
+    Ok(IndexEntry { regular, path_start: t + 1 })
 }
 
 /// A Git object name as printed by `ls-files --stage` or `ls-tree`: 40

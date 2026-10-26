@@ -9,7 +9,7 @@ open transcrypt_v3_core
 /-!
 Functional refinement of the production Git attribute parsers against the
 independent specification's `AttrRecordAt` / `attrResponse`.
-`parse_attr_record` (with its helper `find_nul`) accepts exactly the spec's
+`parse_attr_record` (with the helper `find_byte`, proved in `Bytes`) accepts exactly the spec's
 `git check-attr -z filter` record for the requested path at the given offset
 and reports exactly whether its value selects the v3 filter;
 `parse_attr_response` (used by `transcrypt_v3::git::protected_flags`) accepts
@@ -94,53 +94,6 @@ theorem attrResponse_append (a b : List (List Nat × List Nat)) :
   simp [attrResponse, List.flatMap_append]
 
 end Pure
-
-/-! ## `find_nul` -/
-
-/-- `j` is reached from `f` over non-NUL bytes of `l`: either within `l`, or
-    `j = f` when `f` is past the end. -/
-def NulScan (l : List Nat) (f j : Nat) : Prop :=
-  f ≤ j ∧ (j ≤ l.length ∨ j = f) ∧ ∀ k, f ≤ k → k < j → l[k]! ≠ 0
-
-theorem find_nul_loop_spec (bytes : Slice U8) (f j : Usize)
-    (h : NulScan (sliceBytes bytes) f.val j.val) :
-    find_nul_loop bytes j ⦃ r => NulScan (sliceBytes bytes) f.val r.val ∧
-      (r.val < bytes.length → (sliceBytes bytes)[r.val]! = 0) ⦄ := by
-  unfold find_nul_loop
-  apply loop.spec_decr_nat (fun s => bytes.length - s.val)
-    (fun s => NulScan (sliceBytes bytes) f.val s.val)
-  · intro j hj
-    unfold find_nul_loop.body
-    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-    have hl := sliceBytes_length bytes
-    step*
-    · obtain ⟨h1, _, h3⟩ := hj
-      subst i1_post2
-      have hb : (sliceBytes bytes)[j.val]! ≠ 0 := by
-        have := ‹(_ != 0#u8) = true›
-        simp only [bne_iff_ne, ne_eq] at this
-        rw [sliceBytes_getElem! bytes j.val i1]
-        exact fun h0 => this (UScalar.eq_of_val_eq h0)
-      refine ⟨⟨by omega, Or.inl (by omega), fun k hk1 hk2 => ?_⟩, by omega⟩
-      rcases Nat.lt_or_ge k j.val with hlt | hge
-      · exact h3 k hk1 hlt
-      · rw [show k = j.val by omega]; exact hb
-    · refine ⟨hj, fun _ => ?_⟩
-      subst i1_post2
-      have := ‹¬(_ != 0#u8) = true›
-      simp only [bne_iff_ne, ne_eq, Decidable.not_not] at this
-      rw [sliceBytes_getElem! bytes j.val i1, this]
-      rfl
-  · exact h
-
-/-- `find_nul bytes from` is the first NUL at or after `from`, or the end of
-    `bytes` (and `from` itself when `from` is past the end). -/
-@[step]
-theorem find_nul_spec (bytes : Slice U8) (f : Usize) :
-    find_nul bytes f ⦃ r => NulScan (sliceBytes bytes) f.val r.val ∧
-      (r.val < bytes.length → (sliceBytes bytes)[r.val]! = 0) ⦄ := by
-  unfold find_nul
-  exact find_nul_loop_spec bytes f f ⟨le_refl _, Or.inr rfl, fun k h1 h2 => absurd h2 (by omega)⟩
 
 theorem index_range_spec (s : Slice U8) (a b : Usize) (hab : a.val ≤ b.val) (hb : b.val ≤ s.length) :
     core.Slice.Insts.CoreOpsIndexIndex.index
