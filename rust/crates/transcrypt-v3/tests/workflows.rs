@@ -49,8 +49,7 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     attributes.extend_from_slice(b"private/PUBLIC.md -filter -diff -merge\n");
     fs::write(repo.join(".gitattributes"), attributes).unwrap();
     fs::write(repo.join("config/development.yaml"), b"public config\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "protected files"], None);
+    commit_all(&repo, "protected files");
     let listing = run(&repo, "git", &["ls-files", "-z", "-s"], None);
     assert!(listing.split(|b| *b == 0).any(|e| e.starts_with(b"100755") && e.ends_with(b"private/run.sh")));
     for (path, content) in &files {
@@ -75,7 +74,7 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     // A fresh clone sees ciphertext until it unlocks, then the same files.
     let clone = scratch.clone("repo", "clone");
     assert!(is_record(&fs::read(clone.join(".env")).unwrap()));
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&clone);
     for (path, content) in &files {
         assert_eq!(fs::read(clone.join(path)).unwrap(), *content);
     }
@@ -87,7 +86,7 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     assert!(is_record(&fs::read(clone.join("private/run.sh")).unwrap()));
     assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & 0o111, 0o111);
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&clone);
     assert_eq!(fs::read(clone.join(&odd)).unwrap(), b"odd secret\x00\xff");
 }
 
@@ -100,8 +99,7 @@ fn stored_key_unlock_needs_no_agent_and_follows_the_umask() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", ".env"], Some(PASS));
     fs::write(repo.join(".env"), b"one\n").unwrap();
-    run(&repo, "git", &["add", ".env"], None);
-    run(&repo, "git", &["commit", "-qm", "env"], None);
+    commit(&repo, &[".env"], "env");
     let key = repo.join(".git/transcrypt-v3/key");
     assert_eq!(fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
     assert!(!repo.join(".git/transcrypt-v3/session.sock").exists(), "no agent in the default mode");
@@ -148,7 +146,7 @@ fn stored_and_private_modes_encrypt_identically() {
     assert_eq!(run(&repo, "sh", &["-c", &smudge], Some(&stored)), b"same input\n");
     let smudge = format!("umask 022 && exec '{}' smudge a.txt", bin());
     assert_eq!(run(&repo, "sh", &["-c", &smudge], Some(&stored)), stored);
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     assert!(repo.join(".git/transcrypt-v3/key").exists());
     assert!(!repo.join(".git/transcrypt-v3/session.sock").exists(), "switching back stops the agent");
 }
@@ -166,8 +164,7 @@ fn renames_are_re_encrypted_for_their_new_path() {
     fs::write(repo.join("dir/b.secret"), b"beta\n").unwrap();
     fs::write(repo.join("dir/c.secret"), b"gamma\n").unwrap();
     fs::write(repo.join("notes.txt"), b"was public\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "files"], None);
+    commit_all(&repo, "files");
     run(&repo, "git", &["mv", "a.secret", "renamed.secret"], None);
     run(&repo, "git", &["mv", "dir", "vault"], None);
     run(&repo, "git", &["mv", "notes.txt", "vault/notes.txt"], None);
@@ -198,7 +195,7 @@ fn renames_are_re_encrypted_for_their_new_path() {
     run(&repo, bin(), &["verify-index"], None);
     run(&repo, "git", &["commit", "-qm", "again"], None);
     let clone = scratch.clone("repo", "clone");
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&clone);
     assert_eq!(fs::read(clone.join("again.secret")).unwrap(), b"alpha\n");
     assert_eq!(fs::read(clone.join("vault/c.secret")).unwrap(), b"gamma\n");
     assert_eq!(fs::read(clone.join("vault/notes.txt")).unwrap(), b"was public\n");
@@ -213,8 +210,7 @@ fn locked_renames_and_unbound_moves_are_refused() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
     fs::write(repo.join("a.secret"), b"alpha\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "a"], None);
+    commit_all(&repo, "a");
     run(&repo, bin(), &["lock"], None);
     run(&repo, "git", &["mv", "a.secret", "b.secret"], None);
     let err = run_fails(&repo, "git", &["commit", "-qm", "locked move"], None);
@@ -224,7 +220,7 @@ fn locked_renames_and_unbound_moves_are_refused() {
     assert!(err.contains("moved here without re-encryption"), "{err}");
     // Unlocked again: undo, and the same move goes through.
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     run(&repo, "git", &["mv", "a.secret", "b.secret"], None);
     run(&repo, "git", &["commit", "-qm", "unlocked move"], None);
     run(&repo, bin(), &["audit"], None);
@@ -238,8 +234,7 @@ fn protect_and_unprotect_change_the_policy_explicitly() {
     let mut scratch = Scratch::new("protect");
     let repo = scratch.git_repo("repo");
     fs::write(repo.join("creds.json"), b"{\"token\": \"t\"}\n").unwrap();
-    run(&repo, "git", &["add", "creds.json"], None);
-    run(&repo, "git", &["commit", "-qm", "plaintext creds"], None);
+    commit(&repo, &["creds.json"], "plaintext creds");
     run(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
     let err = run_err(&repo, bin(), &["protect", "creds.json"], None);
     assert!(err.contains("encrypting creds.json") && err.contains("earlier commits"), "{err}");
@@ -281,10 +276,9 @@ fn pulled_rekey_makes_the_stored_key_stale_until_unlock() {
     let origin = scratch.git_repo("origin");
     run(&origin, bin(), &["init", "--password-stdin", ".env"], Some(PASS));
     fs::write(origin.join(".env"), b"before\n").unwrap();
-    run(&origin, "git", &["add", "-A"], None);
-    run(&origin, "git", &["commit", "-qm", "env"], None);
+    commit_all(&origin, "env");
     let clone = scratch.clone("origin", "clone");
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&clone);
     run(&origin, bin(), &["rekey", "--password-stdin"], Some(NEW));
     run(&origin, "git", &["commit", "-qm", "rekey"], None);
     run(&clone, "git", &["pull", "-q", "--no-rebase"], None);
@@ -309,14 +303,12 @@ fn rekey_never_writes_through_committed_symlinks() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
     fs::write(repo.join("a.secret"), b"alpha\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "a"], None);
+    commit_all(&repo, "a");
     let sentinel = scratch.root.join("outside.txt");
     fs::write(&sentinel, b"SENTINEL\n").unwrap();
     std::os::unix::fs::symlink(&sentinel, repo.join(".transcrypt/config.rekey")).unwrap();
     std::os::unix::fs::symlink(&sentinel, repo.join(".transcrypt/config.tmp")).unwrap();
-    run(&repo, "git", &["add", ".transcrypt"], None);
-    run(&repo, "git", &["commit", "-qm", "hostile symlinks"], None);
+    commit(&repo, &[".transcrypt"], "hostile symlinks");
     run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
     assert_eq!(fs::read(&sentinel).unwrap(), b"SENTINEL\n", "rekey wrote outside the repository");
     let meta = fs::symlink_metadata(repo.join(".transcrypt/config")).unwrap();
@@ -351,8 +343,7 @@ fn bash_v2_repositories_migrate_to_v3() {
         b"*.key filter=crypt diff=crypt merge=crypt\nprivate/** filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("server.key"), b"v2 protected key\n").unwrap();
     fs::write(repo.join("private/notes"), b"v2 protected notes\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "v2 secrets"], None);
+    commit_all(&repo, "v2 secrets");
     assert!(committed(&repo, "server.key").starts_with(b"U2FsdGVk"), "v2 encrypts");
     // Uncommitted work is refused, nothing changes.
     fs::write(repo.join("server.key"), b"edited\n").unwrap();
@@ -374,7 +365,7 @@ fn bash_v2_repositories_migrate_to_v3() {
     run(&repo, bin(), &["audit"], None);
     // A fresh clone needs only v3.
     let clone = scratch.clone("repo", "clone");
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&clone);
     assert_eq!(fs::read(clone.join("private/notes")).unwrap(), b"v2 protected notes\n");
     // The v2 history is still v2 ciphertext.
     assert!(run(&repo, "git", &["show", "HEAD~1:server.key"], None).starts_with(b"U2FsdGVk"));
@@ -391,8 +382,7 @@ fn merges_are_verified_before_the_merge_commit() {
     run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
     fs::write(repo.join("a.secret"), b"alpha\n").unwrap();
     fs::write(repo.join("b.secret"), b"beta\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "secrets"], None);
+    commit_all(&repo, "secrets");
     let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
     // A branch that moves a.secret's record over b.secret without re-encryption.
     run(&repo, "git", &["checkout", "-q", "-b", "hostile"], None);
@@ -414,7 +404,7 @@ fn merges_are_verified_before_the_merge_commit() {
     assert!(err.contains("b.secret holds the encrypted a.secret"), "{err}");
     let _ = exec(&repo, "git", &["merge", "--abort"], None);
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD"], None);
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     // An honest branch merges without ceremony.
     run(&repo, "git", &["checkout", "-q", "-b", "honest", "HEAD~1"], None);
     fs::write(repo.join("a.secret"), b"alpha v2\n").unwrap();
@@ -436,8 +426,7 @@ fn rename_and_edit_on_two_branches_conflict_in_plaintext() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
     fs::write(repo.join("a.secret"), b"one\ntwo\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "base"], None);
+    commit_all(&repo, "base");
     run(&repo, "git", &["checkout", "-q", "-b", "renamed"], None);
     run(&repo, "git", &["mv", "a.secret", "b.secret"], None);
     run(&repo, "git", &["commit", "-qm", "rename"], None);
@@ -450,8 +439,7 @@ fn rename_and_edit_on_two_branches_conflict_in_plaintext() {
     assert_eq!(fs::read(repo.join("b.secret")).unwrap(), b"one\ntwo\n", "their rename, decrypted");
     fs::write(repo.join("b.secret"), b"one\nTWO\n").unwrap();
     run(&repo, "git", &["rm", "-q", "a.secret"], None);
-    run(&repo, "git", &["add", "b.secret"], None);
-    run(&repo, "git", &["commit", "-qm", "merge: keep the edit under the new name"], None);
+    commit(&repo, &["b.secret"], "merge: keep the edit under the new name");
     assert!(is_record(&committed(&repo, "b.secret")));
     run(&repo, bin(), &["audit"], None);
 }
@@ -466,8 +454,7 @@ fn everyday_git_commands_just_work() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
     fs::write(repo.join("x.secret"), b"v1\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "v1"], None);
+    commit_all(&repo, "v1");
     let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
     let main = main.trim();
     run(&repo, "git", &["switch", "-q", "-c", "side"], None);
@@ -523,8 +510,7 @@ fn protect_refuses_patterns_that_select_nothing() {
         assert!(run(&repo, "git", &["diff", "--cached", "--name-only"], None).is_empty(), "{pattern} staged");
     }
     run(&repo, bin(), &["protect", "./x.env", "secrets/**"], None);
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "protected"], None);
+    commit_all(&repo, "protected");
     assert!(is_record(&committed(&repo, "x.env")) && is_record(&committed(&repo, "secrets/key.txt")));
 }
 
@@ -536,8 +522,7 @@ fn records_moved_to_unprotected_names_are_refused() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("prod.env"), b"PROD_SECRET\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "secret"], None);
+    commit_all(&repo, "secret");
     run(&repo, "git", &["mv", "prod.env", "prod.env.bak"], None);
     let err = run_fails(&repo, "git", &["commit", "-qm", "backup"], None);
     assert!(err.contains("prod.env.bak holds an encrypted record but is not protected"), "{err}");
@@ -556,8 +541,7 @@ fn unprotect_follows_renames_and_protect_finishes_manual_rules() {
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"PROD\n").unwrap();
     fs::write(repo.join("config.ini"), b"pw=1\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "files"], None);
+    commit_all(&repo, "files");
     run(&repo, "git", &["mv", "a.env", "b.env"], None);
     run(&repo, bin(), &["unprotect", "*.env"], None);
     assert_eq!(staged(&repo, "b.env"), b"PROD\n");
@@ -584,12 +568,10 @@ fn renames_during_rotation_and_rebase_stops_work() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("prod.env"), b"OLD\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "v1"], None);
+    commit_all(&repo, "v1");
     run(&repo, "git", &["mv", "prod.env", "old.env"], None);
     fs::write(repo.join("prod.env"), b"NEW\n").unwrap();
-    run(&repo, "git", &["add", "prod.env"], None);
-    run(&repo, "git", &["commit", "-qm", "rotate"], None);
+    commit(&repo, &["prod.env"], "rotate");
     run(&repo, bin(), &["audit"], None);
     // Stop at a commit during an interactive rebase and rename there.
     run(&repo, "sh", &["-c", "GIT_SEQUENCE_EDITOR='sed -i s/^pick/edit/' exec git rebase -q -i HEAD~1"], None);
@@ -599,7 +581,7 @@ fn renames_during_rotation_and_rebase_stops_work() {
     run(&repo, bin(), &["verify-index"], None);
     run(&repo, bin(), &["audit"], None);
     let clone = scratch.clone("repo", "clone");
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&clone);
     assert_eq!(fs::read(clone.join("older.env")).unwrap(), b"OLD\n");
     assert_eq!(fs::read(clone.join("prod.env")).unwrap(), b"NEW\n");
 }
@@ -616,8 +598,7 @@ fn migrate_converts_quoted_rules_and_refuses_local_ones() {
     fs::write(repo.join("my secret.txt"), b"quoted v2 secret\n").unwrap();
     fs::write(repo.join("local.key"), b"local rule secret\n").unwrap();
     fs::write(repo.join(".git/info/attributes"), b"local.key filter=crypt diff=crypt merge=crypt\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    commit_all(&repo, "v2");
     let err = run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
     assert!(err.contains("info/attributes") && err.contains("move them"), "{err}");
     // As the message says: move the rule into .gitattributes and commit it.
@@ -644,14 +625,12 @@ fn work_across_a_rekey_is_kept_and_reencrypted() {
     run(&repo, bin(), &["init", "--password-stdin", "*.env", "*.key"], Some(PASS));
     fs::write(repo.join(".env"), b"dot env\n").unwrap();
     fs::write(repo.join("z.key"), b"zed\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
     let main = main.trim().to_owned();
     run(&repo, "git", &["checkout", "-q", "-b", "feature"], None);
     fs::write(repo.join("b.env"), b"feature secret\n").unwrap();
-    run(&repo, "git", &["add", "b.env"], None);
-    run(&repo, "git", &["commit", "-qm", "addb"], None);
+    commit(&repo, &["b.env"], "addb");
     run(&repo, "git", &["checkout", "-q", &main], None);
     run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
     run(&repo, "git", &["commit", "-qm", "rekey"], None);
@@ -695,8 +674,7 @@ fn macro_conflicts_other_worktrees_and_deleted_files_are_refused() {
     let mut scratch = Scratch::new("review2");
     let repo = scratch.git_repo("macro");
     fs::write(repo.join(".gitattributes"), b"[attr]transcrypt -diff\n*.txt text\n").unwrap();
-    run(&repo, "git", &["add", ".gitattributes"], None);
-    run(&repo, "git", &["commit", "-qm", "attributes"], None);
+    commit(&repo, &[".gitattributes"], "attributes");
     let err = run_fails(&repo, bin(), &["init", "--password-stdin", "secrets/**"], Some(PASS));
     assert!(err.contains("already defines the `transcrypt` macro"), "{err}");
     assert!(!repo.join(".transcrypt").exists());
@@ -705,14 +683,13 @@ fn macro_conflicts_other_worktrees_and_deleted_files_are_refused() {
     let repo = scratch.git_repo("worktrees");
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"s1\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     run(&repo, "git", &["branch", "old"], None);
     run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
     run(&repo, "git", &["commit", "-qm", "rekey"], None);
     let linked = scratch.root.join("linked");
     run(&repo, "git", &["worktree", "add", "-q", linked.to_str().unwrap(), "old"], None);
-    run(&linked, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&linked);
     assert_eq!(fs::read(linked.join("a.env")).unwrap(), b"s1\n");
     fs::remove_file(repo.join("a.env")).unwrap();
     run(&repo, "git", &["checkout", "--", "a.env"], None);
@@ -728,8 +705,7 @@ fn macro_conflicts_other_worktrees_and_deleted_files_are_refused() {
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"a\n").unwrap();
     fs::write(repo.join("b.env"), b"b\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     let config = fs::read(repo.join(".transcrypt/config")).unwrap();
     fs::remove_file(repo.join("b.env")).unwrap();
     let err = run_fails(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
@@ -787,14 +763,12 @@ fn old_branches_stay_usable_and_reencrypt_only_goes_forward() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"a\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     run(&repo, "git", &["branch", "old"], None);
     run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
     run(&repo, "git", &["commit", "-qm", "rekey"], None);
     fs::write(repo.join("b.env"), b"created after the rekey\n").unwrap();
-    run(&repo, "git", &["add", "b.env"], None);
-    run(&repo, "git", &["commit", "-qm", "addb"], None);
+    commit(&repo, &["b.env"], "addb");
     let linked = scratch.root.join("linked");
     run(&repo, "git", &["worktree", "add", "-q", linked.to_str().unwrap(), "old"], None);
     scratch.repos.push(linked.clone());
@@ -804,7 +778,7 @@ fn old_branches_stay_usable_and_reencrypt_only_goes_forward() {
     assert!(run(&linked, "git", &["status", "--porcelain"], None).is_empty());
     // Unlocking with the old passphrase, then trying to pull the newer
     // record back under the old config, is refused.
-    run(&linked, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&linked);
     let err = run_fails(&linked, bin(), &["reencrypt", "--yes", "--password-stdin"], Some(NEW));
     assert!(err.contains("never had before"), "{err}");
 }
@@ -819,12 +793,11 @@ fn legacy_keys_macro_redefinitions_and_crlf() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"S=1\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     fs::write(repo.join(".git/transcrypt-v3/key"), [7u8; 64]).unwrap();
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("key:        locked"), "{status}");
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     assert_eq!(fs::metadata(repo.join(".git/transcrypt-v3/key")).unwrap().len(), 119);
     // A quoted macro redefinition in .git/info/attributes.
     fs::write(repo.join(".git/info/attributes"), b"\"[attr]transcrypt\" -diff\n").unwrap();
@@ -842,8 +815,7 @@ fn legacy_keys_macro_redefinitions_and_crlf() {
     run(&repo, "git", &["commit", "-qam", "crlf"], None);
     fs::write(repo.join("k.key"), b"K\n").unwrap();
     run(&repo, bin(), &["protect", "*.key"], None);
-    run(&repo, "git", &["add", "k.key"], None);
-    run(&repo, "git", &["commit", "-qm", "key"], None);
+    commit(&repo, &["k.key"], "key");
     assert!(is_record(&committed(&repo, "k.key")));
 }
 
@@ -856,8 +828,7 @@ fn protection_lost_to_another_filter_is_refused() {
     let repo = scratch.git_repo("repo");
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"A=1\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
     attributes.extend_from_slice(b"*.env filter=lfs diff=lfs merge=lfs -text\n");
     fs::write(repo.join(".gitattributes"), attributes).unwrap();
@@ -884,8 +855,7 @@ fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
     let mut scratch = Scratch::new("review4");
     let inner = scratch.git_repo("inner");
     fs::write(inner.join("token.env"), b"TOKEN=1\n").unwrap();
-    run(&inner, "git", &["add", "-A"], None);
-    run(&inner, "git", &["commit", "-qm", "token"], None);
+    commit_all(&inner, "token");
     let outer = scratch.git_repo("outer");
     run(&outer, "git", &["-c", "protocol.file.allow=always", "submodule", "add", "-q", "../inner", "libsec"], None);
     run(&outer, "git", &["commit", "-qm", "submodule"], None);
@@ -903,16 +873,14 @@ fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
     fs::remove_dir_all(&moved).unwrap();
     run(&repo, bin(), &["unlock"], None);
     fs::write(repo.join("a.env"), b"A\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "after moving the binary"], None);
+    commit_all(&repo, "after moving the binary");
     assert!(is_record(&committed(&repo, "a.env")));
     assert!(exec(&repo, bin(), &["doctor"], None).status.success());
 
     // Sparse checkout that leaves out .transcrypt/.
     fs::create_dir(repo.join("app")).unwrap();
     fs::write(repo.join("app/s.env"), b"S\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "app"], None);
+    commit_all(&repo, "app");
     run(&repo, "git", &["sparse-checkout", "set", "app"], None);
     assert!(!repo.join(".transcrypt").exists());
     fs::write(repo.join("app/s.env"), b"S2\n").unwrap();
@@ -934,8 +902,7 @@ fn interrupted_migration_lost_macro_and_case_sensitivity() {
     run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    commit_all(&repo, "v2");
     let hook = fs::read(repo.join(".git/hooks/pre-commit")).unwrap();
     run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(b"short\n"));
     assert_eq!(fs::read(repo.join(".gitattributes")).unwrap(), b"*.key filter=crypt diff=crypt merge=crypt\n");
@@ -945,8 +912,7 @@ fn interrupted_migration_lost_macro_and_case_sensitivity() {
     let repo = scratch.git_repo("macro");
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"S=1\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     fs::write(repo.join(".gitattributes"), b"*.png binary\n").unwrap();
     let err = run_fails(&repo, "git", &["commit", "-qam", "clobber"], None);
     assert!(err.contains("does not set filter=transcrypt-v3"), "{err}");
@@ -1001,8 +967,7 @@ fn hooks_and_audit_agree_on_the_macro_and_configless_branches() {
     run(&repo, "git", &["branch", "before-init"], None);
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"S=1\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
     attributes.extend_from_slice(b"[attr]transcrypt -text\n");
     fs::write(repo.join(".gitattributes"), attributes).unwrap();
@@ -1034,8 +999,7 @@ fn interrupted_commands_converge_when_rerun() {
     assert!(err.contains("interrupted init") && err.contains("start over"), "{err}");
     fs::write(repo.join("a.env"), b"A\n").unwrap();
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     assert!(is_record(&committed(&repo, "a.env")));
     // unprotect: the worktree rules already lost the line.
     let rules = fs::read_to_string(repo.join(".gitattributes")).unwrap();
@@ -1049,8 +1013,7 @@ fn interrupted_commands_converge_when_rerun() {
     run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    commit_all(&repo, "v2");
     let shim = scratch.root.join("shim");
     fs::create_dir(&shim).unwrap();
     let real_git = String::from_utf8(run(&repo, "sh", &["-c", "command -v git"], None)).unwrap();
@@ -1075,8 +1038,7 @@ fn interrupted_commands_converge_when_rerun() {
     fs::write(repo.join(".gitattributes"), b"*.env filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("a.env"), b"a\n").unwrap();
     fs::write(repo.join("PROD.ENV"), b"prod\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    commit_all(&repo, "v2");
     assert!(committed(&repo, "PROD.ENV").starts_with(b"U2FsdGVk"));
     let err = run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
     assert!(err.contains("PROD.ENV is still v2 ciphertext"), "{err}");
@@ -1095,8 +1057,7 @@ fn probe_spoofs_and_amends_are_refused() {
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"S=1\n").unwrap();
     fs::write(repo.join("x.env"), b"X=1\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "init"], None);
+    commit_all(&repo, "init");
     let original = fs::read(repo.join(".gitattributes")).unwrap();
     let mut attributes = original.clone();
     attributes.extend_from_slice(b"[attr]transcrypt -text\ntranscrypt-v3-probe/probe filter=transcrypt-v3\n");
@@ -1148,8 +1109,7 @@ fn a_failed_resume_of_migrate_stays_resumable() {
     run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("a.key"), b"v2 secret\n").unwrap();
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "v2"], None);
+    commit_all(&repo, "v2");
     let shim = scratch.root.join("shim");
     fs::create_dir(&shim).unwrap();
     let real_git = String::from_utf8(run(&repo, "sh", &["-c", "command -v git"], None)).unwrap();

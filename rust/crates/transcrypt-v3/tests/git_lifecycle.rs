@@ -37,8 +37,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     }
     fs::write(source.join("account.secret"), b"private content\n").unwrap();
     fs::write(source.join("ledger.secret"), b"ledger content\n").unwrap();
-    run(&source, "git", &["add", "account.secret", "ledger.secret"], None);
-    run(&source, "git", &["commit", "-qm", "private data"], None);
+    commit(&source, &["account.secret", "ledger.secret"], "private data");
     let object = run(&source, "git", &["show", "HEAD:account.secret"], None);
     assert!(is_record(&object));
     assert!(!object.windows(7).any(|w| w == b"private"));
@@ -56,7 +55,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     fs::write(source.join("nested/.gitattributes"), b"invoice.txt transcrypt\n").unwrap();
     fs::write(source.join("nested/invoice.txt"), b"nested protection\n").unwrap();
     run(&source, "git", &["add", "nested"], None);
-    assert!(run(&source, "git", &["show", ":nested/invoice.txt"], None).starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&run(&source, "git", &["show", ":nested/invoice.txt"], None)));
     run(&source, bin, &["verify-index"], None);
     run(&source, "git", &["reset", "-q", "--", "nested"], None);
     fs::remove_dir_all(source.join("nested")).unwrap();
@@ -136,8 +135,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     fs::write(clone.join("account.secret"), b"private content\n").unwrap();
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
     fs::write(clone.join("account.secret"), b"updated secret\n").unwrap();
-    run(&clone, "git", &["add", "account.secret"], None);
-    run(&clone, "git", &["commit", "-qm", "update secret"], None);
+    commit(&clone, &["account.secret"], "update secret");
     fs::write(clone.join("untracked.secret"), b"untracked plaintext\n").unwrap();
     run_fails(&clone, bin, &["lock"], None);
     assert_unlocked(&clone, true);
@@ -146,7 +144,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     assert_unlocked(&clone, false);
     let locked = fs::read(clone.join("account.secret")).unwrap();
     assert_eq!(locked, run(&clone, "git", &["show", "HEAD:account.secret"], None));
-    run(&clone, bin, &["unlock", "--password-stdin"], Some(pass));
+    unlock(&clone);
     assert_unlocked(&clone, true);
     run(&clone, bin, &["hydrate"], None);
     assert_eq!(fs::read(clone.join("account.secret")).unwrap(), b"updated secret\n");
@@ -188,15 +186,14 @@ fn git_non_utf8_path_survives_filter_agent_commit_clone_and_hydration() {
     fs::write(source.join(&name), payload).unwrap();
     // Git invokes the configured `%f` filter with the exact path byte string,
     // even though this path is neither UTF-8 nor shell-identifier-safe.
-    run(&source, "git", &["add", "-A"], None);
-    run(&source, "git", &["commit", "-qm", "raw-path encrypted record"], None);
+    commit_all(&source, "raw-path encrypted record");
     let index = run(&source, "git", &["ls-files", "-z"], None);
     assert!(index.split(|b| *b == 0).any(|part| part == b"odd \xff'\nname.secret"));
     let clone = scratch.clone("source", "clone");
     let committed_ciphertext = fs::read(clone.join(&name)).unwrap();
     assert!(is_record(&committed_ciphertext));
     assert_ne!(committed_ciphertext, payload);
-    run(&clone, bin, &["unlock", "--password-stdin"], Some(pass));
+    unlock(&clone);
     run(&clone, bin, &["hydrate"], None);
     assert_eq!(fs::read(clone.join(&name)).unwrap(), payload);
     run(&clone, bin, &["verify-index"], None);

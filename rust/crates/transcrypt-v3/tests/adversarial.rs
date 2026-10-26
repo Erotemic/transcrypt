@@ -20,7 +20,7 @@ fn interrupted_lock_resumes_and_unstaged_edits_are_never_discarded() {
     assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), staged(&repo, "dir/b.secret"));
     assert!(!unlocked(&repo));
 
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     run(&repo, bin(), &["hydrate"], None);
     // An unstaged edit is the user's only copy: lock must refuse and keep it.
     fs::write(repo.join("dir/b.secret"), b"unsaved edit\n").unwrap();
@@ -256,10 +256,8 @@ fn unlock_hydrates_by_default_and_reports_refusals() {
     let mut scratch = Scratch::new("autohydrate");
     let repo = scratch.repo("repo");
     run(&repo, bin(), &["lock"], None);
-    let clone = scratch.root.join("clone");
-    run(&scratch.root, "git", &["clone", "-q", "repo", "clone"], None);
-    scratch.repos.push(clone.clone());
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    let clone = scratch.clone("repo", "clone");
+    unlock(&clone);
     assert_eq!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
     assert_eq!(fs::read(clone.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
@@ -267,7 +265,7 @@ fn unlock_hydrates_by_default_and_reports_refusals() {
     // A local edit made while locked survives unlock untouched (and stays
     // unstaged); every other file is decrypted.
     fs::write(clone.join("dir/b.secret"), b"local edit\n").unwrap();
-    run(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&clone);
     assert_eq!(fs::read(clone.join("a.secret")).unwrap(), b"alpha plaintext\n");
     assert_eq!(fs::read(clone.join("dir/b.secret")).unwrap(), b"local edit\n");
     let status = run(&clone, "git", &["status", "--porcelain"], None);
@@ -299,12 +297,11 @@ fn hydration_never_stages_untracked_files_through_pathspec_magic() {
     fs::write(repo.join("sub/.gitattributes"), b"a.secret -filter\n").unwrap();
     fs::write(repo.join("sub/[a].secret"), b"decoy\n").unwrap();
     fs::write(repo.join("sub/:(glob)*.secret"), b"decoy two\n").unwrap();
-    run(&repo, "git", &["add", "sub"], None);
-    run(&repo, "git", &["commit", "-qm", "hostile names"], None);
+    commit(&repo, &["sub"], "hostile names");
     run(&repo, bin(), &["lock"], None);
     fs::write(repo.join("sub/a.secret"), b"UNTRACKED PLAINTEXT\n").unwrap();
     fs::write(repo.join("sub/b.secret"), b"UNTRACKED PLAINTEXT\n").unwrap();
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     let staged = run(&repo, "git", &["ls-files", "-z", "sub"], None);
     assert_eq!(staged, b"sub/.gitattributes\0sub/:(glob)*.secret\0sub/[a].secret\0", "untracked file staged");
     assert_eq!(fs::read(repo.join("sub/[a].secret")).unwrap(), b"decoy\n");
@@ -323,11 +320,10 @@ fn staged_objects_are_read_by_object_id_not_revision_syntax() {
     let mut scratch = Scratch::new("revsyntax");
     let repo = scratch.repo("repo");
     fs::write(repo.join("0:a.secret"), b"colon plaintext\n").unwrap();
-    run(&repo, "git", &["add", "0:a.secret"], None);
-    run(&repo, "git", &["commit", "-qm", "colon name"], None);
+    commit(&repo, &["0:a.secret"], "colon name");
     run(&repo, bin(), &["verify-index"], None);
     run(&repo, bin(), &["lock"], None);
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     assert_eq!(fs::read(repo.join("0:a.secret")).unwrap(), b"colon plaintext\n");
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
 }
@@ -351,7 +347,7 @@ fn pre_push_and_audit_refuse_plaintext_in_history() {
     run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
     // The pre-commit hook encrypts what was staged around the filter.
     run(&repo, "git", &["commit", "-qm", "sealed by pre-commit"], None);
-    assert!(staged(&repo, "leak.secret").starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&staged(&repo, "leak.secret")));
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
     run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "bypass"], None);
@@ -377,11 +373,9 @@ fn pre_push_and_audit_refuse_plaintext_in_history() {
     // as plaintext. Its own audit (as CI or a server hook would run) refuses.
     let clone = scratch.root.join("clone");
     run(&scratch.root, "git", &["clone", "-q", "-b", "main", "remote.git", "clone"], None);
-    run(&clone, "git", &["config", "user.name", "Example"], None);
-    run(&clone, "git", &["config", "user.email", "example@example.test"], None);
+    Scratch::identify(&clone);
     fs::write(clone.join("new.secret"), b"FRESH CLONE PLAINTEXT\n").unwrap();
-    run(&clone, "git", &["add", "new.secret"], None);
-    run(&clone, "git", &["commit", "-qm", "unfiltered"], None);
+    commit(&clone, &["new.secret"], "unfiltered");
     let err = run_fails(&clone, bin(), &["audit", "origin/main..HEAD"], None);
     assert!(err.contains("new.secret"), "{err}");
     run(&clone, bin(), &["audit", "origin/main"], None);
@@ -410,7 +404,7 @@ fn locked_pre_commit_checks_envelopes_and_allows_other_commits() {
     fs::write(repo.join("new.secret"), b"PLAINTEXT\n").unwrap();
     run_fails(&repo, "git", &["add", "new.secret"], None);
     fs::remove_file(repo.join("new.secret")).unwrap();
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
 }
 
@@ -439,8 +433,7 @@ fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
     for i in 0..20 {
         fs::write(repo.join(format!("dir/f{i}.secret")), format!("plaintext number {i}\n")).unwrap();
     }
-    run(&repo, "git", &["add", "-A"], None);
-    run(&repo, "git", &["commit", "-qm", "many secrets"], None);
+    commit_all(&repo, "many secrets");
     let mut files = Vec::new();
     for path in worktree_files(&repo) {
         let name = path.to_str().unwrap().to_owned();
@@ -454,7 +447,7 @@ fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
     let start = std::time::Instant::now();
     run(&repo, bin(), &["lock"], None);
     let full = start.elapsed().as_micros() as u64;
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     let live = |repo: &Path| unlocked(repo);
     for round in 0..12u64 {
         let op = if round % 2 == 0 { "lock" } else { "hydrate" };
@@ -516,16 +509,14 @@ fn init_encrypts_files_already_tracked_in_plaintext() {
     fs::create_dir(&repo).unwrap();
     scratch.repos.push(repo.clone());
     run(&repo, "git", &["init", "-q"], None);
-    run(&repo, "git", &["config", "user.name", "Example"], None);
-    run(&repo, "git", &["config", "user.email", "example@example.test"], None);
+    Scratch::identify(&repo);
     fs::write(repo.join("old.secret"), b"PLAINTEXT IN HISTORY\n").unwrap();
-    run(&repo, "git", &["add", "old.secret"], None);
-    run(&repo, "git", &["commit", "-qm", "plaintext secret"], None);
+    commit(&repo, &["old.secret"], "plaintext secret");
     let out = exec(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
     assert!(err.contains("encrypting old.secret") && err.contains("stay readable in earlier commits"), "{err}");
-    assert!(staged(&repo, "old.secret").starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&staged(&repo, "old.secret")));
     assert_eq!(fs::read(repo.join("old.secret")).unwrap(), b"PLAINTEXT IN HISTORY\n");
     run(&repo, "git", &["commit", "-qm", "enable"], None);
     assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
@@ -898,7 +889,7 @@ fn uninstall_removes_v3_and_leaves_only_ciphertext() {
     let repo = scratch.repo("repo");
     fs::write(repo.join(".git/info/exclude"), b"# mine\n*.log\n").unwrap();
     run(&repo, bin(), &["lock"], None);
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     // A plaintext edit is not lost: lock (and so uninstall) refuses.
     fs::write(repo.join("a.secret"), b"unsaved edit\n").unwrap();
     run_fails(&repo, bin(), &["uninstall"], None);
@@ -906,7 +897,7 @@ fn uninstall_removes_v3_and_leaves_only_ciphertext() {
     run(&repo, "git", &["checkout", "--", "a.secret"], None);
     run(&repo, bin(), &["hydrate"], None);
     run(&repo, bin(), &["uninstall"], None);
-    assert!(fs::read(repo.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&fs::read(repo.join("a.secret")).unwrap()));
     assert!(exec(&repo, "git", &["config", "--get-regexp", "filter.transcrypt-v3"], None).stdout.is_empty());
     for hook in ["pre-commit", "pre-push", "post-checkout"] {
         assert!(!repo.join(".git/hooks").join(hook).exists(), "{hook}");
@@ -915,7 +906,7 @@ fn uninstall_removes_v3_and_leaves_only_ciphertext() {
     assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
     assert!(!repo.join(".git/transcrypt-v3").exists());
     // Unlocking reinstalls everything.
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
     assert!(exec(&repo, bin(), &["doctor"], None).status.success());
 }
@@ -962,9 +953,9 @@ fn deleted_protected_files_do_not_block_lock_or_hydrate() {
     fs::remove_file(repo.join("dir/b.secret")).unwrap();
     fs::remove_dir(repo.join("dir")).unwrap();
     run(&repo, bin(), &["lock"], None);
-    assert!(fs::read(repo.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&fs::read(repo.join("a.secret")).unwrap()));
     assert!(!repo.join("dir").exists());
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&repo);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("deleted") && status.contains("dir/b.secret"), "{status}");
@@ -996,7 +987,7 @@ fn secrets_merge_as_plaintext() {
     git_with_umask(&repo, "022", &["checkout", "-q", &main]);
     git_with_umask(&repo, "022", &["merge", "-q", "--no-edit", "side"]);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"ONE\ntwo\nthree\nfour\nFIVE\n");
-    assert!(staged(&repo, "a.secret").starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&staged(&repo, "a.secret")));
     assert_no_exposed_plaintext(&repo, "clean merge");
     // Overlapping edits conflict; the markers are decrypted for resolution.
     for (mask, needs_hydrate) in [("022", true), ("077", false)] {
@@ -1017,9 +1008,8 @@ fn secrets_merge_as_plaintext() {
             && conflicted.contains("side two") && conflicted.contains(">>>>>>> theirs"), "{conflicted}");
         assert_no_exposed_plaintext(&repo, "hydrated conflict");
         fs::write(repo.join("a.secret"), b"ONE\nresolved two\n").unwrap();
-        run(&repo, "git", &["add", "a.secret"], None);
-        run(&repo, "git", &["commit", "-qm", "resolved"], None);
-        assert!(staged(&repo, "a.secret").starts_with(b"TV3F\0\x01"));
+        commit(&repo, &["a.secret"], "resolved");
+        assert!(is_record(&staged(&repo, "a.secret")));
         run(&repo, bin(), &["verify-index"], None);
         // Make side match main again for the next round.
         git_with_umask(&repo, mask, &["checkout", "-q", "side"]);
@@ -1102,7 +1092,7 @@ fn linked_worktrees_share_one_unlocked_session() {
     assert_eq!(fs::read(linked.join("a.secret")).unwrap(), b"alpha plaintext\n");
     fs::write(linked.join("dir/b.secret"), b"beta from the linked worktree\n").unwrap();
     run(&linked, "git", &["commit", "-qam", "edit in linked worktree"], None);
-    assert!(staged(&linked, "dir/b.secret").starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&staged(&linked, "dir/b.secret")));
     run(&linked, bin(), &["verify-index"], None);
     run(&linked, bin(), &["status"], None);
     // Locking from one worktree flushes every worktree, then stops the
@@ -1112,10 +1102,10 @@ fn linked_worktrees_share_one_unlocked_session() {
     assert_eq!(fs::read(linked.join("a.secret")).unwrap(), b"unsaved edit\n");
     run(&linked, "git", &["checkout", "--", "a.secret"], None);
     run(&repo, bin(), &["lock"], None);
-    assert!(fs::read(linked.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
-    assert!(fs::read(repo.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&fs::read(linked.join("a.secret")).unwrap()));
+    assert!(is_record(&fs::read(repo.join("a.secret")).unwrap()));
     run(&linked, bin(), &["lock"], None);
-    run(&linked, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&linked);
     assert_eq!(fs::read(linked.join("dir/b.secret")).unwrap(), b"beta from the linked worktree\n");
     run(&repo, bin(), &["hydrate"], None);
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
@@ -1135,10 +1125,10 @@ fn submodules_are_independent_v3_repositories() {
     run(&outer, "git", &["-c", "protocol.file.allow=always", "submodule", "add", "-q", "../inner", "inner"], None);
     let sub = outer.join("inner");
     assert!(fs::symlink_metadata(sub.join(".git")).unwrap().is_file());
-    run(&sub, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    unlock(&sub);
     assert_eq!(fs::read(sub.join("a.secret")).unwrap(), b"alpha plaintext\n");
     run(&sub, bin(), &["lock"], None);
-    assert!(fs::read(sub.join("a.secret")).unwrap().starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&fs::read(sub.join("a.secret")).unwrap()));
 }
 
 /// Private mode: a secret created under a permissive umask is made private
@@ -1164,11 +1154,7 @@ fn pulled_rekey_retires_the_stale_agent() {
     const NEW: &[u8] = b"a completely different long passphrase\n";
     let mut scratch = Scratch::new("pulledrekey");
     let origin = scratch.repo("origin");
-    let clone = scratch.root.join("clone");
-    run(&scratch.root, "git", &["clone", "-q", "origin", "clone"], None);
-    scratch.repos.push(clone.clone());
-    run(&clone, "git", &["config", "user.name", "Example"], None);
-    run(&clone, "git", &["config", "user.email", "example@example.test"], None);
+    let clone = scratch.clone("origin", "clone");
     run(&clone, bin(), &["unlock", "--private", "--password-stdin"], Some(PASS));
     run(&origin, bin(), &["rekey", "--password-stdin"], Some(NEW));
     run(&origin, "git", &["commit", "-qm", "rekey"], None);

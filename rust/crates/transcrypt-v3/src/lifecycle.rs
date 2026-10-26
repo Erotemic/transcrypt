@@ -33,10 +33,14 @@ struct Snapshot {
 
 impl Snapshot {
     fn read(root: &Path) -> Result<Snapshot, String> {
-        let listing = git(root, &["ls-files", "--stage", "-z"])?;
+        let listing = index_listing(root)?;
         let entries = parse_listing(&listing)?;
-        let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
-        let flags = protected_flags(root, &paths, Attributes::Staged)?;
+        Snapshot::of(root, listing, entries)
+    }
+
+    /// The snapshot of `listing`, already parsed to `entries`.
+    fn of(root: &Path, listing: Vec<u8>, entries: Vec<Staged>) -> Result<Snapshot, String> {
+        let flags = protected_flags(root, &paths_of(&entries), Attributes::Staged)?;
         Ok(Snapshot { listing, entries, flags })
     }
 
@@ -49,7 +53,7 @@ impl Snapshot {
 
 /// A protected entry must be a file Git filters, and not repository metadata.
 fn selectable(entry: &Staged) -> Result<(), String> {
-    let name = String::from_utf8_lossy(&entry.path);
+    let name = entry.name();
     if is_reserved_path(&entry.path) {
         return Err(format!("{name} is selected for encryption, but v3 never encrypts .gitattributes, \
             .gitmodules or .transcrypt/; narrow the .gitattributes pattern that selects it"));
@@ -101,26 +105,22 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
     }
     let top = entries.iter().find(|e| e.path == b".gitattributes" && e.regular).map(|e| e.oid.as_str());
     if !macro_resolves(root, &git_dir(root), top)? {
-        return Err(crate::setup::MACRO_MISSING.into());
+        return Err(crate::attributes::MACRO_MISSING.into());
     }
-    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
-    if let Some(problem) = marked_unfiltered(root, &paths, Attributes::Staged)? {
+    if let Some(problem) = marked_unfiltered(root, &paths_of(entries), Attributes::Staged)? {
         return Err(problem);
     }
     // With `--amend` (and squash/fixup) the commit's parent is `HEAD^`; its
     // files count too, as they do for the audit, which compares with the
     // parent.
     let parent = commit_files(root, "HEAD^1")?;
-    let oids = |files: &[Staged]| -> HashMap<Vec<u8>, String> {
-        files.iter().map(|e| (e.path.clone(), e.oid.clone())).collect()
-    };
-    let (head_oid, parent_oid) = (oids(head), oids(&parent));
-    let unchanged = |e: &Staged| head_oid.get(&e.path) == Some(&e.oid);
-    let settled = |e: &Staged| unchanged(e) && parent_oid.get(&e.path) == Some(&e.oid);
+    let (head_oid, parent_oid) = (oids_by_path(head), oids_by_path(&parent));
+    let unchanged = |e: &Staged| head_oid.get(e.path.as_slice()) == Some(&e.oid.as_str());
+    let settled = |e: &Staged| unchanged(e) && parent_oid.get(e.path.as_slice()) == Some(&e.oid.as_str());
     // Every path of each blob, in `HEAD`, `HEAD^1` and the index.
-    let mut paths_of: HashMap<&str, Vec<&[u8]>> = HashMap::new();
+    let mut blob_paths: HashMap<&str, Vec<&[u8]>> = HashMap::new();
     for entry in head.iter().chain(&parent).chain(entries) {
-        paths_of.entry(entry.oid.as_str()).or_default().push(entry.path.as_slice());
+        blob_paths.entry(entry.oid.as_str()).or_default().push(entry.path.as_slice());
     }
     let protected = snapshot.protected()?;
     let staged_unprotected: Vec<&Staged> = entries.iter().zip(flags)
@@ -156,7 +156,7 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
     }
     for staged in protected {
         let record = git_blob(root, &staged.oid)?;
-        let name = String::from_utf8_lossy(&staged.path);
+        let name = staged.name();
         match parse_file_header(&record) {
             Err(_) => return Err(format!("staged {name} is not encrypted (was it staged before it was protected?); \
                 run `transcrypt-v3 protect` or `git add --renormalize -- {name}`")),
@@ -171,7 +171,7 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
                 return Err(format!("staged {name} is not v3 ciphertext for this repository")),
             // A copy already in history is reported where it was made.
             None if settled(staged) => {},
-            None => if let Some(other) = paths_of[staged.oid.as_str()].iter().find(|p| **p != staged.path.as_slice()) {
+            None => if let Some(other) = blob_paths[staged.oid.as_str()].iter().find(|p| **p != staged.path.as_slice()) {
                 return Err(format!("staged {name} holds the encrypted {}: a renamed or copied protected \
                     file must be committed while unlocked, which re-encrypts it for its new name",
                     String::from_utf8_lossy(other)));
@@ -181,6 +181,11 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
     let Snapshot { listing, entries, flags } = snapshot;
     let protected = entries.into_iter().zip(flags).filter(|(_, p)| *p).map(|(e, _)| e).collect();
     Ok(Verified { listing, protected })
+}
+
+/// Each entry's object id, by path.
+fn oids_by_path(entries: &[Staged]) -> HashMap<&[u8], &str> {
+    entries.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect()
 }
 
 /// The files of commit `rev`; none when there is no such commit (`HEAD`
@@ -226,7 +231,7 @@ fn configless(snapshot: &Snapshot) -> Result<bool, String> {
     if let Some(entry) = snapshot.protected()?.first() {
         return Err(format!("{} is protected, but this commit has no .transcrypt/config: it would be \
             stored unencrypted; check out .transcrypt/ from a branch that uses v3",
-            String::from_utf8_lossy(&entry.path)));
+            entry.name()));
     }
     Ok(true)
 }
@@ -262,7 +267,7 @@ pub(crate) fn verify_index_command(root: &Path) -> Result<(), String> {
 /// The pre-commit hook.
 pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
     verify(root, true)?;
-    if let Some(file) = crate::setup::filter_overrides(root).first() {
+    if let Some(file) = crate::attributes::filter_overrides(root).first() {
         eprintln!("transcrypt-v3: warning: {file} sets `filter`, which can unprotect files that \
             .gitattributes protects; see `transcrypt-v3 doctor`");
     }
@@ -296,28 +301,30 @@ pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<u
 fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot, head: &[Staged])
     -> Result<usize, String>
 {
-    let incoming = incoming(root)?;
     let protected = snapshot.protected()?;
-    let head_oid: HashMap<&[u8], &str> = head.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
+    let head_oid = oids_by_path(head);
+    let changed = |e: &Staged| head_oid.get(e.path.as_slice()) != Some(&e.oid.as_str());
+    // Only a changed entry can be a local change: skip looking for commits
+    // being brought in (three Git commands) on most commits.
+    let incoming = if protected.iter().any(|e| changed(e)) { incoming(root)? } else { None };
     let moved_from = moved_from(head, &snapshot.entries);
     let mut index_info = Vec::new();
     let mut count = 0;
     for staged in protected {
-        let changed = head_oid.get(staged.path.as_slice()) != Some(&staged.oid.as_str());
         // Changed since `HEAD`, and not by a commit being brought in.
-        let local_change = changed && incoming.as_ref()
+        let local_change = changed(staged) && incoming.as_ref()
             .is_some_and(|files| !files.contains(&(staged.path.clone(), staged.oid.clone())));
         let forced = force.contains(&staged.path);
         // `seal_action` never repairs a non-local entry; skip decrypting it
         // here (`check_index` verifies it right after).
         if !local_change && !forced { continue; }
-        let record = git_blob(root, &staged.oid).map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
+        let record = git_blob(root, &staged.oid).map_err(|e| format!("{}: {e}", staged.name()))?;
         let opens = key.open(&staged.path, &record).is_ok();
         let envelope = parse_file_header(&record).is_ok();
         // `protect` may force sealing plaintext, never re-encrypting a record.
         let local = local_change || (forced && !envelope);
         let moved = if opens || !envelope { None } else { open_moved(key, &moved_from, staged, &record) };
-        let name = String::from_utf8_lossy(&staged.path).into_owned();
+        let name = staged.name().into_owned();
         // The verified core decides.
         let plaintext: Zeroizing<Vec<u8>> = match seal_action(opens, local, envelope, moved.is_some()) {
             SealAction::Keep | SealAction::Leave => continue,
@@ -344,7 +351,7 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
 /// `HEAD`'s paths whose index entry is gone or replaced, by blob: where a
 /// record moved by a local `git mv` came from.
 fn moved_from<'a>(head: &'a [Staged], entries: &[Staged]) -> HashMap<&'a str, Vec<&'a [u8]>> {
-    let indexed: HashMap<&[u8], &str> = entries.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
+    let indexed = oids_by_path(entries);
     let mut moved: HashMap<&str, Vec<&[u8]>> = HashMap::new();
     for entry in head.iter().filter(|e| indexed.get(e.path.as_slice()) != Some(&e.oid.as_str())) {
         moved.entry(entry.oid.as_str()).or_default().push(entry.path.as_slice());
@@ -372,9 +379,8 @@ pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zer
     };
     let head = commit_files(root, "HEAD")?;
     open_moved(key, &moved_from(&head, &indexed_files(root)?), staged, &record).map(|(_, plaintext)| plaintext)
-        .ok_or_else(|| format!("{}: {error}", String::from_utf8_lossy(&staged.path)))
+        .ok_or_else(|| format!("{}: {error}", staged.name()))
 }
-
 
 /// Run from the post-checkout, post-merge and post-rewrite hooks. Only the
 /// private mode needs it (its smudge filter leaves ciphertext when Git's
@@ -420,11 +426,8 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
     let protected: Vec<Staged> = if conflicted.is_empty() {
         // Authenticate ALL staged protected objects and the staged config
         // before exposing any plaintext in the checkout.
-        let verified = check_index(root, Some(&key))?;
-        if verified.listing != index.listing {
-            return Err("index changed during hydration".into());
-        }
-        verified.protected
+        let snapshot = Snapshot::of(root, index.listing.clone(), index.merged)?;
+        check_staged(root, &config, snapshot, &commit_files(root, "HEAD")?, Some(&key), false)?.protected
     } else {
         // A merge is in progress: the stages of an unmerged path are the
         // merge's inputs, not a snapshot to verify. Plaintext published here
@@ -462,7 +465,7 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
             let plaintext = key.open(path, record)
                 .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(path)))?;
             if hydrate_action(&worktree, record, &plaintext) == Ok(HydrateAction::Publish) {
-                pending.push((path, relative, stamp, record.to_vec(), is_staged));
+                pending.push((path, relative, stamp, plaintext, is_staged));
                 continue;
             }
         }
@@ -476,12 +479,11 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
     }
     // Detect a changed index or public configuration between validation and
     // publication.
-    if git(root, &["ls-files", "--stage", "-z"])? != index.listing || load_config(root)? != config {
+    if index_listing(root)? != index.listing || load_config(root)? != config {
         return Err("index or public configuration changed during hydration".into());
     }
     let published = pending.len();
-    for (path, relative, stamp, record, is_staged) in pending {
-        let plaintext = key.open(path, &record)?;
+    for (path, relative, stamp, plaintext, is_staged) in pending {
         // `replace` refuses unless the file is still the record checked above.
         open_protected(root, &relative)?.replace(staging, &plaintext, &stamp, key.private())?;
         if is_staged { refresh.push(path.to_vec()); }
@@ -520,13 +522,12 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
         eprintln!("Already locked.");
         return Ok(());
     };
-    let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
     for other in other_worktrees(root)? {
-        let (flushed, _) = run_in(&bin, &other, "flush")
+        let (flushed, _) = run_in(&other, "flush")
             .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?;
         // A worktree on another config cannot be flushed with this key; it
         // is fine if it holds no plaintext.
-        if !flushed && !run_in(&bin, &other, "check-encrypted").is_ok_and(|(encrypted, _)| encrypted) {
+        if !flushed && !run_in(&other, "check-encrypted").is_ok_and(|(encrypted, _)| encrypted) {
             return Err(format!("worktree {} could not be locked (uncommitted changes, or plaintext under \
                 another config); the key is kept", other.display()));
         }
@@ -545,9 +546,8 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
 /// Refuse unless every other worktree holds no plaintext (each checked in
 /// its own process, with its own config).
 pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
-    let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
     for other in other_worktrees(root)? {
-        let (encrypted, errors) = run_in(&bin, &other, "check-encrypted")
+        let (encrypted, errors) = run_in(&other, "check-encrypted")
             .map_err(|e| format!("cannot check worktree {}: {e}", other.display()))?;
         if !encrypted {
             return Err(format!("worktree {} still holds plaintext ({}); lock it there first",
@@ -559,8 +559,8 @@ pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
 
 /// Run this executable's `command` in the worktree `dir`, bounded: whether
 /// it succeeded, and its error output.
-fn run_in(bin: &Path, dir: &Path, command: &str) -> Result<(bool, Vec<u8>), String> {
-    let mut child = std::process::Command::new(bin);
+fn run_in(dir: &Path, command: &str) -> Result<(bool, Vec<u8>), String> {
+    let mut child = std::process::Command::new(env::current_exe().map_err(|_| "cannot locate executable")?);
     child.arg(command).current_dir(dir);
     let (status, _, errors) = run_bounded_status(child, None, 1 << 20)?;
     Ok((status.success(), errors))
@@ -613,12 +613,12 @@ pub(crate) fn flush(root: &Path) -> Result<(), String> {
             Ok(LockAction::Flush) => {
                 if target.links()? > 1 {
                     eprintln!("warning: {} has other hard links; they keep its plaintext after lock",
-                        String::from_utf8_lossy(&staged.path));
+                        staged.name());
                 }
                 to_flush.push((relative, object, stamp));
             },
             Err(_) => return Err(format!("{} has uncommitted changes; commit or discard them before locking",
-                String::from_utf8_lossy(&staged.path))),
+                staged.name())),
         }
     }
     // Write only ciphertext via private staged files and atomic rename. A
@@ -640,7 +640,7 @@ pub(crate) fn flush(root: &Path) -> Result<(), String> {
 /// behind by `lock`.
 fn untracked_protected(root: &Path) -> Result<(), String> {
     let untracked = git(root, &["ls-files", "--others", "-z"])?;
-    let paths: Vec<&[u8]> = untracked.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+    let paths: Vec<&[u8]> = records(&untracked).collect();
     let flags = protected_flags(root, &paths, Attributes::Worktree)?;
     if let Some((path, _)) = paths.iter().zip(flags).find(|(_, p)| *p) {
         return Err(format!("untracked protected file {} holds plaintext; add or remove it first",
@@ -658,7 +658,7 @@ pub(crate) fn worktree_encrypted(root: &Path, config: &[u8]) -> Result<(), Strin
         if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
             let (contents, _) = target.read()?;
             if !record_envelope_ok(&contents, &id) {
-                return Err(format!("{} holds plaintext", String::from_utf8_lossy(&staged.path)));
+                return Err(format!("{} holds plaintext", staged.name()));
             }
         }
     }

@@ -52,7 +52,7 @@ semantics silently or import legacy CBC into the proved core.
 | Wire/AAD/Git behavior | `docs/verification/specs/V3-AUTHENTICATED-P0.md` |
 | Verified pure core (codec + every decision) | `rust/crates/transcrypt-v3-core/src/lib.rs` |
 | Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-v3/src/lib.rs` |
-| Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-v3/src/{main,lifecycle,credential,git,worktree,setup,audit,migrate,session,fsat}.rs` (module map in `main.rs`) |
+| Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-v3/src/*.rs`: filters, lifecycle, credentials, Git, worktree, setup, attributes, rekey, audit, migrate, agent, fd-relative FS (module map in `main.rs`) |
 | Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
 | Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle}.lean` |

@@ -49,6 +49,19 @@ pub fn run_fails(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) ->
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// `git add PATHS` and `git commit -qm MESSAGE`.
+pub fn commit(repo: &Path, paths: &[&str], message: &str) {
+    let mut add = vec!["add"];
+    add.extend_from_slice(paths);
+    run(repo, "git", &add, None);
+    run(repo, "git", &["commit", "-qm", message], None);
+}
+
+/// `git add -A` and `git commit -qm MESSAGE`.
+pub fn commit_all(repo: &Path, message: &str) {
+    commit(repo, &["-A"], message);
+}
+
 pub fn staged(repo: &Path, path: &str) -> Vec<u8> {
     run(repo, "git", &["show", &format!(":{path}")], None)
 }
@@ -57,12 +70,23 @@ pub fn committed(repo: &Path, path: &str) -> Vec<u8> {
     run(repo, "git", &["show", &format!("HEAD:{path}")], None)
 }
 
+/// Bytes from hexadecimal text.
+pub fn hex(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() % 2, 0);
+    value.as_bytes().chunks(2).map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap()).collect()
+}
+
 pub fn is_record(bytes: &[u8]) -> bool {
     bytes.starts_with(b"TV3F\0\x01")
 }
 
 pub fn socket(repo: &Path) -> PathBuf {
     repo.join(".git/transcrypt-v3/session.sock")
+}
+
+/// Unlock with `PASS`, storing the key.
+pub fn unlock(repo: &Path) {
+    run(repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
 }
 
 /// Switch a repository to the private mode: key in an in-memory agent,
@@ -112,7 +136,8 @@ impl Scratch {
         Scratch { root, repos: Vec::new() }
     }
 
-    fn identify(repo: &Path) {
+    /// Set a commit identity in `repo`.
+    pub fn identify(repo: &Path) {
         run(repo, "git", &["config", "user.name", "Example"], None);
         run(repo, "git", &["config", "user.email", "example@example.test"], None);
     }
@@ -124,8 +149,7 @@ impl Scratch {
         run(&repo, "git", &["init", "-q"], None);
         Self::identify(&repo);
         fs::write(repo.join("README"), b"public\n").unwrap();
-        run(&repo, "git", &["add", "README"], None);
-        run(&repo, "git", &["commit", "-qm", "seed"], None);
+        commit(&repo, &["README"], "seed");
         self.repos.push(repo.clone());
         repo
     }
@@ -137,8 +161,7 @@ impl Scratch {
         fs::create_dir(repo.join("dir")).unwrap();
         fs::write(repo.join("a.secret"), b"alpha plaintext\n").unwrap();
         fs::write(repo.join("dir/b.secret"), b"beta plaintext\n").unwrap();
-        run(&repo, "git", &["add", "-A"], None);
-        run(&repo, "git", &["commit", "-qm", "secrets"], None);
+        commit_all(&repo, "secrets");
         repo
     }
 

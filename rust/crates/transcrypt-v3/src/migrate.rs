@@ -90,7 +90,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     }
     // The files Bash protects, by its attributes.
     let entries = indexed_files(root)?;
-    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
+    let paths = paths_of(&entries);
     // When resuming, rules already converted select with transcrypt-v3.
     let selected: Vec<&[u8]> = paths.iter().zip(filter_values(root, &paths, Attributes::Worktree)?)
         .filter(|(_, value)| v2_value(value) || (resuming && value == b"transcrypt-v3"))
@@ -99,8 +99,8 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     let status = git(root, &["status", "--porcelain", "-z", "--untracked-files=no"])?;
     for entry in status.split(|b| *b == 0).filter(|e| e.len() > 3) {
         let path = &entry[3..];
-        let own = resuming && entry[0] != b'R' && (path == b".transcrypt/config" || path == b".gitattributes"
-            || path.ends_with(b"/.gitattributes") || selected.contains(&path));
+        let own = resuming && entry[0] != b'R'
+            && (path == b".transcrypt/config" || is_attributes_file(path) || selected.contains(&path));
         if !own {
             return Err("commit or discard your changes first; the conversion must start from a committed state".into());
         }
@@ -119,7 +119,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     // refuses: set Bash's hook aside, set up v3, then rewrite the rules, then
     // re-encrypt.
     let attribute_files: Vec<PathBuf> = entries.iter()
-        .filter(|e| e.path == b".gitattributes" || e.path.ends_with(b"/.gitattributes"))
+        .filter(|e| is_attributes_file(&e.path))
         .map(|e| indexed_path(&e.path)).collect::<Result<_, _>>()?;
     let password = passphrase(options.password_stdin, true)?;
     // Bash's own pre-commit hook checks only `filter=crypt` files, which will
@@ -192,12 +192,8 @@ fn convert(root: &Path, attribute_files: &[PathBuf], selected: &[&[u8]], rewritt
     // files with the v3 filter. `--renormalize` (which `update-index` lacks)
     // needs `git add`; the paths are raw bytes and literal
     // (GIT_LITERAL_PATHSPECS), so no pathspec magic applies.
-    let mut paths = Vec::new();
-    for path in rewritten.iter().map(|(p, _)| p.as_os_str().as_bytes()).chain(selected.iter().copied()) {
-        paths.extend_from_slice(path);
-        paths.push(0);
-    }
-    git_with_input(root, &["add", "--renormalize", "--pathspec-from-file=-", "--pathspec-file-nul"], &paths)?;
+    let paths: Vec<&[u8]> = rewritten.iter().map(|(p, _)| p.as_os_str().as_bytes()).chain(selected.iter().copied()).collect();
+    git_with_input(root, &["add", "--renormalize", "--pathspec-from-file=-", "--pathspec-file-nul"], &nul_terminated(&paths))?;
     // Every file v2 protected must now be protected by v3.
     if let Some((path, _)) = selected.iter().zip(protected_flags(root, selected, Attributes::Staged)?).find(|(_, p)| !*p) {
         return Err(format!("{} would no longer be protected after the conversion (an attribute \
@@ -209,7 +205,7 @@ fn convert(root: &Path, attribute_files: &[PathBuf], selected: &[&[u8]], rewritt
         if git_blob_if_record_sized(root, &entry.oid)?.is_some_and(|b| b.starts_with(b"U2FsdGVk")) {
             return Err(format!("{} is still v2 ciphertext after the conversion (selected by a rule v3 \
                 does not apply, e.g. only case-insensitively); fix its rule in .gitattributes and rerun",
-                String::from_utf8_lossy(&entry.path)));
+                entry.name()));
         }
     }
     crate::lifecycle::verify_index_command(root)

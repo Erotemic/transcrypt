@@ -11,8 +11,8 @@ use std::{
 use std::os::unix::ffi::OsStringExt;
 use crate::{
     credential::Key,
-    git::{changed_files, config_blob, git, git_blob, git_command, protected_flags,
-        read_record, tree_files, Attributes, Staged},
+    git::{changed_files, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
+        push_index_record, read_record, tree_files, Attributes, Staged},
 };
 use transcrypt_v3_core::{
     is_object_id, is_reserved_path, record_envelope_ok, ID_LEN,
@@ -109,12 +109,8 @@ type Committed = (Vec<u8>, [u8; ID_LEN], Option<Key>);
 /// The `.gitattributes` blobs of a tree: (path, object id), in tree order.
 type AttributeFiles = Vec<(Vec<u8>, String)>;
 
-fn attribute_file(path: &[u8]) -> bool {
-    path == b".gitattributes" || path.ends_with(b"/.gitattributes")
-}
-
 fn attribute_files(entries: &[Staged]) -> AttributeFiles {
-    entries.iter().filter(|e| e.regular && attribute_file(&e.path)).map(|e| (e.path.clone(), e.oid.clone())).collect()
+    entries.iter().filter(|e| e.regular && is_attributes_file(&e.path)).map(|e| (e.path.clone(), e.oid.clone())).collect()
 }
 
 /// A temporary index holding exactly one commit's `.gitattributes` files,
@@ -132,11 +128,7 @@ impl AttributeIndex {
             self.files = None;
             if !files.is_empty() {
                 let mut info = Vec::new();
-                for (path, oid) in files.iter() {
-                    info.extend_from_slice(format!("100644 {oid}\t").as_bytes());
-                    info.extend_from_slice(path);
-                    info.push(0);
-                }
+                for (path, oid) in files.iter() { push_index_record(&mut info, "100644", oid, path); }
                 let mut command = git_command(Some(root));
                 command.env("GIT_INDEX_FILE", &self.file).args(["update-index", "-z", "--index-info"]);
                 let (status, _, errors) = crate::git::run_bounded_status(command, Some(&info), 1 << 20)?;
@@ -163,7 +155,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     let (mut entries, deleted, modified) = changed_files(root, commit, parent.as_deref())?;
     let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|(p, _)| test(p));
     let config_changed = parent.is_none() || touched(&|p| p == b".transcrypt/config");
-    let attributes_changed = parent.is_none() || touched(&attribute_file);
+    let attributes_changed = parent.is_none() || touched(&is_attributes_file);
     if (config_changed || attributes_changed) && parent.is_some() {
         // A new config re-binds every record, and new attributes may
         // protect files the commit did not change: check the whole tree.
@@ -193,7 +185,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     state.commit_attributes.insert(commit.to_owned(), attributes.clone());
     // Repository metadata is never encrypted, whatever the attributes say.
     entries.retain(|e| !is_reserved_path(&e.path));
-    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
+    let paths = paths_of(&entries);
     let flags = state.policy.protected(root, &attributes, &paths)?;
     let (mut protected, mut unprotected) = (Vec::new(), Vec::new());
     for (entry, &flag) in entries.iter().zip(&flags) {
@@ -218,7 +210,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
         let top = attributes.iter().find(|(p, _)| p == b".gitattributes").map(|(_, oid)| oid.as_str());
         let dir = state.policy.file.parent().map(Path::to_path_buf).unwrap_or_default();
         if !crate::git::macro_resolves(root, &dir, top)? {
-            return Err(format!("commit {commit}: {}", crate::setup::MACRO_MISSING));
+            return Err(format!("commit {commit}: {}", crate::attributes::MACRO_MISSING));
         }
     }
     if config_oid.is_some() {

@@ -88,8 +88,8 @@ one.
 
 ### A4 — Adapter-to-core correspondence
 
-- **Claim:** the effectful adapter (`main.rs`, `git.rs`, `worktree.rs`,
-  `setup.rs`, `audit.rs`, `session.rs`, `lib.rs`, `fsat.rs`) passes the core the right bytes (exact Git path, on-disk config,
+- **Claim:** the effectful adapter (every module of
+  `rust/crates/transcrypt-v3/src/` other than the core) passes the core the right bytes (exact Git path, on-disk config,
   staged record), acts only on `Ok` results, and acts on the *same* bytes it
   checked.
 - **Trust boundary:** our unverified Rust.

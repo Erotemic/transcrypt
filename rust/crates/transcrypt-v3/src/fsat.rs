@@ -34,6 +34,8 @@ fn check(rc: libc::c_int) -> io::Result<libc::c_int> {
 pub(crate) struct Stamp([i64; 7]);
 
 impl Stamp {
+    // The field types differ between platforms (Linux, macOS).
+    #[allow(clippy::unnecessary_cast)]
     fn from_stat(st: &libc::stat) -> Stamp {
         Stamp([
             st.st_dev as i64, st.st_ino as i64, st.st_size as i64,
@@ -135,6 +137,7 @@ impl Dir {
     }
 
     /// Permission bits of an entry, without following a symlink.
+    #[allow(clippy::unnecessary_cast)] // `mode_t` is u16 on macOS.
     pub(crate) fn entry_mode(&self, name: &OsStr) -> io::Result<u32> {
         self.lstat(name).map(|st| st.st_mode as u32 & 0o7777)
     }

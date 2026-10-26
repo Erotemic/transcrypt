@@ -1,7 +1,9 @@
 //! The `transcrypt-v3` command: the effectful adapter around the verified
 //! core (`transcrypt-v3-core`), outside the Aeneas proof boundary.
 //!
-//! - `main.rs`: command dispatch, the Git filters and `status`.
+//! - `main.rs`: command dispatch, the passphrase and the public config.
+//! - `filter.rs`: the clean and smudge filters; `process.rs`: Git's
+//!   long-running filter protocol around them.
 //! - `lifecycle.rs`: `verify-index`, the pre-commit hook, `hydrate` and
 //!   `lock`, the steps whose order the Lean models follow.
 //! - `credential.rs`: the unlocked key (stored by default, or held by the
@@ -10,10 +12,12 @@
 //!   listings and attribute answers parsed by the verified core.
 //! - `worktree.rs`: race-free worktree access and private staging;
 //!   `fsat.rs`: dirfd I/O.
-//! - `setup.rs`: init, unlock, protect, rekey, uninstall, hooks, `doctor`.
+//! - `setup.rs`: init, unlock, uninstall, filters and hooks, `status` and
+//!   `doctor`.
+//! - `attributes.rs`: the `transcrypt` macro, `protect` and `unprotect`.
+//! - `rekey.rs`: `rekey` and `reencrypt`; `migrate.rs`: from Bash transcrypt.
 //! - `audit.rs`: keyless history audit and the pre-push hook.
-//! - `process.rs`: Git's long-running filter protocol; `merge.rs` and
-//!   `diff.rs`: the merge and diff drivers for protected files.
+//! - `merge.rs` and `diff.rs`: the merge and diff drivers for protected files.
 #[cfg(not(unix))]
 compile_error!("transcrypt-v3 requires Unix");
 
@@ -26,21 +30,25 @@ use std::{
 };
 use std::os::unix::ffi::OsStrExt;
 use zeroize::Zeroizing;
+mod attributes;
 mod audit;
 mod credential;
 mod diff;
+mod filter;
 mod fsat;
 mod git;
 mod lifecycle;
 mod merge;
 mod migrate;
 mod process;
+mod rekey;
 mod session;
 mod setup;
 mod worktree;
-use credential::{Key, State};
-use transcrypt_v3_core::{parse_file_header, record_envelope_ok, smudge_action, Refusal, SmudgeAction};
+use attributes::{protect, unprotect};
 use audit::*;
+use filter::Filters;
+use rekey::{reencrypt, rekey};
 use git::*;
 use lifecycle::*;
 use setup::*;
@@ -252,145 +260,6 @@ text, and `git mv` is re-encrypted for the new name when you commit. Equal
 plaintexts at the same path give equal ciphertexts. Filenames, sizes and
 history structure are public. See docs/verification/V3-USER-GUIDE.md.";
 
-/// The clean and smudge filters of one Git process (one file, or every file
-/// of a Git command for `filter-process`). The worktree config is re-read
-/// for every file (a checkout or rebase can change it mid-command) and the
-/// key reloaded when it changes.
-pub(crate) struct Filters<'a> {
-    root: &'a Path,
-    current: Option<(Vec<u8>, Option<Key>)>,
-    stored: Option<Option<Key>>,
-    /// The staged config, when a sparse checkout leaves `.transcrypt/` out
-    /// of the worktree (the index does not change within a Git command).
-    staged_config: Option<Vec<u8>>,
-}
-
-impl<'a> Filters<'a> {
-    pub(crate) fn new(root: &'a Path) -> Filters<'a> {
-        Filters { root, current: None, stored: None, staged_config: None }
-    }
-
-    /// One clean or smudge conversion of the file at `git_path`.
-    pub(crate) fn convert(&mut self, clean: bool, git_path: &[u8], input: Zeroizing<Vec<u8>>)
-        -> Result<Zeroizing<Vec<u8>>, String>
-    {
-        if transcrypt_v3_core::is_reserved_path(git_path) {
-            return Err(format!("{} is selected for encryption, but v3 never encrypts .gitattributes, \
-                .gitmodules or .transcrypt/; narrow the .gitattributes pattern that selects it",
-                String::from_utf8_lossy(git_path)));
-        }
-        transcrypt_v3::validate_protected_path(git_path)?;
-        let config = if fs::symlink_metadata(self.root.join(".transcrypt")).is_ok() {
-            load_config(self.root)?
-        } else {
-            if self.staged_config.is_none() { self.staged_config = Some(load_config(self.root)?); }
-            self.staged_config.clone().unwrap_or_default()
-        };
-        if self.current.as_ref().map(|(c, _)| c) != Some(&config) {
-            let key = Key::load(self.root, &config)?;
-            self.current = Some((config, key));
-        }
-        let Filters { root, current: Some((config, current_key)), stored, .. } = self else { unreachable!() };
-        let (root, key) = (*root, current_key.as_ref());
-        let id = transcrypt_v3::config_id(config);
-        let found = parse_file_header(&input).ok();
-        if clean {
-            // A record of another config (from before a rekey) cannot be
-            // re-encrypted here. It passes through unchanged, so Git keeps
-            // working, only if Git already has exactly these bytes at this
-            // path (verification then refuses to commit it); anything else
-            // starting with such a header is refused.
-            if found.is_some_and(|found| found != id) {
-                if blobs_at(root, git_path)?.contains(&blob_id(root, &input)?) { return Ok(input); }
-                return Err(format!("{} starts like a record of another config but is not the one Git has \
-                    for it; refusing to store it", String::from_utf8_lossy(git_path)));
-            }
-            let Some(key) = key else {
-                // A worktree on another config than the stored key's (a branch
-                // from before a rekey) shows files the stored key decrypted:
-                // the record Git has for the path, if it opens to exactly
-                // these bytes, is their clean form.
-                // (Only plaintext needs this; a record goes on below.)
-                if let Some(stored) = if found.is_none() { stored_key(stored, root)? } else { None } {
-                    for oid in blobs_at(root, git_path)? {
-                        let record = git_blob(root, &oid)?;
-                        if parse_file_header(&record).is_ok_and(|f| f == stored.config_id())
-                            && stored.open(git_path, &record).is_ok_and(|pt| *pt == *input) {
-                            return Ok(Zeroizing::new(record));
-                        }
-                    }
-                }
-                // Locked: without the key nothing can be encrypted, but Git
-                // re-cleans worktree files (a locked checkout holds
-                // ciphertext), so a record of this configuration passes
-                // through unchanged. Plaintext is refused, never stored.
-                if record_envelope_ok(&input, &id) { return Ok(input); }
-                return Err(Key::require(root, config).err().unwrap_or_default());
-            };
-            // `clean` returns a record that already opens at this path
-            // unchanged and otherwise seals with the verified core's
-            // `seal_record`, which refuses any other v3 record.
-            let record = key.clean(git_path, &input)?;
-            if key.private() && *record != *input {
-                // Private mode: Git is staging plaintext of this file; if it
-                // was created readable by others, make it private now.
-                if let Some(target) = indexed_path(git_path).and_then(|p| find_protected(root, &p))? {
-                    target.make_private()?;
-                }
-            }
-            return Ok(record);
-        }
-        // The key for the config the record names: the worktree's, or the
-        // stored key's own (Git may smudge files of a checkout before it
-        // writes the new `.transcrypt/config`).
-        let key = match found {
-            Some(found) if found == id => key,
-            Some(found) => stored_key(stored, root)?.filter(|k| k.config_id() == found),
-            None => None,
-        };
-        let decided = key.map_or(id, Key::config_id);
-        // The verified core decides: bytes that are no v3 record are refused,
-        // a record without a key here stays encrypted, and a record of the
-        // key's config is opened, which authenticates it at this exact path
-        // or fails.
-        match smudge_action(&input, &decided, key.is_some()) {
-            Ok(SmudgeAction::Keep) => {
-                if found.is_some_and(|found| found != id) && current_key.is_some() {
-                    eprintln!("transcrypt-v3: {} is encrypted under another config, without a key here; \
-                        it stays encrypted (`transcrypt-v3 status` tells whether it needs `reencrypt`)",
-                        String::from_utf8_lossy(git_path));
-                }
-                Ok(input)
-            },
-            Ok(SmudgeAction::Open) => {
-                let Some(key) = key else { unreachable!() };
-                let plaintext = key.open(git_path, &input).map_err(|_| {
-                    let name = String::from_utf8_lossy(git_path);
-                    format!("this record does not open at {name}: it was moved from another path or altered. \
-                        If you moved it yourself (`git mv`), run `git add --renormalize -- {name}` or commit, which re-encrypts \
-                        it; if it came from a commit, that commit is broken or hostile")
-                })?;
-                if key.private() && !umask_is_private() {
-                    // Git would create this file readable by other users:
-                    // keep the (now authenticated) record; the post-checkout
-                    // hook or `hydrate` publishes the plaintext with mode 0600.
-                    return Ok(input);
-                }
-                Ok(plaintext)
-            },
-            Err(Refusal::Foreign) => Err("the committed file is not v3 ciphertext (it was stored without the \
-                filter); refusing to present it as a protected file".into()),
-            Err(_) => Err(TOO_LARGE.into()),
-        }
-    }
-}
-
-/// The stored key, read at most once per process.
-fn stored_key<'k>(slot: &'k mut Option<Option<Key>>, root: &Path) -> Result<Option<&'k Key>, String> {
-    if slot.is_none() { *slot = Some(Key::stored(root)?); }
-    Ok(slot.as_ref().and_then(Option::as_ref))
-}
-
 /// A positive duration: a number with an optional unit `s`, `m` (the
 /// default) or `h`.
 fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
@@ -403,87 +272,6 @@ fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
         Ok(n) if n > 0 && scale > 0 => Ok(std::time::Duration::from_secs(n.saturating_mul(scale))),
         _ => Err(format!("--timeout takes a positive duration such as 90s, 15m or 2h (got {text:?})")),
     }
-}
-
-/// Whether files Git creates now are private to this user. Git creates
-/// worktree files with mode `0666 & !umask`, and its filters inherit its
-/// umask, so the smudge filter sees exactly the mask Git will apply.
-pub(crate) fn umask_is_private() -> bool {
-    // SAFETY: umask cannot fail; this process is single-threaded here and
-    // restores the previous mask immediately.
-    let previous = unsafe { libc::umask(0o077) };
-    unsafe { libc::umask(previous) };
-    previous & 0o077 == 0o077
-}
-
-/// Read-only summary for users. Never writes to the worktree, index or
-/// credential directory.
-fn status(root: &Path) -> Result<(), String> {
-    let config = match load_config(root) {
-        Ok(config) => config,
-        Err(e) => {
-            println!("repository: not initialized for v3 ({e})");
-            return Ok(());
-        }
-    };
-    println!("repository: v3 config {}", hex(&transcrypt_v3::config_id(&config)[..4]));
-    let (state, key) = credential::lookup(root, &config)?;
-    println!("key:        {}", match state {
-        State::Unlocked { private: false } => "unlocked (stored in .git/transcrypt-v3/key)",
-        State::Unlocked { private: true } => "unlocked (private: held in memory by an agent)",
-        State::Locked => "locked",
-        State::Stale => "locked: the stored key does not match .transcrypt/config (rekeyed?); run unlock",
-    });
-    let mut counts = [0usize; 4];
-    let index = index_with_conflicts(root)?;
-    for path in protected_paths(root, &index.conflicted)? {
-        counts[2] += 1;
-        println!("  {:<22} {}", "conflicted", String::from_utf8_lossy(&path));
-    }
-    let id = transcrypt_v3::config_id(&config);
-    for staged in protected_entries(root, index.merged, Attributes::Staged)? {
-        let name = String::from_utf8_lossy(&staged.path).into_owned();
-        let state = (|| -> Result<&str, String> {
-            if !staged.regular { return Ok("unsupported mode"); }
-            let object = git_blob(root, &staged.oid)?;
-            if !record_envelope_ok(&object, &id) {
-                return Ok(if parse_file_header(&object).is_ok() { "other config (reencrypt)" } else { "staged unencrypted" });
-            }
-            let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? else {
-                return Ok("deleted");
-            };
-            let (worktree, _) = target.read()?;
-            if *worktree == object { return Ok("ciphertext"); }
-            let Some(key) = &key else { return Ok("modified or plaintext") };
-            Ok(match key.open(&staged.path, &object) {
-                Ok(plaintext) if *worktree == *plaintext => "plaintext",
-                Ok(_) => "modified",
-                Err(_) => "renamed or invalid",
-            })
-        })().unwrap_or("error");
-        counts[match state { "ciphertext" => 0, "plaintext" => 1, "modified" | "modified or plaintext" | "deleted" => 2, _ => 3 }] += 1;
-        println!("  {state:<22} {name}");
-    }
-    println!("protected:  {} ciphertext, {} plaintext, {} modified, {} other",
-        counts[0], counts[1], counts[2], counts[3]);
-    if counts[3] > 0 && key.is_some() {
-        println!("note:       the pre-commit hook encrypts files you staged unencrypted and re-encrypts files you \
-            renamed; files encrypted under an earlier config (cherry-picked or rebased across a rekey) need \
-            `transcrypt-v3 reencrypt`");
-    }
-    let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    let untracked: Vec<&[u8]> = untracked.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
-    let loose = protected_flags(root, &untracked, Attributes::Worktree)?.into_iter().filter(|p| *p).count();
-    if loose > 0 {
-        println!("note:       {loose} untracked protected file(s); `git add` encrypts them");
-    }
-    if key.is_some() && counts[0] > 0 {
-        println!("hint:       run `transcrypt-v3 hydrate` to decrypt ciphertext in the worktree");
-    }
-    if hooks_bypassed(root) {
-        println!("warning:    {HOOKS_BYPASSED}");
-    }
-    Ok(())
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

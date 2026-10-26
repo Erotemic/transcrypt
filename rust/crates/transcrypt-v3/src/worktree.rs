@@ -132,6 +132,18 @@ impl Protected {
     }
 }
 
+/// Replace the worktree file of `path` by `contents` if it still holds
+/// exactly `expected` (a missing file is left alone).
+pub(crate) fn replace_if_holds(root: &Path, staging: &Staging, path: &[u8], expected: &[u8], contents: &[u8], private: bool)
+    -> Result<(), String>
+{
+    if let Some(target) = find_protected(root, &indexed_path(path)?)? {
+        let (worktree, stamp) = target.read()?;
+        if *worktree == *expected { target.replace(staging, contents, &stamp, private)?; }
+    }
+    Ok(())
+}
+
 /// Write a repository file that v3 maintains (`.gitattributes`,
 /// `.transcrypt/config`): replace it if it exists, else create it, with the
 /// same symlink-refusing resolution and staged atomic rename as protected
@@ -305,10 +317,6 @@ mod tests {
         fs::remove_dir_all(&tmp).unwrap();
     }
 
-    /// Randomized robustness of the adapter's parsers of Git output: no
-    /// input panics, every accepted record round-trips to exactly what Git
-    /// would print for it, and mutations of valid input are either rejected
-    /// or still exact.
     #[test]
     fn replacement_refuses_a_file_changed_since_it_was_checked() {
         let tmp = std::env::temp_dir().join(format!(

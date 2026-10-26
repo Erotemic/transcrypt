@@ -5,11 +5,8 @@
 use transcrypt_v3::{authenticate_config, clean_file, decrypt_file, derive_key, encrypt_file, Keyed};
 use transcrypt_v3_core::{V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_HEADER_LEN, TAG_LEN};
 
-fn hex(value: &str) -> Vec<u8> {
-    value.as_bytes().chunks_exact(2)
-        .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
-        .collect()
-}
+mod common;
+use common::hex;
 
 struct Case { name: String, key: [u8; 64], config: Vec<u8>, path: Vec<u8>, plaintext: Vec<u8>, record: Vec<u8> }
 

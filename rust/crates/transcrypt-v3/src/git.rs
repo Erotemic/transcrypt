@@ -317,6 +317,23 @@ pub(crate) struct Staged {
     pub(crate) path: Vec<u8>,
 }
 
+impl Staged {
+    /// The path, for messages.
+    pub(crate) fn name(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.path)
+    }
+}
+
+/// The paths of `entries`, for `protected_flags` and `attr_values`.
+pub(crate) fn paths_of(entries: &[Staged]) -> Vec<&[u8]> {
+    entries.iter().map(|e| e.path.as_slice()).collect()
+}
+
+/// Whether `path` is a `.gitattributes` file (at the top or nested).
+pub(crate) fn is_attributes_file(path: &[u8]) -> bool {
+    path == b".gitattributes" || path.ends_with(b"/.gitattributes")
+}
+
 /// Parse NUL-separated `<mode> SP <oid> SP 0 TAB <path>` records, with paths
 /// as raw bytes. Each record is parsed by the verified core
 /// (`parse_index_entry`): the flag says whether the mode is exactly 100644,
@@ -326,15 +343,25 @@ pub(crate) struct Staged {
 /// `is_object_id`.
 /// Unmerged and malformed records are refused.
 pub(crate) fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
-    if !data.is_empty() && data.last() != Some(&0) {
-        return Err("truncated Git listing".into());
-    }
-    records(data).map(parse_entry).collect()
+    complete_records(data)?.map(parse_entry).collect()
 }
 
 /// The non-empty NUL-separated records of Git `-z` output.
-fn records(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+pub(crate) fn records(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     data.split(|b| *b == 0).filter(|record| !record.is_empty())
+}
+
+/// `records` of a listing that must end with its last record's NUL.
+fn complete_records(data: &[u8]) -> Result<impl Iterator<Item = &[u8]>, String> {
+    if !data.is_empty() && data.last() != Some(&0) {
+        return Err("truncated Git listing".into());
+    }
+    Ok(records(data))
+}
+
+/// The exact index listing (`ls-files --stage -z`), unmerged stages included.
+pub(crate) fn index_listing(root: &Path) -> Result<Vec<u8>, String> {
+    git(root, &["ls-files", "--stage", "-z"])
 }
 
 /// One `<mode> SP <oid> SP 0 TAB <path>` record (see `parse_listing`).
@@ -385,13 +412,10 @@ pub(crate) struct Index {
 }
 
 pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
-    let listing = git(root, &["ls-files", "--stage", "-z"])?;
-    if !listing.is_empty() && listing.last() != Some(&0) {
-        return Err("truncated Git listing".into());
-    }
+    let listing = index_listing(root)?;
     let mut merged = Vec::new();
     let mut conflicted: Vec<Vec<u8>> = Vec::new();
-    for entry in records(&listing) {
+    for entry in complete_records(&listing)? {
         let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed Git index entry")?;
         if tab >= 2 && entry[tab - 2] == b' ' && matches!(entry[tab - 1], b'1'..=b'3') {
             let path = entry[tab + 1..].to_vec();
@@ -404,7 +428,7 @@ pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
 }
 
 pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
-    parse_listing(&git(root, &["ls-files", "--stage", "-z"])?)
+    parse_listing(&index_listing(root)?)
 }
 
 /// The blobs Git already has for exactly `path`: every index stage, and
@@ -414,7 +438,7 @@ pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> 
     let name = std::ffi::OsStr::from_bytes(path).to_str().map(str::to_owned);
     let mut oids = Vec::new();
     let mut parse = |listing: &[u8], tree: bool| {
-        for entry in listing.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        for entry in records(listing) {
             let Some(tab) = entry.iter().position(|b| *b == b'\t') else { continue };
             if &entry[tab + 1..] != path { continue; }
             let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
@@ -445,10 +469,16 @@ pub(crate) fn hash_object(root: &Path, bytes: &[u8]) -> Result<String, String> {
 pub(crate) fn push_blob_record(root: &Path, info: &mut Vec<u8>, mode: &str, path: &[u8], bytes: &[u8])
     -> Result<(), String>
 {
-    info.extend_from_slice(format!("{mode} {}\t", hash_object(root, bytes)?).as_bytes());
+    push_index_record(info, mode, &hash_object(root, bytes)?, path);
+    Ok(())
+}
+
+/// Append the `update-index -z --index-info` record `<mode> SP <oid> TAB
+/// <path> NUL` to `info`.
+pub(crate) fn push_index_record(info: &mut Vec<u8>, mode: &str, oid: &str, path: &[u8]) {
+    info.extend_from_slice(format!("{mode} {oid}\t").as_bytes());
     info.extend_from_slice(path);
     info.push(0);
-    Ok(())
 }
 
 fn object_id(output: Vec<u8>) -> Result<String, String> {
@@ -491,7 +521,7 @@ fn check_attr(root: &Path, paths: &[&[u8]], from: Attributes, attributes: &[&str
 }
 
 /// Each path joined into one buffer, each followed by NUL.
-fn nul_terminated<P: AsRef<[u8]>>(paths: &[P]) -> Vec<u8> {
+pub(crate) fn nul_terminated<P: AsRef<[u8]>>(paths: &[P]) -> Vec<u8> {
     paths.iter().flat_map(|path| path.as_ref().iter().copied().chain([0])).collect()
 }
 
@@ -551,10 +581,9 @@ pub(crate) fn other_filter(value: &[u8]) -> bool {
 /// one predicate.
 pub(crate) fn macro_resolves(root: &Path, index_dir: &Path, top: Option<&str>) -> Result<bool, String> {
     let rules = hash_object(root, b"probe transcrypt\n")?;
-    let mut info = format!("100644 {rules}\ttranscrypt-v3-probe/.gitattributes\0").into_bytes();
-    if let Some(top) = top {
-        info.extend_from_slice(format!("100644 {top}\t.gitattributes\0").as_bytes());
-    }
+    let mut info = Vec::new();
+    push_index_record(&mut info, "100644", &rules, b"transcrypt-v3-probe/.gitattributes");
+    if let Some(top) = top { push_index_record(&mut info, "100644", top, b".gitattributes"); }
     let index = index_dir.join(format!("transcrypt-v3-probe-{}.index", std::process::id()));
     let _ = std::fs::remove_file(&index);
     let mut command = git_command(Some(root));
@@ -575,7 +604,7 @@ pub(crate) fn marked_unfiltered(root: &Path, paths: &[&[u8]], from: Attributes) 
         if mark == b"set" && !matches!(&filter[..], b"transcrypt-v3" | b"unset") {
             let name = String::from_utf8_lossy(path);
             return Ok(Some(if filter == b"unspecified" {
-                format!("{name}: {}", crate::setup::MACRO_MISSING)
+                format!("{name}: {}", crate::attributes::MACRO_MISSING)
             } else {
                 format!("{name} is marked `transcrypt`, but another rule gives it the filter `{}` (from \
                     `git lfs track`?), so it would be stored unencrypted; narrow that rule",
@@ -588,8 +617,7 @@ pub(crate) fn marked_unfiltered(root: &Path, paths: &[&[u8]], from: Attributes) 
 
 /// The entries among `entries` that Git's attributes protect.
 pub(crate) fn protected_entries(root: &Path, entries: Vec<Staged>, from: Attributes) -> Result<Vec<Staged>, String> {
-    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
-    let flags = protected_flags(root, &paths, from)?;
+    let flags = protected_flags(root, &paths_of(&entries), from)?;
     Ok(entries.into_iter().zip(flags).filter(|(_, protected)| *protected).map(|(e, _)| e).collect())
 }
 
@@ -654,7 +682,7 @@ pub(crate) fn config_blob(root: &Path, commit: &str) -> Result<Option<String>, S
 pub(crate) fn reindex(root: &Path, listing: &[u8], paths: &[Vec<u8>]) -> Result<(), String> {
     if paths.is_empty() { return Ok(()); }
     git_with_input(root, &["update-index", "-z", "--stdin"], &nul_terminated(paths))?;
-    if git(root, &["ls-files", "--stage", "-z"])? != listing {
+    if index_listing(root)? != listing {
         return Err("staged Git objects changed while refreshing the index; inspect `git diff --cached`".into());
     }
     Ok(())
@@ -682,6 +710,10 @@ mod tests {
         }
     }
 
+    /// Randomized robustness of the adapter's parsers of Git output: no
+    /// input panics, every accepted record round-trips to exactly what Git
+    /// would print for it, and mutations of valid input are either rejected
+    /// or still exact.
     #[test]
     fn git_output_parsers_never_panic_and_accept_only_exact_records() {
         let oid = "0123456789abcdef0123456789abcdef01234567";

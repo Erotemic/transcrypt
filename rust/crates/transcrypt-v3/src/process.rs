@@ -2,8 +2,9 @@
 //! version 2): one process serves every clean and smudge of a Git command,
 //! instead of one process per file. Packet lengths are decoded by the
 //! verified core (`decode_pkt_len`), and every file goes through the same
-//! `Filters::convert` as the per-file filters (with the key loaded once). Any malformed exchange
-//! ends the process, which makes Git fail the command (the filter is required).
+//! `Filters::convert` as the per-file filters (which reloads the key only
+//! when the config changes). Any malformed exchange ends the process, which
+//! makes Git fail the command (the filter is required).
 
 use std::{
     io::{self, Read, Write},
@@ -11,7 +12,7 @@ use std::{
 };
 use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD};
 use zeroize::Zeroizing;
-use crate::{git::{append_wiped, TOO_LARGE}, Filters};
+use crate::{filter::Filters, git::{append_wiped, TOO_LARGE}};
 
 /// The most data one packet carries.
 const MAX_DATA: usize = MAX_PKT_LEN - 4;
