@@ -9,20 +9,30 @@
 //! the v2 configuration (including its password) is left in place until the
 //! user has verified the result.
 
-use std::{fs, os::unix::ffi::OsStrExt, path::Path};
+use std::{fs, os::unix::ffi::OsStrExt, path::{Path, PathBuf}};
 use crate::{
     git::*,
     passphrase,
-    setup::{init_with_rollback, Rollback},
+    setup::{init_with_rollback, uncommitted_setup},
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
     Options,
 };
 
+/// A Bash transcrypt driver name: `crypt` or `crypt-<context>`.
+fn v2_value(value: &[u8]) -> bool {
+    value == b"crypt" || value.starts_with(b"crypt-")
+}
+
 /// Whether an attribute token belongs to Bash transcrypt: `filter`, `diff`
-/// or `merge` set to `crypt` or `crypt-<context>`.
+/// or `merge` set to a v2 driver.
 fn v2_token(token: &[u8]) -> bool {
-    [&b"filter="[..], b"diff=", b"merge="].iter().any(|key| token.strip_prefix(*key)
-        .is_some_and(|value| value == b"crypt" || value.starts_with(b"crypt-")))
+    [&b"filter="[..], b"diff=", b"merge="].iter().any(|key| token.strip_prefix(*key).is_some_and(v2_value))
+}
+
+/// Whether an attribute line (not a comment) has a Bash transcrypt token.
+fn v2_rule(line: &[u8]) -> bool {
+    !line.trim_ascii_start().starts_with(b"#")
+        && split_pattern(line).1.split(u8::is_ascii_whitespace).any(v2_token)
 }
 
 /// Split an attribute line into its pattern and the rest. A pattern that
@@ -47,32 +57,26 @@ fn split_pattern(line: &[u8]) -> (&[u8], &[u8]) {
 /// pattern and other attributes and gets `transcrypt` instead. Returns the
 /// new text if anything changed.
 fn rewrite_attributes(text: &[u8]) -> Option<Vec<u8>> {
-    let mut changed = false;
+    if !text.split(|b| *b == b'\n').any(v2_rule) { return None; }
     let lines: Vec<Vec<u8>> = text.split(|b| *b == b'\n').map(|line| {
-        if line.trim_ascii_start().starts_with(b"#") { return line.to_vec(); }
+        if !v2_rule(line) { return line.to_vec(); }
         let (pattern, rest) = split_pattern(line);
-        let tokens: Vec<&[u8]> = rest.split(|b| b.is_ascii_whitespace()).filter(|t| !t.is_empty()).collect();
-        if !tokens.iter().any(|t| v2_token(t)) { return line.to_vec(); }
-        changed = true;
         let mut out = pattern.to_vec();
-        for token in tokens.into_iter().filter(|t| !v2_token(t)) {
+        for token in rest.split(u8::is_ascii_whitespace).filter(|t| !t.is_empty() && !v2_token(t)) {
             out.push(b' ');
             out.extend_from_slice(token);
         }
         out.extend_from_slice(b" transcrypt");
         out
     }).collect();
-    changed.then(|| lines.join(&b'\n'))
+    Some(lines.join(&b'\n'))
 }
 
 /// `migrate`: see the module documentation.
 pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     // An uncommitted v3 config is an interrupted migration: rerunning it,
     // with the same v3 passphrase, completes it.
-    let resuming = fs::symlink_metadata(root.join(".transcrypt")).is_ok();
-    if resuming && git(root, &["cat-file", "-e", "HEAD:.transcrypt/config"]).is_ok() {
-        return Err("this repository already uses v3".into());
-    }
+    let resuming = uncommitted_setup(root, "this repository already uses v3")?;
     if git(root, &["config", "--get", "filter.crypt.clean"]).is_err() {
         return Err("Bash transcrypt is not set up in this checkout: install it and unlock with the v2 \
             password first (`transcrypt -c <cipher> -p <password>`), so the worktree holds plaintext".into());
@@ -80,37 +84,23 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     // Rules outside the repository's own files cannot be converted for
     // everyone; files they select would silently stay unprotected.
     let info = common_dir(root).join("info/attributes");
-    if fs::read(&info).is_ok_and(|text| text.split(|b| *b == b'\n')
-        .any(|line| !line.trim_ascii_start().starts_with(b"#") && split_pattern(line).1
-            .split(|b| b.is_ascii_whitespace()).any(v2_token))) {
+    if fs::read(&info).is_ok_and(|text| text.split(|b| *b == b'\n').any(v2_rule)) {
         return Err(format!("{} has Bash transcrypt rules; move them to .gitattributes (and commit) \
             first, so that the conversion keeps them for everyone", info.display()));
     }
     // The files Bash protects, by its attributes.
     let entries = indexed_files(root)?;
     let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
-    let mut command = git_command(Some(root));
-    command.args(["-c", "core.ignorecase=false", "check-attr", "-z", "--stdin", "filter"]);
-    let mut request = Vec::new();
-    for path in &paths {
-        request.extend_from_slice(path);
-        request.push(0);
-    }
-    let response = run_git_input(command, request)?;
-    let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
-    let mut selected = Vec::new();
-    for record in fields.chunks(3).filter(|r| r.len() == 3) {
-        // When resuming, rules already converted select with transcrypt-v3.
-        if record[2] == b"crypt" || record[2].starts_with(b"crypt-") || (resuming && record[2] == b"transcrypt-v3") {
-            selected.push(record[0].to_vec());
-        }
-    }
+    // When resuming, rules already converted select with transcrypt-v3.
+    let selected: Vec<&[u8]> = paths.iter().zip(filter_values(root, &paths, Attributes::Worktree)?)
+        .filter(|(_, value)| v2_value(value) || (resuming && value == b"transcrypt-v3"))
+        .map(|(path, _)| *path).collect();
     // A committed state, except for an interrupted migration's own changes.
     let status = git(root, &["status", "--porcelain", "-z", "--untracked-files=no"])?;
     for entry in status.split(|b| *b == 0).filter(|e| e.len() > 3) {
         let path = &entry[3..];
         let own = resuming && entry[0] != b'R' && (path == b".transcrypt/config" || path == b".gitattributes"
-            || path.ends_with(b"/.gitattributes") || selected.iter().any(|p| p == path));
+            || path.ends_with(b"/.gitattributes") || selected.contains(&path));
         if !own {
             return Err("commit or discard your changes first; the conversion must start from a committed state".into());
         }
@@ -128,88 +118,45 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     // state that still encrypts (Bash's rules or v3's) or that the v3 hook
     // refuses: set Bash's hook aside, set up v3, then rewrite the rules, then
     // re-encrypt.
-    let attribute_files: Vec<std::path::PathBuf> = entries.iter()
+    let attribute_files: Vec<PathBuf> = entries.iter()
         .filter(|e| e.path == b".gitattributes" || e.path.ends_with(b"/.gitattributes"))
         .map(|e| indexed_path(&e.path)).collect::<Result<_, _>>()?;
     let password = passphrase(options.password_stdin, true)?;
     // Bash's own pre-commit hook checks only `filter=crypt` files, which will
     // no longer exist; it is set aside so the v3 hook can be installed.
     let hooks = common_dir(root).join("hooks");
-    let bash_hook = fs::read(hooks.join("pre-commit-crypt")).ok()
-        .filter(|hook| fs::read(hooks.join("pre-commit")).ok().as_ref() == Some(hook));
-    if bash_hook.is_some() {
+    let bash_hook = matches!((fs::read(hooks.join("pre-commit-crypt")), fs::read(hooks.join("pre-commit"))),
+        (Ok(crypt), Ok(current)) if crypt == current);
+    if bash_hook {
         fs::rename(hooks.join("pre-commit"), hooks.join("pre-commit.transcrypt-v2"))
             .map_err(|e| format!("cannot set aside the Bash pre-commit hook: {e}"))?;
     }
-    let mut rewritten: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
-    let undo = |rewritten: &[(std::path::PathBuf, Vec<u8>)]| {
-        if let Ok(staging) = staging_dir(root) {
-            for (relative, original) in rewritten {
-                let _ = write_repository_file(root, &staging, relative, original);
-            }
-        }
-        if bash_hook.is_some() {
+    // Put Bash's hook and the index back (the start was committed).
+    let restore_bash = || {
+        if bash_hook {
             let _ = fs::rename(hooks.join("pre-commit.transcrypt-v2"), hooks.join("pre-commit"));
         }
         let _ = git(root, &["reset", "-q", "--", "."]);
     };
-    let rollback: Rollback = match init_with_rollback(root, options, Some(password)) {
+    let rollback = match init_with_rollback(root, options, Some(password)) {
         Ok(rollback) => rollback,
         Err(e) if resuming => return Err(format!("{e}; rerun `transcrypt-v3 migrate` to complete the conversion")),
-        Err(e) => { undo(&rewritten); return Err(format!("{e}; the conversion was rolled back")); },
+        Err(e) => { restore_bash(); return Err(format!("{e}; the conversion was rolled back")); },
     };
-    let result = (|| -> Result<(), String> {
-        // Rewrite every tracked .gitattributes that has v2 rules (the
-        // top-level one now also defines the `transcrypt` macro).
-        let staging = staging_dir(root)?;
-        for relative in &attribute_files {
-            let Some(file) = find_protected(root, relative)? else { continue };
-            let original = file.read()?.0.to_vec();
-            if let Some(text) = rewrite_attributes(&original) {
-                write_repository_file(root, &staging, relative, &text)?;
-                rewritten.push((relative.clone(), original));
+    let mut rewritten = Vec::new();
+    if let Err(e) = convert(root, &attribute_files, &selected, &mut rewritten) {
+        // Undo this run's rewrites first: a resumed run stays resumable, and
+        // the rollback then restores the top-level file from before `init`.
+        if let Ok(staging) = staging_dir(root) {
+            for (relative, original) in &rewritten {
+                let _ = write_repository_file(root, &staging, relative, original);
             }
         }
-        drop(staging);
-        // Stage the rewritten attribute files and re-clean the decrypted
-        // worktree files with the v3 filter (raw path bytes, no pathspec
-        // magic: GIT_LITERAL_PATHSPECS).
-        let mut paths = Vec::new();
-        for path in rewritten.iter().map(|(p, _)| p.as_os_str().as_bytes()).chain(selected.iter().map(Vec::as_slice)) {
-            paths.extend_from_slice(path);
-            paths.push(0);
-        }
-        git_with_input(root, &["add", "--renormalize", "--pathspec-from-file=-", "--pathspec-file-nul"], &paths)?;
-        // Every file v2 protected must now be protected by v3.
-        let refs: Vec<&[u8]> = selected.iter().map(Vec::as_slice).collect();
-        if let Some((path, _)) = refs.iter().zip(protected_flags(root, &refs, Attributes::Staged)?).find(|(_, p)| !*p) {
-            return Err(format!("{} would no longer be protected after the conversion (an attribute \
-                rule could not be converted); convert it in .gitattributes by hand", String::from_utf8_lossy(path)));
-        }
-        // Nothing may stay v2 ciphertext (a rule Git applied only
-        // case-insensitively, or one that could not be converted).
-        for entry in indexed_files(root)? {
-            if git_blob_if_record_sized(root, &entry.oid)?.is_some_and(|b| b.starts_with(b"U2FsdGVk")) {
-                return Err(format!("{} is still v2 ciphertext after the conversion (selected by a rule v3 \
-                    does not apply, e.g. only case-insensitively); fix its rule in .gitattributes and rerun",
-                    String::from_utf8_lossy(&entry.path)));
-            }
-        }
-        crate::lifecycle::verify_index_command(root)
-    })();
-    if let Err(e) = result {
         if resuming {
-            // Undo only this run's changes: the interrupted state it resumed
-            // from stays resumable.
-            if let Ok(staging) = staging_dir(root) {
-                for (relative, original) in &rewritten {
-                    let _ = write_repository_file(root, &staging, relative, original);
-                }
-            }
             return Err(format!("{e}; fix that, then rerun `transcrypt-v3 migrate` to complete the conversion"));
         }
         rollback.run();
-        undo(&rewritten);
+        restore_bash();
         return Err(format!("{e}; the conversion was rolled back"));
     }
     eprintln!("Converted {} file(s) from Bash transcrypt to v3; review and commit:\n  \
@@ -218,19 +165,54 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
         remove the v2 password from .git/config (`git config --remove-section transcrypt`).\n\
         Earlier commits keep their v2 ciphertext, readable with the v2 password: if that password \
         or the history was ever exposed, change the secrets themselves.", selected.len());
-    if bash_hook.is_some() {
+    if bash_hook {
         eprintln!("The Bash pre-commit hook was renamed to .git/hooks/pre-commit.transcrypt-v2.");
     }
     Ok(())
 }
 
-/// Run a Git command with input; its output.
-fn run_git_input(command: std::process::Command, input: Vec<u8>) -> Result<Vec<u8>, String> {
-    let (status, out, errors) = run_bounded_status(command, Some(input), 256 << 20)?;
-    if !status.success() {
-        return Err(format!("git check-attr failed: {}", String::from_utf8_lossy(&errors)));
+/// Rewrite every tracked `.gitattributes` that has v2 rules (the top-level
+/// one now also defines the `transcrypt` macro), recording each original in
+/// `rewritten`; re-encrypt the selected files; and check that v3 protects
+/// all of them.
+fn convert(root: &Path, attribute_files: &[PathBuf], selected: &[&[u8]], rewritten: &mut Vec<(PathBuf, Vec<u8>)>)
+    -> Result<(), String>
+{
+    let staging = staging_dir(root)?;
+    for relative in attribute_files {
+        let Some(file) = find_protected(root, relative)? else { continue };
+        let original = file.read()?.0.to_vec();
+        if let Some(text) = rewrite_attributes(&original) {
+            write_repository_file(root, &staging, relative, &text)?;
+            rewritten.push((relative.clone(), original));
+        }
     }
-    Ok(out.to_vec())
+    drop(staging);
+    // Stage the rewritten attribute files and re-clean the decrypted worktree
+    // files with the v3 filter. `--renormalize` (which `update-index` lacks)
+    // needs `git add`; the paths are raw bytes and literal
+    // (GIT_LITERAL_PATHSPECS), so no pathspec magic applies.
+    let mut paths = Vec::new();
+    for path in rewritten.iter().map(|(p, _)| p.as_os_str().as_bytes()).chain(selected.iter().copied()) {
+        paths.extend_from_slice(path);
+        paths.push(0);
+    }
+    git_with_input(root, &["add", "--renormalize", "--pathspec-from-file=-", "--pathspec-file-nul"], &paths)?;
+    // Every file v2 protected must now be protected by v3.
+    if let Some((path, _)) = selected.iter().zip(protected_flags(root, selected, Attributes::Staged)?).find(|(_, p)| !*p) {
+        return Err(format!("{} would no longer be protected after the conversion (an attribute \
+            rule could not be converted); convert it in .gitattributes by hand", String::from_utf8_lossy(path)));
+    }
+    // Nothing may stay v2 ciphertext (a rule Git applied only
+    // case-insensitively, or one that could not be converted).
+    for entry in indexed_files(root)? {
+        if git_blob_if_record_sized(root, &entry.oid)?.is_some_and(|b| b.starts_with(b"U2FsdGVk")) {
+            return Err(format!("{} is still v2 ciphertext after the conversion (selected by a rule v3 \
+                does not apply, e.g. only case-insensitively); fix its rule in .gitattributes and rerun",
+                String::from_utf8_lossy(&entry.path)));
+        }
+    }
+    crate::lifecycle::verify_index_command(root)
 }
 
 #[cfg(test)]

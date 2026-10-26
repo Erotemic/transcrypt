@@ -1081,6 +1081,8 @@ fn interrupted_commands_converge_when_rerun() {
     let err = run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
     assert!(err.contains("PROD.ENV is still v2 ciphertext"), "{err}");
     assert!(!repo.join(".transcrypt").exists(), "rolled back");
+    assert_eq!(fs::read(repo.join(".gitattributes")).unwrap(), b"*.env filter=crypt diff=crypt merge=crypt\n");
+    assert!(run(&repo, "git", &["status", "--porcelain", "--untracked-files=no"], None).is_empty());
 }
 
 /// Seventh review F1/F2: a rule aimed at the macro probe's own path does

@@ -275,6 +275,15 @@ impl Rollback {
     }
 }
 
+/// Whether `.transcrypt` exists but `HEAD` has no config: an interrupted
+/// `init` or `migrate`, which rerunning completes. `committed` is the
+/// refusal when `HEAD` already has one.
+pub(crate) fn uncommitted_setup(root: &Path, committed: &str) -> Result<bool, String> {
+    if fs::symlink_metadata(root.join(".transcrypt")).is_err() { return Ok(false); }
+    if config_blob(root, "HEAD").ok().flatten().is_some() { return Err(committed.into()); }
+    Ok(true)
+}
+
 /// Initialize (without protecting anything yet); on failure everything is
 /// rolled back, on success the caller gets the rollback for later steps.
 pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Option<Zeroizing<Vec<u8>>>)
@@ -282,10 +291,8 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
 {
     // An existing config not yet in `HEAD` is an interrupted `init`: rerunning
     // with the same passphrase completes it.
-    let interrupted = if fs::symlink_metadata(root.join(".transcrypt")).is_ok() {
-        if git(root, &["cat-file", "-e", "HEAD:.transcrypt/config"]).is_ok() {
-            return Err(".transcrypt already exists: this repository is set up; run `transcrypt-v3 unlock`".into());
-        }
+    let committed = ".transcrypt already exists: this repository is set up; run `transcrypt-v3 unlock`";
+    let interrupted = if uncommitted_setup(root, committed)? {
         Some(load_config(root).map_err(|e| format!("{e} (left by an interrupted init? to start over: \
             `git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`)"))?)
     } else { None };
