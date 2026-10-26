@@ -300,10 +300,12 @@ The branch is unpushed: push needs the owner's credentials.
    lookup is a binary search (H-75): `verify-index` after rewriting 60 000
    unprotected files takes 5.3 s (it was 32 s with linear scans), a locked
    `verify-index` of a merge bringing 10 000 protected files 0.35 s.
-   **Next:** a mass rename of protected files is dominated by one
-   `git hash-object -w` process per re-encrypted file (about 5 ms each:
-   2 000 files take 10 s in the hook); write the records through one
-   `git hash-object -w --stdin-paths` or `fast-import` stream.
+   Every blob the adapter stages (hook sealing and re-binding, `rekey`,
+   `reencrypt`, `unprotect`) goes through `git::IndexUpdate`: one `git
+   fast-import --done` reading the contents from stdin (no temporary
+   files) and one `update-index`. A commit renaming 2 000 protected files
+   takes 0.54 s (it was 10.9 s with one `hash-object` process per file,
+   which also triggered an automatic `git gc`).
 7. **Simplification passes (two, reviewer-driven) are done**: shared
    helpers in `git.rs` (one check-attr builder, one listing parser,
    `push_blob_record`, `read_record`, `sigpipe_blocked`), one index

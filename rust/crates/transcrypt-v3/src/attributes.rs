@@ -282,13 +282,13 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
         for (staged, plaintext) in &released {
             replace_if_holds(root, &staging, &staged.path, &git_blob(root, &staged.oid)?, plaintext, key.private())?;
         }
-        let mut index_info = Vec::new();
+        let mut update = IndexUpdate::default();
         for (staged, plaintext) in &released {
-            push_blob_record(root, &mut index_info, &staged.mode, &staged.path, plaintext)?;
+            update.add(&staged.mode, &staged.path, plaintext);
         }
         let rules = worktree_attributes(root)?.ok_or("missing .gitattributes")?;
-        push_blob_record(root, &mut index_info, "100644", b".gitattributes", &rules)?;
-        git_with_input(root, &["update-index", "-z", "--add", "--index-info"], &index_info)?;
+        update.add("100644", b".gitattributes", &rules);
+        update.apply(root, &["--add"])?;
         Ok(released.into_iter().map(|(staged, _)| staged.path.clone()).collect())
     })();
     let released = match result {

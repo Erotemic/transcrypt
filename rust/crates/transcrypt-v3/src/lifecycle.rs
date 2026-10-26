@@ -355,8 +355,7 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
         Some(files) => held(&snapshot.listing, &snapshot.flags, files)?,
         None => vec![false; snapshot.flags.len()],
     };
-    let mut index_info = Vec::new();
-    let mut count = 0;
+    let mut update = IndexUpdate::default();
     // `HEAD` by object id, for move sources; only when a record moved.
     let mut head_order: Option<Vec<usize>> = None;
     for i in protected {
@@ -393,12 +392,10 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
                 plaintext
             },
         };
-        push_blob_record(root, &mut index_info, &staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
-        count += 1;
+        update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?);
     }
-    if count > 0 {
-        git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
-    }
+    let count = update.len();
+    update.apply(root, &[])?;
     Ok(count)
 }
 

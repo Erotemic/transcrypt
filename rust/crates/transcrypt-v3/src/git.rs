@@ -535,13 +535,48 @@ pub(crate) fn hash_object(root: &Path, bytes: &[u8]) -> Result<String, String> {
     object_id(git_with_input(root, &["hash-object", "-w", "--no-filters", "--stdin"], bytes)?)
 }
 
-/// Write `bytes` as a blob and append its `update-index -z --index-info`
-/// record for `path` to `info`.
-pub(crate) fn push_blob_record(root: &Path, info: &mut Vec<u8>, mode: &str, path: &[u8], bytes: &[u8])
-    -> Result<(), String>
-{
-    push_index_record(info, mode, &hash_object(root, bytes)?, path);
-    Ok(())
+/// Blobs to stage at paths: written by one `git fast-import` (from stdin, so
+/// no content touches a temporary file), then staged by one `update-index -z
+/// --index-info`. One process each, however many files.
+#[derive(Default)]
+pub(crate) struct IndexUpdate {
+    stream: Zeroizing<Vec<u8>>,
+    entries: Vec<(String, Vec<u8>)>,
+}
+
+impl IndexUpdate {
+    /// Stage `bytes` (unfiltered) as a blob of `mode` at `path`.
+    pub(crate) fn add(&mut self, mode: &str, path: &[u8], bytes: &[u8]) {
+        self.entries.push((mode.to_owned(), path.to_owned()));
+        append_wiped(&mut self.stream, format!("blob\nmark :{}\ndata {}\n", self.entries.len(), bytes.len()).as_bytes());
+        append_wiped(&mut self.stream, bytes);
+        append_wiped(&mut self.stream, b"\n");
+    }
+
+    pub(crate) fn len(&self) -> usize { self.entries.len() }
+
+    /// Write the blobs and stage them, with `update-index` `options` (such as
+    /// `--add`). `--done` makes a truncated stream fail without writing.
+    pub(crate) fn apply(mut self, root: &Path, options: &[&str]) -> Result<(), String> {
+        if self.entries.is_empty() { return Ok(()); }
+        for mark in 1..=self.entries.len() {
+            append_wiped(&mut self.stream, format!("get-mark :{mark}\n").as_bytes());
+        }
+        append_wiped(&mut self.stream, b"done\n");
+        let oids = git_with_input(root, &["fast-import", "--quiet", "--done"], &self.stream)?;
+        let oids: Vec<&[u8]> = oids.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
+        if oids.len() != self.entries.len() || !oids.iter().all(|oid| is_object_id(oid)) {
+            return Err("malformed git fast-import output".into());
+        }
+        let mut info = Vec::new();
+        for ((mode, path), oid) in self.entries.iter().zip(oids) {
+            push_index_record(&mut info, mode, &String::from_utf8_lossy(oid), path);
+        }
+        let arguments: Vec<&str> = ["update-index", "-z"].into_iter().chain(options.iter().copied())
+            .chain(["--index-info"]).collect();
+        git_with_input(root, &arguments, &info)?;
+        Ok(())
+    }
 }
 
 /// Append the `update-index -z --index-info` record `<mode> SP <oid> TAB
@@ -793,6 +828,36 @@ mod tests {
                 Err(e) => assert!(e.contains("cannot send input"), "{e}"),
             }
         }
+    }
+
+    /// `IndexUpdate` stages exactly the given bytes at exactly the given
+    /// paths, whatever they contain (fast-import commands, newlines, NULs).
+    #[test]
+    fn index_updates_stage_exact_blobs() {
+        let root = std::env::temp_dir().join(format!("transcrypt-v3-index-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]).unwrap();
+        let blobs: [(&[u8], &[u8]); 4] = [
+            (b"empty", b""),
+            (b"commands", b"done\nget-mark :1\nblob\nmark :9\ndata 3\n"),
+            (b"dir/binary\n name", b"\0\xff\n\n"),
+            (b"no newline", b"x"),
+        ];
+        let mut update = IndexUpdate::default();
+        for (path, bytes) in blobs { update.add("100644", path, bytes); }
+        update.apply(&root, &["--add"]).unwrap();
+        let listing = git(&root, &["ls-files", "--stage", "-z"]).unwrap();
+        assert_eq!(listing.split(|b| *b == 0).filter(|r| !r.is_empty()).count(), blobs.len());
+        for (path, bytes) in blobs {
+            let oid = git_with_input(&root, &["hash-object", "--stdin"], bytes).unwrap();
+            let oid = String::from_utf8(oid).unwrap();
+            let mut record = format!("100644 {} 0\t", oid.trim_end()).into_bytes();
+            record.extend_from_slice(path);
+            assert!(listing.split(|b| *b == 0).any(|r| r == &record[..]), "{}", String::from_utf8_lossy(path));
+            assert_eq!(git(&root, &["cat-file", "blob", oid.trim_end()]).unwrap(), bytes);
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// Randomized robustness of the adapter's parsers of Git output: no

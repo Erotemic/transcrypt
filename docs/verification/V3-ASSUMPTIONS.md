@@ -328,6 +328,10 @@ one.
   defeats Git's collision detection, plus same-UID write access to the
   object store.
 - **Evidence:** standard Git integrity assumption; replace refs disabled.
+  Object ids the adapter receives for blobs it writes (`git fast-import`
+  `get-mark`, through `IndexUpdate`) are not trusted for security: the
+  hook's final check and `verify-index` read every staged protected blob
+  back by id and check it, so a wrong id fails closed.
 - **Status:** ASSUMED.
 
 ### A12 — Stamps and the staging lock (new)

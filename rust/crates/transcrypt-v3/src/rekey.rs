@@ -45,13 +45,12 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     }
     let (config, key) = new_config(&password)?;
     // The new records, written as Git objects, and one index update.
-    let mut index_info = Vec::new();
+    let mut update = IndexUpdate::default();
     for (staged, plaintext) in &plaintexts {
-        let record = transcrypt_v3::encrypt_file(&config, &key, &staged.path, plaintext)?;
-        push_blob_record(root, &mut index_info, &staged.mode, &staged.path, &record)?;
+        update.add(&staged.mode, &staged.path, &transcrypt_v3::encrypt_file(&config, &key, &staged.path, plaintext)?);
     }
-    push_blob_record(root, &mut index_info, "100644", b".transcrypt/config", &config)?;
-    git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
+    update.add("100644", b".transcrypt/config", &config);
+    update.apply(root, &[])?;
     let undo = "; run `git reset` to undo the staged rekey";
     write_repository_file(root, &staging, Path::new(".transcrypt/config"), &config)
         .map_err(|e| format!("{e}{undo}"))?;
@@ -154,17 +153,17 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         let password = passphrase(options.password_stdin, false)?;
         keys.push((old, *old_id, unlock_config(&password, old)?));
     }
-    let mut index_info = Vec::new();
+    let mut update = IndexUpdate::default();
     let staging = staging_dir(root)?;
     for (old, old_id, old_key) in &keys {
         for (staged, record, _) in stale.iter().filter(|(_, _, f)| f == old_id) {
             let plaintext = transcrypt_v3::decrypt_file(old, old_key, &staged.path, record)
                 .map_err(|e| format!("{}: {e}", staged.name()))?;
-            push_blob_record(root, &mut index_info, &staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
+            update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?);
             replace_if_holds(root, &staging, &staged.path, record, &plaintext, key.private())?;
         }
     }
-    git_with_input(root, &["update-index", "-z", "--index-info"], &index_info)?;
+    update.apply(root, &[])?;
     eprintln!("Re-encrypted {} file(s) under the current config; they are staged. Commit them.", stale.len());
     Ok(())
 }
