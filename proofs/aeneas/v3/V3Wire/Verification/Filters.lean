@@ -157,7 +157,7 @@ theorem smudgeModel_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
       · exact Or.inr hr
       · left
         obtain ⟨hl, hd⟩ := opensTo_envelopeOk σ hr
-        refine ⟨rfl, ⟨_, hd, by rw [sliceBytes_length'] at hl; exact hl⟩, fun _ => ⟨_, hr⟩⟩
+        refine ⟨rfl, ⟨_, hd, by rw [sliceBytes_length] at hl; exact hl⟩, fun _ => ⟨_, hr⟩⟩
     · simp
   · -- Keep
     obtain ⟨s, hs, ha'⟩ := ha
@@ -167,7 +167,7 @@ theorem smudgeModel_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
     rintro out rfl
     left
     obtain ⟨found, hf, hl⟩ := smudgeSpec_keep_envelope hs
-    refine ⟨rfl, ⟨found, hf, by rw [sliceBytes_length'] at hl; exact hl⟩, fun ho => ?_⟩
+    refine ⟨rfl, ⟨found, hf, by rw [sliceBytes_length] at hl; exact hl⟩, fun ho => ?_⟩
     rw [hs] at ho
     cases ho
   · simp

@@ -230,11 +230,6 @@ theorem extract_succ (l : List Nat) (s i : Nat) (hs : s ≤ i) (hi : i < l.lengt
 theorem extract_all (l : List Nat) (s : Nat) : l.extract s l.length = l.drop s := by
   simp
 
-theorem sliceBytes_getElem! (p : Slice U8) (i : Nat) (h : i < p.val.length) :
-    (sliceBytes p)[i]! = (p.val[i]).val := by
-  rw [getElem!_pos (sliceBytes p) i (by simp [sliceBytes]; omega)]
-  simp [sliceBytes]
-
 /-! ## The canonical-path scan loop -/
 
 /-- Loop invariant of the scan in `is_canonical_protected_path`, for state

@@ -78,13 +78,6 @@ theorem map_prefix_drop_iff (l p : List U8) (j : Nat) (hj : j ≤ l.length) :
     rw [getElem!_pos l (j + k) (by simp at h1; omega), getElem!_pos p k (by simpa using h1)] at this
     rw [this]
 
-theorem sliceBytes_length (s : Slice U8) : (sliceBytes s).length = s.length := by
-  simp [sliceBytes]
-
-theorem sliceBytes_getElem (s : Slice U8) (k : Nat) (h : k < s.length) :
-    (sliceBytes s)[k]'(by rw [sliceBytes_length]; exact h) = (s.val[k]'h).val := by
-  simp [sliceBytes]
-
 /-! ## Lifecycle decisions -/
 
 /-- Rust encoding of the specification's hydrate decision. -/

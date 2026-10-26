@@ -15,14 +15,6 @@ least TAB; the second compares the mode field with `REGULAR_MODE` and
 `EXECUTABLE_MODE` at once.
 -/
 
-theorem idx_sliceBytes_length (s : Slice U8) : (sliceBytes s).length = s.length := by
-  simp [sliceBytes]
-
-theorem idx_sliceBytes_getElem! (p : Slice U8) (i : Nat) (h : i < p.val.length) :
-    (sliceBytes p)[i]! = (p.val[i]).val := by
-  rw [getElem!_pos (sliceBytes p) i (by simp [sliceBytes]; omega)]
-  simp [sliceBytes]
-
 /-- Invariant of the TAB scan. -/
 def TabInv (l : List Nat) (t : Nat) (found : Bool) : Prop :=
   t ≤ l.length ∧ (∀ k < t, l[k]! ≠ 9) ∧ (found = true → t < l.length ∧ l[t]! = 9)
@@ -37,7 +29,7 @@ theorem tab_body_spec (entry : Slice U8) (n : Usize) (hn : n.val = entry.length)
       | .cont (t', f') => TabInv (sliceBytes entry) t'.val f' ∧
           2 * (n.val - t'.val) + (if f' then 0 else 1) < 2 * (n.val - t.val) + (if found then 0 else 1)
       | .done r => TabPost (sliceBytes entry) r ⦄ := by
-  have hl := idx_sliceBytes_length entry
+  have hl := sliceBytes_length entry
   obtain ⟨hle, hno, hf⟩ := hinv
   unfold parse_index_entry_loop0.body
   cases found
@@ -45,11 +37,11 @@ theorem tab_body_spec (entry : Slice U8) (n : Usize) (hn : n.val = entry.length)
     step*
     · have hi := i
       have hb : (sliceBytes entry)[t.val]! = 9 := by
-        rw [idx_sliceBytes_getElem! entry t.val hi, ← i_post2]; have h9 : _ = 9#u8 := ‹_›; rw [h9]; rfl
+        rw [sliceBytes_getElem! entry t.val hi, ← i_post2]; have h9 : _ = 9#u8 := ‹_›; rw [h9]; rfl
       refine ⟨⟨hle, hno, fun _ => ⟨by rw [hl]; exact hi, hb⟩⟩, by simp⟩
     · have hi := i
       have hb : (sliceBytes entry)[t.val]! ≠ 9 := by
-        rw [idx_sliceBytes_getElem! entry t.val hi, ← i_post2]
+        rw [sliceBytes_getElem! entry t.val hi, ← i_post2]
         intro h; exact ‹¬_ = 9#u8› (UScalar.eq_of_val_eq h)
       refine ⟨⟨by omega, fun k hk => ?_, by simp⟩, by simp; omega⟩
       rcases Nat.lt_or_ge k t.val with h | h
@@ -266,10 +258,6 @@ theorem index_complete (l : List Nat) (reg : Bool) (path : List Nat)
     have : mode ++ [32] ++ oid ++ [32, 48, 9] ++ path = mode ++ ([32] ++ oid ++ [32, 48, 9] ++ path) := by simp
     rw [this, List.take_left' hm]
 
-theorem idx_usize_max_ge : 4294967295 ≤ Usize.max := by
-  simp only [Usize.max, Usize.numBits]
-  cases System.Platform.numBits_eq <;> simp [*]
-
 @[step]
 theorem parse_index_entry_spec (entry : Slice U8) :
     parse_index_entry entry ⦃ r => match r with
@@ -279,8 +267,8 @@ theorem parse_index_entry_spec (entry : Slice U8) :
           ∀ reg path, ¬ Transcrypt.V3Policy.IndexRecord (sliceBytes entry) reg path ⦄ := by
   unfold parse_index_entry
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  have hl := idx_sliceBytes_length entry
-  have hmax := idx_usize_max_ge
+  have hl := sliceBytes_length entry
+  have hmax := usize_max_ge
   have hrl : entry.length = entry.val.length := rfl
   step with tab_loop_spec entry entry.len (by simp) as ⟨ t, found, hr ⟩
   obtain ⟨hT, hF⟩ := hr
@@ -307,7 +295,7 @@ theorem parse_index_entry_spec (entry : Slice U8) :
     have hbyte : ∀ (k : Nat) (hk : k < entry.val.length) (b : U8), b = entry.val[k] →
         (sliceBytes entry)[k]! = b.val := by
       intro k hk b hb
-      rw [idx_sliceBytes_getElem! entry k hk, hb]
+      rw [sliceBytes_getElem! entry k hk, hb]
     step*
     step with reg_loop_spec entry (by omega) as ⟨ plain, executable, hplain, hexec ⟩
     have hbyte' : ∀ (k : Nat) (hk : k < entry.val.length) (b : U8), b = entry.val[k] →

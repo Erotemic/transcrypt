@@ -25,6 +25,23 @@ namespace Transcrypt.V3Verification
 /-- Project an Aeneas byte slice to the specification's natural-number bytes. -/
 def sliceBytes (s : Slice U8) : List Nat := s.val.map (fun b => b.val)
 
+theorem sliceBytes_length (s : Slice U8) : (sliceBytes s).length = s.length := by
+  simp [sliceBytes]
+
+theorem sliceBytes_getElem (s : Slice U8) (k : Nat) (h : k < s.length) :
+    (sliceBytes s)[k]'(by rw [sliceBytes_length]; exact h) = (s.val[k]'h).val := by
+  simp [sliceBytes]
+
+theorem sliceBytes_getElem! (p : Slice U8) (i : Nat) (h : i < p.val.length) :
+    (sliceBytes p)[i]! = (p.val[i]).val := by
+  rw [getElem!_pos (sliceBytes p) i (by simp [sliceBytes]; omega)]
+  simp [sliceBytes]
+
+/-- `usize` is at least 32 bits wide on every supported platform. -/
+theorem usize_max_ge : 4294967295 ≤ Usize.max := by
+  simp only [Usize.max, Usize.numBits]
+  cases System.Platform.numBits_eq <;> simp [*]
+
 /-- `out` agrees with `src[srcOff + (k - dst)]` on `[dst, dst + n)` and with
     `base` everywhere else. -/
 def Copied (out base src : List U8) (dst srcOff n : Nat) : Prop :=

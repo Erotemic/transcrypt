@@ -132,10 +132,6 @@ theorem authenticate_config_spec (h : Realizes inst prims σ) (config : Std.Arra
 
 /-! ## Record sealing and opening -/
 
-theorem usize_max_ge : 4294967295 ≤ Usize.max := by
-  simp only [Usize.max, Usize.numBits]
-  cases System.Platform.numBits_eq <;> simp [*]
-
 @[step] theorem MAX_FILE_spec : MAX_FILE ⦃ x => x.val = maxFile ⦄ := by
   unfold MAX_FILE; step*; simp [maxFile, *]
 
@@ -218,9 +214,6 @@ theorem seal_record_loop_spec (base out : Slice U8) (header : Std.Array U8 22#us
   | .Ok _ => by simp [core.result.Result.is_ok]
   | .Err _ => by simp [core.result.Result.is_ok]
 
-theorem sliceBytes_length' (x : Slice U8) : (sliceBytes x).length = x.length := by
-  simp [sliceBytes]
-
 /-- The clean direction. Success means every precondition of the spec's
     `MaySeal` holds and the output is exactly the spec's `sealedRecord`;
     each refusal names a violated precondition (or a primitive failure). -/
@@ -266,7 +259,7 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
       | Err e =>
         cases e with
         | Magic => exact r1_post.2
-        | Length => exact Transcrypt.V3Wire.file_truncated _ (by rw [sliceBytes_length']; exact r1_post)
+        | Length => exact Transcrypt.V3Wire.file_truncated _ (by rw [sliceBytes_length]; exact r1_post)
     have hcanon : CanonicalProtectedPath (sliceBytes path) := b_post.1 ‹b = true›
     step with h.config_id config as ⟨ cid, hcid ⟩
     step with encode_file_header_bytes as ⟨ header, hheader ⟩
@@ -276,7 +269,7 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
     step with h.seal_file config path plaintext sub as ⟨ b2, s1, hs1l, hs1 ⟩
     split
     · rename_i hb2
-      refine ⟨⟨hcanon, hauth, by rw [sliceBytes_length', ← hptl]; omega, hnotrec⟩, ?_⟩
+      refine ⟨⟨hcanon, hauth, by rw [sliceBytes_length, ← hptl]; omega, hnotrec⟩, ?_⟩
       have hs1l' : s1.length = out1.length - 22 := by
         rw [hs1l]; simp [Slice.length, hsub]
       have htake : out1.val.take 22 = header.val := by
@@ -375,12 +368,12 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
   · have hr1 := ‹r1 = core.result.Result.Ok id›
     subst hr1
     have := (record_of_shape r1_post).2.1
-    rw [sliceBytes_length'] at this
+    rw [sliceBytes_length] at this
     rw [i2_post, hrl]; exact this
   · have hr1 := ‹r1 = core.result.Result.Ok id›
     subst hr1
     obtain ⟨hshape, hlen38, -⟩ := record_of_shape r1_post
-    rw [sliceBytes_length'] at hlen38
+    rw [sliceBytes_length] at hlen38
     have hauth : ConfigAuthentic σ (wireBytes config) := by
       have := ‹r = core.result.Result.Ok _›; subst this; exact r_post.1
     have hcanon : CanonicalProtectedPath (sliceBytes path) := b_post.1 ‹b = true›
@@ -408,7 +401,7 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
       step with h.open_file config path s2 out as ⟨ b2, out1, hol1, hopen, hcomplete ⟩
       split
       · rename_i hb2
-        refine ⟨hcanon, hauth, by rw [sliceBytes_length']; exact hmax, ?_⟩
+        refine ⟨hcanon, hauth, by rw [sliceBytes_length]; exact hmax, ?_⟩
         have hdrop : List.drop 22 (sliceBytes record) =
             σ.siv [fileDomain, wireBytes config, sliceBytes path] (sliceBytes out1) := by
           rw [hopen hb2]; simp [sliceBytes, hs2, List.map_drop]
@@ -442,7 +435,7 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
     rename_i e _
     cases e with
     | Magic => exact r1_post.2
-    | Length => exact Transcrypt.V3Wire.file_truncated _ (by rw [sliceBytes_length']; exact r1_post)
+    | Length => exact Transcrypt.V3Wire.file_truncated _ (by rw [sliceBytes_length]; exact r1_post)
   · have hr := ‹r = core.result.Result.Err refusal›
     subst hr
     cases refusal <;> simp only at r_post ⊢
@@ -475,7 +468,7 @@ theorem authorize_agent_request_spec (opcode : U8) (supplied active : Std.Array 
   have hMP : MAX_PATH.val = maxPath := by simp [MAX_PATH, maxPath]
   have hwb : wireBytes supplied = wireBytes active ↔ supplied.val = active.val :=
     ⟨fun h => map_val_injective h, fun h => by simp [wireBytes, h]⟩
-  have hsl : (sliceBytes path).length = path.length := sliceBytes_length' path
+  have hsl : (sliceBytes path).length = path.length := sliceBytes_length path
   have hnil : sliceBytes path = [] ↔ path.length = 0 := by
     rw [← List.length_eq_zero_iff, hsl]
   step*
@@ -514,7 +507,7 @@ theorem open_record_complete (h : Realizes inst prims σ) (config : Std.Array U8
       r.1 = core.result.Result.Ok () ∧ sliceBytes r.2 = pt ⦄ := by
   obtain ⟨hcanon, hauth, hmax, hrec⟩ := hop
   have hreclen : record.length = pt.length + 38 := by
-    rw [← sliceBytes_length' record, hrec, sealed_length]
+    rw [← sliceBytes_length record, hrec, sealed_length]
   have hshape := sealed_shape σ (wireBytes config) (sliceBytes path) pt
   rw [← hrec] at hshape
   apply WP.spec_mono (open_record_spec h config path record out)
@@ -525,7 +518,7 @@ theorem open_record_complete (h : Realizes inst prims σ) (config : Std.Array U8
     cases e <;> simp only at hpost
     · exact hpost.2 hcanon
     · rcases hpost.2 with h1 | h1
-      · rw [sliceBytes_length'] at hmax; omega
+      · rw [sliceBytes_length] at hmax; omega
       · omega
     · exact hpost.2 hauth
     · exact hpost.2 hauth

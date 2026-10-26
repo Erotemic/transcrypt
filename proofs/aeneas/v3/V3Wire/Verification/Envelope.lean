@@ -16,14 +16,6 @@ given configuration id). As `WP.spec` triples they also exclude panics and
 divergence.
 -/
 
-theorem env_sliceBytes_length (s : Slice U8) : (sliceBytes s).length = s.length := by
-  simp [sliceBytes]
-
-theorem env_sliceBytes_getElem! (p : Slice U8) (i : Nat) (h : i < p.val.length) :
-    (sliceBytes p)[i]! = (p.val[i]).val := by
-  rw [getElem!_pos (sliceBytes p) i (by simp [sliceBytes]; omega)]
-  simp [sliceBytes]
-
 /-- The digits examined so far are all lowercase hexadecimal. -/
 def EnvHexUpTo (l : List Nat) (i : Nat) : Prop := ∀ k < i, Transcrypt.V3Policy.HexDigit l[k]!
 
@@ -60,7 +52,7 @@ theorem env_oid_body_spec (oid : Slice U8) (n : Usize) (hn : n.val = oid.length)
     step with env_hex_spec as ⟨ ok2, hok2 ⟩
     step*
     rw [c_post2] at hok2
-    have hb := env_sliceBytes_getElem! oid i.val (by omega)
+    have hb := sliceBytes_getElem! oid i.val (by omega)
     refine ⟨⟨by dsimp only; omega, ?_⟩, by omega⟩
     dsimp only
     rw [hok2, i1_post, ← hb]
@@ -106,7 +98,7 @@ theorem is_object_id_spec (oid : Slice U8) :
     is_object_id oid ⦃ r => r = true ↔ Transcrypt.V3Policy.ObjectId (sliceBytes oid) ⦄ := by
   unfold is_object_id
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  rw [env_objectId_iff, env_sliceBytes_length]
+  rw [env_objectId_iff, sliceBytes_length]
   have key := env_oid_loop_spec oid oid.len (by simp) (oid.length = 40 ∨ oid.length = 64)
   simp only [bind_tc_ok]
   -- The length test `n == 40 || n == 64` computes the admissible-length flag.
@@ -121,7 +113,7 @@ theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize)
   unfold record_envelope_ok Transcrypt.V3Policy.EnvelopeOk
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
   have hrl : record.len.val = record.length := by simp
-  have hbl := env_sliceBytes_length record
+  have hbl := sliceBytes_length record
   have := usize_max_ge
   step with FILE_MIN_LEN_spec as ⟨ i1, i1_post ⟩
   split
@@ -189,7 +181,7 @@ theorem smudge_action_spec (blob : Slice U8) (id : Std.Array U8 16#usize) (unloc
   unfold smudge_action Transcrypt.V3Policy.smudgeSpec
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
   have hrl : blob.len.val = blob.length := by simp
-  have hbl := env_sliceBytes_length blob
+  have hbl := sliceBytes_length blob
   have := usize_max_ge
   step with MAX_RECORD_spec as ⟨ i1, i1_post ⟩
   split
