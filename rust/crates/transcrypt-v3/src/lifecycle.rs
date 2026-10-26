@@ -22,22 +22,50 @@ pub(crate) struct Verified {
     pub(crate) protected: Vec<Staged>,
 }
 
-/// The protected stage-0 entries of `entries`, by Git's staged attributes
-/// (what the next commit will say), each a file Git filters and none of
-/// them repository metadata.
+/// One read of the index: its exact listing, its stage-0 entries and, for
+/// each, whether Git's staged attributes (what the next commit will say)
+/// protect it.
+struct Snapshot {
+    listing: Vec<u8>,
+    entries: Vec<Staged>,
+    flags: Vec<bool>,
+}
+
+impl Snapshot {
+    fn read(root: &Path) -> Result<Snapshot, String> {
+        let listing = git(root, &["ls-files", "--stage", "-z"])?;
+        let entries = parse_listing(&listing)?;
+        let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
+        let flags = protected_flags(root, &paths, Attributes::Staged)?;
+        Ok(Snapshot { listing, entries, flags })
+    }
+
+    /// The protected entries, each `selectable`.
+    fn protected(&self) -> Result<Vec<&Staged>, String> {
+        self.entries.iter().zip(&self.flags).filter(|(_, p)| **p)
+            .map(|(e, _)| selectable(e).map(|()| e)).collect()
+    }
+}
+
+/// A protected entry must be a file Git filters, and not repository metadata.
+fn selectable(entry: &Staged) -> Result<(), String> {
+    let name = String::from_utf8_lossy(&entry.path);
+    if is_reserved_path(&entry.path) {
+        return Err(format!("{name} is selected for encryption, but v3 never encrypts .gitattributes, \
+            .gitmodules or .transcrypt/; narrow the .gitattributes pattern that selects it"));
+    }
+    if !entry.regular {
+        return Err(format!("{name} is selected for encryption but is a symlink or submodule, \
+            which Git stores unfiltered; narrow the pattern or replace it by a file"));
+    }
+    Ok(())
+}
+
+/// The protected stage-0 entries of `entries`, by Git's staged attributes,
+/// each `selectable`.
 pub(crate) fn staged_protected(root: &Path, entries: Vec<Staged>) -> Result<Vec<Staged>, String> {
     let protected = protected_entries(root, entries, Attributes::Staged)?;
-    for entry in &protected {
-        let name = String::from_utf8_lossy(&entry.path);
-        if is_reserved_path(&entry.path) {
-            return Err(format!("{name} is selected for encryption, but v3 never encrypts .gitattributes, \
-                .gitmodules or .transcrypt/; narrow the .gitattributes pattern that selects it"));
-        }
-        if !entry.regular {
-            return Err(format!("{name} is selected for encryption but is a symlink or submodule, \
-                which Git stores unfiltered; narrow the pattern or replace it by a file"));
-        }
-    }
+    protected.iter().try_for_each(selectable)?;
     Ok(protected)
 }
 
@@ -52,62 +80,61 @@ pub(crate) fn staged_protected(root: &Path, entries: Vec<Staged>) -> Result<Vec<
 ///   configuration: one moved to an unprotected name (`git mv x.env x.bak`)
 ///   would be committed where nothing ever decrypts it.
 pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, String> {
-    check_staged(root, key, false)
+    let config = load_config(root)?;
+    check_staged(root, &config, Snapshot::read(root)?, &commit_files(root, "HEAD")?, key, false)
 }
 
-/// `check_index`; with `incremental` (the pre-commit hook), protected
-/// entries unchanged since `HEAD` get the keyless checks only. They are
-/// already in history, so authenticating them again on every commit would
-/// prevent nothing; `verify-index`, `hydrate`, `lock`, merge commits and the
-/// audit still authenticate everything.
-fn check_staged(root: &Path, key: Option<&Key>, incremental: bool) -> Result<Verified, String> {
-    let config = load_config(root)?;
-    let listing = git(root, &["ls-files", "--stage", "-z"])?;
-    let entries = parse_listing(&listing)?;
+/// `check_index` of `snapshot`; with `incremental` (the pre-commit hook),
+/// protected entries unchanged since `HEAD` get the keyless checks only.
+/// They are already in history, so authenticating them again on every
+/// commit would prevent nothing; `verify-index`, `hydrate`, `lock`, merge
+/// commits and the audit still authenticate everything.
+fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged], key: Option<&Key>, incremental: bool)
+    -> Result<Verified, String>
+{
+    let (entries, flags) = (&snapshot.entries, &snapshot.flags);
     match entries.iter().find(|e| e.path == b".transcrypt/config") {
         Some(e) if e.regular && git_blob(root, &e.oid)? == config => {},
         _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree \
             (an interrupted `rekey`? `git reset` undoes a staged rekey)".into()),
     }
     let top = entries.iter().find(|e| e.path == b".gitattributes" && e.regular).map(|e| e.oid.as_str());
-    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
     if !macro_resolves(root, &git_dir(root), top)? {
         return Err(crate::setup::MACRO_MISSING.into());
     }
+    let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
     if let Some(problem) = marked_unfiltered(root, &paths, Attributes::Staged)? {
         return Err(problem);
     }
-    let head = head_files(root)?;
+    let head_oid: HashMap<&[u8], &str> = head.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
+    let unchanged = |e: &Staged| head_oid.get(e.path.as_slice()) == Some(&e.oid.as_str());
+    // The first path of each blob, in `HEAD` and then in the index.
+    let mut first_path: HashMap<&str, &[u8]> = HashMap::new();
+    for entry in head.iter().chain(entries) {
+        first_path.entry(entry.oid.as_str()).or_insert(entry.path.as_slice());
+    }
+    let protected = snapshot.protected()?;
+    let staged_unprotected: Vec<&Staged> = entries.iter().zip(flags)
+        .filter(|(e, p)| !**p && e.regular && !unchanged(e)).map(|(e, _)| e).collect();
     // With `--amend` (and squash/fixup) the commit's parent is `HEAD^`; its
     // files count too, as they do for the audit, which compares with the
-    // parent.
-    let parent = if git(root, &["rev-parse", "-q", "--verify", "HEAD^1^{commit}"]).is_ok() {
-        tree_files(root, "HEAD^1")?
+    // parent. Only a path new since `HEAD` is looked up there.
+    let parent = if staged_unprotected.iter().any(|e| !head_oid.contains_key(e.path.as_slice())) {
+        commit_files(root, "HEAD^1")?
     } else { Vec::new() };
     let parent_oid: HashMap<&[u8], &str> = parent.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
-    let head_oid: HashMap<&[u8], &str> = head.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
-    let mut elsewhere: HashMap<String, Vec<u8>> = HashMap::new();
-    for entry in head.iter().chain(entries.iter()).chain(parent.iter()) {
-        elsewhere.entry(entry.oid.clone()).or_insert_with(|| entry.path.clone());
-    }
-    let changed: Vec<(Vec<u8>, String)> = entries.iter()
-        .filter(|e| e.regular && head_oid.get(e.path.as_slice()) != Some(&e.oid.as_str()))
-        .map(|e| (e.path.clone(), e.oid.clone())).collect();
-    let protected = staged_protected(root, entries)?;
-    let id = transcrypt_v3::config_id(&config);
-    let is_record = |oid: &str| -> Result<bool, String> {
-        Ok(git_blob_if_record_sized(root, oid)?.is_some_and(|blob| record_envelope_ok(&blob, &id)))
-    };
+    let id = transcrypt_v3::config_id(config);
     let mut drifted: Vec<&[u8]> = Vec::new();
-    for (path, oid) in changed.iter().filter(|(p, _)| !protected.iter().any(|e| e.path == *p)) {
-        if is_record(oid)? {
+    for entry in staged_unprotected {
+        let path = entry.path.as_slice();
+        if is_record(root, &entry.oid, &id)? {
             return Err(format!("{} holds an encrypted record but is not protected (moved to an unprotected \
                 name? or a pattern that matches it only case-insensitively: v3 matches case-sensitively, \
                 so write it with the file's exact case): nothing would ever decrypt it there. Protect that \
                 name, move the file back, or stage its plaintext", String::from_utf8_lossy(path)));
         }
-        if head_oid.get(path.as_slice()).or(parent_oid.get(path.as_slice()))
-            .is_some_and(|old| is_record(old).unwrap_or(false)) {
+        // As strict as the audit: an unreadable old blob is an error.
+        if head_oid.get(path).or(parent_oid.get(path)).map(|old| is_record(root, old, &id)).transpose()? == Some(true) {
             drifted.push(path);
         }
     }
@@ -125,39 +152,40 @@ fn check_staged(root: &Path, key: Option<&Key>, incremental: bool) -> Result<Ver
             `transcrypt-v3 unprotect` the file deliberately", String::from_utf8_lossy(path),
             String::from_utf8_lossy(&value)));
     }
-    for staged in &protected {
+    for staged in protected {
         let record = git_blob(root, &staged.oid)?;
         let name = String::from_utf8_lossy(&staged.path);
-        if parse_file_header(&record).is_err() {
-            return Err(format!("staged {name} is not encrypted (was it staged before it was protected?); \
-                run `transcrypt-v3 protect` or `git add --renormalize -- {name}`"));
+        match parse_file_header(&record) {
+            Err(_) => return Err(format!("staged {name} is not encrypted (was it staged before it was protected?); \
+                run `transcrypt-v3 protect` or `git add --renormalize -- {name}`")),
+            Ok(found) if found != id => return Err(format!("staged {name} is encrypted under another config \
+                (cherry-picked or rebased across a rekey?); run `transcrypt-v3 reencrypt` with that config's passphrase")),
+            Ok(_) => {},
         }
-        if parse_file_header(&record).is_ok_and(|found| found != id) {
-            return Err(format!("staged {name} is encrypted under another config (cherry-picked or rebased \
-                across a rekey?); run `transcrypt-v3 reencrypt` with that config's passphrase"));
-        }
-        let key = key.filter(|_| !incremental || head_oid.get(staged.path.as_slice()) != Some(&staged.oid.as_str()));
-        match key {
+        match key.filter(|_| !incremental || !unchanged(staged)) {
             Some(key) => { key.open(&staged.path, &record).map_err(|e| format!("staged {name}: {e}; if it \
                 was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
             None if !record_envelope_ok(&record, &id) =>
                 return Err(format!("staged {name} is not v3 ciphertext for this repository")),
-            None => if let Some(other) = elsewhere.get(&staged.oid).filter(|p| **p != staged.path) {
+            None => if let Some(other) = first_path.get(staged.oid.as_str()).filter(|p| **p != staged.path.as_slice()) {
                 return Err(format!("staged {name} holds the encrypted {}: a renamed or copied protected \
                     file must be committed while unlocked, which re-encrypts it for its new name",
                     String::from_utf8_lossy(other)));
             },
         }
     }
+    let Snapshot { listing, entries, flags } = snapshot;
+    let protected = entries.into_iter().zip(flags).filter(|(_, p)| *p).map(|(e, _)| e).collect();
     Ok(Verified { listing, protected })
 }
 
-/// The files of `HEAD` (none before the first commit).
-fn head_files(root: &Path) -> Result<Vec<Staged>, String> {
-    if git(root, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]).is_err() {
+/// The files of commit `rev`; none when there is no such commit (`HEAD`
+/// before the first commit, `HEAD^1` of a root commit).
+fn commit_files(root: &Path, rev: &str) -> Result<Vec<Staged>, String> {
+    if git(root, &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]).is_err() {
         return Ok(Vec::new());
     }
-    tree_files(root, "HEAD")
+    tree_files(root, rev)
 }
 
 /// Files as (path, object id) pairs.
@@ -189,10 +217,9 @@ fn incoming(root: &Path) -> Result<Option<Files>, String> {
 /// A commit without `.transcrypt/config` (a branch from before `init`):
 /// the hooks accept exactly what the audit does, which is anything that
 /// protects no file. Returns whether the index is such a commit.
-fn configless(root: &Path) -> Result<bool, String> {
-    let entries = indexed_files(root)?;
-    if entries.iter().any(|e| e.path == b".transcrypt/config") { return Ok(false); }
-    if let Some(entry) = staged_protected(root, entries)?.first() {
+fn configless(snapshot: &Snapshot) -> Result<bool, String> {
+    if snapshot.entries.iter().any(|e| e.path == b".transcrypt/config") { return Ok(false); }
+    if let Some(entry) = snapshot.protected()?.first() {
         return Err(format!("{} is protected, but this commit has no .transcrypt/config: it would be \
             stored unencrypted; check out .transcrypt/ from a branch that uses v3",
             String::from_utf8_lossy(&entry.path)));
@@ -200,32 +227,37 @@ fn configless(root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// `verify-index`: the read-only check. Locked, it checks the keyless
-/// envelopes, which still rejects any plaintext.
-pub(crate) fn verify_index_command(root: &Path) -> Result<(), String> {
-    if configless(root)? { return Ok(()); }
+/// `verify-index`, the read-only check, and (with `seal`) the pre-commit
+/// hook, which first encrypts what ordinary Git commands stage without the
+/// filter (`seal_staged`). Locked, it checks the keyless envelopes, which
+/// still rejects any plaintext.
+fn verify(root: &Path, seal: bool) -> Result<(), String> {
+    let mut snapshot = Snapshot::read(root)?;
+    if configless(&snapshot)? { return Ok(()); }
     let config = load_config(root)?;
     let key = Key::load(root, &config)?;
-    check_index(root, key.as_ref())?;
+    let head = commit_files(root, "HEAD")?;
+    if let Some(key) = key.as_ref().filter(|_| seal) {
+        // Sealing replaced index entries: check the index it left.
+        if seal_snapshot(root, key, &[], &snapshot, &head)? > 0 {
+            snapshot = Snapshot::read(root)?;
+        }
+    }
+    check_staged(root, &config, snapshot, &head, key.as_ref(), seal)?;
     if key.is_none() {
         eprintln!("transcrypt-v3: locked; checked staged record envelopes only");
     }
     Ok(())
 }
 
-/// The pre-commit hook. First encrypt what ordinary Git commands stage
-/// without the filter (`seal_staged`), then check the whole index.
+/// `verify-index`.
+pub(crate) fn verify_index_command(root: &Path) -> Result<(), String> {
+    verify(root, false)
+}
+
+/// The pre-commit hook.
 pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
-    if configless(root)? { return Ok(()); }
-    let config = load_config(root)?;
-    let key = Key::load(root, &config)?;
-    if let Some(key) = &key {
-        seal_staged(root, key, &[])?;
-    }
-    check_staged(root, key.as_ref(), true)?;
-    if key.is_none() {
-        eprintln!("transcrypt-v3: locked; checked staged record envelopes only");
-    }
+    verify(root, true)?;
     if let Some(file) = crate::setup::filter_overrides(root).first() {
         eprintln!("transcrypt-v3: warning: {file} sets `filter`, which can unprotect files that \
             .gitattributes protects; see `transcrypt-v3 doctor`");
@@ -254,38 +286,33 @@ pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
 /// files committed before they were protected). Returns how many entries
 /// were sealed.
 pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<usize, String> {
+    seal_snapshot(root, key, force, &Snapshot::read(root)?, &commit_files(root, "HEAD")?)
+}
+
+fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot, head: &[Staged])
+    -> Result<usize, String>
+{
     let incoming = incoming(root)?;
-    let listing = git(root, &["ls-files", "--stage", "-z"])?;
-    let entries = parse_listing(&listing)?;
-    let indexed: HashMap<Vec<u8>, String> = entries.iter().map(|e| (e.path.clone(), e.oid.clone())).collect();
-    let protected = staged_protected(root, entries)?;
-    let mut head_oid: HashMap<Vec<u8>, String> = HashMap::new();
-    let mut moved_from: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
-    for entry in head_files(root)? {
-        if indexed.get(&entry.path) != Some(&entry.oid) {
-            moved_from.entry(entry.oid.clone()).or_default().push(entry.path.clone());
-        }
-        head_oid.insert(entry.path, entry.oid);
-    }
+    let protected = snapshot.protected()?;
+    let head_oid: HashMap<&[u8], &str> = head.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
+    let moved_from = moved_from(head, &snapshot.entries);
     let mut index_info = Vec::new();
     let mut count = 0;
-    for staged in &protected {
-        let changed = head_oid.get(&staged.path) != Some(&staged.oid);
-        let committed = incoming.as_ref().is_none_or(|files| files.contains(&(staged.path.clone(), staged.oid.clone())));
+    for staged in protected {
+        let changed = head_oid.get(staged.path.as_slice()) != Some(&staged.oid.as_str());
+        // Changed since `HEAD`, and not by a commit being brought in.
+        let local_change = changed && incoming.as_ref()
+            .is_some_and(|files| !files.contains(&(staged.path.clone(), staged.oid.clone())));
         let forced = force.contains(&staged.path);
         // `seal_action` never repairs a non-local entry; skip decrypting it
         // here (`check_index` verifies it right after).
-        if !(changed && !committed) && !forced { continue; }
+        if !local_change && !forced { continue; }
         let record = git_blob(root, &staged.oid).map_err(|e| format!("{}: {e}", String::from_utf8_lossy(&staged.path)))?;
         let opens = key.open(&staged.path, &record).is_ok();
         let envelope = parse_file_header(&record).is_ok();
         // `protect` may force sealing plaintext, never re-encrypting a record.
-        let local = (changed && !committed) || (forced && !envelope);
-        let moved = if opens || !envelope { None } else {
-            moved_from.get(&staged.oid).map(Vec::as_slice).unwrap_or_default().iter()
-                .filter(|p| **p != staged.path)
-                .find_map(|p| key.open(p, &record).ok().map(|pt| (p, pt)))
-        };
+        let local = local_change || (forced && !envelope);
+        let moved = if opens || !envelope { None } else { open_moved(key, &moved_from, staged, &record) };
         let name = String::from_utf8_lossy(&staged.path).into_owned();
         // The verified core decides.
         let plaintext: Zeroizing<Vec<u8>> = match seal_action(opens, local, envelope, moved.is_some()) {
@@ -314,6 +341,26 @@ pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<u
     Ok(count)
 }
 
+/// `HEAD`'s paths whose index entry is gone or replaced, by blob: where a
+/// record moved by a local `git mv` came from.
+fn moved_from<'a>(head: &'a [Staged], entries: &[Staged]) -> HashMap<&'a str, Vec<&'a [u8]>> {
+    let indexed: HashMap<&[u8], &str> = entries.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
+    let mut moved: HashMap<&str, Vec<&[u8]>> = HashMap::new();
+    for entry in head.iter().filter(|e| indexed.get(e.path.as_slice()) != Some(&e.oid.as_str())) {
+        moved.entry(entry.oid.as_str()).or_default().push(entry.path.as_slice());
+    }
+    moved
+}
+
+/// The first path that `staged`'s blob was moved from and opens at, with
+/// its plaintext.
+fn open_moved<'a>(key: &Key, moved_from: &HashMap<&str, Vec<&'a [u8]>>, staged: &Staged, record: &[u8])
+    -> Option<(&'a [u8], Zeroizing<Vec<u8>>)>
+{
+    moved_from.get(staged.oid.as_str())?.iter().filter(|p| **p != staged.path.as_slice())
+        .find_map(|p| key.open(p, record).ok().map(|plaintext| (*p, plaintext)))
+}
+
 /// The plaintext of a staged protected record: opened at its own path, or,
 /// for a record moved there by a local `git mv`, at the `HEAD` path it came
 /// from (whose index entry is gone or replaced).
@@ -323,13 +370,9 @@ pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zer
         Ok(plaintext) => return Ok(plaintext),
         Err(e) => e,
     };
-    let indexed: HashMap<Vec<u8>, String> = indexed_files(root)?.into_iter().map(|e| (e.path, e.oid)).collect();
-    for entry in head_files(root)? {
-        if entry.oid == staged.oid && entry.path != staged.path && indexed.get(&entry.path) != Some(&entry.oid) {
-            if let Ok(plaintext) = key.open(&entry.path, &record) { return Ok(plaintext); }
-        }
-    }
-    Err(format!("{}: {error}", String::from_utf8_lossy(&staged.path)))
+    let head = commit_files(root, "HEAD")?;
+    open_moved(key, &moved_from(&head, &indexed_files(root)?), staged, &record).map(|(_, plaintext)| plaintext)
+        .ok_or_else(|| format!("{}: {error}", String::from_utf8_lossy(&staged.path)))
 }
 
 
@@ -479,14 +522,11 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
     };
     let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
     for other in other_worktrees(root)? {
-        let flushed = std::process::Command::new(&bin).arg("flush").current_dir(&other)
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()
-            .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?.success();
+        let (flushed, _) = run_in(&bin, &other, "flush")
+            .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?;
         // A worktree on another config cannot be flushed with this key; it
         // is fine if it holds no plaintext.
-        let encrypted = || std::process::Command::new(&bin).arg("check-encrypted").current_dir(&other)
-            .output().is_ok_and(|out| out.status.success());
-        if !flushed && !encrypted() {
+        if !flushed && !run_in(&bin, &other, "check-encrypted").is_ok_and(|(encrypted, _)| encrypted) {
             return Err(format!("worktree {} could not be locked (uncommitted changes, or plaintext under \
                 another config); the key is kept", other.display()));
         }
@@ -507,14 +547,23 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
 pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
     let bin = env::current_exe().map_err(|_| "cannot locate executable")?;
     for other in other_worktrees(root)? {
-        let out = std::process::Command::new(&bin).arg("check-encrypted").current_dir(&other).output()
+        let (encrypted, errors) = run_in(&bin, &other, "check-encrypted")
             .map_err(|e| format!("cannot check worktree {}: {e}", other.display()))?;
-        if !out.status.success() {
+        if !encrypted {
             return Err(format!("worktree {} still holds plaintext ({}); lock it there first",
-                other.display(), String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("transcrypt-v3: ")));
+                other.display(), String::from_utf8_lossy(&errors).trim().trim_start_matches("transcrypt-v3: ")));
         }
     }
     Ok(())
+}
+
+/// Run this executable's `command` in the worktree `dir`, bounded: whether
+/// it succeeded, and its error output.
+fn run_in(bin: &Path, dir: &Path, command: &str) -> Result<(bool, Vec<u8>), String> {
+    let mut child = std::process::Command::new(bin);
+    child.arg(command).current_dir(dir);
+    let (status, _, errors) = run_bounded_status(child, None, 1 << 20)?;
+    Ok((status.success(), errors))
 }
 
 /// The other worktrees of this repository (from `git worktree list`), that

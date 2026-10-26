@@ -6,12 +6,12 @@
 //! cached, unlike a textconv cache, which would keep plaintext in
 //! `refs/notes`.
 
-use std::{fs, path::Path, process::Command};
-use transcrypt_v3_core::record_envelope_ok;
+use std::{fs, io::{self, Write}, path::Path, process::Command};
+use transcrypt_v3_core::{record_envelope_ok, MAX_RECORD};
 use zeroize::Zeroizing;
 use crate::{
     credential::Key,
-    git::read_record,
+    git::{read_record, run_bounded_status},
     load_config,
     worktree::Scratch,
 };
@@ -41,11 +41,13 @@ pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], ne
     };
     let scratch = Scratch::create(root)?;
     let (a, b) = (scratch.write("a", &a)?, scratch.write("b", &b)?);
-    let status = Command::new("diff").args(["-u", "-L", &a_label, "-L", &b_label]).arg(&a).arg(&b)
-        .current_dir(root).status().map_err(|e| format!("cannot run diff: {e}"))?;
+    let mut command = Command::new("diff");
+    command.args(["-u", "-L", &a_label, "-L", &b_label]).arg(&a).arg(&b).current_dir(root);
+    // At most both inputs, each line once more for its marker.
+    let (status, output, _) = run_bounded_status(command, None, 4 * MAX_RECORD)?;
     drop(scratch);
     match status.code() {
-        Some(0 | 1) => Ok(()),
+        Some(0 | 1) => io::stdout().write_all(&output).map_err(|_| "cannot write the diff".into()),
         _ => Err("diff failed".into()),
     }
 }

@@ -204,6 +204,12 @@ pub(crate) fn git_blob_if_record_sized(root: &Path, oid: &str) -> Result<Option<
     read_blob(root, oid, true)
 }
 
+/// Whether blob `oid` has the v3 record envelope of the config `id` (a blob
+/// too large for any record has not, and is skipped unread).
+pub(crate) fn is_record(root: &Path, oid: &str, id: &[u8; transcrypt_v3_core::ID_LEN]) -> Result<bool, String> {
+    Ok(git_blob_if_record_sized(root, oid)?.is_some_and(|blob| transcrypt_v3_core::record_envelope_ok(&blob, id)))
+}
+
 fn read_blob(root: &Path, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
     if !is_object_id(oid.as_bytes()) {
         return Err("invalid Git object id".into());
@@ -576,10 +582,6 @@ pub(crate) fn protected_entries(root: &Path, entries: Vec<Staged>, from: Attribu
     Ok(entries.into_iter().zip(flags).filter(|(_, protected)| *protected).map(|(e, _)| e).collect())
 }
 
-/// The entries a commit adds or changes relative to `parent` (all of its
-/// entries for a root commit), from `diff-tree -r -z --raw` between the two
-/// trees, rewritten to the index-record shape and parsed by the verified
-/// core, and the paths it deletes with their old object ids.
 /// Paths with their old object ids: what a commit deletes, or changes.
 pub(crate) type Deleted = Vec<(Vec<u8>, String)>;
 
@@ -587,7 +589,12 @@ pub(crate) type Deleted = Vec<(Vec<u8>, String)>;
 /// object ids of modified paths.
 pub(crate) type Changes = (Vec<Staged>, Deleted, Deleted);
 
-pub(crate) fn changed_files(root: &Path, commit: &str, parent: &str) -> Result<Changes, String> {
+/// The entries a commit adds or changes relative to `parent` (all of its
+/// entries for a root commit), from `diff-tree -r -z --raw` between the two
+/// trees, rewritten to the index-record shape and parsed by the verified
+/// core, and the paths it deletes with their old object ids.
+pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Changes, String> {
+    let Some(parent) = parent else { return Ok((tree_files(root, commit)?, Vec::new(), Vec::new())) };
     let data = git(root, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
     parse_diff_tree(&data)
 }

@@ -160,10 +160,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     -> Result<(), String>
 {
     let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));
-    let (mut entries, deleted, modified) = match parent {
-        Some(ref parent) => changed_files(root, commit, parent)?,
-        None => (tree_files(root, commit)?, Vec::new(), Vec::new()),
-    };
+    let (mut entries, deleted, modified) = changed_files(root, commit, parent.as_deref())?;
     let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|(p, _)| test(p));
     let config_changed = parent.is_none() || touched(&|p| p == b".transcrypt/config");
     let attributes_changed = parent.is_none() || touched(&attribute_file);
@@ -198,18 +195,23 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     entries.retain(|e| !is_reserved_path(&e.path));
     let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
     let flags = state.policy.protected(root, &attributes, &paths)?;
-    let protected: Vec<&Staged> = entries.iter().zip(&flags).filter(|(_, p)| **p).map(|(e, _)| e).collect();
-    let unprotected = entries.iter().zip(&flags).filter(|(_, p)| !**p).map(|(e, _)| e);
+    let (mut protected, mut unprotected) = (Vec::new(), Vec::new());
+    for (entry, &flag) in entries.iter().zip(&flags) {
+        if flag { protected.push(entry) } else { unprotected.push(entry) }
+    }
+    // The first deleted path of each removed blob, and the old blob of each
+    // modified path.
+    let mut moved: HashMap<&str, &[u8]> = HashMap::new();
+    for (path, oid) in &deleted { moved.entry(oid.as_str()).or_insert(path.as_slice()); }
+    let old: HashMap<&[u8], &str> = modified.iter().map(|(p, oid)| (p.as_slice(), oid.as_str())).collect();
     // A record this commit moved from a deleted path to an unprotected one is
     // never decrypted there (`git mv x.env x.bak`, committed by any route).
-    let unprotected: Vec<&Staged> = unprotected.collect();
     let moved_away: Vec<(&Staged, &[u8])> = unprotected.iter()
-        .filter_map(|e| deleted.iter().find(|(_, oid)| *oid == e.oid).map(|(p, _)| (*e, p.as_slice())))
-        .collect();
+        .filter_map(|e| moved.get(e.oid.as_str()).map(|from| (*e, *from))).collect();
     // A file that was encrypted and is now handed to another named filter
     // (`git lfs track` writing `filter=lfs`) silently lost its protection.
-    let was_record: Vec<&Staged> = unprotected.iter().copied()
-        .filter(|e| modified.iter().any(|(p, _)| *p == e.path)).collect();
+    let was_record: Vec<(&Staged, &str)> = unprotected.iter()
+        .filter_map(|e| old.get(e.path.as_slice()).map(|oid| (*e, *oid))).collect();
     // While a v3 config exists, the policy must define the `transcrypt`
     // macro (checked when either changes).
     if config_oid.is_some() && (config_changed || attributes_changed) {
@@ -220,7 +222,6 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
         }
     }
     if config_oid.is_some() {
-        let paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
         // The policy index holds this commit's attributes (loaded above).
         if let Some(problem) = crate::git::marked_unfiltered(root, &paths, Attributes::Index(&state.policy.file))? {
             return Err(format!("commit {commit}: {problem}"));
@@ -229,9 +230,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     if protected.is_empty() && moved_away.is_empty() && was_record.is_empty() { return Ok(()); }
     if let Some(config_oid) = &config_oid {
         let id = transcrypt_v3::config_id(&git_blob(root, config_oid)?);
-        let is_record = |oid: &str| -> Result<bool, String> {
-            Ok(crate::git::git_blob_if_record_sized(root, oid)?.is_some_and(|b| record_envelope_ok(&b, &id)))
-        };
+        let is_record = |oid: &str| crate::git::is_record(root, oid, &id);
         for (entry, from) in moved_away {
             if is_record(&entry.oid)? {
                 return Err(format!("{}: the encrypted {} moved to this unprotected name without decryption; \
@@ -239,8 +238,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
             }
         }
         let mut drifted = Vec::new();
-        for entry in was_record {
-            let old = modified.iter().find(|(p, _)| *p == entry.path).map(|(_, oid)| oid.as_str()).unwrap_or_default();
+        for (entry, old) in was_record {
             if is_record(old)? && !is_record(&entry.oid)? { drifted.push(entry.path.as_slice()); }
         }
         let values = crate::git::filter_values(root, &drifted, Attributes::Index(&state.policy.file))?;
@@ -266,7 +264,6 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     let (_, id, key) = &state.configs[&config_oid];
     // A blob this commit removed from one path and added at another is a
     // record moved without re-encryption: it does not open at its new path.
-    let moved: HashMap<&str, &[u8]> = deleted.iter().map(|(p, oid)| (oid.as_str(), p.as_slice())).collect();
     for entry in protected {
         if !entry.regular {
             return Err(format!("{}: protected path is not a regular file", at(&entry.path)));
@@ -286,7 +283,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
         }
         state.records += 1;
     }
-    if key.is_none() { state.authenticated = false; }
+    state.authenticated &= key.is_some();
     Ok(())
 }
 

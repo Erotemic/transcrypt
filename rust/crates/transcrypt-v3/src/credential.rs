@@ -48,27 +48,16 @@ pub(crate) enum State {
 impl Key {
     /// The key for `config`, if this checkout is unlocked for it.
     pub(crate) fn load(root: &Path, config: &[u8]) -> Result<Option<Key>, String> {
-        if let Some((stored_config, key)) = read_stored(root)? {
-            if stored_config == config && authenticate_config(config, &key).is_ok() {
-                return Ok(Some(Key { root: root.to_owned(), config: config.to_vec(), stored: Some(key) }));
-            }
-            return Ok(None);
-        }
-        if session::request(root, config, Operation::Ping, &[], &[]).is_ok() {
-            return Ok(Some(Key { root: root.to_owned(), config: config.to_vec(), stored: None }));
-        }
-        Ok(None)
+        Ok(lookup(root, config)?.1)
     }
 
     /// Like `load`, but required: the error says how to unlock.
     pub(crate) fn require(root: &Path, config: &[u8]) -> Result<Key, String> {
-        match Key::load(root, config)? {
-            Some(key) => Ok(key),
-            None => Err(match state(root, config)? {
-                State::Stale => "the stored key does not match .transcrypt/config (it was rekeyed?); \
-                    run `transcrypt-v3 unlock` with the current passphrase".into(),
-                _ => "this checkout is locked; run `transcrypt-v3 unlock`".into(),
-            }),
+        match lookup(root, config)? {
+            (_, Some(key)) => Ok(key),
+            (State::Stale, None) => Err("the stored key does not match .transcrypt/config (it was rekeyed?); \
+                run `transcrypt-v3 unlock` with the current passphrase".into()),
+            _ => Err("this checkout is locked; run `transcrypt-v3 unlock`".into()),
         }
     }
 
@@ -111,17 +100,24 @@ impl Key {
 
 /// How this checkout is unlocked for `config`.
 pub(crate) fn state(root: &Path, config: &[u8]) -> Result<State, String> {
-    if let Some((stored_config, key)) = read_stored(root)? {
-        return Ok(if stored_config == config && authenticate_config(config, &key).is_ok() {
-            State::Unlocked { private: false }
+    Ok(lookup(root, config)?.0)
+}
+
+/// How this checkout is unlocked for `config`, with the key when it is.
+fn lookup(root: &Path, config: &[u8]) -> Result<(State, Option<Key>), String> {
+    let key = |stored| Some(Key { root: root.to_owned(), config: config.to_vec(), stored });
+    if let Some((stored_config, secret)) = read_stored(root)? {
+        return Ok(if stored_config == config && authenticate_config(config, &secret).is_ok() {
+            (State::Unlocked { private: false }, key(Some(secret)))
         } else {
-            State::Stale
+            (State::Stale, None)
         });
     }
-    if session::request(root, config, Operation::Ping, &[], &[]).is_ok() {
-        return Ok(State::Unlocked { private: true });
-    }
-    Ok(State::Locked)
+    Ok(if session::request(root, config, Operation::Ping, &[], &[]).is_ok() {
+        (State::Unlocked { private: true }, key(None))
+    } else {
+        (State::Locked, None)
+    })
 }
 
 /// The stored config and key, if there are any. A key file that is not a
