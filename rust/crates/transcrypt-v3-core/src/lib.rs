@@ -1,17 +1,46 @@
 #![no_std]
-//! Pure, dependency-free Transcrypt v3 wire grammar. Crypto lives in the adapter.
+//! Pure, dependency-free Transcrypt v3 wire grammar and protocol decisions.
+//! Crypto, Git and filesystem I/O live in the adapter (`transcrypt-v3`).
 //! No legacy format recognition, format guessing, or plaintext fallback.
+//!
+//! The whole crate is translated by Charon/Aeneas and proved in Lean
+//! (`proofs/aeneas/v3`). It is written in the subset that translates to
+//! readable, provable code:
+//!
+//! - loops are `while` loops over an explicit index, never iterators or
+//!   closures;
+//! - no early `return` from inside a nested loop (a single loop may return);
+//! - no `?` operator: errors are matched and returned explicitly;
+//! - record lengths are literal constants (see `CONFIG_LEN`).
+//!
+//! Proofs name the generated loops (`*_loop0`, `*_loop1`, ...) by their order
+//! inside each function, so reordering loops renames them.
 
+/// Version marker of the committed public configuration.
 pub const CONFIG_MAGIC: [u8; 7] = *b"TCFG3\0\x01";
+/// Version marker that starts every encrypted file record.
 pub const FILE_MAGIC: [u8; 6] = *b"TV3F\0\x01";
+/// Length of the public Argon2id salt.
 pub const SALT_LEN: usize = 32;
+/// Length of an AES-SIV synthetic IV (the authentication tag).
 pub const TAG_LEN: usize = 16;
+/// Length of the keyless configuration identifier in a file header.
 pub const ID_LEN: usize = 16;
+// The three record lengths below are written as literals on purpose: a
+// literal constant translates to a plain Lean value, whereas a computed one
+// (like `FILE_MIN_LEN`) becomes an overflow-checked computation every proof
+// must step through. The test `literal_lengths_are_the_field_sums` checks
+// the sums.
+/// Authenticated part of the configuration: magic and salt (39 = 7 + 32).
 pub const CONFIG_PREFIX_LEN: usize = 39;
+/// Complete configuration: prefix and tag (55 = 39 + 16).
 pub const CONFIG_LEN: usize = 55;
+/// File header: magic and configuration identifier (22 = 6 + 16).
 pub const FILE_HEADER_LEN: usize = 22;
+/// Shortest file record: the header and the tag of an empty plaintext.
 pub const FILE_MIN_LEN: usize = FILE_HEADER_LEN + TAG_LEN;
 
+/// Why a fixed-format record was rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormatError {
     Length,
@@ -56,11 +85,9 @@ pub fn encode_config(config: &Config) -> [u8; CONFIG_LEN] {
     out
 }
 
-/// Decode the fixed-size committed config record. This is the primary pure
-/// codec entrypoint for Charon/Aeneas: no dynamically-sized slice operations,
-/// filesystem state, allocation, or external cryptographic library calls.
-/// Authentication is a separate operation performed by the cryptographic
-/// adapter *after* this structural parse.
+/// Decode the fixed-size committed config record: check the magic and split
+/// out salt and tag. Authentication is a separate step
+/// (`authenticate_config`) performed *after* this structural parse.
 pub fn decode_config_exact(input: &[u8; CONFIG_LEN]) -> Result<Config, FormatError> {
     let mut i = 0;
     while i < CONFIG_MAGIC.len() {
@@ -85,8 +112,8 @@ pub fn decode_config_exact(input: &[u8; CONFIG_LEN]) -> Result<Config, FormatErr
 }
 
 /// Reject unknown versions, truncated/extended metadata and malformed magic.
-/// This public slice boundary delegates the content decision to the *same*
-/// fixed-size decoder targeted by formal refinement.
+/// This public slice boundary checks the length and delegates the content
+/// decision to `decode_config_exact`.
 pub fn parse_config(input: &[u8]) -> Result<Config, FormatError> {
     if input.len() != CONFIG_LEN {
         return Err(FormatError::Length);
@@ -115,10 +142,10 @@ pub fn encode_file_header(id: &[u8; ID_LEN]) -> [u8; FILE_HEADER_LEN] {
     out
 }
 
-/// Decode a fixed-width file header. This is the second pure refinement
-/// target; it is also used by the production slice-based parser below.
-/// The caller is responsible for checking that at least TAG_LEN body bytes
-/// follow the header and for authenticating the complete file record.
+/// Decode a fixed-width file header: check the magic and return the
+/// configuration identifier. `parse_file_header` additionally checks that at
+/// least `TAG_LEN` body bytes follow; authenticating the complete record is
+/// the caller's job.
 pub fn decode_file_header_exact(input: &[u8; FILE_HEADER_LEN]) -> Result<[u8; ID_LEN], FormatError> {
     let mut i = 0;
     while i < FILE_MAGIC.len() {
@@ -154,11 +181,10 @@ pub fn parse_file_header(input: &[u8]) -> Result<[u8; ID_LEN], FormatError> {
 // ---------------------------------------------------------------------------
 // Protocol decision core.
 //
-// Everything below is also extracted by Charon/Aeneas. The effectful adapter
-// (`transcrypt-v3`) supplies cryptographic primitives through `V3Primitives`
-// and performs Git/filesystem I/O; every *decision* about whether bytes may
-// be sealed, released, published or flushed is made here, so the adapter
-// cannot skip a gate. Loops are plain bounded `while` loops for extraction.
+// The effectful adapter (`transcrypt-v3`) supplies cryptographic primitives
+// through `V3Primitives` and performs Git/filesystem I/O; every *decision*
+// about whether bytes may be sealed, released, published or flushed is made
+// here, so the adapter cannot skip a gate.
 // ---------------------------------------------------------------------------
 
 /// Largest plaintext accepted by any v3 operation (16 MiB).
@@ -167,14 +193,19 @@ pub const MAX_FILE: usize = 16 * 1024 * 1024;
 pub const MAX_PATH: usize = 4096;
 /// Largest record or agent body: a maximal plaintext plus its envelope.
 pub const MAX_RECORD: usize = MAX_FILE + FILE_MIN_LEN;
-/// The Git attribute that selects protected files, and its value.
+/// The Git attribute that selects protected files.
 pub const FILTER_ATTR: [u8; 6] = *b"filter";
+/// The value of `FILTER_ATTR` that protects a file.
 pub const FILTER_DRIVER: [u8; 13] = *b"transcrypt-v3";
-/// Repository metadata that Git or v3 must read unencrypted: the committed
-/// configuration directory, attribute files and the submodule map.
+// Repository metadata that Git or v3 must read unencrypted
+// (`is_reserved_path`).
+/// The committed configuration directory (a path prefix).
 pub const METADATA_DIR: [u8; 12] = *b".transcrypt/";
+/// The top-level attribute file.
 pub const ATTRIBUTES_NAME: [u8; 14] = *b".gitattributes";
+/// An attribute file in any subdirectory (a path suffix).
 pub const ATTRIBUTES_SUFFIX: [u8; 15] = *b"/.gitattributes";
+/// The submodule map.
 pub const MODULES_NAME: [u8; 11] = *b".gitmodules";
 
 /// Every reason the protocol core refuses an operation.
@@ -247,6 +278,30 @@ pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
         i += 1;
     }
     true
+}
+
+/// Whether `bytes[at..]` starts with `expected`.
+fn matches_at(bytes: &[u8], at: usize, expected: &[u8]) -> bool {
+    if at > bytes.len() || bytes.len() - at < expected.len() {
+        return false;
+    }
+    let mut k = 0;
+    while k < expected.len() {
+        if bytes[at + k] != expected[k] {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
+/// The position of the first NUL in `bytes[from..]`, or `bytes.len()`.
+fn find_nul(bytes: &[u8], from: usize) -> usize {
+    let mut j = from;
+    while j < bytes.len() && bytes[j] != 0 {
+        j += 1;
+    }
+    j
 }
 
 /// Whether `bytes` ends with `suffix`.
@@ -568,30 +623,6 @@ pub fn parse_attr_response(request: &[u8], response: &[u8], flags: &mut [bool]) 
     ok && start == request.len() && i == flags.len() && at == response.len()
 }
 
-/// Whether `bytes[at..]` starts with `expected`.
-fn matches_at(bytes: &[u8], at: usize, expected: &[u8]) -> bool {
-    if at > bytes.len() || bytes.len() - at < expected.len() {
-        return false;
-    }
-    let mut k = 0;
-    while k < expected.len() {
-        if bytes[at + k] != expected[k] {
-            return false;
-        }
-        k += 1;
-    }
-    true
-}
-
-/// The position of the first NUL in `bytes[from..]`, or `bytes.len()`.
-fn find_nul(bytes: &[u8], from: usize) -> usize {
-    let mut j = from;
-    while j < bytes.len() && bytes[j] != 0 {
-        j += 1;
-    }
-    j
-}
-
 /// Length of a credential-agent request header: opcode, the 55-byte public
 /// config and the big-endian path length. The path and a big-endian body
 /// length follow (local IPC only, not part of the committed wire format).
@@ -641,6 +672,7 @@ pub fn encode_be_u32(x: u32) -> [u8; 4] {
     [(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8]
 }
 
+/// Inverse of `encode_be_u32`.
 pub fn decode_be_u32(b: &[u8; 4]) -> u32 {
     ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
 }
@@ -663,6 +695,8 @@ pub struct IndexEntry {
 /// The path, which becomes AES-SIV associated data, is everything after the
 /// *first* TAB (Git paths may themselves contain TABs; modes and object ids
 /// cannot). Unmerged entries (stage 1-3) and malformed records are refused.
+/// The object id `entry[7..path_start - 3]` is not inspected here: the
+/// adapter checks it with `is_object_id` before passing it to Git.
 pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
     let n = entry.len();
     let mut t = 0;
@@ -832,14 +866,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixed_decoders_are_the_actual_public_parser_path() {
+    fn literal_lengths_are_the_field_sums() {
+        assert_eq!(CONFIG_PREFIX_LEN, CONFIG_MAGIC.len() + SALT_LEN);
+        assert_eq!(CONFIG_LEN, CONFIG_PREFIX_LEN + TAG_LEN);
+        assert_eq!(FILE_HEADER_LEN, FILE_MAGIC.len() + ID_LEN);
+    }
+
+    #[test]
+    fn config_codec_roundtrip_strict_length_and_magic() {
         let salt = core::array::from_fn(|i| i as u8);
         let tag = core::array::from_fn(|i| (255 - i) as u8);
         let config = Config { salt, tag };
         let bytes = encode_config(&config);
         assert_eq!(decode_config_exact(&bytes), Ok(config));
-        assert_eq!(parse_config(&bytes), decode_config_exact(&bytes));
-        // Each byte of either version marker must be enforced, with no
+        assert_eq!(parse_config(&bytes), Ok(config));
+        for n in 0..CONFIG_LEN {
+            assert_eq!(parse_config(&bytes[..n]), Err(FormatError::Length));
+        }
+        let mut extended = bytes.to_vec();
+        extended.push(1);
+        assert_eq!(parse_config(&extended), Err(FormatError::Length));
+        // Each byte of the version marker must be enforced, with no
         // exceptions for offsets 5 or 6 and no fallback to older formats.
         for pos in 0..CONFIG_MAGIC.len() {
             let mut modified = bytes;
@@ -847,13 +894,22 @@ mod tests {
             assert_eq!(decode_config_exact(&modified), Err(FormatError::Magic));
             assert_eq!(parse_config(&modified), Err(FormatError::Magic));
         }
+    }
+
+    #[test]
+    fn file_header_codec_roundtrip_strict_length_and_magic() {
         let id = core::array::from_fn(|i| (i * 11) as u8);
         let header = encode_file_header(&id);
         assert_eq!(decode_file_header_exact(&header), Ok(id));
         for n in [FILE_MIN_LEN, FILE_MIN_LEN + 1, FILE_MIN_LEN + 255] {
             let mut blob = header.to_vec();
             blob.resize(n, 0x7f);
-            assert_eq!(parse_file_header(&blob), decode_file_header_exact(&header));
+            assert_eq!(parse_file_header(&blob), Ok(id));
+        }
+        let mut record = header.to_vec();
+        record.extend_from_slice(&[0x66; TAG_LEN]);
+        for n in 0..FILE_MIN_LEN {
+            assert_eq!(parse_file_header(&record[..n]), Err(FormatError::Length));
         }
         for pos in 0..FILE_MAGIC.len() {
             let mut modified = header;
@@ -863,35 +919,6 @@ mod tests {
             blob.extend_from_slice(&[0u8; TAG_LEN]);
             assert_eq!(parse_file_header(&blob), Err(FormatError::Magic));
         }
-    }
-
-    #[test]
-    fn config_roundtrip_and_strict_length() {
-        let config = Config { salt: [0x5a; SALT_LEN], tag: [0x81; TAG_LEN] };
-        let bytes = encode_config(&config);
-        assert_eq!(parse_config(&bytes), Ok(config));
-        for n in 0..CONFIG_LEN {
-            assert!(parse_config(&bytes[..n]).is_err());
-        }
-        let mut bad = bytes.to_vec();
-        bad[0] = 0;
-        assert_eq!(parse_config(&bad), Err(FormatError::Magic));
-        bad = bytes.to_vec();
-        bad.push(1);
-        assert_eq!(parse_config(&bad), Err(FormatError::Length));
-    }
-
-    #[test]
-    fn file_header_roundtrip_and_strict_magic() {
-        let id = [0x41; ID_LEN];
-        let mut record = encode_file_header(&id).to_vec();
-        record.extend_from_slice(&[0x66; TAG_LEN]);
-        assert_eq!(parse_file_header(&record), Ok(id));
-        for n in 0..FILE_MIN_LEN {
-            assert_eq!(parse_file_header(&record[..n]), Err(FormatError::Length));
-        }
-        record[2] = 0;
-        assert_eq!(parse_file_header(&record), Err(FormatError::Magic));
     }
 
     /// A deterministic toy primitive: NOT cryptography. It exists only so the

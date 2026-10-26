@@ -22,7 +22,7 @@ set_option maxRecDepth 2048
 namespace transcrypt_v3_core
 
 /-- [transcrypt_v3_core::FormatError]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 16:0-19:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 45:0-48:1
     Visibility: public -/
 @[discriminant isize]
 inductive FormatError where
@@ -30,14 +30,14 @@ inductive FormatError where
 | Magic : FormatError
 
 /-- [transcrypt_v3_core::Config]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 23:0-26:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 52:0-55:1
     Visibility: public -/
 structure Config where
   salt : Array Std.U8 32#usize
   tag : Array Std.U8 16#usize
 
 /-- [transcrypt_v3_core::Refusal]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 182:0-212:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 213:0-243:1
     Visibility: public -/
 @[discriminant isize]
 inductive Refusal where
@@ -57,7 +57,7 @@ inductive Refusal where
 | Foreign : Refusal
 
 /-- Trait declaration: [transcrypt_v3_core::V3Primitives]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 219:0-235:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 250:0-266:1
     Visibility: public -/
 structure V3Primitives (Self : Type) where
   seal_config : Self → Array Std.U8 39#usize → Array Std.U8 16#usize →
@@ -71,7 +71,7 @@ structure V3Primitives (Self : Type) where
   config_id : Self → Array Std.U8 55#usize → RustM (Array Std.U8 16#usize)
 
 /-- [transcrypt_v3_core::HydrateAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 411:0-416:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 466:0-471:1
     Visibility: public -/
 @[discriminant isize]
 inductive HydrateAction where
@@ -79,7 +79,7 @@ inductive HydrateAction where
 | Keep : HydrateAction
 
 /-- [transcrypt_v3_core::LockAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 432:0-437:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 487:0-492:1
     Visibility: public -/
 @[discriminant isize]
 inductive LockAction where
@@ -87,7 +87,7 @@ inductive LockAction where
 | Flush : LockAction
 
 /-- [transcrypt_v3_core::AgentOp]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 457:0-462:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 512:0-517:1
     Visibility: public -/
 @[discriminant isize]
 inductive AgentOp where
@@ -97,14 +97,14 @@ inductive AgentOp where
 | Stop : AgentOp
 
 /-- [transcrypt_v3_core::AttrRecord]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 503:0-508:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 558:0-563:1
     Visibility: public -/
 structure AttrRecord where
   «protected» : Bool
   next : Std.Usize
 
 /-- [transcrypt_v3_core::FrameHeader]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 620:0-624:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 651:0-655:1
     Visibility: public -/
 structure FrameHeader where
   opcode : Std.U8
@@ -112,14 +112,14 @@ structure FrameHeader where
   path_len : Std.U32
 
 /-- [transcrypt_v3_core::IndexEntry]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 654:0-660:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 686:0-692:1
     Visibility: public -/
 structure IndexEntry where
   regular : Bool
   path_start : Std.Usize
 
 /-- [transcrypt_v3_core::SmudgeAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 734:0-740:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 768:0-774:1
     Visibility: public -/
 @[discriminant isize]
 inductive SmudgeAction where
@@ -127,7 +127,7 @@ inductive SmudgeAction where
 | Keep : SmudgeAction
 
 /-- [transcrypt_v3_core::SealAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 765:0-774:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 799:0-808:1
     Visibility: public -/
 @[discriminant isize]
 inductive SealAction where
