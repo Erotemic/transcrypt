@@ -22,10 +22,13 @@ use std::{
 };
 use zeroize::Zeroizing;
 use transcrypt_v3::{authenticate_config, clean_file, decrypt_file, SecretKey, KEY_SIZE};
-use transcrypt_v3_core::{CONFIG_LEN, ID_LEN};
+use transcrypt_v3_core::{stored_key_state, StoredKey, CONFIG_LEN, ID_LEN, KEY_FILE_LEN};
 use crate::{fsat, session::{self, Operation}};
 
 const KEY_FILE: &str = "key";
+const DAMAGED: &str = "damaged .git/transcrypt-v3/key; run `transcrypt-v3 unlock` again";
+// The verified decision's layout is this adapter's: the config, then the key.
+const _: () = assert!(KEY_FILE_LEN == CONFIG_LEN + KEY_SIZE && transcrypt_v3_core::KEY_LEN == KEY_SIZE);
 
 /// An unlocked key for one public configuration.
 pub(crate) struct Key {
@@ -65,9 +68,14 @@ impl Key {
     /// worktree's config is now (during a checkout, Git may write files
     /// before it writes `.transcrypt/config`).
     pub(crate) fn stored(root: &Path) -> Result<Option<Key>, String> {
-        let Some((config, key)) = read_stored(root)? else { return Ok(None) };
-        if authenticate_config(&config, &key).is_err() { return Ok(None); }
-        Ok(Some(Key { root: root.to_owned(), config, stored: Some(key) }))
+        let file = read_key_file(root)?;
+        let file = file.as_ref().map(|f| f.as_slice());
+        let stored_config = file.and_then(|f| f.get(..CONFIG_LEN)).unwrap_or_default();
+        match stored_lookup(file, stored_config) {
+            Ok(Some(secret)) => Ok(Some(Key { root: root.to_owned(), config: stored_config.to_vec(), stored: Some(secret) })),
+            Ok(None) | Err(StoredKey::Stale) => Ok(None),
+            Err(_) => Err(DAMAGED.into()),
+        }
     }
 
     /// The public identifier of this key's config (records name it).
@@ -106,12 +114,12 @@ pub(crate) fn state(root: &Path, config: &[u8]) -> Result<State, String> {
 /// How this checkout is unlocked for `config`, with the key when it is.
 pub(crate) fn lookup(root: &Path, config: &[u8]) -> Result<(State, Option<Key>), String> {
     let key = |stored| Some(Key { root: root.to_owned(), config: config.to_vec(), stored });
-    if let Some((stored_config, secret)) = read_stored(root)? {
-        return Ok(if stored_config == config && authenticate_config(config, &secret).is_ok() {
-            (State::Unlocked { private: false }, key(Some(secret)))
-        } else {
-            (State::Stale, None)
-        });
+    let file = read_key_file(root)?;
+    match stored_lookup(file.as_ref().map(|f| f.as_slice()), config) {
+        Ok(Some(secret)) => return Ok((State::Unlocked { private: false }, key(Some(secret)))),
+        Err(StoredKey::Stale) => return Ok((State::Stale, None)),
+        Err(_) => return Err(DAMAGED.into()),
+        Ok(None) => {},
     }
     Ok(if session::request(root, config, Operation::Ping, &[], &[]).is_ok() {
         (State::Unlocked { private: true }, key(None))
@@ -120,30 +128,40 @@ pub(crate) fn lookup(root: &Path, config: &[u8]) -> Result<(State, Option<Key>),
     })
 }
 
-/// The stored config and key, if there are any. A key file that is not a
-/// regular file of exactly that size, in the checked private directory, is
-/// an error.
-fn read_stored(root: &Path) -> Result<Option<(Vec<u8>, SecretKey)>, String> {
+/// The stored key for `config`, as the verified `stored_key_state` decides:
+/// `Ok(Some)` only if the file holds exactly `config` then a key that
+/// authenticates it; `Ok(None)` without a stored key (none, or one written
+/// by an earlier version: the key alone); `Err(Stale)` for a key of another
+/// config or one that does not authenticate it; `Err(Damaged)` otherwise.
+fn stored_lookup(file: Option<&[u8]>, config: &[u8]) -> Result<Option<SecretKey>, StoredKey> {
+    let bytes = file.unwrap_or_default();
+    // The key bytes, if the file has the stored layout (`config ‖ key`).
+    let secret: Option<SecretKey> = (bytes.len() == KEY_FILE_LEN).then(|| {
+        let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
+        key.copy_from_slice(&bytes[CONFIG_LEN..]);
+        key
+    });
+    let authentic = secret.as_ref().is_some_and(|key| authenticate_config(config, key).is_ok());
+    match stored_key_state(file.is_some(), bytes, config, authentic) {
+        StoredKey::Unlocked => Ok(secret),
+        StoredKey::Absent => Ok(None),
+        state => Err(state),
+    }
+}
+
+/// The bytes of the stored key file (at most one more than a valid file
+/// holds, in wiped memory), if there is one. A key file that is not a
+/// regular file in the checked private directory is an error.
+fn read_key_file(root: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let Some(dir) = session::existing_directory(root)? else { return Ok(None) };
     let dir = fsat::Dir::open(&dir).map_err(|_| "cannot open the local v3 credential directory")?;
-    let mut file = match dir.open_regular(OsStr::new(KEY_FILE)) {
+    let file = match dir.open_regular(OsStr::new(KEY_FILE)) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("unsafe .git/transcrypt-v3/key: expected a regular file".into()),
     };
-    // A key stored by an earlier version (the key alone, without its
-    // config) is not used: the checkout counts as locked until `unlock`
-    // replaces it.
-    if file.metadata().is_ok_and(|m| m.len() == KEY_SIZE as u64) { return Ok(None); }
-    let mut config = vec![0u8; CONFIG_LEN];
-    let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
-    let mut extra = [0u8; 1];
-    if file.read_exact(&mut config).is_err() || file.read_exact(&mut key[..]).is_err()
-        || !matches!(file.read(&mut extra), Ok(0))
-    {
-        return Err("damaged .git/transcrypt-v3/key; run `transcrypt-v3 unlock` again".into());
-    }
-    Ok(Some((config, key)))
+    crate::git::read_wiped(&mut file.take(KEY_FILE_LEN as u64 + 1), KEY_FILE_LEN + 1)
+        .map(Some).map_err(|_| "cannot read .git/transcrypt-v3/key".into())
 }
 
 /// Store `key`, with the public `config` it unlocks, for later commands: an

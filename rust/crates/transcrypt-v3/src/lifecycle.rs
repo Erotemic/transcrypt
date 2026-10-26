@@ -2,11 +2,12 @@
 //! hook, `hydrate`, and `lock` (`flush` per worktree). Every decision to
 //! publish, keep or replace bytes is made by the verified core.
 
-use std::{collections::{HashMap, HashSet}, env, fs, path::{Path, PathBuf}};
+use std::{collections::HashMap, env, fs, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    hydrate_action, is_reserved_path, lock_action, parse_file_header, record_envelope_ok, seal_action,
-    HydrateAction, LockAction, SealAction,
+    blob_elsewhere, first_unselectable, held_entries, hydrate_action, is_local_change, is_reserved_path,
+    lock_action, next_move_source, parse_file_header, record_envelope_ok, seal_action, HydrateAction,
+    LockAction, SealAction,
 };
 use crate::{
     credential::Key,
@@ -22,33 +23,50 @@ pub(crate) struct Verified {
     pub(crate) protected: Vec<Staged>,
 }
 
-/// One read of the index: its exact listing, its stage-0 entries and, for
-/// each, whether Git's staged attributes (what the next commit will say)
-/// protect it.
+/// One read of the index: its exact listing (`Listing`: bytes, record ends
+/// and entries) and, for each entry, whether Git's staged attributes (what the
+/// next commit will say) protect it.
 struct Snapshot {
-    listing: Vec<u8>,
-    entries: Vec<Staged>,
+    listing: Listing,
     flags: Vec<bool>,
 }
 
 impl Snapshot {
     fn read(root: &Path) -> Result<Snapshot, String> {
-        let listing = index_listing(root)?;
-        let entries = parse_listing(&listing)?;
-        Snapshot::of(root, listing, entries)
+        Snapshot::of(root, Listing::parse(index_listing(root)?)?)
     }
 
-    /// The snapshot of `listing`, already parsed to `entries`.
-    fn of(root: &Path, listing: Vec<u8>, entries: Vec<Staged>) -> Result<Snapshot, String> {
-        let flags = protected_flags(root, &paths_of(&entries), Attributes::Staged)?;
-        Ok(Snapshot { listing, entries, flags })
+    /// The snapshot of `listing`, with Git's answer for its own paths.
+    fn of(root: &Path, listing: Listing) -> Result<Snapshot, String> {
+        let flags = listing_flags(root, &listing, Attributes::Staged)?;
+        Ok(Snapshot { listing, flags })
     }
 
-    /// The protected entries, each `selectable`.
-    fn protected(&self) -> Result<Vec<&Staged>, String> {
-        self.entries.iter().zip(&self.flags).filter(|(_, p)| **p)
-            .map(|(e, _)| selectable(e).map(|()| e)).collect()
+    fn entries(&self) -> &[Staged] {
+        &self.listing.entries
     }
+
+    /// The positions of the protected entries, each `Selectable` (the
+    /// verified `first_unselectable` decides; `selectable` only words the
+    /// refusal).
+    fn protected(&self) -> Result<Vec<usize>, String> {
+        let first = first_unselectable(&self.listing.bytes, &self.listing.ends, &self.flags);
+        if let Some(entry) = self.listing.entries.get(first) {
+            selectable(entry)?;
+            return Err(format!("{} is selected for encryption but cannot be protected", entry.name()));
+        }
+        Ok((0..self.flags.len()).filter(|i| self.flags[*i]).collect())
+    }
+}
+
+/// For each entry of `index` that is `wanted`, whether `other` holds its blob
+/// at its path (the verified `held_entries`).
+fn held(index: &Listing, wanted: &[bool], other: &Listing) -> Result<Vec<bool>, String> {
+    let mut out = vec![false; index.entries.len()];
+    if !held_entries(&index.bytes, &index.ends, wanted, &other.bytes, &other.ends, &mut out) {
+        return Err("internal error: snapshot sizes differ".into());
+    }
+    Ok(out)
 }
 
 /// A protected entry must be a file Git filters, and not repository metadata.
@@ -85,7 +103,7 @@ pub(crate) fn staged_protected(root: &Path, entries: Vec<Staged>) -> Result<Vec<
 ///   would be committed where nothing ever decrypts it.
 pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, String> {
     let config = load_config(root)?;
-    check_staged(root, &config, Snapshot::read(root)?, &commit_files(root, "HEAD")?, key, false)
+    check_staged(root, &config, Snapshot::read(root)?, &commit_listing(root, "HEAD")?, key, false)
 }
 
 /// `check_index` of `snapshot`; with `incremental` (the pre-commit hook),
@@ -94,10 +112,10 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
 /// them again on every commit would prevent nothing (`HEAD^1` counts
 /// because `--amend` makes it the parent); `verify-index`, `hydrate`,
 /// `lock`, merge commits and the audit still authenticate everything.
-fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged], key: Option<&Key>, incremental: bool)
+fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, key: Option<&Key>, incremental: bool)
     -> Result<Verified, String>
 {
-    let (entries, flags) = (&snapshot.entries, &snapshot.flags);
+    let (entries, flags) = (snapshot.entries(), &snapshot.flags);
     match entries.iter().find(|e| e.path == b".transcrypt/config") {
         Some(e) if e.regular && git_blob(root, &e.oid)? == config => {},
         _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree \
@@ -113,18 +131,15 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
     // With `--amend` (and squash/fixup) the commit's parent is `HEAD^`; its
     // files count too, as they do for the audit, which compares with the
     // parent.
-    let parent = commit_files(root, "HEAD^1")?;
-    let (head_oid, parent_oid) = (oids_by_path(head), oids_by_path(&parent));
-    let unchanged = |e: &Staged| head_oid.get(e.path.as_slice()) == Some(&e.oid.as_str());
-    let settled = |e: &Staged| unchanged(e) && parent_oid.get(e.path.as_slice()) == Some(&e.oid.as_str());
-    // Every path of each blob, in `HEAD`, `HEAD^1` and the index.
-    let mut blob_paths: HashMap<&str, Vec<&[u8]>> = HashMap::new();
-    for entry in head.iter().chain(&parent).chain(entries) {
-        blob_paths.entry(entry.oid.as_str()).or_default().push(entry.path.as_slice());
-    }
+    let parent = commit_listing(root, "HEAD^1")?;
+    // Whether `HEAD` holds each entry's blob at its path, and (protected
+    // entries) `HEAD^1` too: the verified `held_entries`.
+    let in_head = held(&snapshot.listing, &vec![true; entries.len()], head)?;
+    let in_parent = held(&snapshot.listing, flags, &parent)?;
+    let (head_oid, parent_oid) = (oids_by_path(&head.entries), oids_by_path(&parent.entries));
     let protected = snapshot.protected()?;
-    let staged_unprotected: Vec<&Staged> = entries.iter().zip(flags)
-        .filter(|(e, p)| !**p && e.regular && !unchanged(e)).map(|(e, _)| e).collect();
+    let staged_unprotected: Vec<&Staged> = entries.iter().zip(flags).zip(&in_head)
+        .filter(|((e, p), unchanged)| !**p && e.regular && !**unchanged).map(|((e, _), _)| e).collect();
     let id = transcrypt_v3::config_id(config);
     let mut drifted: Vec<&[u8]> = Vec::new();
     for entry in staged_unprotected {
@@ -154,7 +169,10 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
             `transcrypt-v3 unprotect` the file deliberately", String::from_utf8_lossy(path),
             String::from_utf8_lossy(&value)));
     }
-    for staged in protected {
+    for i in protected {
+        let staged = &entries[i];
+        // Unchanged since `HEAD` and `HEAD^1`: already in history.
+        let settled = in_head[i] && in_parent[i];
         let record = git_blob(root, &staged.oid)?;
         let name = staged.name();
         match parse_file_header(&record) {
@@ -164,23 +182,26 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
                 (cherry-picked or rebased across a rekey?); run `transcrypt-v3 reencrypt` with that config's passphrase")),
             Ok(_) => {},
         }
-        match key.filter(|_| !incremental || !settled(staged)) {
+        match key.filter(|_| !incremental || !settled) {
             Some(key) => { key.open(&staged.path, &record).map_err(|e| format!("staged {name}: {e}; if it \
                 was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
             None if !record_envelope_ok(&record, &id) =>
                 return Err(format!("staged {name} is not v3 ciphertext for this repository")),
             // A copy already in history is reported where it was made.
-            None if settled(staged) => {},
-            None => if let Some(other) = blob_paths[staged.oid.as_str()].iter().find(|p| **p != staged.path.as_slice()) {
-                return Err(format!("staged {name} holds the encrypted {}: a renamed or copied protected \
-                    file must be committed while unlocked, which re-encrypts it for its new name",
-                    String::from_utf8_lossy(other)));
+            None if settled => {},
+            None => if blob_elsewhere(&snapshot.listing.bytes, &snapshot.listing.ends, i, &head.bytes, &head.ends,
+                &parent.bytes, &parent.ends)
+            {
+                let other = head.entries.iter().chain(&parent.entries).chain(entries)
+                    .find(|e| e.oid == staged.oid && e.path != staged.path).map(Staged::name).unwrap_or_default();
+                return Err(format!("staged {name} holds the encrypted {other}: a renamed or copied protected \
+                    file must be committed while unlocked, which re-encrypts it for its new name"));
             },
         }
     }
-    let Snapshot { listing, entries, flags } = snapshot;
-    let protected = entries.into_iter().zip(flags).filter(|(_, p)| *p).map(|(e, _)| e).collect();
-    Ok(Verified { listing, protected })
+    let Snapshot { listing, flags } = snapshot;
+    let protected = listing.entries.into_iter().zip(flags).filter(|(_, p)| *p).map(|(e, _)| e).collect();
+    Ok(Verified { listing: listing.bytes, protected })
 }
 
 /// Each entry's object id, by path.
@@ -191,20 +212,22 @@ fn oids_by_path(entries: &[Staged]) -> HashMap<&[u8], &str> {
 /// The files of commit `rev`; none when there is no such commit (`HEAD`
 /// before the first commit, `HEAD^1` of a root commit).
 pub(crate) fn commit_files(root: &Path, rev: &str) -> Result<Vec<Staged>, String> {
-    if git(root, &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]).is_err() {
-        return Ok(Vec::new());
-    }
-    tree_files(root, rev)
+    Ok(commit_listing(root, rev)?.entries)
 }
 
-/// Files as (path, object id) pairs.
-type Files = HashSet<(Vec<u8>, String)>;
+/// `commit_files`, as a `Listing`.
+pub(crate) fn commit_listing(root: &Path, rev: &str) -> Result<Listing, String> {
+    if git(root, &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]).is_err() {
+        return Ok(Listing::empty());
+    }
+    tree_listing(root, rev)
+}
 
 /// Every (path, blob) of the commits a merge, cherry-pick, revert or rebase
-/// is bringing in: index content equal to one of them came from a commit and
-/// is checked, never repaired. `None` when a rebase or `git am` is in
-/// progress without a known commit: then nothing is repaired.
-fn incoming(root: &Path) -> Result<Option<Files>, String> {
+/// is bringing in, as one listing: index content equal to one of them came
+/// from a commit and is checked, never repaired. `None` when a rebase or
+/// `git am` is in progress without a known commit: then nothing is repaired.
+fn incoming(root: &Path) -> Result<Option<Listing>, String> {
     let mut commits: Vec<String> = fs::read_to_string(git_dir(root).join("MERGE_HEAD")).unwrap_or_default()
         .lines().map(str::to_owned).collect();
     for name in ["CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD"] {
@@ -216,22 +239,22 @@ fn incoming(root: &Path) -> Result<Option<Files>, String> {
     if commits.is_empty() && ["rebase-merge", "rebase-apply"].iter().any(|dir| git_dir(root).join(dir).exists()) {
         return Ok(None);
     }
-    let mut files = HashSet::new();
+    let mut bytes = Vec::new();
     for commit in commits {
-        files.extend(tree_files(root, &commit)?.into_iter().map(|e| (e.path, e.oid)));
+        bytes.extend(tree_listing_bytes(root, &["ls-tree", "-r", "-z", "--full-tree", &commit])?);
     }
-    Ok(Some(files))
+    Ok(Some(Listing::parse(bytes)?))
 }
 
 /// A commit without `.transcrypt/config` (a branch from before `init`):
 /// the hooks accept exactly what the audit does, which is anything that
 /// protects no file. Returns whether the index is such a commit.
 fn configless(snapshot: &Snapshot) -> Result<bool, String> {
-    if snapshot.entries.iter().any(|e| e.path == b".transcrypt/config") { return Ok(false); }
-    if let Some(entry) = snapshot.protected()?.first() {
+    if snapshot.entries().iter().any(|e| e.path == b".transcrypt/config") { return Ok(false); }
+    if let Some(&first) = snapshot.protected()?.first() {
         return Err(format!("{} is protected, but this commit has no .transcrypt/config: it would be \
             stored unencrypted; check out .transcrypt/ from a branch that uses v3",
-            entry.name()));
+            snapshot.entries()[first].name()));
     }
     Ok(true)
 }
@@ -245,7 +268,7 @@ fn verify(root: &Path, seal: bool) -> Result<(), String> {
     if configless(&snapshot)? { return Ok(()); }
     let config = load_config(root)?;
     let key = Key::load(root, &config)?;
-    let head = commit_files(root, "HEAD")?;
+    let head = commit_listing(root, "HEAD")?;
     if let Some(key) = key.as_ref().filter(|_| seal) {
         // Sealing replaced index entries: check the index it left.
         if seal_snapshot(root, key, &[], &snapshot, &head)? > 0 {
@@ -295,25 +318,31 @@ pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
 /// files committed before they were protected). Returns how many entries
 /// were sealed.
 pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<usize, String> {
-    seal_snapshot(root, key, force, &Snapshot::read(root)?, &commit_files(root, "HEAD")?)
+    seal_snapshot(root, key, force, &Snapshot::read(root)?, &commit_listing(root, "HEAD")?)
 }
 
-fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot, head: &[Staged])
+fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot, head: &Listing)
     -> Result<usize, String>
 {
     let protected = snapshot.protected()?;
-    let head_oid = oids_by_path(head);
-    let changed = |e: &Staged| head_oid.get(e.path.as_slice()) != Some(&e.oid.as_str());
+    // The decision's inputs are verified functions of the snapshots:
+    // whether `HEAD` and the incoming commits hold each protected entry
+    // (`held_entries`), local changes (`is_local_change`) and move sources
+    // (`next_move_source`).
+    let in_head = held(&snapshot.listing, &snapshot.flags, head)?;
     // Only a changed entry can be a local change: skip looking for commits
     // being brought in (three Git commands) on most commits.
-    let incoming = if protected.iter().any(|e| changed(e)) { incoming(root)? } else { None };
-    let moved_from = moved_from(head, &snapshot.entries);
+    let incoming = if protected.iter().any(|i| !in_head[*i]) { incoming(root)? } else { None };
+    let in_incoming = match &incoming {
+        Some(files) => held(&snapshot.listing, &snapshot.flags, files)?,
+        None => vec![false; snapshot.flags.len()],
+    };
     let mut index_info = Vec::new();
     let mut count = 0;
-    for staged in protected {
+    for i in protected {
+        let staged = &snapshot.entries()[i];
         // Changed since `HEAD`, and not by a commit being brought in.
-        let local_change = changed(staged) && incoming.as_ref()
-            .is_some_and(|files| !files.contains(&(staged.path.clone(), staged.oid.clone())));
+        let local_change = is_local_change(in_head[i], incoming.is_some(), in_incoming[i], false, true);
         let forced = force.contains(&staged.path);
         // `seal_action` never repairs a non-local entry; skip decrypting it
         // here (`check_index` verifies it right after).
@@ -322,8 +351,8 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
         let opens = key.open(&staged.path, &record).is_ok();
         let envelope = parse_file_header(&record).is_ok();
         // `protect` may force sealing plaintext, never re-encrypting a record.
-        let local = local_change || (forced && !envelope);
-        let moved = if opens || !envelope { None } else { open_moved(key, &moved_from, staged, &record) };
+        let local = is_local_change(in_head[i], incoming.is_some(), in_incoming[i], forced, envelope);
+        let moved = if opens || !envelope { None } else { open_moved(key, &snapshot.listing, i, head, &record) };
         let name = staged.name().into_owned();
         // The verified core decides.
         let plaintext: Zeroizing<Vec<u8>> = match seal_action(opens, local, envelope, moved.is_some()) {
@@ -348,24 +377,21 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
     Ok(count)
 }
 
-/// `HEAD`'s paths whose index entry is gone or replaced, by blob: where a
-/// record moved by a local `git mv` came from.
-fn moved_from<'a>(head: &'a [Staged], entries: &[Staged]) -> HashMap<&'a str, Vec<&'a [u8]>> {
-    let indexed = oids_by_path(entries);
-    let mut moved: HashMap<&str, Vec<&[u8]>> = HashMap::new();
-    for entry in head.iter().filter(|e| indexed.get(e.path.as_slice()) != Some(&e.oid.as_str())) {
-        moved.entry(entry.oid.as_str()).or_default().push(entry.path.as_slice());
-    }
-    moved
-}
-
-/// The first path that `staged`'s blob was moved from and opens at, with
-/// its plaintext.
-fn open_moved<'a>(key: &Key, moved_from: &HashMap<&str, Vec<&'a [u8]>>, staged: &Staged, record: &[u8])
+/// The first `HEAD` path that entry `i` of `index` may have been moved from
+/// (the verified `next_move_source`: the same blob at another path, whose
+/// own entry has left the index, in `HEAD` order) and at which `record`
+/// opens, with its plaintext.
+fn open_moved<'a>(key: &Key, index: &Listing, i: usize, head: &'a Listing, record: &[u8])
     -> Option<(&'a [u8], Zeroizing<Vec<u8>>)>
 {
-    moved_from.get(staged.oid.as_str())?.iter().filter(|p| **p != staged.path.as_slice())
-        .find_map(|p| key.open(p, record).ok().map(|plaintext| (*p, plaintext)))
+    let mut j = next_move_source(&index.bytes, &index.ends, i, &head.bytes, &head.ends, 0);
+    while let Some(source) = head.entries.get(j) {
+        if let Ok(plaintext) = key.open(&source.path, record) {
+            return Some((&source.path, plaintext));
+        }
+        j = next_move_source(&index.bytes, &index.ends, i, &head.bytes, &head.ends, j + 1);
+    }
+    None
 }
 
 /// The plaintext of a staged protected record: opened at its own path, or,
@@ -377,8 +403,10 @@ pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zer
         Ok(plaintext) => return Ok(plaintext),
         Err(e) => e,
     };
-    let head = commit_files(root, "HEAD")?;
-    open_moved(key, &moved_from(&head, &indexed_files(root)?), staged, &record).map(|(_, plaintext)| plaintext)
+    let index = Listing::parse(index_listing(root)?)?;
+    let head = commit_listing(root, "HEAD")?;
+    index.entries.iter().position(|e| e.path == staged.path && e.oid == staged.oid)
+        .and_then(|i| open_moved(key, &index, i, &head, &record)).map(|(_, plaintext)| plaintext)
         .ok_or_else(|| format!("{}: {error}", staged.name()))
 }
 
@@ -426,8 +454,8 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
     let protected: Vec<Staged> = if conflicted.is_empty() {
         // Authenticate ALL staged protected objects and the staged config
         // before exposing any plaintext in the checkout.
-        let snapshot = Snapshot::of(root, index.listing.clone(), index.merged)?;
-        check_staged(root, &config, snapshot, &commit_files(root, "HEAD")?, Some(&key), false)?.protected
+        let snapshot = Snapshot::of(root, Listing::parse(index.listing.clone())?)?;
+        check_staged(root, &config, snapshot, &commit_listing(root, "HEAD")?, Some(&key), false)?.protected
     } else {
         // A merge is in progress: the stages of an unmerged path are the
         // merge's inputs, not a snapshot to verify. Plaintext published here

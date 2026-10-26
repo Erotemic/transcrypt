@@ -9,7 +9,8 @@ use std::{
 use std::os::unix::ffi::OsStrExt;
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    is_object_id, parse_attr_response, parse_index_entry, MAX_RECORD,
+    blob_read, is_object_id, listing_fields, parse_attr_response, parse_batch_header, parse_index_entry,
+    parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, MAX_RECORD,
 };
 
 /// The most any Git subprocess may print to us. Listings of a hostile index
@@ -263,20 +264,24 @@ impl Objects {
         let mut header = Vec::new();
         (&mut self.output).take(160).read_until(b'\n', &mut header)
             .map_err(|_| "cannot read git cat-file reply")?;
-        let size = batch_blob_size(&header, oid)
+        // The verified core checks the header and decides what to read.
+        let size = parse_batch_header(&header, oid.as_bytes())
             .ok_or_else(|| format!("Git object {oid} is missing or not a blob"))?;
-        if size > MAX_RECORD {
-            if !skip_large {
-                return Err(TOO_LARGE.into());
-            }
-            // Skip the content (and its LF) without keeping it.
-            let skipped = io::copy(&mut (&mut self.output).take(size as u64 + 1), &mut io::sink())
-                .map_err(|_| "truncated git cat-file reply")?;
-            if skipped != size as u64 + 1 {
-                return Err("truncated git cat-file reply".into());
-            }
-            return Ok(None);
+        match blob_read(size, skip_large) {
+            BlobRead::Read => {},
+            BlobRead::TooLarge => return Err(TOO_LARGE.into()),
+            BlobRead::Skip => {
+                // Skip the content (and its LF) without keeping it.
+                let skipped = io::copy(&mut (&mut self.output).take(size.saturating_add(1)), &mut io::sink())
+                    .map_err(|_| "truncated git cat-file reply")?;
+                if skipped != size.saturating_add(1) {
+                    return Err("truncated git cat-file reply".into());
+                }
+                return Ok(None);
+            },
         }
+        // `blob_read` decided `Read`, so `size` is at most `MAX_RECORD`.
+        let size = usize::try_from(size).map_err(|_| TOO_LARGE)?;
         let mut data = vec![0u8; size + 1];
         self.output.read_exact(&mut data).map_err(|_| "truncated git cat-file reply")?;
         if data.pop() != Some(b'\n') {
@@ -284,18 +289,6 @@ impl Objects {
         }
         Ok(Some(data))
     }
-}
-
-/// The size in a `cat-file --batch` reply header, which must be exactly
-/// `<oid> blob <size> LF` with `<size>` in canonical decimal (checked by
-/// re-serializing it).
-fn batch_blob_size(header: &[u8], oid: &str) -> Option<usize> {
-    header.strip_prefix(oid.as_bytes())
-        .and_then(|rest| rest.strip_prefix(b" blob "))
-        .and_then(|rest| rest.strip_suffix(b"\n"))
-        .and_then(|digits| std::str::from_utf8(digits).ok())
-        .and_then(|digits| digits.parse::<usize>().ok())
-        .filter(|size| header == format!("{oid} blob {size}\n").as_bytes())
 }
 
 impl Drop for Objects {
@@ -334,16 +327,47 @@ pub(crate) fn is_attributes_file(path: &[u8]) -> bool {
     path == b".gitattributes" || path.ends_with(b"/.gitattributes")
 }
 
-/// Parse NUL-separated `<mode> SP <oid> SP 0 TAB <path>` records, with paths
-/// as raw bytes. Each record is parsed by the verified core
-/// (`parse_index_entry`): the flag says whether the mode is exactly 100644,
-/// and the path is everything after the first TAB. Its specification fixes
-/// the record as `mode(6) SP oid SP "0" TAB path`, so the object id is
-/// `entry[7..path_start - 3]` (Lean `indexRecord_oid`), which must also pass
-/// `is_object_id`.
-/// Unmerged and malformed records are refused.
+/// One snapshot of the index or of a commit's tree: the exact listing (Git's
+/// `ls-files --stage -z`, or `ls-tree -r -z` rewritten to the same records),
+/// where each record ends, and its entries. The verified core checks the
+/// whole listing (`parse_listing`: NUL-terminated stage-0 records with object
+/// ids, nothing else) and delimits each entry's fields (`listing_fields`);
+/// the pre-commit decisions are verified functions of `bytes` and `ends`.
+pub(crate) struct Listing {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) ends: Vec<usize>,
+    pub(crate) entries: Vec<Staged>,
+}
+
+impl Listing {
+    pub(crate) fn parse(bytes: Vec<u8>) -> Result<Listing, String> {
+        // One slot per NUL; the core refuses unless that is exactly the
+        // number of records.
+        let mut ends = vec![0; bytes.iter().filter(|b| **b == 0).count()];
+        if !parse_listing_ends(&bytes, &mut ends) {
+            return Err("malformed or unmerged Git index entry; resolve conflicts first".into());
+        }
+        let entries = (0..ends.len()).map(|i| {
+            let f = listing_fields(&bytes, &ends, i).ok_or("malformed Git listing")?;
+            Ok(Staged {
+                regular: f.regular,
+                mode: String::from_utf8_lossy(&bytes[f.start..f.start + 6]).into_owned(),
+                oid: String::from_utf8(bytes[f.start + 7..f.oid_end].to_vec()).map_err(|_| "malformed Git object id")?,
+                path: bytes[f.path_start..f.end].to_vec(),
+            })
+        }).collect::<Result<_, String>>()?;
+        Ok(Listing { bytes, ends, entries })
+    }
+
+    /// The listing of no entries.
+    pub(crate) fn empty() -> Listing {
+        Listing { bytes: Vec::new(), ends: Vec::new(), entries: Vec::new() }
+    }
+}
+
+/// The entries of an index listing (`Listing::parse`).
 pub(crate) fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
-    complete_records(data)?.map(parse_entry).collect()
+    Ok(Listing::parse(data.to_vec())?.entries)
 }
 
 /// The non-empty NUL-separated records of Git `-z` output.
@@ -383,14 +407,29 @@ fn parse_entry(entry: &[u8]) -> Result<Staged, String> {
 /// The blobs of a commit's tree. `ls-tree -r -z` prints `<mode> SP <type> SP
 /// <oid> TAB <path>` (every Git version; `--format` needs 2.36); each record
 /// is rewritten as `<mode> SP <oid> SP 0 TAB <path>`, with the path copied
-/// verbatim, and then parsed and checked by the verified core exactly like an
-/// index record.
+/// verbatim, and the listing is then parsed and checked by the verified core
+/// exactly like an index listing.
 pub(crate) fn tree_files(root: &Path, commit: &str) -> Result<Vec<Staged>, String> {
-    ls_tree(root, &["ls-tree", "-r", "-z", "--full-tree", commit])
+    Ok(tree_listing(root, commit)?.entries)
+}
+
+/// `tree_files`, as a `Listing`.
+pub(crate) fn tree_listing(root: &Path, commit: &str) -> Result<Listing, String> {
+    Listing::parse(tree_listing_bytes(root, &["ls-tree", "-r", "-z", "--full-tree", commit])?)
+}
+
+/// An `ls-tree -z` listing rewritten to index records (`tree_record`).
+pub(crate) fn tree_listing_bytes(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    for entry in records(&git(root, arguments)?) {
+        bytes.extend_from_slice(&tree_record(entry)?);
+        bytes.push(0);
+    }
+    Ok(bytes)
 }
 
 fn ls_tree(root: &Path, arguments: &[&str]) -> Result<Vec<Staged>, String> {
-    records(&git(root, arguments)?).map(|entry| parse_entry(&tree_record(entry)?)).collect()
+    Ok(Listing::parse(tree_listing_bytes(root, arguments)?)?.entries)
 }
 
 /// Rewrite one `ls-tree` record as `<mode> SP <oid> SP 0 TAB <path>`.
@@ -535,6 +574,20 @@ pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) ->
     let (request, response) = check_attr(root, paths, from, &["filter"])?;
     let mut flags = vec![false; paths.len()];
     if !parse_attr_response(&request, &response, &mut flags) {
+        return Err("unexpected git check-attr output".into());
+    }
+    Ok(flags)
+}
+
+/// For each entry of `listing`, whether Git's effective `filter` attribute
+/// is `transcrypt-v3`. Git's answer is parsed by the verified core against
+/// the listing's own paths (`parse_listing_attrs_spec`): one record per
+/// entry, in order, naming exactly that entry's path, and nothing else.
+pub(crate) fn listing_flags(root: &Path, listing: &Listing, from: Attributes) -> Result<Vec<bool>, String> {
+    if listing.entries.is_empty() { return Ok(Vec::new()); }
+    let (_, response) = check_attr(root, &paths_of(&listing.entries), from, &["filter"])?;
+    let mut flags = vec![false; listing.entries.len()];
+    if !parse_listing_attrs(&listing.bytes, &listing.ends, &response, &mut flags) {
         return Err("unexpected git check-attr output".into());
     }
     Ok(flags)
@@ -752,7 +805,7 @@ mod tests {
                 }
             }
             let header = [oid.as_bytes(), b" blob ", input.as_slice()].concat();
-            if let Some(size) = batch_blob_size(&header, oid) {
+            if let Some(size) = parse_batch_header(&header, oid.as_bytes()) {
                 assert_eq!(header, format!("{oid} blob {size}\n").as_bytes());
             }
         }
@@ -761,10 +814,10 @@ mod tests {
         assert_eq!((tree[0].regular, tree[0].oid.as_str(), tree[0].path.as_slice()), (true, oid, &b"dir/a b.secret"[..]));
         let (diff, _, _) = parse_diff_tree(&valid_diff).unwrap();
         assert_eq!((diff[0].regular, diff[0].oid.as_str(), diff[0].path.as_slice()), (true, oid, &b"dir/a\tb.secret"[..]));
-        assert_eq!(batch_blob_size(format!("{oid} blob 12\n").as_bytes(), oid), Some(12));
+        assert_eq!(parse_batch_header(format!("{oid} blob 12\n").as_bytes(), oid.as_bytes()), Some(12));
         for bad in ["blob 12\n", " blob 012\n", " blob +12\n", " blob 12", " tree 12\n", " missing\n"] {
             let header = if bad.starts_with(' ') { format!("{oid}{bad}") } else { bad.to_owned() };
-            assert_eq!(batch_blob_size(header.as_bytes(), oid), None, "{bad:?}");
+            assert_eq!(parse_batch_header(header.as_bytes(), oid.as_bytes()), None, "{bad:?}");
         }
         let (kept, deleted, _) = parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap();
         assert!(kept.is_empty() && deleted == [(b"gone.secret".to_vec(), oid.to_owned())]);
