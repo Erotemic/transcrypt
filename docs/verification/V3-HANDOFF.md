@@ -102,6 +102,7 @@ python3 tests/v3/reference/differential.py          # same venv
 python3 -m unittest discover -s proofs/aeneas/tests -p 'test_v3_*.py'
 bash proofs/aeneas/build-v3-tracked.sh
 bash proofs/aeneas/check-v3-axioms.sh
+scripts/build-release.sh --test   # static Linux x86_64/arm64 archives in dist/ (docs/RELEASING.md)
 ```
 
 When the core changes: `bash proofs/aeneas/translate-v3-core.sh`, then

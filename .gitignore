@@ -36,3 +36,4 @@ htmlcov/
 
 # Lake writes a dependency-free manifest for the standalone spec project.
 /proofs/lean/lake-manifest.json
+dist/

@@ -164,6 +164,8 @@ fn help_and_status_report_state_without_changing_anything() {
     let mut scratch = Scratch::new("status");
     let help = String::from_utf8(run(&scratch.root, bin(), &["help"], None)).unwrap();
     assert!(help.contains("transcrypt-v3 unlock") && help.contains("transcrypt-v3 protect PATTERN"));
+    let version = String::from_utf8(run(&scratch.root, bin(), &["--version"], None)).unwrap();
+    assert!(version.starts_with(&format!("transcrypt-v3 {}", env!("CARGO_PKG_VERSION"))), "{version}");
     let repo = scratch.repo("repo");
     let text = |repo: &Path| String::from_utf8(run(repo, bin(), &["status"], None)).unwrap();
     let unlocked = text(&repo);

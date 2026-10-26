@@ -1,0 +1,64 @@
+name: Release
+
+# Static Linux binaries of transcrypt-v3 for x86_64 and arm64. Each runner
+# builds both archives with scripts/build-release.sh (the same script used
+# without CI) and tests its native one; the two runners' builds should be
+# byte-identical (a difference is reported). A `v3-*` tag publishes a draft
+# release of the x86_64 runner's archives; a manual run only builds and tests.
+on:
+  push:
+    tags: ["v3-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build both archives and test the native one
+        run: scripts/build-release.sh --test --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.runner }}
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Compare the builds of the two runners
+        run: |
+          (cd dist-ubuntu-24.04 && sha256sum -c SHA256SUMS)
+          if ! cmp -s dist-ubuntu-24.04/SHA256SUMS dist-ubuntu-24.04-arm/SHA256SUMS; then
+            echo "::warning::the x86_64 and arm64 runners built different archives (not reproducible across hosts)"
+            diff dist-ubuntu-24.04/SHA256SUMS dist-ubuntu-24.04-arm/SHA256SUMS || true
+          fi
+      - uses: actions/attest-build-provenance@v2
+        if: startsWith(github.ref, 'refs/tags/v3-')
+        with:
+          subject-path: dist-ubuntu-24.04/*.tar.gz
+      - name: Draft the release
+        if: startsWith(github.ref, 'refs/tags/v3-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+            --title "transcrypt-v3 ${GITHUB_REF_NAME#v3-}" --notes-file - \
+            dist-ubuntu-24.04/*.tar.gz dist-ubuntu-24.04/SHA256SUMS <<'EOF'
+          Static Linux binaries (x86_64, arm64) of transcrypt-v3; they need only Git 2.34 or later.
+          Install: download `install.sh` from the repository's `scripts/` and run it, or unpack the archive for
+          your architecture and put `transcrypt-v3` on your PATH. Verify with `sha256sum -c SHA256SUMS` and
+          `gh attestation verify <archive> --repo Erotemic/transcrypt`. Rebuild and compare:
+          `scripts/build-release.sh` at this tag.
+          EOF

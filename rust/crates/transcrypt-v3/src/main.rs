@@ -85,6 +85,14 @@ fn run() -> Result<(), String> {
         println!("{HELP}");
         return Ok(());
     }
+    if matches!(action, "version" | "--version" | "-V") {
+        // Release builds (scripts/build-release.sh) record their commit.
+        match option_env!("TRANSCRYPT_V3_COMMIT") {
+            Some(commit) => println!("transcrypt-v3 {} ({commit})", env!("CARGO_PKG_VERSION")),
+            None => println!("transcrypt-v3 {}", env!("CARGO_PKG_VERSION")),
+        }
+        return Ok(());
+    }
     session::harden_process()?;
     if action != "serve" {
         // Die quietly when a reader such as `head` closes our output, like
@@ -206,7 +214,7 @@ fn run() -> Result<(), String> {
 }
 
 const USAGE: &str = "usage: transcrypt-v3 init|protect|unprotect|unlock|status|doctor|lock|rekey|hydrate|\
-    verify-index|audit|migrate|uninstall|help (clean, smudge, filter-process, diff, merge, pre-commit and \
+    verify-index|audit|migrate|uninstall|help|version (clean, smudge, filter-process, diff, merge, pre-commit and \
     pre-push are invoked by Git)";
 
 const HELP: &str = "\
@@ -242,6 +250,7 @@ Typical workflow
   transcrypt-v3 uninstall   lock, then remove the filters and hooks from this checkout
   transcrypt-v3 migrate     convert a repository protected by Bash transcrypt (v2): run it
                             where Bash transcrypt has decrypted the files; keeps your patterns
+  transcrypt-v3 version     print the version (and, for release builds, the source commit)
 
 Options
   --password-stdin          (init, unlock, rekey, migrate, reencrypt) read the passphrase from stdin

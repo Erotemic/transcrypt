@@ -22,5 +22,7 @@ cargo test --workspace
 cargo build --release -p transcrypt-v3
 ```
 
-The first build fetches the pinned RustCrypto dependencies. The legacy-v2
+The first build fetches the pinned RustCrypto dependencies. Static release
+binaries for Linux x86_64 and arm64 come from `scripts/build-release.sh`, with
+or without CI; see [`docs/RELEASING.md`](../docs/RELEASING.md). The legacy-v2
 compatibility crates are a separate workspace in [`../rust-legacy`](../rust-legacy).
