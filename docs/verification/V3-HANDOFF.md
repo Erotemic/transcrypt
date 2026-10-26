@@ -167,7 +167,7 @@ or `tests/git_lifecycle.rs`.
 `lock` flushes all of them), submodules, bare repositories (audit).
 
 **Gates at this checkpoint.**
-- Rust: 139 tests across the workspace.
+- Rust: 140 tests across the workspace.
 - Bash: 218 bats tests.
 - Python vectors, the differential corpus and the Git transport tests.
 - Snapshot verify/compare.
@@ -202,12 +202,21 @@ The branch is unpushed: push needs the owner's credentials.
    A4 narrowings: the inputs of `seal_action` and the stored-key load
    (authenticate before use).
 5. **Done:** the private-mode agent's optional idle timeout (`--timeout`).
-6. **Performance at this checkpoint** (release build, 10 000 files, 300
-   protected): a commit with the hook takes 0.46 s, `git status` 0.05 s,
-   an audit of 4 commits 0.30 s. Most of the hook's time is decrypting
-   every staged protected file. If repositories with thousands of secrets
-   need it, verify only changed entries keyed and keep the others to the
-   keyless envelope check.
+6. **Performance** (release build, 10 000 files, 300 protected): a commit
+   with the hook takes 0.24 s, `git status` 0.04 s. The hook reads the
+   index once, and authenticates only entries that differ from `HEAD` or
+   `HEAD^1` (the others get the keyless checks; H-74).
+7. **Simplification passes (two, reviewer-driven) are done**: shared
+   helpers in `git.rs` (one check-attr builder, one listing parser,
+   `push_blob_record`, `read_record`, `sigpipe_blocked`), one index
+   snapshot per hook run, `filter.rs`/`attributes.rs`/`rekey.rs` split out
+   of `main.rs`/`setup.rs`, shared test helpers in `tests/common`. Review
+   round 8 checked the refactor (no regression; H-74 found and fixed). Open
+   owner decision: the legacy crates (`transcrypt-policy`,
+   `transcrypt-legacy*`, `transcrypt-protocol`) are not used by v3; the
+   policy crate is referenced only by historical SMT checks
+   (`proofs/smt`, `proofs/sourcecheck`). Remove them, or move them to a
+   separate workspace.
 
 Remote enforcement is an **optional organizational control** (A13), not a
 hard dependency for using the product. Keyless enforcement detects obvious
