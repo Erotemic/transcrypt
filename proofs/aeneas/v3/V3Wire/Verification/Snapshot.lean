@@ -11,14 +11,16 @@ open transcrypt_v3_core
 /-!
 Functional refinement of the production Git snapshot functions: the inputs
 of the pre-commit decisions. `parse_listing` accepts exactly the listings
-`Transcrypt.V3Policy.listingBytes es` of well-formed entries and records
-where each record ends (`ListingOf`); every query over such a listing
-computes the spec's predicate on its entries: `listing_fields` (the fields
-of one entry), `held_entries` (`Holds`), `is_local_change` (`LocalChange`),
-`next_move_source` (`MoveSource`, first at or after an offset),
-`blob_elsewhere` (`BlobElsewhere`), `parse_listing_attrs` (Git's attribute
-answer for exactly the listing's paths, `attrResponse`) and
-`first_unselectable` (`Selectable`).
+`Transcrypt.V3Policy.listingBytes es` of well-formed entries in Git's byte
+order of paths (`Sorted`: each path once; or, for merged trees,
+`PathOrdered`) and records where each record ends (`ListingOf`); every
+query over such a listing computes the spec's predicate on its entries:
+`listing_fields` (the fields of one entry), `held_entries` (`Holds`, by
+binary search), `is_local_change` (`LocalChange`), `next_move_source`
+(`MoveSource`, first at or after an offset, through an object order
+checked by `object_order_ok`), `blob_elsewhere` (`BlobElsewhere`, likewise),
+`parse_listing_attrs` (Git's attribute answer for exactly the listing's
+paths, `attrResponse`) and `first_unselectable` (`Selectable`).
 -/
 
 /-! ## Pure facts about listings -/
@@ -274,11 +276,6 @@ theorem ListingOf.record {listing : Slice U8} {ends : Slice Usize} {es : List En
 theorem ListingOf.ends_length {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
     (hL : ListingOf listing ends es) : ends.val.length = es.length := hL.2.2.1
 
-/-- An entry of the listing names `oid` at `path` (`same`), or at another
-    path (`!same`). -/
-def Named (oid path : List Nat) (same : Bool) (e : Entry) : Prop :=
-  e.oid = oid ∧ (e.path = path ↔ same = true)
-
 /-- `r` is the first position in `[from, to)` whose entry satisfies `P`, or
     `to` if there is none. -/
 def FirstFrom (es : List Entry) (P : Entry → Prop) (from_ to_ r : Nat) : Prop :=
@@ -288,116 +285,6 @@ def FirstFrom (es : List Entry) (P : Entry → Prop) (from_ to_ r : Nat) : Prop 
 /-- An object id of a well-formed entry contains no TAB. -/
 theorem objectId_no_tab {oid : List Nat} (h : ObjectId oid) : 9 ∉ oid := fun h9 => by
   rcases h.2 9 h9 with ⟨_, h⟩ | ⟨h, _⟩ <;> omega
-
-theorem scan_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
-    (hL : ListingOf listing ends es) (oid path : Slice U8) (same : Bool) (h9 : 9 ∉ sliceBytes oid)
-    (from_ to_ : Usize) (hft : from_.val ≤ to_.val) (hto : to_.val ≤ es.length) :
-    scan listing ends from_ to_ oid path same ⦃ r =>
-      FirstFrom es (Named (sliceBytes oid) (sliceBytes path) same) from_.val to_.val r.val ⦄ := by
-  unfold scan scan_loop FirstFrom
-  apply loop.spec_decr_nat (fun s => 2 * (to_.val - s.1.val) + (if s.2 then 0 else 1))
-    (fun s => from_.val ≤ s.1.val ∧ s.1.val ≤ to_.val ∧
-      (∀ k e, from_.val ≤ k → k < s.1.val → es[k]? = some e →
-        ¬ Named (sliceBytes oid) (sliceBytes path) same e) ∧
-      (s.2 = true → s.1.val < to_.val ∧
-        ∃ e, es[s.1.val]? = some e ∧ Named (sliceBytes oid) (sliceBytes path) same e))
-  · rintro ⟨j, found⟩ ⟨h1, h2, h3, h4⟩
-    dsimp only at h1 h2 h3 h4 ⊢
-    unfold scan_loop.body
-    split
-    · rename_i hf
-      simp only [WP.spec_ok]
-      exact ⟨h1, h2, h3, fun _ => (h4 hf).2⟩
-    · rename_i hf
-      split
-      · rename_i hjt
-        have hjt' : j.val < to_.val := by scalar_tac
-        have hj : j.val < es.length := by omega
-        obtain ⟨hdrop, hend, hok⟩ := hL.record hj
-        have hel := hL.ends_length
-        step with record_start_spec hL j (by omega) as ⟨ st, hst ⟩
-        step as ⟨ hjl, x, hx ⟩
-        have hxv : x.val = st.val + (entryRecord es[j.val]).length := by
-          rw [hx, ← getElem!_pos ends.val j.val hjl, hend, hst]
-        step with record_is_spec listing st x oid path same es[j.val] _ hok (by rw [hst]; exact hdrop)
-          hxv h9 as ⟨ b, hb ⟩
-        split
-        · rename_i hbt
-          simp only [WP.spec_ok]
-          exact ⟨h1, h2, h3, fun _ => ⟨hjt', es[j.val], by simp, hb.mp hbt⟩, by simp⟩
-        · rename_i hbt
-          step as ⟨ j1, hj1 ⟩
-          refine ⟨by omega, by omega, fun k e hk1 hk2 hke => ?_, fun h => absurd h (by simp),
-            by simp only [Bool.false_eq_true, if_false]; omega⟩
-          rcases Nat.lt_or_ge k j.val with hlt | hge
-          · exact h3 k e hk1 hlt hke
-          · have hkj : k = j.val := by omega
-            subst hkj
-            rw [List.getElem?_eq_getElem hj, Option.some.injEq] at hke
-            subst hke
-            exact fun hn => hbt (hb.mpr hn)
-      · rename_i hjt
-        simp only [WP.spec_ok]
-        have hjt' : to_.val ≤ j.val := by scalar_tac
-        refine ⟨h1, h2, h3, fun h => absurd h (by omega)⟩
-  · refine ⟨le_refl _, hft, fun k e hk1 hk2 => by dsimp only at hk2; omega, fun h => absurd h (by simp)⟩
-
-/-- `find_entry` finds a record that names `oid` at `path` if there is one,
-    whatever the hint. -/
-theorem find_entry_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
-    (hL : ListingOf listing ends es) (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) (hint : Usize) :
-    find_entry listing ends oid path hint ⦃ r => r.val ≤ es.length ∧
-      (r.val < es.length → ∃ e, es[r.val]? = some e ∧ e.oid = sliceBytes oid ∧ e.path = sliceBytes path) ∧
-      (r.val = es.length → ¬ Holds es (sliceBytes oid) (sliceBytes path)) ⦄ := by
-  have hel := hL.ends_length
-  have hnamed : ∀ e, Named (sliceBytes oid) (sliceBytes path) true e ↔
-      e.oid = sliceBytes oid ∧ e.path = sliceBytes path := by
-    intro e; simp [Named]
-  have hn : ends.len.val = es.length := by simp [← hel]
-  have rest : ∀ f : Usize, f.val ≤ es.length →
-      (do
-        let j ← scan listing ends f ends.len oid path true
-        if j < ends.len then ok j
-        else
-          let k ← scan listing ends 0#usize f oid path true
-          if k < f then ok k else ok ends.len : RustM Usize) ⦃ r => r.val ≤ es.length ∧
-        (r.val < es.length → ∃ e, es[r.val]? = some e ∧ e.oid = sliceBytes oid ∧ e.path = sliceBytes path) ∧
-        (r.val = es.length → ¬ Holds es (sliceBytes oid) (sliceBytes path)) ⦄ := by
-    intro f hf
-    step with scan_spec hL oid path true h9 f ends.len (by omega) (by omega) as ⟨ j, hj ⟩
-    obtain ⟨hj1, hj2, hj3, hj4⟩ := hj
-    split
-    · rename_i hjn
-      have hjn' : j.val < es.length := by scalar_tac
-      simp only [WP.spec_ok]
-      obtain ⟨e, he, hne⟩ := hj4 (by omega)
-      exact ⟨by omega, fun _ => ⟨e, he, (hnamed e).mp hne⟩, fun h => absurd h (by omega)⟩
-    · rename_i hjn
-      have hjv : j.val = es.length := by scalar_tac
-      step with scan_spec hL oid path true h9 0#usize f (by simp) hf as ⟨ k, hk ⟩
-      obtain ⟨hk1, hk2, hk3, hk4⟩ := hk
-      split
-      · rename_i hkf
-        have hkf' : k.val < f.val := by scalar_tac
-        simp only [WP.spec_ok]
-        obtain ⟨e, he, hne⟩ := hk4 hkf'
-        exact ⟨by omega, fun _ => ⟨e, he, (hnamed e).mp hne⟩, fun h => absurd h (by omega)⟩
-      · rename_i hkf
-        have hkf' : f.val ≤ k.val := by scalar_tac
-        simp only [WP.spec_ok]
-        refine ⟨by omega, fun h => absurd h (by omega), fun _ => ?_⟩
-        rintro ⟨e, hmem, ho, hp⟩
-        obtain ⟨m, hm, rfl⟩ := List.getElem_of_mem hmem
-        rcases Nat.lt_or_ge m f.val with hlt | hge
-        · exact hk3 m _ (by simp) (by omega) (List.getElem?_eq_getElem hm) ((hnamed _).mpr ⟨ho, hp⟩)
-        · exact hj3 m _ hge (by omega) (List.getElem?_eq_getElem hm) ((hnamed _).mpr ⟨ho, hp⟩)
-  unfold find_entry
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
-  by_cases hh : hint < ends.len
-  · simp only [hh, if_true, bind_tc_ok]
-    exact rest hint (by scalar_tac)
-  · simp only [hh, if_false, bind_tc_ok]
-    exact rest ends.len (by omega)
 
 /-! ## `listing_fields` -/
 
@@ -555,7 +442,7 @@ theorem FieldsOf.slices {listing : Slice U8} {ends : Slice Usize} {es : List Ent
       (off es i + 10 + e.oid.length) = e.path.length by omega]
     simp
 
-/-! ## `held_entries` -/
+/-! ## Slice updates -/
 
 theorem getElem!_set_ne' {α : Type} [Inhabited α] (l : List α) {i k : Nat} (v : α) (h : k ≠ i) :
     (l.set i v)[k]! = l[k]! := by
@@ -565,106 +452,194 @@ theorem getElem!_set_self' {α : Type} [Inhabited α] (l : List α) {i : Nat} (v
     (l.set i v)[i]! = v := by
   simp only [getElem!_def, List.getElem?_set_self h]
 
-/-- `held_entries` writes, for each entry `k` of the index, whether it is
-    wanted and the other listing holds its blob at its path. -/
-def HeldUpTo (es os : List Entry) (wanted held : Slice Bool) (n : Nat) : Prop :=
-  ∀ k e, k < n → es[k]? = some e →
-    (held.val[k]! = true ↔ wanted.val[k]! = true ∧ Holds os e.oid e.path)
+/-! ## Byte order: `bytes_lt` and `listing_ordered` -/
 
-theorem held_entries_spec {index other : Slice U8} {index_ends other_ends : Slice Usize}
-    {es os : List Entry} (hI : ListingOf index index_ends es) (hO : ListingOf other other_ends os)
-    (wanted held : Slice Bool) (hw : wanted.length = es.length) (hh : held.length = es.length) :
-    held_entries index index_ends wanted other other_ends held ⦃ r =>
-      r.1 = true ∧ r.2.length = es.length ∧ HeldUpTo es os wanted r.2 es.length ⦄ := by
-  have hiel := hI.ends_length
-  have hoel := hO.ends_length
-  unfold held_entries held_entries_loop
+theorem bytesLt_append_left (p a b : List Nat) : BytesLt (p ++ a) (p ++ b) ↔ BytesLt a b := by
+  induction p with
+  | nil => exact Iff.rfl
+  | cons x p ih => simp only [List.cons_append, BytesLt, Nat.lt_irrefl, false_or, true_and, ih]
+
+/-- Byte strings with a common prefix compare as their rests. -/
+theorem bytesLt_drop {A B : List Nat} {j : Nat} (h : A.take j = B.take j) :
+    BytesLt A B ↔ BytesLt (A.drop j) (B.drop j) := by
+  conv_lhs => rw [← List.take_append_drop j A, ← List.take_append_drop j B, h]
+  exact bytesLt_append_left _ _ _
+
+/-- **Byte order.** `bytes_lt` is exactly `BytesLt`, Git's order of paths. -/
+@[step]
+theorem bytes_lt_spec (a b : Slice U8) :
+    bytes_lt a b ⦃ r => r = true ↔ BytesLt (sliceBytes a) (sliceBytes b) ⦄ := by
+  unfold bytes_lt bytes_lt_loop
+  apply compare_loop _ (fun n => n ≤ a.length ∧ n ≤ b.length ∧
+      (sliceBytes a).take n = (sliceBytes b).take n) (min a.length b.length) _ _ 0#usize (by simp)
+    ⟨by simp, by simp, by simp⟩
+  intro j hj ⟨hja, hjb, hc⟩
+  have hla := sliceBytes_length a
+  have hlb := sliceBytes_length b
+  unfold bytes_lt_loop.body
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  step*
+  · rename_i hne
+    subst i3_post2 i4_post2
+    have hj1 : j.val < (sliceBytes a).length := by omega
+    have hj2 : j.val < (sliceBytes b).length := by omega
+    rw [bytesLt_drop hc, List.drop_eq_getElem_cons hj1, List.drop_eq_getElem_cons hj2,
+      sliceBytes_getElem a j.val i3, sliceBytes_getElem b j.val i4]
+    simp only [bne_iff_ne, ne_eq] at hne
+    have hv : (a.val[j.val]).val ≠ (b.val[j.val]).val := fun h => hne (UScalar.eq_of_val_eq h)
+    simp only [BytesLt, decide_eq_true_eq, hv, false_and, or_false]
+    exact Iff.rfl
+  · subst i3_post2 i4_post2
+    rename_i heq
+    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at heq
+    refine ⟨i5_post, by omega, by omega, by omega, ?_⟩
+    rw [i5_post, List.take_add_one, List.take_add_one, hc,
+      List.getElem?_eq_getElem (by omega : j.val < (sliceBytes a).length),
+      List.getElem?_eq_getElem (by omega : j.val < (sliceBytes b).length),
+      sliceBytes_getElem a j.val i3, sliceBytes_getElem b j.val i4, heq]
+  · have hjb2 : j.val = b.length := by scalar_tac
+    have hja2 : j.val < a.length := by scalar_tac
+    rw [bytesLt_drop hc, List.drop_eq_getElem_cons (by omega : j.val < (sliceBytes a).length),
+      List.drop_eq_nil_of_le (by omega : (sliceBytes b).length ≤ j.val)]
+    simp only [BytesLt, iff_false, decide_eq_true_eq]
+    scalar_tac
+  · have hja2 : j.val = a.length := by scalar_tac
+    rw [bytesLt_drop hc, List.drop_eq_nil_of_le (by omega : (sliceBytes a).length ≤ j.val)]
+    rcases Nat.lt_or_ge j.val b.length with hlt | hge
+    · rw [List.drop_eq_getElem_cons (by omega : j.val < (sliceBytes b).length)]
+      simp only [BytesLt, iff_true, decide_eq_true_eq]
+      scalar_tac
+    · rw [List.drop_eq_nil_of_le (by omega : (sliceBytes b).length ≤ j.val)]
+      simp only [BytesLt, iff_false, decide_eq_true_eq]
+      scalar_tac
+
+/-- A transitive relation holds pairwise if it holds between neighbors. -/
+theorem pairwise_of_adjacent {α : Type} {R : α → α → Prop} (htr : ∀ a b c, R a b → R b c → R a c) :
+    ∀ (l : List α), (∀ k (h : k + 1 < l.length), R l[k] l[k + 1]) → l.Pairwise R
+  | [], _ => List.Pairwise.nil
+  | x :: xs, h => by
+    refine List.Pairwise.cons ?_ (pairwise_of_adjacent htr xs (fun k hk => h (k + 1) (by simp; omega)))
+    have hall : ∀ m (hm : m < xs.length), R x xs[m] := by
+      intro m
+      induction m with
+      | zero => exact fun hm => h 0 (by simp; omega)
+      | succ m ih => exact fun hm => htr _ _ _ (ih (by omega)) (h (m + 1) (by simp; omega))
+    intro y hy
+    obtain ⟨m, hm, rfl⟩ := List.getElem_of_mem hy
+    exact hall m hm
+
+/-- The order of a listing's paths that `parse_listing` checks: strictly
+    increasing (`unique`), or never decreasing. -/
+def PathRel : Bool → Entry → Entry → Prop
+  | true, a, b => BytesLt a.path b.path
+  | false, a, b => BytesLt a.path b.path ∨ a.path = b.path
+
+def OrderedAs (unique : Bool) (es : List Entry) : Prop := es.Pairwise (PathRel unique)
+
+theorem orderedAs_true {es : List Entry} : OrderedAs true es ↔ Sorted es := Iff.rfl
+
+theorem orderedAs_false {es : List Entry} : OrderedAs false es ↔ PathOrdered es := Iff.rfl
+
+theorem pathRel_trans (unique : Bool) (a b c : Entry) (h1 : PathRel unique a b) (h2 : PathRel unique b c) :
+    PathRel unique a c := by
+  cases unique
+  · simp only [PathRel] at h1 h2 ⊢
+    rcases h1 with h1 | h1 <;> rcases h2 with h2 | h2
+    · exact Or.inl (bytesLt_trans h1 h2)
+    · exact Or.inl (h2 ▸ h1)
+    · exact Or.inl (h1 ▸ h2)
+    · exact Or.inr (h1.trans h2)
+  · simp only [PathRel] at h1 h2 ⊢
+    exact bytesLt_trans h1 h2
+
+theorem orderedAs_iff_adjacent (unique : Bool) (es : List Entry) :
+    OrderedAs unique es ↔ ∀ k (h : k + 1 < es.length), PathRel unique es[k] es[k + 1] :=
+  ⟨fun h k hk => List.pairwise_iff_getElem.mp h k (k + 1) (by omega) hk (by omega),
+   pairwise_of_adjacent (pathRel_trans unique) es⟩
+
+/-- **Path order.** For a listing of `es`, `listing_ordered` says exactly
+    whether its paths are in the order `parse_listing` requires. -/
+theorem listing_ordered_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (unique : Bool) :
+    listing_ordered listing ends unique ⦃ b => b = true ↔ OrderedAs unique es ⦄ := by
+  have hel := hL.ends_length
+  unfold listing_ordered listing_ordered_loop
+  apply compare_loop _ (fun n => 1 ≤ n ∧ ∀ k (h : k + 1 < es.length), k + 1 < n → PathRel unique es[k] es[k + 1])
+    (max es.length 1) _ _ 1#usize (by simp) ⟨by simp, fun k _ hk => absurd hk (by simp)⟩
+  intro i hi ⟨hi1, hinv⟩
+  unfold listing_ordered_loop.body
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
-  have hc1 : ¬ (wanted.len != index_ends.len) = true := by
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not]; apply UScalar.eq_of_val_eq; simp [hw, ← hiel]
-  have hc2 : ¬ (held.len != index_ends.len) = true := by
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not]; apply UScalar.eq_of_val_eq; simp [hh, ← hiel]
-  simp only [hc1, hc2, if_false, Bool.false_eq_true]
-  step with loop.spec_decr_nat (fun s : Slice Bool × Usize × Usize => es.length - s.2.2.val)
-    (fun s : Slice Bool × Usize × Usize => s.2.2.val ≤ es.length ∧ s.1.length = es.length ∧ HeldUpTo es os wanted s.1 s.2.2.val)
-    (fun h : Slice Bool => h.length = es.length ∧ HeldUpTo es os wanted h es.length) as ⟨ r, hr1, hr2 ⟩
-  · rintro ⟨hd, hint, i⟩ ⟨h1, h2, h3⟩
-    dsimp only at h1 h2 h3 ⊢
-    unfold held_entries_loop.body
-    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
-    split
-    · rename_i hil
-      have hi : i.val < es.length := by scalar_tac
-      have hwl : i.val < wanted.length := by omega
-      have hdl : i.val < hd.length := by omega
-      -- After writing the right value `v` at `i`, the invariant holds at `i + 1`.
-      have hnext : ∀ (v : Bool) (s : Slice Bool),
-          (v = true ↔ wanted.val[i.val]! = true ∧ Holds os es[i.val].oid es[i.val].path) →
-          s.val = hd.val.set i.val v →
-          s.length = es.length ∧ HeldUpTo es os wanted s (i.val + 1) := by
-        intro v s hv hsv
-        refine ⟨by simp [Slice.length, hsv, ← h2], fun k e hk hke => ?_⟩
-        rw [hsv]
-        rcases Nat.lt_or_ge k i.val with hlt | hge
-        · rw [getElem!_set_ne' _ _ (by omega)]
-          exact h3 k e hlt hke
-        · have hki : k = i.val := by omega
-          subst hki
-          rw [getElem!_set_self' _ _ (by simp [Slice.length] at h2 ⊢; omega)]
-          rw [List.getElem?_eq_getElem hi, Option.some.injEq] at hke
-          subst hke
-          exact hv
-      step as ⟨ hiw, b, hb ⟩
-      have hbw : b = wanted.val[i.val]! := by rw [hb, getElem!_pos wanted.val i.val hiw]
-      by_cases hbv : b = true
-      · simp only [hbv, if_true]
-        step with listing_fields_spec hI i as ⟨ o, ho ⟩
-        rcases o with _ | f
-        · exfalso; simp only at ho; omega
-        · obtain ⟨_, hf⟩ := ho
-          obtain ⟨e, he, hok, hoid, hpath, hf1, hf2, hf3, hf4⟩ := FieldsOf.slices hI hf
-          have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
-          simp only
-          step as ⟨ i2, hi2 ⟩
-          step with index_range_spec index i2 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
-          step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
-          rw [hi2, hoid] at hso
-          rw [hpath] at hsp
-          have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
-          step with find_entry_spec hO so sp h9 hint as ⟨ j, hj1, hj2, hj3 ⟩
-          by_cases hjv : j < other_ends.len
-          · simp only [hjv, if_true]
-            step as ⟨ s, hil', hs ⟩
-            step*
-            have hsv : s.val = hd.val.set i.val true := by rw [hs]; rfl
-            obtain ⟨hl', hu⟩ := hnext true s (by
-              rw [← hbw, hei, ← hso, ← hsp]
-              obtain ⟨e', he', ho', hp'⟩ := hj2 (by scalar_tac)
-              exact ⟨fun _ => ⟨hbv, e', List.mem_of_getElem? he', ho', hp'⟩, fun _ => rfl⟩) hsv
-            exact ⟨by omega, hl', by rw [show i2.val = i.val + 1 by scalar_tac]; exact hu, by omega⟩
-          · simp only [hjv, if_false]
-            step as ⟨ s, hil', hs ⟩
-            step*
-            have hsv : s.val = hd.val.set i.val false := by rw [hs]; rfl
-            obtain ⟨hl', hu⟩ := hnext false s (by
-              rw [← hbw, hei, ← hso, ← hsp]
-              have := hj3 (by scalar_tac)
-              simp only [Bool.false_eq_true, false_iff, not_and]
-              exact fun _ => this) hsv
-            exact ⟨by omega, hl', by rw [show i2.val = i.val + 1 by scalar_tac]; exact hu, by omega⟩
-      · simp only [hbv, if_false, Bool.false_eq_true]
-        step as ⟨ s, hil', hs ⟩
+  split
+  · rename_i hlt
+    have hin : i.val < es.length := by scalar_tac
+    step as ⟨ i2, hi2 ⟩
+    step with listing_fields_spec hL i2 as ⟨ o, ho ⟩
+    rcases o with _ | p
+    · exfalso; simp only at ho; omega
+    obtain ⟨-, hp⟩ := ho
+    obtain ⟨ep, hep, -, -, hpp, -, -, hp3, hp4⟩ := FieldsOf.slices hL hp
+    simp only
+    step with listing_fields_spec hL i as ⟨ o1, ho1 ⟩
+    rcases o1 with _ | f
+    · exfalso; simp only at ho1; omega
+    obtain ⟨-, hf⟩ := ho1
+    obtain ⟨ef, hef, -, -, hfp, -, -, hf3, hf4⟩ := FieldsOf.slices hL hf
+    simp only
+    step with index_range_spec listing p.path_start p.end hp3 hp4 as ⟨ prev, hprev ⟩
+    step with index_range_spec listing f.path_start f.end hf3 hf4 as ⟨ path, hpath ⟩
+    rw [hpp] at hprev
+    rw [hfp] at hpath
+    have hk : i2.val + 1 = i.val := by scalar_tac
+    have hepi : es[i2.val]'(by omega) = ep := by
+      rw [List.getElem?_eq_getElem (by omega)] at hep; exact Option.some.inj hep
+    have hefi : es[i.val] = ef := by
+      rw [List.getElem?_eq_getElem hin] at hef; exact Option.some.inj hef
+    -- The pair `(i - 1, i)` decides.
+    have hcont : PathRel unique ep ef → ∀ k (h : k + 1 < es.length), k + 1 < i.val + 1 →
+        PathRel unique es[k] es[k + 1] := by
+      intro hr k hk1 hk2
+      rcases Nat.lt_or_ge (k + 1) i.val with hlt | hge
+      · exact hinv k hk1 hlt
+      · have hki : k = i2.val := by omega
+        subst hki
+        rw [← hepi, ← hefi] at hr
+        simpa [hk] using hr
+    have hdone : ¬ PathRel unique ep ef → ¬ OrderedAs unique es := by
+      intro hr hall
+      apply hr
+      have := (orderedAs_iff_adjacent unique es).mp hall i2.val (by omega)
+      rw [hepi] at this
+      simpa [hk, hefi] using this
+    cases unique
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      step with bytes_lt_spec prev path as ⟨ b, hb ⟩
+      step with bytes_eq_spec prev path as ⟨ b1, hb1 ⟩
+      have hord : (b || b1) = true ↔ PathRel false ep ef := by
+        rw [Bool.or_eq_true, hb, hb1, ← sliceBytes_inj, hprev, hpath]
+        simp [PathRel]
+      split
+      · rename_i hot
         step*
-        have hsv : s.val = hd.val.set i.val false := by rw [hs]; rfl
-        obtain ⟨hl', hu⟩ := hnext false s (by
-          rw [← hbw]; simp only [Bool.false_eq_true, false_iff, not_and]; exact fun h => absurd h hbv) hsv
-        exact ⟨by omega, hl', by rw [show i2.val = i.val + 1 by scalar_tac]; exact hu, by omega⟩
-    · rename_i hil
-      simp only [WP.spec_ok]
-      have : i.val = es.length := by scalar_tac
-      exact ⟨h2, this ▸ h3⟩
-  · exact ⟨by simp, by simp [hh], fun k e hk => absurd hk (by simp)⟩
-  · exact ⟨hr1, hr2⟩
+        exact ⟨i3_post, by omega, by omega, fun k hk1 hk2 => hcont (hord.mp hot) k hk1 (by omega)⟩
+      · rename_i hot
+        simp only [WP.spec_ok, Bool.false_eq_true, false_iff]
+        exact hdone (fun h => hot (hord.mpr h))
+    · simp only [↓reduceIte]
+      step with bytes_lt_spec prev path as ⟨ b, hb ⟩
+      have hord : b = true ↔ PathRel true ep ef := by
+        rw [hb, hprev, hpath]
+        simp [PathRel]
+      split
+      · rename_i hot
+        step*
+        exact ⟨i3_post, by omega, by omega, fun k hk1 hk2 => hcont (hord.mp hot) k hk1 (by omega)⟩
+      · rename_i hot
+        simp only [WP.spec_ok, Bool.false_eq_true, false_iff]
+        exact hdone (fun h => hot (hord.mpr h))
+  · rename_i hge
+    simp only [WP.spec_ok, true_iff]
+    rw [orderedAs_iff_adjacent]
+    exact fun k hk => hinv k hk (by scalar_tac)
 
 /-! ## `is_local_change` -/
 
@@ -683,236 +658,6 @@ theorem is_local_change_spec (head : List Entry) (incoming : Option (List Entry)
   · simp
   · have him := hi m rfl
     cases inHead <;> cases inIncoming <;> cases forced <;> cases envelope <;> simp_all
-
-/-! ## Move sources -/
-
-/-- The `HEAD` entry `h` holds the blob `oid` at another path than `path`,
-    and the index does not hold it at `h`'s path. -/
-def MovedFrom (es : List Entry) (oid path : List Nat) (h : Entry) : Prop :=
-  h.oid = oid ∧ h.path ≠ path ∧ ¬ Holds es h.oid h.path
-
-theorem move_source_at_spec {index head : Slice U8} {index_ends head_ends : Slice Usize}
-    {es hs : List Entry} (hI : ListingOf index index_ends es) (hH : ListingOf head head_ends hs)
-    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) (j : Usize) (hj : j.val < hs.length) :
-    move_source_at index index_ends head head_ends oid path j ⦃ b =>
-      b = true ↔ MovedFrom es (sliceBytes oid) (sliceBytes path) hs[j.val] ⦄ := by
-  obtain ⟨hdrop, hend, hok⟩ := hH.record hj
-  have hel := hH.ends_length
-  have hiel := hI.ends_length
-  have hm := hok.1
-  have hrl := entryRecord_length _ hm
-  have hin := hH.off_le (Nat.succ_le_of_lt hj)
-  rw [off_succ hs _ hj] at hin
-  unfold move_source_at
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
-  step with record_start_spec hH j (by omega) as ⟨ st, hst ⟩
-  step as ⟨ hjl, x, hx ⟩
-  have hxv : x.val = st.val + (entryRecord hs[j.val]).length := by
-    rw [hx, ← getElem!_pos head_ends.val j.val hjl, hend, hst]
-  step with record_is_spec head st x oid path false hs[j.val] _ hok (by rw [hst]; exact hdrop)
-    hxv h9 as ⟨ b, hb ⟩
-  simp only [Bool.false_eq_true, iff_false] at hb
-  split
-  · rename_i hbt
-    obtain ⟨hoe, hpe⟩ := hb.mp hbt
-    have hol : oid.length = hs[j.val].oid.length := by rw [← sliceBytes_length, hoe]
-    have hD7 : (sliceBytes head).drop (st.val + 7) = hs[j.val].oid ++ [32, 48, 9] ++ hs[j.val].path ++
-        (0 :: listingBytes (hs.drop (j.val + 1))) := by
-      rw [← List.drop_drop, hst, hdrop, entryRecord_drop7 _ hm]
-    have hD10 : (sliceBytes head).drop (st.val + 10 + hs[j.val].oid.length) =
-        hs[j.val].path ++ (0 :: listingBytes (hs.drop (j.val + 1))) := by
-      rw [show st.val + 10 + hs[j.val].oid.length = (st.val + 7) + (hs[j.val].oid.length + 3) by omega,
-        ← List.drop_drop, hD7]
-      simp
-    have hsrc : (sliceBytes head).extract (st.val + 10 + oid.length) x.val = hs[j.val].path := by
-      rw [List.extract_eq_take_drop, hxv, hrl, hol, hD10, show st.val + (hs[j.val].oid.length +
-        hs[j.val].path.length + 10) - (st.val + 10 + hs[j.val].oid.length) = hs[j.val].path.length by omega]
-      simp
-    have hLl := sliceBytes_length head
-    have hmax := head.property
-    step as ⟨ i1, hi1 ⟩
-    step as ⟨ i3, hi3 ⟩
-    have hi3v : i3.val = st.val + 10 + oid.length := by rw [hi3, hi1]; simp
-    step with index_range_spec head i3 x (by omega) (by omega) as ⟨ source, source_post ⟩
-    rw [hi3v, hsrc] at source_post
-    have h9' : 9 ∉ sliceBytes oid := h9
-    step with find_entry_spec hI oid source h9' 0#usize as ⟨ r, hr1, hr2, hr3 ⟩
-    simp only [decide_eq_true_eq]
-    rw [source_post] at hr2 hr3
-    unfold MovedFrom
-    constructor
-    · intro hr
-      refine ⟨hoe, hpe, ?_⟩
-      rw [hoe]
-      exact hr3 (by have := congrArg UScalar.val hr; simpa [hiel] using this)
-    · rintro ⟨-, -, hn⟩
-      apply UScalar.eq_of_val_eq
-      have hlenv : index_ends.len.val = es.length := by simp [hiel]
-      rw [hlenv]
-      rcases Nat.lt_or_ge r.val es.length with h | h
-      · exfalso
-        obtain ⟨e, he, ho, hp⟩ := hr2 h
-        exact hn ⟨e, List.mem_of_getElem? he, by rw [ho, hoe], hp⟩
-      · omega
-  · rename_i hbt
-    simp only [WP.spec_ok, Bool.false_eq_true, false_iff]
-    rintro ⟨ho, hp, _⟩
-    exact hbt (hb.mpr ⟨ho, hp⟩)
-
-theorem move_source_from_spec {index head : Slice U8} {index_ends head_ends : Slice Usize}
-    {es hs : List Entry} (hI : ListingOf index index_ends es) (hH : ListingOf head head_ends hs)
-    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) (from_ : Usize) (hf : from_.val ≤ hs.length) :
-    move_source_from index index_ends head head_ends oid path from_ ⦃ r =>
-      FirstFrom hs (MovedFrom es (sliceBytes oid) (sliceBytes path)) from_.val hs.length r.val ⦄ := by
-  have hel := hH.ends_length
-  unfold move_source_from move_source_from_loop FirstFrom
-  apply loop.spec_decr_nat (fun s => 2 * (hs.length - s.1.val) + (if s.2 then 0 else 1))
-    (fun s => from_.val ≤ s.1.val ∧ s.1.val ≤ hs.length ∧
-      (∀ k e, from_.val ≤ k → k < s.1.val → hs[k]? = some e →
-        ¬ MovedFrom es (sliceBytes oid) (sliceBytes path) e) ∧
-      (s.2 = true → s.1.val < hs.length ∧
-        ∃ e, hs[s.1.val]? = some e ∧ MovedFrom es (sliceBytes oid) (sliceBytes path) e))
-  · rintro ⟨j, found⟩ ⟨h1, h2, h3, h4⟩
-    dsimp only at h1 h2 h3 h4 ⊢
-    unfold move_source_from_loop.body
-    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
-    split
-    · rename_i hfd
-      simp only [WP.spec_ok]
-      exact ⟨h1, h2, h3, fun _ => (h4 hfd).2⟩
-    · rename_i hfd
-      split
-      · rename_i hjt
-        have hj : j.val < hs.length := by scalar_tac
-        step with move_source_at_spec hI hH oid path h9 j hj as ⟨ b, hb ⟩
-        split
-        · rename_i hbt
-          simp only [WP.spec_ok]
-          exact ⟨h1, h2, h3, fun _ => ⟨hj, hs[j.val], by simp, hb.mp hbt⟩, by simp⟩
-        · rename_i hbt
-          step as ⟨ j1, hj1 ⟩
-          refine ⟨by omega, by omega, fun k e hk1 hk2 hke => ?_, fun h => absurd h (by simp),
-            by simp only [Bool.false_eq_true, if_false]; omega⟩
-          rcases Nat.lt_or_ge k j.val with hlt | hge
-          · exact h3 k e hk1 hlt hke
-          · have hkj : k = j.val := by omega
-            subst hkj
-            rw [List.getElem?_eq_getElem hj, Option.some.injEq] at hke
-            subst hke
-            exact fun hn => hbt (hb.mpr hn)
-      · rename_i hjt
-        simp only [WP.spec_ok]
-        have hjt' : hs.length ≤ j.val := by scalar_tac
-        exact ⟨h1, h2, h3, fun h => absurd h (by omega)⟩
-  · refine ⟨le_refl _, hf, fun k e hk1 hk2 => by dsimp only at hk2; omega, fun h => absurd h (by simp)⟩
-
-/-- **Move sources.** `next_move_source` returns the first `HEAD` entry at
-    or after `from` that the staged entry `i` may have been moved from
-    (`MoveSource`: the same blob at another path, which has left the index),
-    or `HEAD`'s length if there is none. -/
-theorem next_move_source_spec {index head : Slice U8} {index_ends head_ends : Slice Usize}
-    {es hs : List Entry} (hI : ListingOf index index_ends es) (hH : ListingOf head head_ends hs)
-    (i : Usize) (hi : i.val < es.length) (from_ : Usize) (hf : from_.val ≤ hs.length) :
-    next_move_source index index_ends i head head_ends from_ ⦃ r =>
-      FirstFrom hs (MoveSource es es[i.val]) from_.val hs.length r.val ⦄ := by
-  unfold next_move_source
-  step with listing_fields_spec hI i as ⟨ o, ho ⟩
-  rcases o with _ | f
-  · exfalso; simp only at ho; omega
-  · obtain ⟨_, hf'⟩ := ho
-    obtain ⟨e, he, hok, hoid, hpath, hf1, hf2, hf3, hf4⟩ := FieldsOf.slices hI hf'
-    have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
-    simp only
-    step as ⟨ i1, hi1 ⟩
-    step with index_range_spec index i1 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
-    step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
-    rw [hi1, hoid] at hso
-    rw [hpath] at hsp
-    have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
-    apply WP.spec_mono (move_source_from_spec hI hH so sp h9 from_ hf)
-    intro r hr
-    have hP : ∀ h, MovedFrom es (sliceBytes so) (sliceBytes sp) h ↔ MoveSource es es[i.val] h := by
-      intro h
-      rw [hei, hso, hsp]
-      rfl
-    obtain ⟨r1, r2, r3, r4⟩ := hr
-    refine ⟨r1, r2, fun k h hk1 hk2 hkh => (hP h).not.mp (r3 k h hk1 hk2 hkh), fun hlt => ?_⟩
-    obtain ⟨h, hh, hm⟩ := r4 hlt
-    exact ⟨h, hh, (hP h).mp hm⟩
-
-/-! ## `blob_elsewhere` -/
-
-theorem scan_other_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
-    (hL : ListingOf listing ends es) (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) :
-    scan listing ends 0#usize ends.len oid path false ⦃ r =>
-      (r.val < es.length ↔ ∃ e ∈ es, e.oid = sliceBytes oid ∧ e.path ≠ sliceBytes path) ∧
-      r.val ≤ es.length ⦄ := by
-  have hel := hL.ends_length
-  have hn : ends.len.val = es.length := by simp [hel]
-  apply WP.spec_mono (scan_spec hL oid path false h9 0#usize ends.len (by simp) (by omega))
-  intro r ⟨r1, r2, r3, r4⟩
-  rw [hn] at r2 r4
-  refine ⟨⟨fun h => ?_, fun ⟨e, hmem, ho, hp⟩ => ?_⟩, r2⟩
-  · obtain ⟨e, he, ho, hp⟩ := r4 h
-    exact ⟨e, List.mem_of_getElem? he, ho, fun h' => by simp at hp; exact hp h'⟩
-  · obtain ⟨m, hm, rfl⟩ := List.getElem_of_mem hmem
-    by_contra hge
-    exact r3 m _ (by simp) (by omega) (List.getElem?_eq_getElem hm) ⟨ho, by simp [hp]⟩
-
-/-- **Keyless move check.** `blob_elsewhere` says exactly whether the blob
-    of entry `i` of the index is at another path in the index, `HEAD` or its
-    parent (`BlobElsewhere`). -/
-theorem blob_elsewhere_spec {index head parent : Slice U8} {index_ends head_ends parent_ends : Slice Usize}
-    {es hs ps : List Entry} (hI : ListingOf index index_ends es) (hH : ListingOf head head_ends hs)
-    (hP : ListingOf parent parent_ends ps) (i : Usize) (hi : i.val < es.length) :
-    blob_elsewhere index index_ends i head head_ends parent parent_ends ⦃ b =>
-      b = true ↔ BlobElsewhere [es, hs, ps] es[i.val] ⦄ := by
-  unfold blob_elsewhere
-  step with listing_fields_spec hI i as ⟨ o, ho ⟩
-  rcases o with _ | f
-  · exfalso; simp only at ho; omega
-  · obtain ⟨_, hf'⟩ := ho
-    obtain ⟨e, he, hok, hoid, hpath, hf1, hf2, hf3, hf4⟩ := FieldsOf.slices hI hf'
-    have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
-    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
-    step as ⟨ i1, hi1 ⟩
-    step with index_range_spec index i1 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
-    step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
-    rw [hi1, hoid] at hso
-    rw [hpath] at hsp
-    have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
-    have hiel := hI.ends_length
-    have hhel := hH.ends_length
-    have hpel := hP.ends_length
-    unfold BlobElsewhere
-    rw [hei]
-    simp only [List.mem_cons, List.not_mem_nil, or_false, exists_eq_or_imp, exists_eq_left]
-    rw [← hso, ← hsp]
-    step with scan_other_spec hI so sp h9 as ⟨ r1, hr1, hr1l ⟩
-    split
-    · rename_i hlt
-      simp only [WP.spec_ok, true_iff]
-      exact Or.inl (hr1.mp (by scalar_tac))
-    · rename_i hlt
-      have hn1 := mt hr1.mpr (by scalar_tac)
-      step with scan_other_spec hH so sp h9 as ⟨ r2, hr2, hr2l ⟩
-      split
-      · rename_i hlt2
-        simp only [WP.spec_ok, true_iff]
-        exact Or.inr (Or.inl (hr2.mp (by scalar_tac)))
-      · rename_i hlt2
-        have hn2 := mt hr2.mpr (by scalar_tac)
-        step with scan_other_spec hP so sp h9 as ⟨ r3, hr3, hr3l ⟩
-        simp only [decide_eq_true_eq]
-        have hlen3 : parent_ends.len.val = ps.length := by simp [hpel]
-        constructor
-        · intro h
-          exact Or.inr (Or.inr (hr3.mp (by scalar_tac)))
-        · rintro (h | h | h)
-          · exact absurd h hn1
-          · exact absurd h hn2
-          · have := hr3.mpr h
-            scalar_tac
 
 /-! ## `parse_listing_attrs` -/
 
@@ -1296,14 +1041,16 @@ theorem hyp_record_end {listing : Slice U8} {ends : Slice Usize} {es : List Entr
     exact List.mem_of_getElem? this.symm
 
 /-- **The listing parser.** If `parse_listing` accepts, the listing is
-    exactly Git's listing of well-formed entries and `ends` records where each
-    record ends (`ListingOf`); conversely it accepts Git's listing of any
-    well-formed entries, with one slot per entry, and computes exactly their
-    ends. -/
-theorem parse_listing_spec (listing : Slice U8) (ends : Slice Usize) :
-    parse_listing listing ends ⦃ r =>
-      (r.1 = true → ∃ es, ListingOf listing r.2 es) ∧
-      (∀ es, ListingHyp listing ends es → r.1 = true ∧ ListingOf listing r.2 es) ⦄ := by
+    exactly Git's listing of well-formed entries, `ends` records where each
+    record ends (`ListingOf`), and the paths are in byte order, each once if
+    `unique` (`OrderedAs`: `Sorted`, else `PathOrdered`). Conversely, for
+    Git's listing of any well-formed entries with one slot per entry it
+    computes exactly their ends, and accepts exactly when they are in that
+    order. -/
+theorem parse_listing_spec (listing : Slice U8) (ends : Slice Usize) (unique : Bool) :
+    parse_listing listing ends unique ⦃ r =>
+      (r.1 = true → ∃ es, ListingOf listing r.2 es ∧ OrderedAs unique es) ∧
+      (∀ es, ListingHyp listing ends es → ListingOf listing r.2 es ∧ (r.1 = true ↔ OrderedAs unique es)) ⦄ := by
   have hLl := sliceBytes_length listing
   have hmax := listing.property
   unfold parse_listing parse_listing_loop
@@ -1461,21 +1208,1055 @@ theorem parse_listing_spec (listing : Slice U8) (ends : Slice Usize) :
     split
     · rename_i hok
       obtain ⟨pre, hpl, hpok, hpt, hpe, hph⟩ := h4 hok
-      simp only [WP.spec_ok]
-      refine ⟨fun hst => ⟨pre, hpok, ?_, by rw [h2, hpl], hpe⟩, fun es hy => ?_⟩
-      · have : st.val = listing.length := by
-          have := of_decide_eq_true hst; rw [this]; simp
-        rw [← hpt, this, ← hLl, List.take_length]
-      · have hpe' := hph es hy
-        rw [hy.2.2, List.take_of_length_le (le_refl _)] at hpe'
+      -- Under Git's listing, the loop read exactly its entries.
+      have hpre : ∀ es, ListingHyp listing ends es → pre = es := by
+        intro es hy
+        have hpe' := hph es hy
+        rwa [hy.2.2, List.take_of_length_le (le_refl _)] at hpe'
+      split
+      · rename_i hst
+        have hstv : st.val = listing.length := by scalar_tac
+        have hLp : ListingOf listing fl pre :=
+          ⟨hpok, by rw [← hpt, hstv, ← hLl, List.take_length], by rw [h2, hpl], hpe⟩
+        step with listing_ordered_spec hLp unique as ⟨ b, hb ⟩
+        refine ⟨fun hbt => ⟨pre, hLp, hb.mp hbt⟩, fun es hy => ?_⟩
+        rw [← hpre es hy]
+        exact ⟨hLp, hb⟩
+      · rename_i hst
+        simp only [WP.spec_ok]
+        refine ⟨fun h => absurd h (by simp), fun es hy => ?_⟩
+        exfalso
+        apply hst
+        have hpe' := hpre es hy
         subst hpe'
-        have hst : st.val = listing.length := by
-          have := congrArg List.length (hpt.trans hy.2.1.symm)
-          rw [List.length_take, hLl] at this
-          omega
-        refine ⟨decide_eq_true (UScalar.eq_of_val_eq (by rw [hst]; simp)), hy.1, hy.2.1, by rw [h2, hy.2.2], hpe⟩
+        have := congrArg List.length (hpt.trans hy.2.1.symm)
+        rw [List.length_take, hLl] at this
+        scalar_tac
     · rename_i hok
       simp only [WP.spec_ok]
       exact ⟨fun h => absurd h (by simp), fun es hy => absurd (h5 es hy) hok⟩
+
+/-- Pigeonhole: `n` distinct numbers below `n` are all of them. -/
+theorem mem_of_nodup_lt {L : List Nat} {n : Nat} (hd : L.Nodup) (hl : L.length = n) (hlt : ∀ x ∈ L, x < n)
+    {j : Nat} (hj : j < n) : j ∈ L := by
+  have hsub : L.toFinset ⊆ Finset.range n := by
+    intro x hx; simp only [List.mem_toFinset] at hx; simpa using hlt x hx
+  have hcard : (Finset.range n).card ≤ L.toFinset.card := by
+    rw [List.toFinset_card_of_nodup hd, hl, Finset.card_range]
+  have := Finset.eq_of_subset_of_card_le hsub hcard
+  have hj' : j ∈ Finset.range n := Finset.mem_range.mpr hj
+  rw [← this] at hj'
+  exact List.mem_toFinset.mp hj'
+
+
+/-! ## Path lookups: `find_path`, `find_entry`, `held_entries` -/
+
+theorem path_before_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (j : Usize) (path : Slice U8) :
+    path_before listing ends j path ⦃ b => b = true ↔
+      ∃ e, es[j.val]? = some e ∧ BytesLt e.path (sliceBytes path) ⦄ := by
+  unfold path_before
+  step with listing_fields_spec hL j as ⟨ o, ho ⟩
+  rcases o with _ | f
+  · simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_exists, not_and]
+    intro e he
+    simp only at ho
+    have := (List.getElem?_eq_some_iff.mp he).1
+    omega
+  · obtain ⟨_, hf⟩ := ho
+    obtain ⟨e, he, -, -, hpath, -, -, hf3, hf4⟩ := FieldsOf.slices hL hf
+    simp only
+    step with index_range_spec listing f.path_start f.end hf3 hf4 as ⟨ s, hs ⟩
+    apply WP.spec_mono (bytes_lt_spec s path)
+    intro b hb
+    rw [hb, hs, hpath]
+    exact ⟨fun h => ⟨e, he, h⟩, fun ⟨e', he', h⟩ => by rw [he] at he'; cases he'; exact h⟩
+
+theorem path_at_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (j : Usize) (path : Slice U8) :
+    path_at listing ends j path ⦃ b => b = true ↔
+      ∃ e, es[j.val]? = some e ∧ e.path = sliceBytes path ⦄ := by
+  unfold path_at
+  step with listing_fields_spec hL j as ⟨ o, ho ⟩
+  rcases o with _ | f
+  · simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_exists, not_and]
+    intro e he
+    simp only at ho
+    have := (List.getElem?_eq_some_iff.mp he).1
+    omega
+  · obtain ⟨_, hf⟩ := ho
+    obtain ⟨e, he, -, -, hpath, -, -, hf3, hf4⟩ := FieldsOf.slices hL hf
+    simp only
+    step with index_range_spec listing f.path_start f.end hf3 hf4 as ⟨ s, hs ⟩
+    apply WP.spec_mono (bytes_eq_spec s path)
+    intro b hb
+    rw [hb, ← sliceBytes_inj, hs, hpath]
+    exact ⟨fun h => ⟨e, he, h⟩, fun ⟨e', he', h⟩ => by rw [he] at he'; cases he'; exact h⟩
+
+/-- In a listing in path order, paths before `P` come first. -/
+theorem PathOrdered.lt_of_le {es : List Entry} (hO : PathOrdered es) {P : List Nat} {k m : Nat}
+    (hkm : k ≤ m) (hm : m < es.length) (h : BytesLt es[m].path P) : BytesLt es[k].path P := by
+  rcases Nat.lt_or_ge k m with hlt | hge
+  · rcases List.pairwise_iff_getElem.mp hO k m (by omega) hm hlt with h' | h'
+    · exact bytesLt_trans h' h
+    · rw [h']; exact h
+  · have : k = m := by omega
+    subst this; exact h
+
+/-- `find_path` is the first record whose path is not before `P`; all
+    earlier paths are before it, no later one is. -/
+theorem find_path_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (hO : PathOrdered es) (path : Slice U8) :
+    find_path listing ends path ⦃ r => r.val ≤ es.length ∧
+      (∀ k (h : k < es.length), k < r.val → BytesLt es[k].path (sliceBytes path)) ∧
+      (∀ k (h : k < es.length), r.val ≤ k → ¬ BytesLt es[k].path (sliceBytes path)) ⦄ := by
+  have hel := hL.ends_length
+  unfold find_path find_path_loop
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  apply loop.spec_decr_nat (fun s : Usize × Usize => s.2.val - s.1.val)
+    (fun s : Usize × Usize => s.1.val ≤ s.2.val ∧ s.2.val ≤ es.length ∧
+      (∀ k (h : k < es.length), k < s.1.val → BytesLt es[k].path (sliceBytes path)) ∧
+      (∀ k (h : k < es.length), s.2.val ≤ k → ¬ BytesLt es[k].path (sliceBytes path)))
+  · rintro ⟨low, high⟩ ⟨h1, h2, h3, h4⟩
+    dsimp only at h1 h2 h3 h4 ⊢
+    unfold find_path_loop.body
+    split
+    · rename_i hlh
+      have hlh' : low.val < high.val := by scalar_tac
+      step as ⟨ d, hd ⟩
+      step as ⟨ d2, hd2 ⟩
+      step as ⟨ mid, hmid ⟩
+      have hm1 : low.val ≤ mid.val := by scalar_tac
+      have hm2 : mid.val < high.val := by
+        have : d2.val ≤ d.val / 2 := by scalar_tac
+        have : d.val / 2 < d.val := Nat.div_lt_self (by omega) (by omega)
+        scalar_tac
+      step with path_before_spec hL mid path as ⟨ b, hb ⟩
+      have hmes : mid.val < es.length := by omega
+      split
+      · rename_i hbt
+        obtain ⟨e, he, hlt⟩ := hb.mp hbt
+        rw [List.getElem?_eq_getElem hmes, Option.some.injEq] at he
+        subst he
+        step as ⟨ low1, hlow1 ⟩
+        refine ⟨by omega, h2, fun k hk hkl => PathOrdered.lt_of_le hO (by omega) hmes hlt, h4, by omega⟩
+      · rename_i hbt
+        simp only [WP.spec_ok]
+        refine ⟨hm1, by omega, h3, fun k hk hkm hlt => hbt (hb.mpr ⟨_, List.getElem?_eq_getElem hmes,
+          PathOrdered.lt_of_le hO hkm hk hlt⟩), by omega⟩
+    · rename_i hlh
+      simp only [WP.spec_ok]
+      have : high.val ≤ low.val := by scalar_tac
+      exact ⟨by omega, h3, fun k hk hkl => h4 k hk (by omega)⟩
+  · exact ⟨by simp, by simp [hel], fun k _ hk => absurd hk (by simp), fun k hk hk2 => by simp [hel] at hk2; omega⟩
+
+
+/-- After a path that comes after `P`, no path is `P`. -/
+theorem PathOrdered.ne_of_gt {es : List Entry} (hO : PathOrdered es) {P : List Nat} {j k : Nat}
+    (hjk : j ≤ k) (hk : k < es.length) (hj : BytesLt P es[j].path) : es[k].path ≠ P := by
+  intro hkp
+  rcases Nat.lt_or_ge j k with hlt | hge
+  · rcases List.pairwise_iff_getElem.mp hO j k (by omega) hk hlt with h' | h'
+    · rw [hkp] at h'; exact bytesLt_irrefl _ (bytesLt_trans hj h')
+    · rw [h', hkp] at hj; exact bytesLt_irrefl _ hj
+  · have : j = k := by omega
+    subst this; rw [hkp] at hj; exact bytesLt_irrefl _ hj
+
+/-- **Path lookup.** In a listing in path order, `find_entry` finds a record
+    that names `oid` at `path` exactly when there is one. -/
+theorem find_entry_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (hO : PathOrdered es) (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) :
+    find_entry listing ends oid path ⦃ r => r.val ≤ es.length ∧
+      (r.val < es.length → ∃ e, es[r.val]? = some e ∧ e.oid = sliceBytes oid ∧ e.path = sliceBytes path) ∧
+      (r.val = es.length → ¬ Holds es (sliceBytes oid) (sliceBytes path)) ⦄ := by
+  have hel := hL.ends_length
+  unfold find_entry find_entry_loop
+  step with find_path_spec hL hO path as ⟨ j0, hj0l, hbefore, hafter ⟩
+  apply loop.spec_decr_nat (fun j : Usize => es.length - j.val)
+    (fun j : Usize => j0.val ≤ j.val ∧ j.val ≤ es.length ∧
+      ∀ k (h : k < es.length), j0.val ≤ k → k < j.val →
+        ¬ (es[k].oid = sliceBytes oid ∧ es[k].path = sliceBytes path))
+  · intro j ⟨h1, h2, h3⟩
+    unfold find_entry_loop.body
+    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+    split
+    · rename_i hjn
+      have hj : j.val < es.length := by scalar_tac
+      step with path_at_spec hL j path as ⟨ b, hb ⟩
+      rw [List.getElem?_eq_getElem hj] at hb
+      split
+      · rename_i hbt
+        obtain ⟨e, he, hep⟩ := hb.mp hbt
+        rw [Option.some.injEq] at he
+        obtain ⟨hdrop, hend, hok⟩ := hL.record hj
+        step with record_start_spec hL j (by omega) as ⟨ st, hst ⟩
+        step as ⟨ hjl, x, hx ⟩
+        have hxv : x.val = st.val + (entryRecord es[j.val]).length := by
+          rw [hx, ← getElem!_pos ends.val j.val hjl, hend, hst]
+        step with record_is_spec listing st x oid path true es[j.val] _ hok (by rw [hst]; exact hdrop)
+          hxv h9 as ⟨ b1, hb1 ⟩
+        split
+        · rename_i hb1t
+          simp only [WP.spec_ok]
+          obtain ⟨ho, -⟩ := hb1.mp hb1t
+          exact ⟨by omega, fun _ => ⟨es[j.val], by simp, ho, he ▸ hep⟩, fun h => absurd h (by omega)⟩
+        · rename_i hb1t
+          step as ⟨ j1, hj1 ⟩
+          refine ⟨by omega, by omega, fun k hk hk1 hk2 hn => ?_, by omega⟩
+          rcases Nat.lt_or_ge k j.val with hlt | hge
+          · exact h3 k hk hk1 hlt hn
+          · have hkj : k = j.val := by omega
+            subst hkj
+            exact hb1t (hb1.mpr ⟨hn.1, by simp [hn.2]⟩)
+      · rename_i hbt
+        simp only [WP.spec_ok]
+        refine ⟨by scalar_tac, fun h => absurd h (by scalar_tac), fun _ => ?_⟩
+        -- `es[j]` is after `path`: so is every later entry.
+        have hne : es[j.val].path ≠ sliceBytes path := fun h => hbt (hb.mpr ⟨_, rfl, h⟩)
+        have hgt : BytesLt (sliceBytes path) es[j.val].path := by
+          rcases bytesLt_total es[j.val].path (sliceBytes path) with h | h | h
+          · exact absurd h (hafter j.val hj h1)
+          · exact absurd h hne
+          · exact h
+        rintro ⟨e, hmem, ho, hp⟩
+        obtain ⟨k, hk, rfl⟩ := List.getElem_of_mem hmem
+        rcases Nat.lt_or_ge k j0.val with hlt | hge
+        · have := hbefore k hk hlt
+          rw [hp] at this
+          exact bytesLt_irrefl _ this
+        rcases Nat.lt_or_ge k j.val with hlt' | hge'
+        · exact h3 k hk hge hlt' ⟨ho, hp⟩
+        · exact PathOrdered.ne_of_gt hO hge' hk hgt hp
+    · rename_i hjn
+      simp only [WP.spec_ok]
+      have hj : j.val = es.length := by scalar_tac
+      refine ⟨by scalar_tac, fun h => absurd h (by scalar_tac), fun _ => ?_⟩
+      rintro ⟨e, hmem, ho, hp⟩
+      obtain ⟨k, hk, rfl⟩ := List.getElem_of_mem hmem
+      rcases Nat.lt_or_ge k j0.val with hlt | hge
+      · have := hbefore k hk hlt
+        rw [hp] at this
+        exact bytesLt_irrefl _ this
+      · exact h3 k hk hge (by omega) ⟨ho, hp⟩
+  · exact ⟨le_refl _, hj0l, fun k _ hk1 hk2 => absurd hk2 (by omega)⟩
+
+
+/-- `held_entries` writes, for each entry `k` of the index, whether it is
+    wanted and the other listing holds its blob at its path. -/
+def HeldUpTo (es os : List Entry) (wanted held : Slice Bool) (n : Nat) : Prop :=
+  ∀ k e, k < n → es[k]? = some e →
+    (held.val[k]! = true ↔ wanted.val[k]! = true ∧ Holds os e.oid e.path)
+
+/-- **Membership.** `held_entries` says, for every wanted index entry,
+    whether the other listing (in path order) holds its blob at its path. -/
+theorem held_entries_spec {index other : Slice U8} {index_ends other_ends : Slice Usize}
+    {es os : List Entry} (hI : ListingOf index index_ends es) (hO : ListingOf other other_ends os)
+    (hOrd : PathOrdered os) (wanted held : Slice Bool) (hw : wanted.length = es.length)
+    (hh : held.length = es.length) :
+    held_entries index index_ends wanted other other_ends held ⦃ r =>
+      r.1 = true ∧ r.2.length = es.length ∧ HeldUpTo es os wanted r.2 es.length ⦄ := by
+  have hiel := hI.ends_length
+  have hoel := hO.ends_length
+  unfold held_entries held_entries_loop
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  have hc1 : ¬ (wanted.len != index_ends.len) = true := by
+    simp only [bne_iff_ne, ne_eq, Decidable.not_not]; apply UScalar.eq_of_val_eq; simp [hw, ← hiel]
+  have hc2 : ¬ (held.len != index_ends.len) = true := by
+    simp only [bne_iff_ne, ne_eq, Decidable.not_not]; apply UScalar.eq_of_val_eq; simp [hh, ← hiel]
+  simp only [hc1, hc2, if_false, Bool.false_eq_true]
+  step with loop.spec_decr_nat (fun s : Slice Bool × Usize => es.length - s.2.val)
+    (fun s : Slice Bool × Usize => s.2.val ≤ es.length ∧ s.1.length = es.length ∧ HeldUpTo es os wanted s.1 s.2.val)
+    (fun h : Slice Bool => h.length = es.length ∧ HeldUpTo es os wanted h es.length) as ⟨ r, hr1, hr2 ⟩
+  · rintro ⟨hd, i⟩ ⟨h1, h2, h3⟩
+    dsimp only at h1 h2 h3 ⊢
+    unfold held_entries_loop.body
+    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+    split
+    · rename_i hil
+      have hi : i.val < es.length := by scalar_tac
+      have hwl : i.val < wanted.length := by omega
+      have hdl : i.val < hd.length := by omega
+      -- After writing the right value `v` at `i`, the invariant holds at `i + 1`.
+      have hnext : ∀ (v : Bool) (s : Slice Bool),
+          (v = true ↔ wanted.val[i.val]! = true ∧ Holds os es[i.val].oid es[i.val].path) →
+          s.val = hd.val.set i.val v →
+          s.length = es.length ∧ HeldUpTo es os wanted s (i.val + 1) := by
+        intro v s hv hsv
+        refine ⟨by simp [Slice.length, hsv, ← h2], fun k e hk hke => ?_⟩
+        rw [hsv]
+        rcases Nat.lt_or_ge k i.val with hlt | hge
+        · rw [getElem!_set_ne' _ _ (by omega)]
+          exact h3 k e hlt hke
+        · have hki : k = i.val := by omega
+          subst hki
+          rw [getElem!_set_self' _ _ (by simp [Slice.length] at h2 ⊢; omega)]
+          rw [List.getElem?_eq_getElem hi, Option.some.injEq] at hke
+          subst hke
+          exact hv
+      step as ⟨ hiw, b, hb ⟩
+      have hbw : b = wanted.val[i.val]! := by rw [hb, getElem!_pos wanted.val i.val hiw]
+      by_cases hbv : b = true
+      · simp only [hbv, if_true]
+        step with listing_fields_spec hI i as ⟨ o, ho ⟩
+        rcases o with _ | f
+        · exfalso; simp only at ho; omega
+        · obtain ⟨_, hf⟩ := ho
+          obtain ⟨e, he, hok, hoid, hpath, hf1, hf2, hf3, hf4⟩ := FieldsOf.slices hI hf
+          have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
+          simp only
+          step as ⟨ i2, hi2 ⟩
+          step with index_range_spec index i2 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
+          step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
+          rw [hi2, hoid] at hso
+          rw [hpath] at hsp
+          have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+          step with find_entry_spec hO hOrd so sp h9 as ⟨ j, hj1, hj2, hj3 ⟩
+          step as ⟨ s, hil', hs ⟩
+          step*
+          have hsv : s.val = hd.val.set i.val (decide (j < other_ends.len)) := by rw [hs]; rfl
+          obtain ⟨hl', hu⟩ := hnext _ s (by
+            rw [← hbw, hei, ← hso, ← hsp, hbv, decide_eq_true_iff]
+            simp only [true_and]
+            constructor
+            · intro hjl
+              obtain ⟨e', he', ho', hp'⟩ := hj2 (by scalar_tac)
+              exact ⟨e', List.mem_of_getElem? he', ho', hp'⟩
+            · intro hho
+              by_contra hjl
+              exact hj3 (by scalar_tac) hho) hsv
+          exact ⟨by omega, hl', by rw [show i2.val = i.val + 1 by scalar_tac]; exact hu, by omega⟩
+      · simp only [hbv, if_false, Bool.false_eq_true]
+        step as ⟨ s, hil', hs ⟩
+        step*
+        have hsv : s.val = hd.val.set i.val false := by rw [hs]; rfl
+        obtain ⟨hl', hu⟩ := hnext false s (by
+          rw [← hbw]; simp only [Bool.false_eq_true, false_iff, not_and]; exact fun h => absurd h hbv) hsv
+        exact ⟨by omega, hl', by rw [show i2.val = i.val + 1 by scalar_tac]; exact hu, by omega⟩
+    · rename_i hil
+      simp only [WP.spec_ok]
+      have : i.val = es.length := by scalar_tac
+      exact ⟨h2, this ▸ h3⟩
+  · exact ⟨by simp, by simp [hh], fun k e hk => absurd hk (by simp)⟩
+  · exact ⟨hr1, hr2⟩
+
+
+/-! ## Object orders -/
+
+/-- The key of record `j`: its object id, then its position. -/
+def keyOf (es : List Entry) (j : Nat) : List Nat × Nat := ((es[j]?.map (·.oid)).getD [], j)
+
+theorem keyOf_of_lt {es : List Entry} {j : Nat} (h : j < es.length) : keyOf es j = (es[j].oid, j) := by
+  simp [keyOf, List.getElem?_eq_getElem h]
+
+/-- Keys in order: by object id in byte order, then by position. -/
+def KeyLt (a b : List Nat × Nat) : Prop := BytesLt a.1 b.1 ∨ (a.1 = b.1 ∧ a.2 < b.2)
+
+theorem keyLt_irrefl (a : List Nat × Nat) : ¬ KeyLt a a := by
+  rintro (h | ⟨_, h⟩)
+  · exact bytesLt_irrefl _ h
+  · exact Nat.lt_irrefl _ h
+
+theorem keyLt_trans {a b c : List Nat × Nat} (h1 : KeyLt a b) (h2 : KeyLt b c) : KeyLt a c := by
+  rcases h1 with h1 | ⟨e1, h1⟩ <;> rcases h2 with h2 | ⟨e2, h2⟩
+  · exact Or.inl (bytesLt_trans h1 h2)
+  · exact Or.inl (e2 ▸ h1)
+  · exact Or.inl (e1 ▸ h2)
+  · exact Or.inr ⟨e1.trans e2, Nat.lt_trans h1 h2⟩
+
+theorem keyLt_total (a b : List Nat × Nat) : KeyLt a b ∨ a = b ∨ KeyLt b a := by
+  rcases bytesLt_total a.1 b.1 with h | h | h
+  · exact Or.inl (Or.inl h)
+  · rcases Nat.lt_trichotomy a.2 b.2 with h' | h' | h'
+    · exact Or.inl (Or.inr ⟨h, h'⟩)
+    · exact Or.inr (Or.inl (Prod.ext h h'))
+    · exact Or.inr (Or.inr (Or.inr ⟨h.symm, h'⟩))
+  · exact Or.inr (Or.inr (Or.inl h))
+
+/-- `order` lists the records of `es` by key: one slot per record, every
+    slot a position, and the keys strictly increase, so each record is
+    listed exactly once (`ObjectOrder.surj`). -/
+def ObjectOrder (es : List Entry) (order : Slice Usize) : Prop :=
+  order.length = es.length ∧ (∀ t (h : t < order.length), order.val[t].val < es.length) ∧
+  (order.val.map (fun j => keyOf es j.val)).Pairwise KeyLt
+
+theorem ObjectOrder.lt {es : List Entry} {order : Slice Usize} (ho : ObjectOrder es order) {s t : Nat}
+    (hst : s < t) (ht : t < order.length) :
+    KeyLt (keyOf es (order.val[s]'(by simp [Slice.length] at ht; omega)).val)
+      (keyOf es (order.val[t]'(by simpa [Slice.length] using ht)).val) := by
+  have := List.pairwise_iff_getElem.mp ho.2.2 s t (by simp [Slice.length] at ht ⊢; omega)
+    (by simpa [Slice.length] using ht) hst
+  simpa using this
+
+/-- Slots are ordered as their keys. -/
+theorem ObjectOrder.lt_iff {es : List Entry} {order : Slice Usize} (ho : ObjectOrder es order) {s t : Nat}
+    (hs : s < order.length) (ht : t < order.length) :
+    KeyLt (keyOf es (order.val[s]'(by simpa [Slice.length] using hs)).val)
+      (keyOf es (order.val[t]'(by simpa [Slice.length] using ht)).val) ↔ s < t := by
+  constructor
+  · intro h
+    by_contra hge
+    rcases Nat.lt_or_ge t s with hlt | hge'
+    · exact keyLt_irrefl _ (keyLt_trans h (ho.lt hlt hs))
+    · have : s = t := by omega
+      subst this; exact keyLt_irrefl _ h
+  · intro h; exact ho.lt h ht
+
+/-- Every record has a slot (pigeonhole: the keys, so the positions, are
+    distinct). -/
+theorem ObjectOrder.surj {es : List Entry} {order : Slice Usize} (ho : ObjectOrder es order) {j : Nat}
+    (hj : j < es.length) : ∃ t, ∃ h : t < order.length, (order.val[t]'(by simpa [Slice.length] using h)).val = j := by
+  have hnd : (order.val.map (·.val)).Nodup := by
+    rw [List.Nodup, List.pairwise_iff_getElem]
+    intro s t hs ht hst heq
+    simp only [List.length_map] at hs ht
+    have := ho.lt (s := s) (t := t) hst (by simpa [Slice.length] using ht)
+    simp only [List.getElem_map] at heq
+    rw [heq] at this
+    exact keyLt_irrefl _ this
+  have hmem := mem_of_nodup_lt hnd (by simp [← ho.1, Slice.length]) (by
+    intro x hx
+    obtain ⟨y, hy, rfl⟩ := List.mem_map.1 hx
+    obtain ⟨t, ht, rfl⟩ := List.getElem_of_mem hy
+    exact ho.2.1 t (by simpa [Slice.length] using ht)) hj
+  obtain ⟨t, ht, htj⟩ := List.getElem_of_mem hmem
+  simp only [List.length_map] at ht
+  exact ⟨t, by simpa [Slice.length] using ht, by simpa using htj⟩
+
+theorem object_before_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (j : Usize) (oid : Slice U8) (at_ : Usize) :
+    object_before listing ends j oid at_ ⦃ b => b = true ↔
+      j.val < es.length ∧ KeyLt (keyOf es j.val) (sliceBytes oid, at_.val) ⦄ := by
+  unfold object_before
+  step with listing_fields_spec hL j as ⟨ o, ho ⟩
+  rcases o with _ | f
+  · simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
+    simp only at ho
+    intro h; omega
+  · obtain ⟨hj, hf⟩ := ho
+    obtain ⟨e, he, -, hoid, -, hf1, hf2, -, -⟩ := FieldsOf.slices hL hf
+    have hej : es[j.val] = e := (List.getElem?_eq_some_iff.mp he).2
+    simp only
+    step as ⟨ i, hi ⟩
+    step with index_range_spec listing i f.oid_end (by omega) hf2 as ⟨ id, hid ⟩
+    rw [hi, hoid] at hid
+    step with bytes_lt_spec id oid as ⟨ b, hb ⟩
+    step with bytes_eq_spec id oid as ⟨ b1, hb1 ⟩
+    simp only [Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, hb, hb1, ← sliceBytes_inj,
+      hid, keyOf_of_lt hj, hej, KeyLt, hj, true_and]
+    constructor
+    · rintro (h | ⟨h1, h2⟩)
+      · exact Or.inl h
+      · exact Or.inr ⟨h1, by scalar_tac⟩
+    · rintro (h | ⟨h1, h2⟩)
+      · exact Or.inl h
+      · exact Or.inr ⟨h1, by scalar_tac⟩
+
+
+/-- **Object orders.** `object_order_ok` accepts exactly the object orders
+    of the listing: each record once, by object id and then position. -/
+theorem object_order_ok_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (order : Slice Usize) :
+    object_order_ok listing ends order ⦃ b => b = true ↔ ObjectOrder es order ⦄ := by
+  have hel := hL.ends_length
+  unfold object_order_ok
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  split
+  · rename_i hne
+    simp only [WP.spec_ok, Bool.false_eq_true, false_iff]
+    intro ho
+    simp only [bne_iff_ne, ne_eq] at hne
+    apply hne
+    apply UScalar.eq_of_val_eq
+    have := ho.1
+    simp only [Slice.length] at this
+    simp [this, hel]
+  · rename_i hne
+    have hlen : order.length = es.length := by
+      simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+      have := congrArg UScalar.val hne
+      simp [hel] at this; simpa [Slice.length] using this
+    unfold object_order_ok_loop
+    apply compare_loop _ (fun n => (∀ t (h : t < order.val.length), t < n → order.val[t].val < es.length) ∧
+        ∀ t (h : t + 1 < order.val.length), t + 1 < n →
+          KeyLt (keyOf es order.val[t].val) (keyOf es order.val[t + 1].val))
+      order.length _ _ 0#usize (by simp) ⟨fun t _ h => absurd h (by simp), fun t _ h => absurd h (by simp)⟩
+    intro t ht ⟨hr, hk⟩
+    unfold object_order_ok_loop.body
+    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+    split
+    · rename_i htl
+      have ht' : t.val < order.length := by scalar_tac
+      step as ⟨ htv, j, hj ⟩
+      step with listing_fields_spec hL j as ⟨ o, ho ⟩
+      rcases o with _ | f
+      · simp only at ho
+        simp only [WP.spec_ok, Bool.false_eq_true, false_iff]
+        intro hord
+        have := hord.2.1 t.val ht'
+        rw [← hj] at this
+        omega
+      · obtain ⟨hjl, hf⟩ := ho
+        obtain ⟨e, he, -, hoid, -, hf1, hf2, -, -⟩ := FieldsOf.slices hL hf
+        have hej : es[j.val] = e := (List.getElem?_eq_some_iff.mp he).2
+        simp only
+        have hjt : order.val[t.val].val = j.val := by rw [hj]
+        -- Slot `t` is a position; with the pair `(t - 1, t)` in order, the invariant extends.
+        have hcont : (t.val = 0 ∨ KeyLt (keyOf es order.val[t.val - 1]!.val) (keyOf es j.val)) →
+            (∀ s (h : s < order.val.length), s < t.val + 1 → order.val[s].val < es.length) ∧
+            ∀ s (h : s + 1 < order.val.length), s + 1 < t.val + 1 →
+              KeyLt (keyOf es order.val[s].val) (keyOf es order.val[s + 1].val) := by
+          intro hpair
+          refine ⟨fun s hs hst => ?_, fun s hs hst => ?_⟩
+          · rcases Nat.lt_or_ge s t.val with hlt | hge
+            · exact hr s hs hlt
+            · have : s = t.val := by omega
+              subst this; rw [hjt]; exact hjl
+          · rcases Nat.lt_or_ge (s + 1) t.val with hlt | hge
+            · exact hk s hs hlt
+            · have hs1 : s + 1 = t.val := by omega
+              rcases hpair with h0 | hpair
+              · omega
+              · have : order.val[s + 1] = order.val[t.val] := by simp [hs1]
+                rw [this, hjt]
+                rw [getElem!_pos order.val (t.val - 1) (by simp [Slice.length] at ht' ⊢; omega)] at hpair
+                simpa [show t.val - 1 = s by omega] using hpair
+        split
+        · rename_i htp
+          have ht0 : 0 < t.val := htp
+          step as ⟨ i1, hi1 ⟩
+          step as ⟨ hi1l, i2, hi2 ⟩
+          step as ⟨ i3, hi3 ⟩
+          step with index_range_spec listing i3 f.oid_end (by omega) hf2 as ⟨ s, hs ⟩
+          rw [hi3, hoid] at hs
+          step with object_before_spec hL i2 s j as ⟨ b, hb ⟩
+          have hi2v : i2.val = order.val[t.val - 1]!.val := by
+            rw [hi2, ← getElem!_pos order.val i1.val hi1l, hi1]
+          rw [hi2v, hs, ← hej, ← keyOf_of_lt hjl] at hb
+          split
+          · rename_i hbt
+            step*
+            exact ⟨t1_post, by omega, by rw [t1_post]; exact hcont (Or.inr (hb.mp hbt).2)⟩
+          · rename_i hbt
+            simp only [WP.spec_ok, Bool.false_eq_true, false_iff]
+            intro hord
+            apply hbt
+            apply hb.mpr
+            have ht1 : t.val - 1 < order.length := by omega
+            refine ⟨hord.2.1 _ ht1 |>.trans_eq' (by rw [getElem!_pos order.val (t.val - 1) (by simp [Slice.length] at ht1 ⊢; omega)]), ?_⟩
+            have := hord.lt (s := t.val - 1) (t := t.val) (by omega) ht'
+            rw [getElem!_pos order.val (t.val - 1) (by simp [Slice.length] at ht1 ⊢; omega)]
+            rwa [hjt] at this
+        · rename_i htp
+          have ht0 : ¬ 0 < t.val := htp
+          step*
+          exact ⟨t1_post, by omega, by rw [t1_post]; exact hcont (Or.inl (by omega))⟩
+    · rename_i htl
+      simp only [WP.spec_ok, true_iff]
+      have htv : t.val = order.length := by scalar_tac
+      refine ⟨hlen, fun s hs => hr s hs (by omega), ?_⟩
+      apply pairwise_of_adjacent (R := KeyLt) (fun _ _ _ h1 h2 => keyLt_trans h1 h2)
+      intro k hkl
+      simp only [List.length_map] at hkl
+      simpa using hk k hkl (by simp [Slice.length] at htv; omega)
+
+
+/-- Slots before one whose key is before `X` have keys before `X`. -/
+theorem ObjectOrder.lt_of_le {es : List Entry} {order : Slice Usize} (ho : ObjectOrder es order)
+    {X : List Nat × Nat} {s t : Nat} (hst : s ≤ t) (ht : t < order.val.length)
+    (h : KeyLt (keyOf es order.val[t].val) X) : KeyLt (keyOf es (order.val[s]'(by omega)).val) X := by
+  rcases Nat.lt_or_ge s t with hlt | hge
+  · exact keyLt_trans (ho.lt hlt ht) h
+  · have : s = t := by omega
+    subst this; exact h
+
+/-- `find_object` is the first slot whose key is not before `(oid, at)`. -/
+theorem find_object_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) {order : Slice Usize} (ho : ObjectOrder es order) (oid : Slice U8)
+    (at_ : Usize) :
+    find_object listing ends order oid at_ ⦃ r => r.val ≤ order.val.length ∧
+      (∀ t (h : t < order.val.length), t < r.val → KeyLt (keyOf es order.val[t].val) (sliceBytes oid, at_.val)) ∧
+      (∀ t (h : t < order.val.length), r.val ≤ t →
+        ¬ KeyLt (keyOf es order.val[t].val) (sliceBytes oid, at_.val)) ⦄ := by
+  unfold find_object find_object_loop
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  apply loop.spec_decr_nat (fun s : Usize × Usize => s.2.val - s.1.val)
+    (fun s : Usize × Usize => s.1.val ≤ s.2.val ∧ s.2.val ≤ order.val.length ∧
+      (∀ t (h : t < order.val.length), t < s.1.val → KeyLt (keyOf es order.val[t].val) (sliceBytes oid, at_.val)) ∧
+      (∀ t (h : t < order.val.length), s.2.val ≤ t →
+        ¬ KeyLt (keyOf es order.val[t].val) (sliceBytes oid, at_.val)))
+  · rintro ⟨low, high⟩ ⟨h1, h2, h3, h4⟩
+    dsimp only at h1 h2 h3 h4 ⊢
+    unfold find_object_loop.body
+    split
+    · rename_i hlh
+      have hlh' : low.val < high.val := by scalar_tac
+      step as ⟨ d, hd ⟩
+      step as ⟨ d2, hd2 ⟩
+      step as ⟨ mid, hmid ⟩
+      have hm1 : low.val ≤ mid.val := by scalar_tac
+      have hm2 : mid.val < high.val := by
+        have : d2.val ≤ d.val / 2 := by scalar_tac
+        have : d.val / 2 < d.val := Nat.div_lt_self (by omega) (by omega)
+        scalar_tac
+      have hmo : mid.val < order.val.length := by omega
+      step as ⟨ hml, j, hj ⟩
+      step with object_before_spec hL j oid at_ as ⟨ b, hb ⟩
+      have hjv : j.val = order.val[mid.val].val := by rw [hj]
+      rw [hjv] at hb
+      have hjn : order.val[mid.val].val < es.length := ho.2.1 mid.val (by simpa [Slice.length] using hmo)
+      split
+      · rename_i hbt
+        have hlt := (hb.mp hbt).2
+        step as ⟨ low1, hlow1 ⟩
+        refine ⟨by omega, h2, fun t ht htl => ho.lt_of_le (by omega) hmo hlt, h4, by omega⟩
+      · rename_i hbt
+        simp only [WP.spec_ok]
+        refine ⟨hm1, by omega, h3, fun t ht htm hlt => hbt (hb.mpr ⟨hjn, ho.lt_of_le htm ht hlt⟩), by omega⟩
+    · rename_i hlh
+      simp only [WP.spec_ok]
+      have : high.val ≤ low.val := by scalar_tac
+      exact ⟨by omega, h3, fun t ht htl => h4 t ht (by omega)⟩
+  · exact ⟨by simp, by simp, fun t _ ht => absurd ht (by simp), fun t ht ht2 => by simp at ht2; omega⟩
+
+theorem names_oid_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (j : Usize) (oid : Slice U8) :
+    names_oid listing ends j oid ⦃ b => b = true ↔ ∃ e, es[j.val]? = some e ∧ e.oid = sliceBytes oid ⦄ := by
+  unfold names_oid
+  step with listing_fields_spec hL j as ⟨ o, ho ⟩
+  rcases o with _ | f
+  · simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_exists, not_and]
+    intro e he
+    simp only at ho
+    have := (List.getElem?_eq_some_iff.mp he).1
+    omega
+  · obtain ⟨_, hf⟩ := ho
+    obtain ⟨e, he, -, hoid, -, hf1, hf2, -, -⟩ := FieldsOf.slices hL hf
+    simp only
+    step as ⟨ i, hi ⟩
+    step with index_range_spec listing i f.oid_end (by omega) hf2 as ⟨ s, hs ⟩
+    apply WP.spec_mono (bytes_eq_spec s oid)
+    intro b hb
+    rw [hb, ← sliceBytes_inj, hs, hi, hoid]
+    exact ⟨fun h => ⟨e, he, h⟩, fun ⟨e', he', h⟩ => by rw [he] at he'; cases he'; exact h⟩
+
+/-! ## Move sources -/
+
+/-- The `HEAD` entry `h` holds the blob `oid` at another path than `path`,
+    and the index does not hold it at `h`'s path. -/
+def MovedFrom (es : List Entry) (oid path : List Nat) (h : Entry) : Prop :=
+  h.oid = oid ∧ h.path ≠ path ∧ ¬ Holds es h.oid h.path
+
+theorem move_source_at_spec {index head : Slice U8} {index_ends head_ends : Slice Usize}
+    {es hs : List Entry} (hI : ListingOf index index_ends es) (hIo : PathOrdered es)
+    (hH : ListingOf head head_ends hs)
+    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) (j : Usize) (hj : j.val < hs.length) :
+    move_source_at index index_ends head head_ends oid path j ⦃ b =>
+      b = true ↔ MovedFrom es (sliceBytes oid) (sliceBytes path) hs[j.val] ⦄ := by
+  obtain ⟨hdrop, hend, hok⟩ := hH.record hj
+  have hel := hH.ends_length
+  have hiel := hI.ends_length
+  have hm := hok.1
+  have hrl := entryRecord_length _ hm
+  have hin := hH.off_le (Nat.succ_le_of_lt hj)
+  rw [off_succ hs _ hj] at hin
+  unfold move_source_at
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  step with record_start_spec hH j (by omega) as ⟨ st, hst ⟩
+  step as ⟨ hjl, x, hx ⟩
+  have hxv : x.val = st.val + (entryRecord hs[j.val]).length := by
+    rw [hx, ← getElem!_pos head_ends.val j.val hjl, hend, hst]
+  step with record_is_spec head st x oid path false hs[j.val] _ hok (by rw [hst]; exact hdrop)
+    hxv h9 as ⟨ b, hb ⟩
+  simp only [Bool.false_eq_true, iff_false] at hb
+  split
+  · rename_i hbt
+    obtain ⟨hoe, hpe⟩ := hb.mp hbt
+    have hol : oid.length = hs[j.val].oid.length := by rw [← sliceBytes_length, hoe]
+    have hD7 : (sliceBytes head).drop (st.val + 7) = hs[j.val].oid ++ [32, 48, 9] ++ hs[j.val].path ++
+        (0 :: listingBytes (hs.drop (j.val + 1))) := by
+      rw [← List.drop_drop, hst, hdrop, entryRecord_drop7 _ hm]
+    have hD10 : (sliceBytes head).drop (st.val + 10 + hs[j.val].oid.length) =
+        hs[j.val].path ++ (0 :: listingBytes (hs.drop (j.val + 1))) := by
+      rw [show st.val + 10 + hs[j.val].oid.length = (st.val + 7) + (hs[j.val].oid.length + 3) by omega,
+        ← List.drop_drop, hD7]
+      simp
+    have hsrc : (sliceBytes head).extract (st.val + 10 + oid.length) x.val = hs[j.val].path := by
+      rw [List.extract_eq_take_drop, hxv, hrl, hol, hD10, show st.val + (hs[j.val].oid.length +
+        hs[j.val].path.length + 10) - (st.val + 10 + hs[j.val].oid.length) = hs[j.val].path.length by omega]
+      simp
+    have hLl := sliceBytes_length head
+    have hmax := head.property
+    step as ⟨ i1, hi1 ⟩
+    step as ⟨ i3, hi3 ⟩
+    have hi3v : i3.val = st.val + 10 + oid.length := by rw [hi3, hi1]; simp
+    step with index_range_spec head i3 x (by omega) (by omega) as ⟨ source, source_post ⟩
+    rw [hi3v, hsrc] at source_post
+    have h9' : 9 ∉ sliceBytes oid := h9
+    step with find_entry_spec hI hIo oid source h9' as ⟨ r, hr1, hr2, hr3 ⟩
+    simp only [decide_eq_true_eq]
+    rw [source_post] at hr2 hr3
+    unfold MovedFrom
+    constructor
+    · intro hr
+      refine ⟨hoe, hpe, ?_⟩
+      rw [hoe]
+      exact hr3 (by have := congrArg UScalar.val hr; simpa [hiel] using this)
+    · rintro ⟨-, -, hn⟩
+      apply UScalar.eq_of_val_eq
+      have hlenv : index_ends.len.val = es.length := by simp [hiel]
+      rw [hlenv]
+      rcases Nat.lt_or_ge r.val es.length with h | h
+      · exfalso
+        obtain ⟨e, he, ho, hp⟩ := hr2 h
+        exact hn ⟨e, List.mem_of_getElem? he, by rw [ho, hoe], hp⟩
+      · omega
+  · rename_i hbt
+    simp only [WP.spec_ok, Bool.false_eq_true, false_iff]
+    rintro ⟨ho, hp, _⟩
+    exact hbt (hb.mpr ⟨ho, hp⟩)
+
+/-- The record in slot `s` of an object order, and its key. -/
+theorem ObjectOrder.slot {es : List Entry} {order : Slice Usize} (ho : ObjectOrder es order) {s : Nat}
+    (hs : s < order.val.length) : ∃ e, es[(order.val[s]).val]? = some e ∧
+      keyOf es (order.val[s]).val = (e.oid, (order.val[s]).val) := by
+  have hj := ho.2.1 s (by simpa [Slice.length] using hs)
+  exact ⟨_, List.getElem?_eq_getElem hj, keyOf_of_lt hj⟩
+
+/-- A record of `oid` at a position from `from` on is in a slot from the
+    first slot not before `(oid, from)` on. -/
+theorem ObjectOrder.slot_of {es : List Entry} {order : Slice Usize} (ho : ObjectOrder es order)
+    {O : List Nat} {from_ t0 k : Nat} {e : Entry} (hk : es[k]? = some e) (he : e.oid = O) (hfk : from_ ≤ k)
+    (hbefore : ∀ t (h : t < order.val.length), t < t0 → KeyLt (keyOf es order.val[t].val) (O, from_)) :
+    ∃ s, ∃ h : s < order.val.length, (order.val[s]).val = k ∧ t0 ≤ s := by
+  have hkl : k < es.length := (List.getElem?_eq_some_iff.mp hk).1
+  obtain ⟨s, hs, hsk⟩ := ho.surj hkl
+  have hs' : s < order.val.length := by simpa [Slice.length] using hs
+  refine ⟨s, hs', hsk, ?_⟩
+  by_contra hlt
+  have := hbefore s hs' (by omega)
+  rw [hsk, keyOf_of_lt hkl, (List.getElem?_eq_some_iff.mp hk).2, he] at this
+  rcases this with h | ⟨_, h⟩
+  · exact bytesLt_irrefl _ h
+  · simp only at h; omega
+
+theorem move_source_from_spec {index head : Slice U8} {index_ends head_ends : Slice Usize}
+    {es hs : List Entry} (hI : ListingOf index index_ends es) (hIo : PathOrdered es)
+    (hH : ListingOf head head_ends hs) {order : Slice Usize} (ho : ObjectOrder hs order)
+    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) (from_ : Nat) (hf : from_ ≤ hs.length) (t0 : Usize)
+    (ht0 : t0.val ≤ order.val.length)
+    (hbefore : ∀ t (h : t < order.val.length), t < t0.val →
+      KeyLt (keyOf hs order.val[t].val) (sliceBytes oid, from_))
+    (hafter : ∀ t (h : t < order.val.length), t0.val ≤ t →
+      ¬ KeyLt (keyOf hs order.val[t].val) (sliceBytes oid, from_)) :
+    move_source_from index index_ends head head_ends order oid path t0 ⦃ r =>
+      FirstFrom hs (MovedFrom es (sliceBytes oid) (sliceBytes path)) from_ hs.length r.val ⦄ := by
+  have hel := hH.ends_length
+  have hol : order.val.length = hs.length := by have := ho.1; simpa [Slice.length] using this
+  unfold move_source_from move_source_from_loop FirstFrom
+  apply loop.spec_decr_nat (fun t : Usize => order.val.length - t.val)
+    (fun t : Usize => t0.val ≤ t.val ∧ t.val ≤ order.val.length ∧
+      ∀ s (h : s < order.val.length), t0.val ≤ s → s < t.val → ∀ e, hs[(order.val[s]).val]? = some e →
+        e.oid = sliceBytes oid ∧ ¬ MovedFrom es (sliceBytes oid) (sliceBytes path) e)
+  · intro t ⟨h1, h2, h3⟩
+    unfold move_source_from_loop.body
+    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+    -- A record of `oid` from `from` on that is not in a slot before `t` is in no slot before a
+    -- slot `t` whose record is not of `oid`.
+    have hcover : ∀ k e, from_ ≤ k → hs[k]? = some e → e.oid = sliceBytes oid →
+        (∀ htl : t.val < order.val.length, ∀ e', hs[(order.val[t.val]'htl).val]? = some e' →
+          e'.oid ≠ sliceBytes oid) →
+        ¬ MovedFrom es (sliceBytes oid) (sliceBytes path) e := by
+      intro k e hfk hk he hnot
+      obtain ⟨s, hs', hsk, hts⟩ := ho.slot_of hk he hfk hbefore
+      rcases Nat.lt_or_ge s t.val with hlt | hge
+      · exact (h3 s hs' hts hlt e (by rw [hsk]; exact hk)).2
+      · exfalso
+        have htl : t.val < order.val.length := by omega
+        obtain ⟨e', he', hkey'⟩ := ho.slot htl
+        apply hnot htl e' he'
+        rcases Nat.lt_or_ge t.val s with hts' | hts'
+        · have hkl := ho.lt (s := t.val) (t := s) hts' (by simpa [Slice.length] using hs')
+          rw [hkey', hsk, keyOf_of_lt (List.getElem?_eq_some_iff.mp hk).1,
+            (List.getElem?_eq_some_iff.mp hk).2, he] at hkl
+          by_contra heq
+          rcases hkl with hkl | ⟨hkl, _⟩
+          · apply hafter t.val htl h1
+            rw [hkey']
+            exact Or.inl hkl
+          · exact heq hkl
+        · have : s = t.val := by omega
+          subst this
+          rw [hsk, hk] at he'
+          cases he'
+          exact he
+    split
+    · rename_i htl
+      have htl' : t.val < order.val.length := by scalar_tac
+      step as ⟨ htv, j, hj ⟩
+      have hjv : j.val = (order.val[t.val]).val := by rw [hj]
+      obtain ⟨ej, hej, hkey⟩ := ho.slot htl'
+      rw [← hjv] at hej hkey
+      have hjn : j.val < hs.length := (List.getElem?_eq_some_iff.mp hej).1
+      have hejj : hs[j.val] = ej := (List.getElem?_eq_some_iff.mp hej).2
+      step with names_oid_spec hH j oid as ⟨ b, hb ⟩
+      rw [hej] at hb
+      split
+      · rename_i hbt
+        obtain ⟨_, he1, hoid⟩ := hb.mp hbt
+        cases he1
+        step with move_source_at_spec hI hIo hH oid path h9 j hjn as ⟨ b1, hb1 ⟩
+        rw [hejj] at hb1
+        split
+        · rename_i hb1t
+          simp only [WP.spec_ok]
+          have hfj : from_ ≤ j.val := by
+            by_contra hlt
+            apply hafter t.val htl' h1
+            rw [← hjv, hkey, hoid]
+            exact Or.inr ⟨rfl, by omega⟩
+          refine ⟨hfj, by omega, fun k e hk1 hk2 hke hm => ?_, fun _ => ⟨ej, hej, hb1.mp hb1t⟩⟩
+          have heo : e.oid = sliceBytes oid := hm.1
+          obtain ⟨s, hs', hsk, hts⟩ := ho.slot_of hke heo hk1 hbefore
+          have hkl : k < hs.length := (List.getElem?_eq_some_iff.mp hke).1
+          have hst : s < t.val := by
+            apply (ho.lt_iff (by simpa [Slice.length] using hs') (by simpa [Slice.length] using htl')).mp
+            rw [hsk, ← hjv, keyOf_of_lt hkl, hkey, (List.getElem?_eq_some_iff.mp hke).2, heo, hoid]
+            exact Or.inr ⟨rfl, hk2⟩
+          exact (h3 s hs' hts hst e (by rw [hsk]; exact hke)).2 hm
+        · rename_i hb1t
+          step as ⟨ t1, ht1 ⟩
+          refine ⟨by omega, by omega, fun s hs' hts hst e he => ?_, by omega⟩
+          rcases Nat.lt_or_ge s t.val with hlt | hge
+          · exact h3 s hs' hts hlt e he
+          · have : s = t.val := by omega
+            subst this
+            rw [← hjv, hej] at he
+            cases he
+            exact ⟨hoid, fun hm => hb1t (hb1.mpr hm)⟩
+      · rename_i hbt
+        simp only [WP.spec_ok]
+        have hnv : head_ends.len.val = hs.length := by simp [hel]
+        rw [hnv]
+        refine ⟨hf, le_refl _, fun k e hk1 hk2 hke hm => ?_, fun h => absurd h (by omega)⟩
+        apply hcover k e hk1 hke hm.1 _ hm
+        intro _ e' he' hoe
+        rw [← hjv, hej] at he'
+        cases he'
+        exact hbt (hb.mpr ⟨_, rfl, hoe⟩)
+    · rename_i htl
+      have htv : t.val = order.val.length := by scalar_tac
+      simp only [WP.spec_ok]
+      have hnv : head_ends.len.val = hs.length := by simp [hel]
+      rw [hnv]
+      refine ⟨hf, le_refl _, fun k e hk1 hk2 hke hm => ?_, fun h => absurd h (by omega)⟩
+      exact hcover k e hk1 hke hm.1 (fun h => absurd h (by omega)) hm
+  · exact ⟨le_refl _, ht0, fun s _ h1 h2 => absurd h2 (by omega)⟩
+
+/-- **Move sources.** `next_move_source` returns the first `HEAD` entry at
+    or after `from` that the staged entry `i` may have been moved from
+    (`MoveSource`: the same blob at another path, which has left the index),
+    or `HEAD`'s length if there is none. It looks the blob up in an object
+    order of `HEAD`. -/
+theorem next_move_source_spec {index head : Slice U8} {index_ends head_ends : Slice Usize}
+    {es hs : List Entry} (hI : ListingOf index index_ends es) (hIo : PathOrdered es)
+    (hH : ListingOf head head_ends hs) {order : Slice Usize} (ho : ObjectOrder hs order)
+    (i : Usize) (hi : i.val < es.length) (from_ : Usize) (hf : from_.val ≤ hs.length) :
+    next_move_source index index_ends i head head_ends order from_ ⦃ r =>
+      FirstFrom hs (MoveSource es es[i.val]) from_.val hs.length r.val ⦄ := by
+  unfold next_move_source
+  step with listing_fields_spec hI i as ⟨ o, ho' ⟩
+  rcases o with _ | f
+  · exfalso; simp only at ho'; omega
+  · obtain ⟨_, hf'⟩ := ho'
+    obtain ⟨e, he, hok, hoid, hpath, hf1, hf2, hf3, hf4⟩ := FieldsOf.slices hI hf'
+    have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
+    simp only
+    step as ⟨ i1, hi1 ⟩
+    step with index_range_spec index i1 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
+    step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
+    rw [hi1, hoid] at hso
+    rw [hpath] at hsp
+    have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+    step with find_object_spec hH ho so from_ as ⟨ t, ht1, ht2, ht3 ⟩
+    apply WP.spec_mono (move_source_from_spec hI hIo hH ho so sp h9 from_.val hf t ht1 ht2 ht3)
+    intro r hr
+    have hP : ∀ h, MovedFrom es (sliceBytes so) (sliceBytes sp) h ↔ MoveSource es es[i.val] h := by
+      intro h
+      rw [hei, hso, hsp]
+      rfl
+    obtain ⟨r1, r2, r3, r4⟩ := hr
+    refine ⟨r1, r2, fun k h hk1 hk2 hkh => (hP h).not.mp (r3 k h hk1 hk2 hkh), fun hlt => ?_⟩
+    obtain ⟨h, hh, hm⟩ := r4 hlt
+    exact ⟨h, hh, (hP h).mp hm⟩
+
+
+/-! ## The keyless move check: `blob_elsewhere` -/
+
+theorem other_path_at_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) {order : Slice Usize} (ho : ObjectOrder es order) (t : Usize)
+    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) :
+    other_path_at listing ends order t oid path ⦃ b => b = true ↔
+      ∃ h : t.val < order.val.length, ∃ e, es[(order.val[t.val]'h).val]? = some e ∧
+        e.oid = sliceBytes oid ∧ e.path ≠ sliceBytes path ⦄ := by
+  have hel := hL.ends_length
+  unfold other_path_at
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  split
+  · rename_i htl
+    have htl' : t.val < order.val.length := by scalar_tac
+    step as ⟨ htv, j, hj ⟩
+    have hjv : j.val = (order.val[t.val]).val := by rw [hj]
+    have hjn : j.val < es.length := by rw [hjv]; exact ho.2.1 t.val (by simpa [Slice.length] using htl')
+    split
+    · obtain ⟨hdrop, hend, hok⟩ := hL.record hjn
+      step with record_start_spec hL j (by omega) as ⟨ st, hst ⟩
+      step as ⟨ hjl, x, hx ⟩
+      have hxv : x.val = st.val + (entryRecord es[j.val]).length := by
+        rw [hx, ← getElem!_pos ends.val j.val hjl, hend, hst]
+      apply WP.spec_mono (record_is_spec listing st x oid path false es[j.val] _ hok (by rw [hst]; exact hdrop)
+        hxv h9)
+      intro b hb
+      rw [hb]
+      simp only [Bool.false_eq_true, iff_false]
+      constructor
+      · rintro ⟨ho', hp⟩
+        exact ⟨htl', es[j.val], by rw [← hjv]; simp, ho', hp⟩
+      · rintro ⟨_, e, he, ho', hp⟩
+        rw [← hjv, List.getElem?_eq_getElem hjn, Option.some.injEq] at he
+        subst he
+        exact ⟨ho', hp⟩
+    · rename_i hjl
+      exfalso; apply hjl; scalar_tac
+  · rename_i htl
+    simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_exists]
+    intro h; exfalso; scalar_tac
+
+/-- Distinct entries of a sorted snapshot have distinct paths. -/
+theorem Sorted.path_ne {es : List Entry} (hS : Sorted es) {a b : Nat} (ha : a < es.length) (hb : b < es.length)
+    (hab : a ≠ b) : es[a].path ≠ es[b].path := by
+  intro heq
+  rcases Nat.lt_or_gt_of_ne hab with h | h
+  · have := List.pairwise_iff_getElem.mp hS a b ha hb h
+    rw [heq] at this; exact bytesLt_irrefl _ this
+  · have := List.pairwise_iff_getElem.mp hS b a hb ha h
+    rw [heq] at this; exact bytesLt_irrefl _ this
+
+/-- A sorted listing has the blob `oid` at another path than `path`
+    exactly when `elsewhere_in` says so: its records of `oid` are together
+    in the object order, at most one of them at `path`. -/
+theorem elsewhere_in_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
+    (hL : ListingOf listing ends es) (hS : Sorted es) {order : Slice Usize} (ho : ObjectOrder es order)
+    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) :
+    elsewhere_in listing ends order oid path ⦃ b => b = true ↔
+      ∃ e ∈ es, e.oid = sliceBytes oid ∧ e.path ≠ sliceBytes path ⦄ := by
+  unfold elsewhere_in
+  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  step with find_object_spec hL ho oid 0#usize as ⟨ t, ht1, ht2, ht3 ⟩
+  have hbefore : ∀ s (h : s < order.val.length), s < t.val →
+      KeyLt (keyOf es order.val[s].val) (sliceBytes oid, (0#usize).val) := ht2
+  -- A slot from `t` on whose key is before a key of `oid` holds `oid`.
+  have hoid_of : ∀ s (hs : s < order.val.length) k (hk : k < es.length), t.val ≤ s →
+      KeyLt (keyOf es (order.val[s]).val) (es[k].oid, k) → es[k].oid = sliceBytes oid →
+      ∃ e, es[(order.val[s]).val]? = some e ∧ e.oid = sliceBytes oid := by
+    intro s hs k hk hts hkl hko
+    obtain ⟨e, he, hkey⟩ := ho.slot hs
+    refine ⟨e, he, ?_⟩
+    rw [hkey, hko] at hkl
+    rcases hkl with hkl | ⟨hkl, _⟩
+    · exfalso
+      apply ht3 s hs hts
+      rw [hkey]
+      exact Or.inl hkl
+    · exact hkl
+  split
+  · rename_i htl
+    have htl' : t.val < order.val.length := by scalar_tac
+    step with other_path_at_spec hL ho t oid path h9 as ⟨ b, hb ⟩
+    step as ⟨ t1, ht1v ⟩
+    step with other_path_at_spec hL ho t1 oid path h9 as ⟨ b1, hb1 ⟩
+    simp only [Bool.or_eq_true]
+    constructor
+    · rintro (h | h)
+      · obtain ⟨_, e, he, ho', hp⟩ := hb.mp h
+        exact ⟨e, List.mem_of_getElem? he, ho', hp⟩
+      · obtain ⟨_, e, he, ho', hp⟩ := hb1.mp h
+        exact ⟨e, List.mem_of_getElem? he, ho', hp⟩
+    · rintro ⟨e, hmem, ho', hp⟩
+      obtain ⟨k, hk, rfl⟩ := List.getElem_of_mem hmem
+      obtain ⟨s, hs, hsk, hts⟩ := ho.slot_of (List.getElem?_eq_getElem hk) ho' (Nat.zero_le k) hbefore
+      rcases Nat.lt_or_ge s (t.val + 2) with hlt | hge
+      · rcases (by omega : s = t.val ∨ s = t.val + 1) with hst | hst
+        · left
+          refine hb.mpr ⟨htl', es[k], ?_, ho', hp⟩
+          have : (order.val[t.val]'htl') = order.val[s] := by simp [hst]
+          rw [this, hsk]; simp
+        · right
+          have ht1' : t1.val < order.val.length := by omega
+          refine hb1.mpr ⟨ht1', es[k], ?_, ho', hp⟩
+          have : (order.val[t1.val]'ht1') = order.val[s] := by simp [ht1v, hst]
+          rw [this, hsk]; simp
+      · -- Slots `t` and `t + 1` both hold `oid`, at distinct positions, so at distinct paths.
+        have ht1' : t1.val < order.val.length := by omega
+        have hkey_s : keyOf es (order.val[s]).val = (es[k].oid, k) := by rw [hsk, keyOf_of_lt hk]
+        obtain ⟨e0, he0, ho0⟩ := hoid_of t.val htl' k hk (le_refl _)
+          (by rw [← hkey_s]; exact ho.lt (by omega) (by simpa [Slice.length] using hs)) ho'
+        obtain ⟨e1, he1, ho1⟩ := hoid_of t1.val ht1' k hk (by omega)
+          (by rw [← hkey_s]; exact ho.lt (by omega) (by simpa [Slice.length] using hs)) ho'
+        have hj0 := ho.2.1 t.val (by simpa [Slice.length] using htl')
+        have hj1 := ho.2.1 t1.val (by simpa [Slice.length] using ht1')
+        have hne : (order.val[t.val]).val ≠ (order.val[t1.val]).val := by
+          intro heq
+          have := ho.lt (s := t.val) (t := t1.val) (by omega) (by simpa [Slice.length] using ht1')
+          rw [heq] at this
+          exact keyLt_irrefl _ this
+        have hpne := Sorted.path_ne hS hj0 hj1 hne
+        rw [List.getElem?_eq_getElem hj0, Option.some.injEq] at he0
+        rw [List.getElem?_eq_getElem hj1, Option.some.injEq] at he1
+        by_cases h0 : e0.path = sliceBytes path
+        · right
+          refine hb1.mpr ⟨ht1', e1, by rw [List.getElem?_eq_getElem hj1, he1], ho1, fun h1 => hpne ?_⟩
+          rw [he0, he1, h0, h1]
+        · left
+          exact hb.mpr ⟨htl', e0, by rw [List.getElem?_eq_getElem hj0, he0], ho0, h0⟩
+  · rename_i htl
+    simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_exists, not_and]
+    intro e hmem ho' hp
+    obtain ⟨k, hk, rfl⟩ := List.getElem_of_mem hmem
+    obtain ⟨s, hs, hsk, hts⟩ := ho.slot_of (List.getElem?_eq_getElem hk) ho' (Nat.zero_le k) hbefore
+    exfalso
+    have : t.val ≥ order.val.length := by scalar_tac
+    omega
+
+/-- **Keyless move check.** `blob_elsewhere` says exactly whether the blob
+    of entry `i` of the index is at another path in the index, `HEAD` or its
+    parent (`BlobElsewhere`), for sorted listings with their object orders. -/
+theorem blob_elsewhere_spec {index head parent : Slice U8} {index_ends head_ends parent_ends : Slice Usize}
+    {es hs ps : List Entry} {index_order head_order parent_order : Slice Usize}
+    (hI : ListingOf index index_ends es) (hIs : Sorted es) (hIo : ObjectOrder es index_order)
+    (hH : ListingOf head head_ends hs) (hHs : Sorted hs) (hHo : ObjectOrder hs head_order)
+    (hP : ListingOf parent parent_ends ps) (hPs : Sorted ps) (hPo : ObjectOrder ps parent_order)
+    (i : Usize) (hi : i.val < es.length) :
+    blob_elsewhere index index_ends index_order i head head_ends head_order parent parent_ends parent_order
+      ⦃ b => b = true ↔ BlobElsewhere [es, hs, ps] es[i.val] ⦄ := by
+  unfold blob_elsewhere
+  step with listing_fields_spec hI i as ⟨ o, ho ⟩
+  rcases o with _ | f
+  · exfalso; simp only at ho; omega
+  · obtain ⟨_, hf'⟩ := ho
+    obtain ⟨e, he, hok, hoid, hpath, hf1, hf2, hf3, hf4⟩ := FieldsOf.slices hI hf'
+    have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
+    simp only
+    step as ⟨ i1, hi1 ⟩
+    step with index_range_spec index i1 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
+    step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
+    rw [hi1, hoid] at hso
+    rw [hpath] at hsp
+    have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+    step with elsewhere_in_spec hI hIs hIo so sp h9 as ⟨ b, hb ⟩
+    step with elsewhere_in_spec hH hHs hHo so sp h9 as ⟨ b1, hb1 ⟩
+    step with elsewhere_in_spec hP hPs hPo so sp h9 as ⟨ b2, hb2 ⟩
+    simp only [Bool.or_eq_true, hb, hb1, hb2, hso, hsp, hei, BlobElsewhere, List.mem_cons,
+      List.not_mem_nil, or_false, exists_eq_or_imp, exists_eq_left]
+    simp only [or_assoc]
 
 end Transcrypt.V3Verification

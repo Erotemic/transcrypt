@@ -1142,3 +1142,30 @@ fn a_failed_resume_of_migrate_stays_resumable() {
     run(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
     assert!(is_record(&staged(&repo, "a.key")));
 }
+
+/// Committing an octopus merge stopped with `--no-commit`: the hook looks
+/// up entries in both merged commits at once (paths repeat across them),
+/// keeps their records as they are, and still seals a local addition.
+#[test]
+fn octopus_merges_check_every_incoming_commit() {
+    let mut scratch = Scratch::new("octopus");
+    let repo = scratch.repo("repo");
+    for (branch, file) in [("one", "one.secret"), ("two", "two.secret")] {
+        run(&repo, "git", &["checkout", "-q", "-b", branch, "master"], None);
+        fs::write(repo.join(file), format!("{branch} plaintext\n")).unwrap();
+        commit(&repo, &[file], branch);
+    }
+    run(&repo, "git", &["checkout", "-q", "master"], None);
+    fs::write(repo.join("README"), b"diverged\n").unwrap();
+    commit(&repo, &["README"], "diverge");
+    run(&repo, "git", &["merge", "-q", "--no-commit", "one", "two"], None);
+    assert_eq!(fs::read_to_string(repo.join(".git/MERGE_HEAD")).unwrap().lines().count(), 2);
+    let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(b"local plaintext\n"))).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("100644,{},three.secret", blob.trim())], None);
+    run(&repo, "git", &["commit", "-qm", "octopus"], None);
+    assert_eq!(run(&repo, "git", &["rev-list", "--parents", "-1", "HEAD"], None).split(|b| *b == b' ').count(), 4);
+    assert_eq!(committed(&repo, "one.secret"), run(&repo, "git", &["show", "one:one.secret"], None));
+    assert_eq!(committed(&repo, "two.secret"), run(&repo, "git", &["show", "two:two.secret"], None));
+    assert!(is_record(&committed(&repo, "three.secret")));
+    run(&repo, bin(), &["verify-index"], None);
+}

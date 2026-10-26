@@ -1171,3 +1171,47 @@ fn pulled_rekey_retires_the_stale_agent() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(!socket(&clone).exists(), "a stale agent survived lock");
 }
+
+/// A crafted tree may list a path twice (`git mktree` accepts it, `git fsck`
+/// refuses it). With such a tree as `HEAD` and `HEAD^1`, `dir/b.secret`'s
+/// record staged as `a.secret` must not count as unchanged: the hook (with
+/// and without the key) and `verify-index` refuse the snapshot instead of
+/// trusting either of its entries.
+#[test]
+fn trees_listing_a_path_twice_are_refused() {
+    let mut scratch = Scratch::new("duptree");
+    for moved_first in [true, false] {
+        let repo = scratch.repo(if moved_first { "first" } else { "second" });
+        let oid = |rev: &str| String::from_utf8(run(&repo, "git", &["rev-parse", rev], None)).unwrap().trim().to_owned();
+        let (a, b) = (oid("HEAD:a.secret"), oid("HEAD:dir/b.secret"));
+        let listing = String::from_utf8(run(&repo, "git", &["ls-tree", "HEAD"], None)).unwrap();
+        let mut tree: String = listing.lines().filter(|l| !l.ends_with("\ta.secret")).map(|l| format!("{l}\n")).collect();
+        let (x, y) = if moved_first { (&b, &a) } else { (&a, &b) };
+        tree.push_str(&format!("100644 blob {x}\ta.secret\n100644 blob {y}\ta.secret\n"));
+        let tree = String::from_utf8(run(&repo, "git", &["mktree"], Some(tree.as_bytes()))).unwrap();
+        let first = String::from_utf8(run(&repo, "git", &["commit-tree", tree.trim(), "-p", "HEAD", "-m", "dup"], None)).unwrap();
+        let second = String::from_utf8(run(&repo, "git", &["commit-tree", tree.trim(), "-p", first.trim(), "-m", "dup"], None)).unwrap();
+        run(&repo, "git", &["reset", "-q", "--soft", second.trim()], None);
+        // The keyed audit refuses that history (the record does not open there).
+        run_fails(&repo, bin(), &["audit", "HEAD"], None);
+        run(&repo, "git", &["update-index", "--cacheinfo", &format!("100644,{b},a.secret")], None);
+        fs::write(repo.join("z"), b"z\n").unwrap();
+        run(&repo, "git", &["add", "z"], None);
+        for locked in [false, true] {
+            if locked {
+                // `lock` verifies the index against `HEAD` first, so it refuses too.
+                let err = run_fails(&repo, bin(), &["lock"], None);
+                assert!(err.contains("lists a path twice"), "{err}");
+                fs::remove_file(repo.join(".git/transcrypt-v3/key")).unwrap();
+            }
+            // The hook Git runs (the locked worktree's plaintext would fail clean first).
+            let err = if locked { run_fails(&repo, bin(), &["pre-commit"], None) }
+                else { run_fails(&repo, "git", &["commit", "-qm", "moved record"], None) };
+            assert!(err.contains("lists a path twice"), "{err}");
+            let err = run_fails(&repo, bin(), &["verify-index"], None);
+            assert!(err.contains("lists a path twice"), "{err}");
+        }
+        assert_eq!(oid("HEAD"), second.trim(), "a commit was made");
+    }
+}
+

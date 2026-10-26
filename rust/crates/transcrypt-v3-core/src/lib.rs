@@ -837,9 +837,12 @@ pub fn decode_pkt_len(header: &[u8; 4]) -> Result<usize, Refusal> {
 //
 // A *listing* is the exact output of `git ls-files --stage -z`: records
 // `mode SP oid SP 0 TAB path`, each followed by NUL (tree listings are
-// rewritten to the same shape by the adapter). `parse_listing` checks one and
-// records where each record ends; every query below takes a listing with
-// those `ends`, and is only meaningful for a listing `parse_listing` accepted.
+// rewritten to the same shape by the adapter). Git prints them in byte order
+// of their paths, each path once. `parse_listing` checks one and records
+// where each record ends; every query below takes a listing with those
+// `ends`, and is only meaningful for a listing `parse_listing` accepted.
+// Path lookups are binary searches; lookups by object id use an *object
+// order* of the listing (`object_order_ok`).
 // ---------------------------------------------------------------------------
 
 /// The bytes between an object id and the path in an index record.
@@ -863,11 +866,56 @@ fn record_ok(entry: &[u8]) -> bool {
     }
 }
 
+/// Whether `a` comes before `b` in byte order, which is Git's order of
+/// paths: at the first position where they differ `a` has the smaller byte,
+/// or `a` is a proper prefix of `b`.
+pub fn bytes_lt(a: &[u8], b: &[u8]) -> bool {
+    let mut i = 0;
+    while i < a.len() && i < b.len() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+        i += 1;
+    }
+    a.len() < b.len()
+}
+
+/// Whether the records of a listing with `ends` are in byte order of their
+/// paths: strictly increasing (`unique`, each path once) or never
+/// decreasing.
+fn listing_ordered(listing: &[u8], ends: &[usize], unique: bool) -> bool {
+    let mut i = 1;
+    while i < ends.len() {
+        match listing_fields(listing, ends, i - 1) {
+            Some(p) => match listing_fields(listing, ends, i) {
+                Some(f) => {
+                    let previous = &listing[p.path_start..p.end];
+                    let path = &listing[f.path_start..f.end];
+                    let ordered = if unique {
+                        bytes_lt(previous, path)
+                    } else {
+                        bytes_lt(previous, path) | bytes_eq(previous, path)
+                    };
+                    if !ordered {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+            None => return false,
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Check that `listing` is exactly `ends.len()` NUL-terminated index records
-/// (`record_ok`, so every mode, object id and path is well formed), and
+/// (`record_ok`, so every mode, object id and path is well formed) in byte
+/// order of their paths, each path once if `unique` (`listing_ordered`), and
 /// record in `ends[i]` the position of the NUL that ends record `i`. On
-/// failure `ends` must not be used.
-pub fn parse_listing(listing: &[u8], ends: &mut [usize]) -> bool {
+/// failure `ends` must not be used. Git lists the index and each tree with
+/// unique paths; only the adapter's merge of several trees repeats them.
+pub fn parse_listing(listing: &[u8], ends: &mut [usize], unique: bool) -> bool {
     let mut ok = true;
     let mut start = 0;
     let mut i = 0;
@@ -881,7 +929,11 @@ pub fn parse_listing(listing: &[u8], ends: &mut [usize]) -> bool {
             ok = false;
         }
     }
-    ok && start == listing.len()
+    if ok && start == listing.len() {
+        listing_ordered(listing, ends, unique)
+    } else {
+        false
+    }
 }
 
 /// The fields of one listing record: the record is `listing[start..end]`,
@@ -929,44 +981,57 @@ fn record_is(listing: &[u8], start: usize, end: usize, oid: &[u8], path: &[u8], 
     here == same_path
 }
 
-/// The first record `j` in `from..to` that `record_is` (`oid`, `path`,
-/// `same_path`), or `to` if there is none.
-fn scan(listing: &[u8], ends: &[usize], from: usize, to: usize, oid: &[u8], path: &[u8], same_path: bool) -> usize {
-    let mut j = from;
-    let mut found = false;
-    while !found && j < to {
-        if record_is(listing, record_start(ends, j), ends[j], oid, path, same_path) {
-            found = true;
-        } else {
-            j += 1;
-        }
+/// Whether record `j` exists and its path comes before `path`.
+fn path_before(listing: &[u8], ends: &[usize], j: usize, path: &[u8]) -> bool {
+    match listing_fields(listing, ends, j) {
+        Some(f) => bytes_lt(&listing[f.path_start..f.end], path),
+        None => false,
     }
-    j
 }
 
-/// The position of a record that names `oid` at `path`, searched from
-/// `hint` to the end and then from the start, or `ends.len()` if there is
-/// none. Listings are sorted by path, so the hint of the previous match
-/// makes a pass over a whole listing linear.
-fn find_entry(listing: &[u8], ends: &[usize], oid: &[u8], path: &[u8], hint: usize) -> usize {
-    let n = ends.len();
-    let from = if hint < n { hint } else { n };
-    let j = scan(listing, ends, from, n, oid, path, true);
-    if j < n {
-        return j;
+/// Whether record `j` exists and is at `path`.
+fn path_at(listing: &[u8], ends: &[usize], j: usize, path: &[u8]) -> bool {
+    match listing_fields(listing, ends, j) {
+        Some(f) => bytes_eq(&listing[f.path_start..f.end], path),
+        None => false,
     }
-    let k = scan(listing, ends, 0, from, oid, path, true);
-    if k < from {
-        k
-    } else {
-        n
+}
+
+/// The first record whose path does not come before `path`, or
+/// `ends.len()`: a binary search of a listing in path order.
+fn find_path(listing: &[u8], ends: &[usize], path: &[u8]) -> usize {
+    let mut low = 0;
+    let mut high = ends.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if path_before(listing, ends, middle, path) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
     }
+    low
+}
+
+/// The position of a record that names `oid` at `path`, or `ends.len()` if
+/// there is none, in a listing in path order: the records at `path` are the
+/// ones from `find_path` on.
+fn find_entry(listing: &[u8], ends: &[usize], oid: &[u8], path: &[u8]) -> usize {
+    let mut j = find_path(listing, ends, path);
+    while j < ends.len() && path_at(listing, ends, j, path) {
+        if record_is(listing, record_start(ends, j), ends[j], oid, path, true) {
+            return j;
+        }
+        j += 1;
+    }
+    ends.len()
 }
 
 /// For each record `i` of the listing `index` with `wanted[i]`, whether the
 /// listing `other` holds a record with its object id and path
 /// (`held[i]`); `held[i]` is false for the others. Fails, writing nothing,
-/// unless `wanted` and `held` have one slot per record.
+/// unless `wanted` and `held` have one slot per record. `other` must be in
+/// path order (`parse_listing`, possibly not `unique`).
 pub fn held_entries(
     index: &[u8],
     index_ends: &[usize],
@@ -978,19 +1043,13 @@ pub fn held_entries(
     if wanted.len() != index_ends.len() || held.len() != index_ends.len() {
         return false;
     }
-    let mut hint = 0;
     let mut i = 0;
     while i < held.len() {
         if wanted[i] {
             match listing_fields(index, index_ends, i) {
                 Some(f) => {
-                    let j = find_entry(other, other_ends, &index[f.start + 7..f.oid_end], &index[f.path_start..f.end], hint);
-                    if j < other_ends.len() {
-                        held[i] = true;
-                        hint = j + 1;
-                    } else {
-                        held[i] = false;
-                    }
+                    let j = find_entry(other, other_ends, &index[f.start + 7..f.oid_end], &index[f.path_start..f.end]);
+                    held[i] = j < other_ends.len();
                 }
                 None => held[i] = false,
             }
@@ -1012,6 +1071,67 @@ pub fn is_local_change(in_head: bool, incoming_known: bool, in_incoming: bool, f
     (!in_head & incoming_known & !in_incoming) | (forced & !envelope)
 }
 
+/// Whether record `j` exists and its key, its object id and then its
+/// position, comes before the key `(oid, at)`.
+fn object_before(listing: &[u8], ends: &[usize], j: usize, oid: &[u8], at: usize) -> bool {
+    match listing_fields(listing, ends, j) {
+        Some(f) => {
+            let id = &listing[f.start + 7..f.oid_end];
+            bytes_lt(id, oid) | (bytes_eq(id, oid) & (j < at))
+        }
+        None => false,
+    }
+}
+
+/// Whether `order` lists the records of a listing by object id, and by
+/// position among equal ids: one slot per record, and the keys of
+/// `order[0]`, `order[1]`, … strictly increase (`object_before`), so every
+/// record is listed exactly once. The adapter sorts; this checks.
+pub fn object_order_ok(listing: &[u8], ends: &[usize], order: &[usize]) -> bool {
+    if order.len() != ends.len() {
+        return false;
+    }
+    let mut t = 0;
+    while t < order.len() {
+        let j = order[t];
+        match listing_fields(listing, ends, j) {
+            Some(f) => {
+                if t > 0 && !object_before(listing, ends, order[t - 1], &listing[f.start + 7..f.oid_end], j) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+        t += 1;
+    }
+    true
+}
+
+/// The first slot `t` of an object order (`object_order_ok`) whose record's
+/// key is not before `(oid, at)`, or `order.len()`: a binary search. The
+/// records of `oid` at positions from `at` on are the ones from there on.
+fn find_object(listing: &[u8], ends: &[usize], order: &[usize], oid: &[u8], at: usize) -> usize {
+    let mut low = 0;
+    let mut high = order.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if object_before(listing, ends, order[middle], oid, at) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+/// Whether record `j` exists and names `oid`.
+fn names_oid(listing: &[u8], ends: &[usize], j: usize, oid: &[u8]) -> bool {
+    match listing_fields(listing, ends, j) {
+        Some(f) => bytes_eq(&listing[f.start + 7..f.oid_end], oid),
+        None => false,
+    }
+}
+
 /// Whether record `j` of `head` is a source the staged blob `oid` at `path`
 /// may have been moved from: it names `oid` at another path, and the index
 /// does not hold that blob at that path (the entry is gone or replaced).
@@ -1029,74 +1149,107 @@ fn move_source_at(
         return false;
     }
     let source = &head[start + 10 + oid.len()..head_ends[j]];
-    find_entry(index, index_ends, oid, source, 0) == index_ends.len()
+    find_entry(index, index_ends, oid, source) == index_ends.len()
 }
 
-/// The first `move_source_at` record in `from..`, or `head_ends.len()`.
+/// The first move source (`move_source_at`) among the records
+/// `head_order[t]`, `head_order[t + 1]`, … that name `oid`, or
+/// `head_ends.len()`.
+#[allow(clippy::too_many_arguments)]
 fn move_source_from(
     index: &[u8],
     index_ends: &[usize],
     head: &[u8],
     head_ends: &[usize],
+    head_order: &[usize],
     oid: &[u8],
     path: &[u8],
-    from: usize,
+    t: usize,
 ) -> usize {
-    let mut j = from;
-    let mut found = false;
-    while !found && j < head_ends.len() {
+    let mut t = t;
+    while t < head_order.len() && names_oid(head, head_ends, head_order[t], oid) {
+        let j = head_order[t];
         if move_source_at(index, index_ends, head, head_ends, oid, path, j) {
-            found = true;
-        } else {
-            j += 1;
+            return j;
         }
+        t += 1;
     }
-    j
+    head_ends.len()
 }
 
-/// The next record of `head`, from `from` on, that the staged entry `i` of
-/// `index` may have been moved from (`move_source_at`), or `head_ends.len()`
-/// if there is none. The hook tries the candidates in `HEAD` order and
-/// re-encrypts from the first at which the record opens.
+/// The next record of `head`, from position `from` on, that the staged entry
+/// `i` of `index` may have been moved from (`move_source_at`), or
+/// `head_ends.len()` if there is none. The hook tries the candidates in
+/// `HEAD` order and re-encrypts from the first at which the record opens.
+/// `head_order` is an object order of `head` (`object_order_ok`): the
+/// candidates are the records of the blob from `from` on, in that order.
 pub fn next_move_source(
     index: &[u8],
     index_ends: &[usize],
     i: usize,
     head: &[u8],
     head_ends: &[usize],
+    head_order: &[usize],
     from: usize,
 ) -> usize {
     match listing_fields(index, index_ends, i) {
-        Some(f) => move_source_from(
-            index, index_ends, head, head_ends, &index[f.start + 7..f.oid_end], &index[f.path_start..f.end], from,
-        ),
+        Some(f) => {
+            let oid = &index[f.start + 7..f.oid_end];
+            let path = &index[f.path_start..f.end];
+            let t = find_object(head, head_ends, head_order, oid, from);
+            move_source_from(index, index_ends, head, head_ends, head_order, oid, path, t)
+        }
         None => head_ends.len(),
+    }
+}
+
+/// Whether slot `t` of an object order names a record of `oid` at another
+/// path than `path`.
+fn other_path_at(listing: &[u8], ends: &[usize], order: &[usize], t: usize, oid: &[u8], path: &[u8]) -> bool {
+    if t < order.len() && order[t] < ends.len() {
+        let j = order[t];
+        record_is(listing, record_start(ends, j), ends[j], oid, path, false)
+    } else {
+        false
+    }
+}
+
+/// Whether a listing with unique paths holds `oid` at another path than
+/// `path`. Its records of `oid` are together in the object order, at most
+/// one of them at `path`, so one of the first two is elsewhere if any is.
+fn elsewhere_in(listing: &[u8], ends: &[usize], order: &[usize], oid: &[u8], path: &[u8]) -> bool {
+    let t = find_object(listing, ends, order, oid, 0);
+    if t < order.len() {
+        other_path_at(listing, ends, order, t, oid, path) | other_path_at(listing, ends, order, t + 1, oid, path)
+    } else {
+        false
     }
 }
 
 /// Whether the blob of entry `i` of `index` is at another path in `index`,
 /// `head` or `parent`: a record moved or copied there, which only the key
-/// can re-encrypt (the locked pre-commit check refuses it).
+/// can re-encrypt (the locked pre-commit check refuses it). Each listing
+/// comes with an object order (`object_order_ok`).
+#[allow(clippy::too_many_arguments)]
 pub fn blob_elsewhere(
     index: &[u8],
     index_ends: &[usize],
+    index_order: &[usize],
     i: usize,
     head: &[u8],
     head_ends: &[usize],
+    head_order: &[usize],
     parent: &[u8],
     parent_ends: &[usize],
+    parent_order: &[usize],
 ) -> bool {
     match listing_fields(index, index_ends, i) {
         Some(f) => {
             let oid = &index[f.start + 7..f.oid_end];
             let path = &index[f.path_start..f.end];
-            if scan(index, index_ends, 0, index_ends.len(), oid, path, false) < index_ends.len() {
-                return true;
-            }
-            if scan(head, head_ends, 0, head_ends.len(), oid, path, false) < head_ends.len() {
-                return true;
-            }
-            scan(parent, parent_ends, 0, parent_ends.len(), oid, path, false) < parent_ends.len()
+            elsewhere_in(index, index_ends, index_order, oid, path)
+                | elsewhere_in(head, head_ends, head_order, oid, path)
+                | elsewhere_in(parent, parent_ends, parent_order, oid, path)
         }
         None => false,
     }
@@ -1618,8 +1771,8 @@ mod tests {
         }
     }
 
-    /// A listing of `(mode, oid digit, path)` records, and its `ends`.
-    fn listing(records: &[(&str, u8, &[u8])]) -> (std::vec::Vec<u8>, std::vec::Vec<usize>) {
+    /// The bytes of a listing of `(mode, oid digit, path)` records.
+    fn listing_bytes(records: &[(&str, u8, &[u8])]) -> std::vec::Vec<u8> {
         let mut bytes = std::vec::Vec::new();
         for (mode, digit, path) in records {
             bytes.extend_from_slice(mode.as_bytes());
@@ -1629,44 +1782,104 @@ mod tests {
             bytes.extend_from_slice(path);
             bytes.push(0);
         }
+        bytes
+    }
+
+    type Listing = (std::vec::Vec<u8>, std::vec::Vec<usize>);
+
+    /// A listing with unique paths in byte order, and its `ends`.
+    fn listing(records: &[(&str, u8, &[u8])]) -> Listing {
+        let bytes = listing_bytes(records);
         let mut ends = std::vec![0; records.len()];
-        assert!(parse_listing(&bytes, &mut ends));
+        assert!(parse_listing(&bytes, &mut ends, true));
         (bytes, ends)
     }
 
-    fn held(index: &(std::vec::Vec<u8>, std::vec::Vec<usize>), other: &(std::vec::Vec<u8>, std::vec::Vec<usize>))
-        -> std::vec::Vec<bool>
-    {
+    /// The object order of a listing (by object id, then position).
+    fn order(l: &Listing) -> std::vec::Vec<usize> {
+        let id = |j: usize| listing_fields(&l.0, &l.1, j).map(|f| l.0[f.start + 7..f.oid_end].to_vec()).unwrap();
+        let mut order: std::vec::Vec<usize> = (0..l.1.len()).collect();
+        order.sort_by_key(|j| (id(*j), *j));
+        assert!(object_order_ok(&l.0, &l.1, &order));
+        order
+    }
+
+    fn held(index: &Listing, other: &Listing) -> std::vec::Vec<bool> {
         let mut out = std::vec![true; index.1.len()];
         let wanted = std::vec![true; index.1.len()];
         assert!(held_entries(&index.0, &index.1, &wanted, &other.0, &other.1, &mut out));
         out
     }
 
+    fn elsewhere(index: &Listing, i: usize, head: &Listing, parent: &Listing) -> bool {
+        blob_elsewhere(&index.0, &index.1, &order(index), i, &head.0, &head.1, &order(head), &parent.0, &parent.1,
+            &order(parent))
+    }
+
+    fn source(index: &Listing, i: usize, head: &Listing, from: usize) -> usize {
+        next_move_source(&index.0, &index.1, i, &head.0, &head.1, &order(head), from)
+    }
+
     #[test]
     fn listings_are_parsed_exactly() {
-        let (bytes, ends) = listing(&[("100644", b'a', b"x\ty"), ("120000", b'b', b"d/l")]);
+        let (bytes, ends) = listing(&[("100644", b'a', b"x\ty"), ("120000", b'b', b"y/l")]);
         let first = listing_fields(&bytes, &ends, 0).unwrap();
         assert_eq!(&bytes[first.start + 7..first.oid_end], &[b'a'; 40]);
         assert_eq!(&bytes[first.path_start..first.end], b"x\ty");
         assert!(first.regular);
         let second = listing_fields(&bytes, &ends, 1).unwrap();
-        assert_eq!(&bytes[second.path_start..second.end], b"d/l");
+        assert_eq!(&bytes[second.path_start..second.end], b"y/l");
         assert!(!second.regular);
         assert_eq!(listing_fields(&bytes, &ends, 2), None);
-        assert!(parse_listing(b"", &mut []));
+        assert!(parse_listing(b"", &mut [], true));
         // Wrong count, truncated, extended, unmerged, bad object id, empty record.
-        assert!(!parse_listing(&bytes, &mut [0; 1]));
-        assert!(!parse_listing(&bytes, &mut [0; 3]));
-        assert!(!parse_listing(&bytes[..bytes.len() - 1], &mut [0; 2]));
-        assert!(!parse_listing(&[&bytes[..], b"\0"].concat(), &mut [0; 2]));
+        assert!(!parse_listing(&bytes, &mut [0; 1], true));
+        assert!(!parse_listing(&bytes, &mut [0; 3], true));
+        assert!(!parse_listing(&bytes[..bytes.len() - 1], &mut [0; 2], true));
+        assert!(!parse_listing(&[&bytes[..], b"\0"].concat(), &mut [0; 2], true));
         let unmerged = [b"100644 ".as_slice(), &[b'a'; 40], b" 1\tx\0"].concat();
-        assert!(!parse_listing(&unmerged, &mut [0; 1]));
+        assert!(!parse_listing(&unmerged, &mut [0; 1], true));
         let short = [b"100644 ".as_slice(), &[b'a'; 39], b" 0\tx\0"].concat();
-        assert!(!parse_listing(&short, &mut [0; 1]));
+        assert!(!parse_listing(&short, &mut [0; 1], true));
         let upper = [b"100644 ".as_slice(), &[b'A'; 40], b" 0\tx\0"].concat();
-        assert!(!parse_listing(&upper, &mut [0; 1]));
-        assert!(!parse_listing(b"\0", &mut [0; 1]));
+        assert!(!parse_listing(&upper, &mut [0; 1], true));
+        assert!(!parse_listing(b"\0", &mut [0; 1], true));
+    }
+
+    #[test]
+    fn listings_are_in_path_order() {
+        // Git's order is byte order of the whole path ("a-b" < "a.c" < "a/b" < "a0").
+        for (a, b) in [(&b"a"[..], &b"b"[..]), (b"a", b"ab"), (b"", b"a"), (b"a-b", b"a.c"), (b"a.c", b"a/b"),
+            (b"a/b", b"a0"), (b"a/b/c", b"a/bc"), (b"z\x7f", b"z\x80"), (b"A", b"a")]
+        {
+            assert!(bytes_lt(a, b) && !bytes_lt(b, a), "{a:?} {b:?}");
+        }
+        assert!(!bytes_lt(b"", b"") && !bytes_lt(b"a/b", b"a/b"));
+        let mut ends = [0; 2];
+        let sorted = listing_bytes(&[("100644", b'1', b"a.c"), ("100644", b'2', b"a/b")]);
+        assert!(parse_listing(&sorted, &mut ends, true));
+        // Out of order or a path twice (a crafted tree): refused, unless
+        // repeated paths are allowed (the merged incoming commits).
+        let swapped = listing_bytes(&[("100644", b'2', b"a/b"), ("100644", b'1', b"a.c")]);
+        assert!(!parse_listing(&swapped, &mut ends, true));
+        assert!(!parse_listing(&swapped, &mut ends, false));
+        let twice = listing_bytes(&[("100644", b'1', b"a.secret"), ("100644", b'2', b"a.secret")]);
+        assert!(!parse_listing(&twice, &mut ends, true));
+        assert!(parse_listing(&twice, &mut ends, false));
+        // In a merged listing, every record at a path is found.
+        let index = listing(&[("100644", b'2', b"a.secret")]);
+        let other = (twice, ends.to_vec());
+        assert_eq!(held(&index, &other), [true]);
+    }
+
+    #[test]
+    fn object_orders_list_each_record_once_by_object_id() {
+        let l = listing(&[("100644", b'2', b"a"), ("100644", b'1', b"b"), ("100644", b'2', b"c")]);
+        assert_eq!(order(&l), [1, 0, 2]);
+        for bad in [&[0usize, 1, 2][..], &[1, 2, 0], &[1, 0, 0], &[1, 0, 3], &[1, 0], &[1, 0, 2, 2]] {
+            assert!(!object_order_ok(&l.0, &l.1, bad), "{bad:?}");
+        }
+        assert!(object_order_ok(b"", &[], &[]));
     }
 
     #[test]
@@ -1674,10 +1887,10 @@ mod tests {
         let index = listing(&[("100644", b'1', b"a"), ("100644", b'2', b"b"), ("100644", b'3', b"c"),
             ("100644", b'4', b"moved")]);
         let head = listing(&[("100644", b'1', b"a"), ("100755", b'2', b"b"), ("100644", b'9', b"c"),
-            ("100644", b'4', b"old"), ("100644", b'4', b"kept"), ("100644", b'4', b"moved")]);
+            ("100644", b'4', b"kept"), ("100644", b'4', b"moved"), ("100644", b'4', b"old")]);
         // The mode does not matter; another blob at the path is not held.
         assert_eq!(held(&index, &head), [true, true, false, true]);
-        assert_eq!(held(&head, &index), [true, true, false, false, false, true]);
+        assert_eq!(held(&head, &index), [true, true, false, false, true, false]);
         let mut out = [true; 4];
         assert!(held_entries(&index.0, &index.1, &[false, true, true, false], &head.0, &head.1, &mut out));
         assert_eq!(out, [false, true, false, false]);
@@ -1686,16 +1899,15 @@ mod tests {
         assert_eq!(held(&index, &empty), [false; 4]);
         // Move sources of `moved` (entry 3): the HEAD paths of its blob that
         // left the index, in HEAD order, never its own path.
-        assert_eq!(next_move_source(&index.0, &index.1, 3, &head.0, &head.1, 0), 3);
-        assert_eq!(next_move_source(&index.0, &index.1, 3, &head.0, &head.1, 4), 4);
-        assert_eq!(next_move_source(&index.0, &index.1, 3, &head.0, &head.1, 5), 6);
-        assert_eq!(next_move_source(&index.0, &index.1, 0, &head.0, &head.1, 0), 6);
+        assert_eq!(source(&index, 3, &head, 0), 3);
+        assert_eq!(source(&index, 3, &head, 4), 5);
+        assert_eq!(source(&index, 3, &head, 6), 6);
+        assert_eq!(source(&index, 0, &head, 0), 6);
         let kept = listing(&[("100644", b'4', b"kept"), ("100644", b'4', b"moved")]);
-        assert_eq!(next_move_source(&kept.0, &kept.1, 1, &head.0, &head.1, 0), 3);
-        assert_eq!(next_move_source(&kept.0, &kept.1, 1, &head.0, &head.1, 4), 6);
-        assert!(blob_elsewhere(&index.0, &index.1, 3, &empty.0, &empty.1, &head.0, &head.1));
-        assert!(!blob_elsewhere(&index.0, &index.1, 0, &head.0, &head.1, &head.0, &head.1));
-        assert!(blob_elsewhere(&kept.0, &kept.1, 1, &empty.0, &empty.1, &empty.0, &empty.1));
+        assert_eq!(source(&kept, 1, &head, 0), 5);
+        assert!(elsewhere(&index, 3, &empty, &head));
+        assert!(!elsewhere(&index, 0, &head, &head));
+        assert!(elsewhere(&kept, 1, &empty, &empty));
         // `local_change`: changed and known not to come from a commit, or forced plaintext.
         for (in_head, known, in_incoming, forced, envelope, expected) in [
             (false, true, false, false, true, true), (true, true, false, false, false, false),
@@ -1706,21 +1918,82 @@ mod tests {
         }
     }
 
+    /// The queries agree with their definitions on random listings: held
+    /// (`Holds`), the keyless move check (`BlobElsewhere`) and move sources
+    /// (`MoveSource`, first from an offset).
+    #[test]
+    fn snapshot_queries_match_their_definitions() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state % n };
+        let names: [&[u8]; 8] = [b"a", b"a-b", b"a.c", b"a/b", b"a/b/c", b"a0", b"b", b"b\xc3\xa9"];
+        for _ in 0..300 {
+            let mut random = |size: u64| {
+                let mut records: std::vec::Vec<(&str, u8, &[u8])> = std::vec::Vec::new();
+                for name in names {
+                    if next(8) < size {
+                        records.push(("100644", b'0' + next(4) as u8, name));
+                    }
+                }
+                listing(&records)
+            };
+            let (index, head, parent) = (random(6), random(5), random(3));
+            let entries = |l: &Listing| (0..l.1.len()).map(|j| {
+                let f = listing_fields(&l.0, &l.1, j).unwrap();
+                (l.0[f.start + 7..f.oid_end].to_vec(), l.0[f.path_start..f.end].to_vec())
+            }).collect::<std::vec::Vec<_>>();
+            let (es, hs, ps) = (entries(&index), entries(&head), entries(&parent));
+            let holds = |l: &[(std::vec::Vec<u8>, std::vec::Vec<u8>)], e: &(std::vec::Vec<u8>, std::vec::Vec<u8>)| l.contains(e);
+            let expected: std::vec::Vec<bool> = es.iter().map(|e| holds(&hs, e)).collect();
+            assert_eq!(held(&index, &head), expected);
+            for (i, e) in es.iter().enumerate() {
+                let other = |l: &[(std::vec::Vec<u8>, std::vec::Vec<u8>)]| l.iter().any(|x| x.0 == e.0 && x.1 != e.1);
+                assert_eq!(elsewhere(&index, i, &head, &parent), other(&es) || other(&hs) || other(&ps));
+                for from in 0..=hs.len() {
+                    let first = (from..hs.len()).find(|j| hs[*j].0 == e.0 && hs[*j].1 != e.1 && !holds(&es, &hs[*j]));
+                    assert_eq!(source(&index, i, &head, from), first.unwrap_or(hs.len()));
+                }
+            }
+        }
+    }
+
+    /// Lookups stay fast on large listings where nothing matches (a whole
+    /// directory rewritten): every query is a binary search, not a scan.
+    #[test]
+    fn snapshot_queries_scale_to_large_listings() {
+        let n = 50_000;
+        let names: std::vec::Vec<std::vec::Vec<u8>> = (0..n).map(|i| std::format!("d/f{i:06}").into_bytes()).collect();
+        let build = |digit: u8| {
+            let records: std::vec::Vec<(&str, u8, &[u8])> = names.iter().map(|p| ("100644", digit, p.as_slice())).collect();
+            listing(&records)
+        };
+        let (index, head) = (build(b'1'), build(b'2'));
+        let (index_order, head_order) = (order(&index), order(&head));
+        let started = std::time::Instant::now();
+        assert!(held(&index, &head).iter().all(|h| !h));
+        for i in (0..n).step_by(7) {
+            assert!(blob_elsewhere(&index.0, &index.1, &index_order, i, &head.0, &head.1, &head_order, &head.0,
+                &head.1, &head_order));
+            assert_eq!(next_move_source(&index.0, &index.1, i, &head.0, &head.1, &head_order, 0), n);
+        }
+        // Quadratic lookups take minutes here.
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    }
+
     #[test]
     fn listing_attributes_and_selectability() {
-        let (bytes, ends) = listing(&[("100644", b'a', b"a.env"), ("120000", b'b', b"link"),
-            ("100644", b'c', b".gitattributes"), ("100755", b'd', b"run")]);
-        let response = b"a.env\0filter\0transcrypt-v3\0link\0filter\0unspecified\0.gitattributes\0filter\0unset\0run\0filter\0transcrypt-v3\0";
+        let (bytes, ends) = listing(&[("100644", b'c', b".gitattributes"), ("100644", b'a', b"a.env"),
+            ("120000", b'b', b"link"), ("100755", b'd', b"run")]);
+        let response = b".gitattributes\0filter\0unset\0a.env\0filter\0transcrypt-v3\0link\0filter\0unspecified\0run\0filter\0transcrypt-v3\0";
         let mut flags = [false; 4];
         assert!(parse_listing_attrs(&bytes, &ends, response, &mut flags));
-        assert_eq!(flags, [true, false, false, true]);
+        assert_eq!(flags, [false, true, false, true]);
         assert_eq!(first_unselectable(&bytes, &ends, &flags), 4);
-        assert_eq!(first_unselectable(&bytes, &ends, &[true, true, true, true]), 1);
-        assert_eq!(first_unselectable(&bytes, &ends, &[false, false, true, false]), 2);
+        assert_eq!(first_unselectable(&bytes, &ends, &[false, true, true, true]), 2);
+        assert_eq!(first_unselectable(&bytes, &ends, &[true, false, false, false]), 0);
         assert!(!parse_listing_attrs(&bytes, &ends, &response[..response.len() - 1], &mut flags));
         assert!(!parse_listing_attrs(&bytes, &ends, &[&response[..], b"x"].concat(), &mut flags));
         assert!(!parse_listing_attrs(&bytes, &ends, response, &mut [false; 3]));
-        let swapped = b"link\0filter\0unspecified\0a.env\0filter\0transcrypt-v3\0.gitattributes\0filter\0unset\0run\0filter\0transcrypt-v3\0";
+        let swapped = b"a.env\0filter\0transcrypt-v3\0.gitattributes\0filter\0unset\0link\0filter\0unspecified\0run\0filter\0transcrypt-v3\0";
         assert!(!parse_listing_attrs(&bytes, &ends, swapped, &mut flags));
     }
 

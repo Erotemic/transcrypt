@@ -9,8 +9,8 @@ use std::{
 use std::os::unix::ffi::OsStrExt;
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    blob_read, is_object_id, listing_fields, parse_attr_response, parse_batch_header, parse_index_entry,
-    parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, MAX_RECORD,
+    blob_read, is_object_id, listing_fields, object_order_ok, parse_attr_response, parse_batch_header,
+    parse_index_entry, parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, MAX_RECORD,
 };
 
 /// The most any Git subprocess may print to us. Listings of a hostile index
@@ -331,8 +331,9 @@ pub(crate) fn is_attributes_file(path: &[u8]) -> bool {
 /// `ls-files --stage -z`, or `ls-tree -r -z` rewritten to the same records),
 /// where each record ends, and its entries. The verified core checks the
 /// whole listing (`parse_listing`: NUL-terminated stage-0 records with object
-/// ids, nothing else) and delimits each entry's fields (`listing_fields`);
-/// the pre-commit decisions are verified functions of `bytes` and `ends`.
+/// ids, in Git's byte order of paths, each path once, nothing else) and
+/// delimits each entry's fields (`listing_fields`); the pre-commit decisions
+/// are verified functions of `bytes` and `ends`.
 pub(crate) struct Listing {
     pub(crate) bytes: Vec<u8>,
     pub(crate) ends: Vec<usize>,
@@ -340,11 +341,31 @@ pub(crate) struct Listing {
 }
 
 impl Listing {
+    /// Git's listing of the index or of one tree: each path once.
     pub(crate) fn parse(bytes: Vec<u8>) -> Result<Listing, String> {
+        Listing::parse_ordered(bytes, true)
+    }
+
+    /// The records of several trees merged in path order (a path may repeat).
+    pub(crate) fn merge(listings: Vec<Listing>) -> Result<Listing, String> {
+        let mut records: Vec<&[u8]> = listings.iter().flat_map(|l| records(&l.bytes)).collect();
+        // Stable, by the path (after the first TAB) in byte order.
+        fn path(record: &[u8]) -> &[u8] {
+            record.iter().position(|b| *b == b'\t').map_or(&record[..0], |tab| &record[tab + 1..])
+        }
+        records.sort_by(|a, b| path(a).cmp(path(b)));
+        Listing::parse_ordered(records.iter().flat_map(|r| r.iter().chain(&[0])).copied().collect(), false)
+    }
+
+    fn parse_ordered(bytes: Vec<u8>, unique: bool) -> Result<Listing, String> {
         // One slot per NUL; the core refuses unless that is exactly the
         // number of records.
         let mut ends = vec![0; bytes.iter().filter(|b| **b == 0).count()];
-        if !parse_listing_ends(&bytes, &mut ends) {
+        if !parse_listing_ends(&bytes, &mut ends, unique) {
+            if unique && parse_listing_ends(&bytes, &mut ends, false) {
+                return Err("a Git tree lists a path twice or out of Git's order (a crafted tree?); \
+                    `git fsck` reports it".into());
+            }
             return Err("malformed or unmerged Git index entry; resolve conflicts first".into());
         }
         let entries = (0..ends.len()).map(|i| {
@@ -362,6 +383,17 @@ impl Listing {
     /// The listing of no entries.
     pub(crate) fn empty() -> Listing {
         Listing { bytes: Vec::new(), ends: Vec::new(), entries: Vec::new() }
+    }
+
+    /// The object order of the listing: its positions sorted by object id,
+    /// then position, which the verified `object_order_ok` checks.
+    pub(crate) fn object_order(&self) -> Result<Vec<usize>, String> {
+        let mut order: Vec<usize> = (0..self.entries.len()).collect();
+        order.sort_unstable_by(|a, b| self.entries[*a].oid.cmp(&self.entries[*b].oid).then(a.cmp(b)));
+        if !object_order_ok(&self.bytes, &self.ends, &order) {
+            return Err("internal error: object order of a Git listing".into());
+        }
+        Ok(order)
     }
 }
 

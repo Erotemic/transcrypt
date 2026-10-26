@@ -53,7 +53,8 @@ ENTRYPOINTS = (
     'encode_frame_header', 'decode_frame_header',
     'is_object_id', 'record_envelope_ok', 'decode_pkt_len',
     'parse_listing', 'listing_fields', 'held_entries', 'is_local_change',
-    'next_move_source', 'blob_elsewhere', 'parse_listing_attrs', 'first_unselectable',
+    'next_move_source', 'blob_elsewhere', 'object_order_ok', 'bytes_lt', 'parse_listing_attrs',
+    'first_unselectable',
     'stored_key_state', 'parse_batch_header', 'blob_read',
 )
 BAD = re.compile(r'\b(?:sorry|admit|axiom|native_decide|bv_decide)\b')

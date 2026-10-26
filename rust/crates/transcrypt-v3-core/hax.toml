@@ -42,6 +42,8 @@ include = [
   "transcrypt_v3_core::is_local_change",
   "transcrypt_v3_core::next_move_source",
   "transcrypt_v3_core::blob_elsewhere",
+  "transcrypt_v3_core::object_order_ok",
+  "transcrypt_v3_core::bytes_lt",
   "transcrypt_v3_core::parse_listing_attrs",
   "transcrypt_v3_core::first_unselectable",
   # The stored key and Git object replies.

@@ -391,6 +391,97 @@ def listingBytes (es : List Entry) : List Nat := es.flatMap (fun e => entryRecor
 /-- The snapshot has the blob `oid` at `path` (modes do not matter). -/
 def Holds (es : List Entry) (oid path : List Nat) : Prop := ∃ e ∈ es, e.oid = oid ∧ e.path = path
 
+/-- Byte order, Git's order of paths in the index and in `ls-tree -r`: at
+    the first position where two byte strings differ the smaller byte comes
+    first, and a proper prefix comes before its extensions. -/
+def BytesLt : List Nat → List Nat → Prop
+  | [], [] => False
+  | [], _ :: _ => True
+  | _ :: _, [] => False
+  | a :: as, b :: bs => a < b ∨ (a = b ∧ BytesLt as bs)
+
+theorem bytesLt_irrefl : ∀ (a : List Nat), ¬ BytesLt a a
+  | [] => fun h => h
+  | _ :: xs => fun h => by
+    rcases h with h | ⟨_, h⟩
+    · exact Nat.lt_irrefl _ h
+    · exact bytesLt_irrefl xs h
+
+theorem bytesLt_trans {a b c : List Nat} (h1 : BytesLt a b) (h2 : BytesLt b c) : BytesLt a c := by
+  induction a generalizing b c with
+  | nil =>
+    cases b with
+    | nil => exact h1.elim
+    | cons y ys =>
+      cases c with
+      | nil => exact h2.elim
+      | cons z zs => exact trivial
+  | cons x xs ih =>
+    cases b with
+    | nil => exact h1.elim
+    | cons y ys =>
+      cases c with
+      | nil => exact h2.elim
+      | cons z zs =>
+        rcases h1 with h1 | ⟨rfl, h1⟩ <;> rcases h2 with h2 | ⟨rfl, h2⟩
+        · exact Or.inl (Nat.lt_trans h1 h2)
+        · exact Or.inl h1
+        · exact Or.inl h2
+        · exact Or.inr ⟨rfl, ih h1 h2⟩
+
+theorem bytesLt_total : ∀ (a b : List Nat), BytesLt a b ∨ a = b ∨ BytesLt b a
+  | [], [] => Or.inr (Or.inl rfl)
+  | [], _ :: _ => Or.inl trivial
+  | _ :: _, [] => Or.inr (Or.inr trivial)
+  | x :: xs, y :: ys => by
+    rcases Nat.lt_trichotomy x y with h | rfl | h
+    · exact Or.inl (Or.inl h)
+    · rcases bytesLt_total xs ys with h | rfl | h
+      · exact Or.inl (Or.inr ⟨rfl, h⟩)
+      · exact Or.inr (Or.inl rfl)
+      · exact Or.inr (Or.inr (Or.inr ⟨rfl, h⟩))
+    · exact Or.inr (Or.inr (Or.inl h))
+
+/-- A snapshot as Git lists it (the index, or one tree): paths strictly
+    increase in byte order, so each path occurs once. A tree that lists a
+    path twice or out of order (`git mktree` accepts one, `git fsck` does
+    not) is not a snapshot. -/
+def Sorted (es : List Entry) : Prop := es.Pairwise (fun a b => BytesLt a.path b.path)
+
+/-- Paths never decrease in byte order: the entries of several trees, merged
+    by path (a path may repeat). -/
+def PathOrdered (es : List Entry) : Prop :=
+  es.Pairwise (fun a b => BytesLt a.path b.path ∨ a.path = b.path)
+
+theorem Sorted.pathOrdered {es : List Entry} (h : Sorted es) : PathOrdered es :=
+  h.imp Or.inl
+
+/-- In a sorted snapshot an entry is determined by its path. -/
+theorem Sorted.eq_of_path {es : List Entry} (h : Sorted es) {a b : Entry} (ha : a ∈ es) (hb : b ∈ es)
+    (hp : a.path = b.path) : a = b := by
+  induction es with
+  | nil => cases ha
+  | cons x xs ih =>
+    rw [Sorted, List.pairwise_cons] at h
+    rcases List.mem_cons.1 ha with hax | ha'
+    · rcases List.mem_cons.1 hb with hbx | hb'
+      · rw [hax, hbx]
+      · have := h.1 b hb'
+        rw [← hax, hp] at this
+        exact absurd this (bytesLt_irrefl _)
+    · rcases List.mem_cons.1 hb with hbx | hb'
+      · have := h.1 a ha'
+        rw [← hbx, ← hp] at this
+        exact absurd this (bytesLt_irrefl _)
+      · exact ih h.2 ha' hb'
+
+/-- So in a sorted snapshot, `Holds` names *the* entry at the path: every
+    entry at that path has that blob. -/
+theorem Sorted.holds_oid {es : List Entry} (h : Sorted es) {oid path : List Nat} (hh : Holds es oid path)
+    {e : Entry} (he : e ∈ es) (hp : e.path = path) : e.oid = oid := by
+  obtain ⟨x, hx, ho, hxp⟩ := hh
+  rw [h.eq_of_path he hx (hp.trans hxp.symm), ho]
+
 /-- A selected entry can be protected: a regular file, not reserved
     metadata. -/
 def Selectable (e : Entry) : Prop := e.Regular ∧ ¬ Reserved e.path

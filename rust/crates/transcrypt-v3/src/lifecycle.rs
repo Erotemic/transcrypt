@@ -169,6 +169,8 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
             `transcrypt-v3 unprotect` the file deliberately", String::from_utf8_lossy(path),
             String::from_utf8_lossy(&value)));
     }
+    // The keyless move check looks blobs up by object id (`blob_elsewhere`).
+    let mut orders: Option<[Vec<usize>; 3]> = None;
     for i in protected {
         let staged = &entries[i];
         // Unchanged since `HEAD` and `HEAD^1`: already in history.
@@ -189,9 +191,17 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
                 return Err(format!("staged {name} is not v3 ciphertext for this repository")),
             // A copy already in history is reported where it was made.
             None if settled => {},
-            None => if blob_elsewhere(&snapshot.listing.bytes, &snapshot.listing.ends, i, &head.bytes, &head.ends,
-                &parent.bytes, &parent.ends)
-            {
+            None => {
+                let [index_order, head_order, parent_order] = match orders.take() {
+                    Some(orders) => orders,
+                    None => [snapshot.listing.object_order()?, head.object_order()?, parent.object_order()?],
+                };
+                let elsewhere = blob_elsewhere(&snapshot.listing.bytes, &snapshot.listing.ends, &index_order, i,
+                    &head.bytes, &head.ends, &head_order, &parent.bytes, &parent.ends, &parent_order);
+                orders = Some([index_order, head_order, parent_order]);
+                if !elsewhere {
+                    continue;
+                }
                 let other = head.entries.iter().chain(&parent.entries).chain(entries)
                     .find(|e| e.oid == staged.oid && e.path != staged.path).map(Staged::name).unwrap_or_default();
                 return Err(format!("staged {name} holds the encrypted {other}: a renamed or copied protected \
@@ -239,11 +249,8 @@ fn incoming(root: &Path) -> Result<Option<Listing>, String> {
     if commits.is_empty() && ["rebase-merge", "rebase-apply"].iter().any(|dir| git_dir(root).join(dir).exists()) {
         return Ok(None);
     }
-    let mut bytes = Vec::new();
-    for commit in commits {
-        bytes.extend(tree_listing_bytes(root, &["ls-tree", "-r", "-z", "--full-tree", &commit])?);
-    }
-    Ok(Some(Listing::parse(bytes)?))
+    let trees = commits.iter().map(|commit| tree_listing(root, commit)).collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(Listing::merge(trees)?))
 }
 
 /// A commit without `.transcrypt/config` (a branch from before `init`):
@@ -339,6 +346,8 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
     };
     let mut index_info = Vec::new();
     let mut count = 0;
+    // `HEAD` by object id, for move sources; only when a record moved.
+    let mut head_order: Option<Vec<usize>> = None;
     for i in protected {
         let staged = &snapshot.entries()[i];
         // Changed since `HEAD`, and not by a commit being brought in.
@@ -352,7 +361,12 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
         let envelope = parse_file_header(&record).is_ok();
         // `protect` may force sealing plaintext, never re-encrypting a record.
         let local = is_local_change(in_head[i], incoming.is_some(), in_incoming[i], forced, envelope);
-        let moved = if opens || !envelope { None } else { open_moved(key, &snapshot.listing, i, head, &record) };
+        let moved = if opens || !envelope { None } else {
+            let order = match head_order.take() { Some(order) => order, None => head.object_order()? };
+            let moved = open_moved(key, &snapshot.listing, i, head, &order, &record);
+            head_order = Some(order);
+            moved
+        };
         let name = staged.name().into_owned();
         // The verified core decides.
         let plaintext: Zeroizing<Vec<u8>> = match seal_action(opens, local, envelope, moved.is_some()) {
@@ -380,16 +394,17 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
 /// The first `HEAD` path that entry `i` of `index` may have been moved from
 /// (the verified `next_move_source`: the same blob at another path, whose
 /// own entry has left the index, in `HEAD` order) and at which `record`
-/// opens, with its plaintext.
-fn open_moved<'a>(key: &Key, index: &Listing, i: usize, head: &'a Listing, record: &[u8])
+/// opens, with its plaintext. `head_order` is `HEAD`'s object order.
+fn open_moved<'a>(key: &Key, index: &Listing, i: usize, head: &'a Listing, head_order: &[usize], record: &[u8])
     -> Option<(&'a [u8], Zeroizing<Vec<u8>>)>
 {
-    let mut j = next_move_source(&index.bytes, &index.ends, i, &head.bytes, &head.ends, 0);
+    let next = |from| next_move_source(&index.bytes, &index.ends, i, &head.bytes, &head.ends, head_order, from);
+    let mut j = next(0);
     while let Some(source) = head.entries.get(j) {
         if let Ok(plaintext) = key.open(&source.path, record) {
             return Some((&source.path, plaintext));
         }
-        j = next_move_source(&index.bytes, &index.ends, i, &head.bytes, &head.ends, j + 1);
+        j = next(j + 1);
     }
     None
 }
@@ -405,8 +420,9 @@ pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zer
     };
     let index = Listing::parse(index_listing(root)?)?;
     let head = commit_listing(root, "HEAD")?;
+    let head_order = head.object_order()?;
     index.entries.iter().position(|e| e.path == staged.path && e.oid == staged.oid)
-        .and_then(|i| open_moved(key, &index, i, &head, &record)).map(|(_, plaintext)| plaintext)
+        .and_then(|i| open_moved(key, &index, i, &head, &head_order, &record)).map(|(_, plaintext)| plaintext)
         .ok_or_else(|| format!("{}: {error}", staged.name()))
 }
 

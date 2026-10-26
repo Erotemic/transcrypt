@@ -50,9 +50,15 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.sealSpec_repairs_only_local
 #print axioms decode_pkt_len_spec
 #print axioms parse_listing_spec
+#print axioms bytes_lt_spec
+#print axioms listing_ordered_spec
+#print axioms Transcrypt.V3Policy.Sorted.holds_oid
 #print axioms listing_fields_spec
+#print axioms find_entry_spec
 #print axioms held_entries_spec
 #print axioms is_local_change_spec
+#print axioms object_order_ok_spec
+#print axioms ObjectOrder.surj
 #print axioms next_move_source_spec
 #print axioms blob_elsewhere_spec
 #print axioms parse_listing_attrs_spec
