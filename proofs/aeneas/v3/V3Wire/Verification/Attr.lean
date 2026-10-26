@@ -7,14 +7,14 @@ namespace Transcrypt.V3Verification
 open transcrypt_v3_core
 
 /-!
-Functional refinement of the production Git attribute-record parser
-`parse_attr_record` (and its helper `find_nul`) against the independent
-specification's `AttrRecordAt`: the parser accepts exactly the spec's
-`git check-attr -z filter` record for the requested path at the given
-offset, and reports exactly whether its value selects the v3 filter. A model
-of the adapter's loop over a whole response (`attrFlagsModel`, mirroring
-`transcrypt_v3::git::protected_flags`) succeeds exactly on Git's complete
-answer `attrResponse` for the requested paths and returns their selections.
+Functional refinement of the production Git attribute parsers against the
+independent specification's `AttrRecordAt` / `attrResponse`.
+`parse_attr_record` (with its helper `find_nul`) accepts exactly the spec's
+`git check-attr -z filter` record for the requested path at the given offset
+and reports exactly whether its value selects the v3 filter;
+`parse_attr_response` (used by `transcrypt_v3::git::protected_flags`) accepts
+exactly Git's complete answer for the NUL-terminated request and returns the
+selection of every requested path.
 -/
 
 /-! ## Pure facts about attribute records -/
@@ -92,26 +92,6 @@ theorem attrRecordAt_unique {R P v v' : List Nat} {s n n' : Nat}
 theorem attrResponse_append (a b : List (List Nat × List Nat)) :
     attrResponse (a ++ b) = attrResponse a ++ attrResponse b := by
   simp [attrResponse, List.flatMap_append]
-
-theorem attrResponse_take_succ (rs : List (List Nat × List Nat)) (i : Nat) (h : i < rs.length) :
-    attrResponse (rs.take (i + 1)) = attrResponse (rs.take i) ++ attrRecord rs[i].1 rs[i].2 := by
-  rw [List.take_add_one, List.getElem?_eq_getElem h, attrResponse_append]
-  simp [attrResponse]
-
-/-- Git's complete answer for a list of records holds each record at the
-    offset where the previous ones end. -/
-theorem attrResponse_recordAt (rs : List (List Nat × List Nat)) (hv : ∀ r ∈ rs, 0 ∉ r.2)
-    (i : Nat) (h : i < rs.length) :
-    AttrRecordAt (attrResponse rs) (attrResponse (rs.take i)).length rs[i].1 rs[i].2
-      (attrResponse (rs.take (i + 1))).length := by
-  refine ⟨hv _ (List.getElem_mem h), ?_, ?_⟩
-  · have : attrResponse rs = attrResponse (rs.take i) ++
-        (attrRecord rs[i].1 rs[i].2 ++ attrResponse (rs.drop (i + 1))) := by
-      rw [← List.append_assoc, ← attrResponse_take_succ rs i h, ← attrResponse_append,
-        List.take_append_drop]
-    rw [this, List.drop_left]
-    exact List.prefix_append _ _
-  · rw [attrResponse_take_succ rs i h, List.length_append]
 
 end Pure
 
@@ -363,164 +343,10 @@ theorem parse_attr_record_spec (response : Slice U8) (start : Usize) (path : Sli
     rw [b_post]
     exact ⟨by omega, F.2.1⟩
 
-/-! ## The adapter's loop over a whole `check-attr` response -/
+/-! ## `parse_attr_response`: the whole answer, driven by the request -/
 
 instance (v : List Nat) : Decidable (Transcrypt.V3Policy.Selected v) :=
   inferInstanceAs (Decidable (v = Transcrypt.V3Policy.filterDriver))
-
-/-- Model of the record loop of `transcrypt_v3::git::protected_flags`: parse
-    one record per requested path, in order, each starting where the previous
-    one ended; the response must end exactly after the last record. `none` =
-    refusal ("unexpected git check-attr output"). -/
-def attrFlagsLoop (response : Slice U8) : Usize → List (Slice U8) → RustM (Option (List Bool))
-  | at_, [] => ok (if at_ = response.len then some [] else none)
-  | at_, p :: ps => do
-    let r ← parse_attr_record response at_ p
-    match r with
-    | core.result.Result.Ok a => do
-      let rest ← attrFlagsLoop response a.next ps
-      ok (rest.map (a.protected :: ·))
-    | core.result.Result.Err _ => ok none
-
-def attrFlagsModel (response : Slice U8) (paths : List (Slice U8)) : RustM (Option (List Bool)) :=
-  attrFlagsLoop response 0#usize paths
-
-theorem drop_eq_of_prefix_drop {l p : List Nat} {a : Nat} (h : p <+: l.drop a) :
-    l.drop a = p ++ l.drop (a + p.length) := by
-  obtain ⟨t, ht⟩ := h
-  rw [← ht, ← List.drop_drop, ← ht, List.drop_left]
-
-theorem attrFlagsLoop_sound (response : Slice U8) (paths : List (Slice U8)) (at_ : Usize) :
-    attrFlagsLoop response at_ paths ⦃ r => ∀ flags, r = some flags →
-      ∃ values : List (List Nat), values.length = paths.length ∧ (∀ v ∈ values, 0 ∉ v) ∧
-        (sliceBytes response).drop at_.val =
-          Transcrypt.V3Policy.attrResponse ((paths.map sliceBytes).zip values) ∧
-        flags = values.map (fun v => decide (Transcrypt.V3Policy.Selected v)) ⦄ := by
-  induction paths generalizing at_ with
-  | nil =>
-    simp only [attrFlagsLoop]
-    split
-    · rename_i heq
-      simp only [WP.spec_ok, Option.some.injEq]
-      rintro flags rfl
-      refine ⟨[], rfl, by simp, ?_, rfl⟩
-      rw [heq, List.drop_eq_nil_of_le (by simp [sliceBytes_length])]
-      simp [Transcrypt.V3Policy.attrResponse]
-    · simp
-  | cons p ps ih =>
-    simp only [attrFlagsLoop]
-    step with parse_attr_record_spec response at_ p as ⟨ r, hr ⟩
-    rcases r with a | e
-    · obtain ⟨v, hrec, hprot⟩ := hr
-      simp only
-      apply WP.spec_bind (ih a.next)
-      intro rest hrest
-      simp only [WP.spec_ok]
-      intro flags hflags
-      cases rest with
-      | none => cases hflags
-      | some fs =>
-        simp only [Option.map_some, Option.some.injEq] at hflags
-        subst hflags
-        obtain ⟨vs, hl, h0, hd, hf⟩ := hrest fs rfl
-        obtain ⟨hv0, hp, hn⟩ := hrec
-        refine ⟨v :: vs, by simp [hl], ?_, ?_, ?_⟩
-        · intro w hw
-          rcases List.mem_cons.1 hw with rfl | hw
-          · exact hv0
-          · exact h0 w hw
-        · rw [drop_eq_of_prefix_drop hp, ← hn, hd]
-          simp [Transcrypt.V3Policy.attrResponse]
-        · rw [hf]
-          simp only [List.map_cons, List.cons.injEq, and_true]
-          cases hpr : a.protected <;> simp_all
-    · simp
-
-/-- **Soundness of the adapter's attribute loop.** If it returns flags, the
-    whole response is exactly Git's answer `attrResponse` for the requested
-    paths, in order, with some NUL-free values, and each flag says whether
-    the corresponding value selects the v3 filter. -/
-theorem attrFlagsModel_sound (response : Slice U8) (paths : List (Slice U8)) :
-    attrFlagsModel response paths ⦃ r => ∀ flags, r = some flags →
-      ∃ values : List (List Nat), values.length = paths.length ∧ (∀ v ∈ values, 0 ∉ v) ∧
-        sliceBytes response =
-          Transcrypt.V3Policy.attrResponse ((paths.map sliceBytes).zip values) ∧
-        flags = values.map (fun v => decide (Transcrypt.V3Policy.Selected v)) ⦄ := by
-  unfold attrFlagsModel
-  apply WP.spec_mono (attrFlagsLoop_sound response paths 0#usize)
-  intro r hr flags hf
-  simpa using hr flags hf
-
-theorem attrFlagsLoop_complete (response : Slice U8)
-    (qs : List (List Nat × List Nat)) (hv : ∀ q ∈ qs, 0 ∉ q.2)
-    (paths : List (Slice U8)) (hp : paths.map sliceBytes = qs.map (·.1)) (at_ : Usize)
-    (hat : at_.val ≤ response.length)
-    (hR : (sliceBytes response).drop at_.val = Transcrypt.V3Policy.attrResponse qs) :
-    attrFlagsLoop response at_ paths ⦃ r =>
-      r = some (qs.map (fun q => decide (Transcrypt.V3Policy.Selected q.2))) ⦄ := by
-  induction paths generalizing qs at_ with
-  | nil =>
-    cases qs with
-    | cons q qs => simp at hp
-    | nil =>
-      simp only [attrFlagsLoop]
-      have : at_.val = response.length := by
-        have := congrArg List.length hR
-        simp only [List.length_drop, sliceBytes_length, Transcrypt.V3Policy.attrResponse,
-          List.flatMap_nil, List.length_nil] at this
-        omega
-      rw [if_pos (by apply UScalar.eq_of_val_eq; simpa using this)]
-      simp
-  | cons p ps ih =>
-    cases qs with
-    | nil => simp at hp
-    | cons q qs =>
-      simp only [List.map_cons, List.cons.injEq] at hp
-      obtain ⟨hp1, hps⟩ := hp
-      have hrec : Transcrypt.V3Policy.AttrRecordAt (sliceBytes response) at_.val q.1 q.2
-          (at_.val + (Transcrypt.V3Policy.attrRecord q.1 q.2).length) := by
-        refine ⟨hv q (by simp), ?_, rfl⟩
-        rw [hR]
-        simp [Transcrypt.V3Policy.attrResponse]
-      have hlen : at_.val + (Transcrypt.V3Policy.attrRecord q.1 q.2).length ≤ response.length := by
-        have := congrArg List.length hR
-        simp only [List.length_drop, sliceBytes_length, Transcrypt.V3Policy.attrResponse,
-          List.flatMap_cons, List.length_append] at this
-        omega
-      simp only [attrFlagsLoop]
-      step with parse_attr_record_spec response at_ p as ⟨ r, hr ⟩
-      rcases r with a | e
-      · obtain ⟨v, hrec', hprot⟩ := hr
-        rw [hp1] at hrec'
-        obtain ⟨rfl, hnext⟩ := attrRecordAt_unique hrec' hrec
-        simp only
-        apply WP.spec_bind (ih qs (fun q hq => hv q (by simp [hq])) hps a.next
-          (by rw [hnext]; exact hlen) ?_)
-        · intro rest hrest
-          rw [hrest]
-          simp only [Option.map_some, WP.spec_ok, List.map_cons, Option.some.injEq,
-            List.cons.injEq, and_true]
-          cases hpr : a.protected <;> simp_all
-        · rw [hnext, ← List.drop_drop, hR]
-          simp [Transcrypt.V3Policy.attrResponse]
-      · exfalso
-        apply hr.2
-        rw [hp1]
-        exact ⟨q.2, _, hrec⟩
-
-/-- **Completeness of the adapter's attribute loop.** On Git's complete answer
-    for the requested paths with NUL-free values, the loop parses every record
-    back in order (ending exactly at the end of the response) and returns
-    exactly whether each value selects the v3 filter. -/
-theorem attrFlagsModel_complete (response : Slice U8)
-    (qs : List (List Nat × List Nat)) (hv : ∀ q ∈ qs, 0 ∉ q.2)
-    (paths : List (Slice U8)) (hp : paths.map sliceBytes = qs.map (·.1))
-    (hR : sliceBytes response = Transcrypt.V3Policy.attrResponse qs) :
-    attrFlagsModel response paths ⦃ r =>
-      r = some (qs.map (fun q => decide (Transcrypt.V3Policy.Selected q.2))) ⦄ :=
-  attrFlagsLoop_complete response qs hv paths hp 0#usize (by simp) (by simpa using hR)
-
-/-! ## `parse_attr_response`: the whole answer, driven by the request -/
 
 section Response
 open Transcrypt.V3Policy

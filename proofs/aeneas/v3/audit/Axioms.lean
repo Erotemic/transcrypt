@@ -16,8 +16,6 @@ open Transcrypt.V3Verification
 #print axioms is_reserved_path_spec
 #print axioms is_canonical_protected_path_spec
 #print axioms parse_attr_record_spec
-#print axioms attrFlagsModel_sound
-#print axioms attrFlagsModel_complete
 #print axioms parse_attr_response_spec
 #print axioms parse_attr_response_complete
 #print axioms hydrate_action_spec

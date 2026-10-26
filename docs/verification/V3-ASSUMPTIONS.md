@@ -550,7 +550,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Clean never emits anything but a correct record, never double-encrypts | `seal_record_spec` |
 | Smudge/verify release only authentic plaintext for this config and path | `open_record_spec`, `open_record_complete`, `opensTo_unique` |
 | Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
-| Parsing Git's attribute answers (what is protected) | `parse_attr_record_spec` (both directions), `parse_attr_response_spec`, `parse_attr_response_complete`, `attrResponse_recordAt` |
+| Parsing Git's attribute answers (what is protected) | `parse_attr_record_spec` (both directions), `parse_attr_response_spec`, `parse_attr_response_complete` |
 | Smudge keeps only genuine envelopes; opens only its own config | `smudge_action_spec`, `smudgeSpec_keep_envelope`, `smudgeModel_spec` |
 | The pre-commit hook repairs only local changes | `seal_action_spec`, `sealSpec_repairs_only_local` |
 | Index record parsing | `parse_index_entry_spec` |
