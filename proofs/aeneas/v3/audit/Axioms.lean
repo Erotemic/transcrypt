@@ -62,3 +62,7 @@ open Transcrypt.V3Verification
 #print axioms parse_batch_header_spec
 #print axioms Transcrypt.V3Policy.batchHeader_unique
 #print axioms blob_read_spec
+#print axioms hookPlan_spec
+#print axioms hook_accepts_only_authenticated_ciphertext
+#print axioms hook_repairs_only_local_changes
+#print axioms stored_key_authenticates_current_config
