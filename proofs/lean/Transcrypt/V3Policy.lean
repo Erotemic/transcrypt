@@ -357,4 +357,178 @@ def PktLen (header : List Nat) (n : Nat) : Prop :=
 def PktLenAccepted (header : List Nat) (n : Nat) : Prop :=
   PktLen header n ∧ (n = 0 ∨ (5 ≤ n ∧ n ≤ maxPktLen))
 
+/-! ## Git snapshots
+
+What Git reports about an index or a commit, as data: the entries of
+`git ls-files --stage -z` (or of `git ls-tree -r -z`), in order. The
+pre-commit decisions are specified over these lists. -/
+
+/-- One stage-0 entry: mode, object name and path. -/
+structure Entry where
+  mode : List Nat
+  oid : List Nat
+  path : List Nat
+
+/-- Its record, `mode SP oid SP 0 TAB path`. -/
+def entryRecord (e : Entry) : List Nat := e.mode ++ [32] ++ e.oid ++ [32, 48, 9] ++ e.path
+
+/-- An entry as Git prints it: a six-digit mode, an object name and a
+    nonempty path. NUL ends records, so no field contains one; the mode
+    contains no TAB. -/
+def EntryOk (e : Entry) : Prop :=
+  e.mode.length = 6 ∧ 9 ∉ e.mode ∧ 0 ∉ e.mode ∧ ObjectId e.oid ∧ e.path ≠ [] ∧ 0 ∉ e.path
+
+/-- A regular file (non-executable or executable): the only kind of entry
+    whose content Git passes through filters. -/
+def Entry.Regular (e : Entry) : Prop := e.mode = regularMode ∨ e.mode = executableMode
+
+instance (e : Entry) : Decidable e.Regular :=
+  inferInstanceAs (Decidable (e.mode = regularMode ∨ e.mode = executableMode))
+
+/-- The exact listing of a snapshot: each record followed by NUL. -/
+def listingBytes (es : List Entry) : List Nat := es.flatMap (fun e => entryRecord e ++ [0])
+
+/-- The snapshot has the blob `oid` at `path` (modes do not matter). -/
+def Holds (es : List Entry) (oid path : List Nat) : Prop := ∃ e ∈ es, e.oid = oid ∧ e.path = path
+
+/-- A selected entry can be protected: a regular file, not reserved
+    metadata. -/
+def Selectable (e : Entry) : Prop := e.Regular ∧ ¬ Reserved e.path
+
+/-- The `isLocal` input of `sealSpec` for the staged entry `s`: the user
+    staged it, i.e. `HEAD` does not hold its blob at its path and the
+    commits being merged, picked, reverted or rebased (`incoming`) are known
+    and do not hold it either (`none`: a rebase or `am` without a known
+    commit, where nothing counts as local); or `protect` selected it
+    (`forced`) and it is plaintext (no `envelope`). -/
+def LocalChange (head : List Entry) (incoming : Option (List Entry)) (forced envelope : Bool)
+    (s : Entry) : Prop :=
+  (¬ Holds head s.oid s.path ∧ ∃ m, incoming = some m ∧ ¬ Holds m s.oid s.path) ∨
+    (forced = true ∧ envelope = false)
+
+/-- `h`, an entry of `HEAD`, is where the staged entry `s` may have been
+    moved from: the same blob at another path, whose own entry has left the
+    index (removed, or replaced by other content). -/
+def MoveSource (index : List Entry) (s h : Entry) : Prop :=
+  h.oid = s.oid ∧ h.path ≠ s.path ∧ ¬ Holds index h.oid h.path
+
+/-- Unchanged since `HEAD` and since its first parent: already in history
+    (the parent counts because `--amend` makes it the commit's parent). -/
+def Settled (head parent : List Entry) (s : Entry) : Prop :=
+  Holds head s.oid s.path ∧ Holds parent s.oid s.path
+
+/-- The blob of `s` is at another path of one of the snapshots: a record
+    moved or copied there, which would not open at `s`'s path. -/
+def BlobElsewhere (snapshots : List (List Entry)) (s : Entry) : Prop :=
+  ∃ l ∈ snapshots, ∃ e ∈ l, e.oid = s.oid ∧ e.path ≠ s.path
+
+/-- Every record of a well-formed snapshot is an `IndexRecord`, with the
+    regular flag of its mode and its path. -/
+theorem entryOk_indexRecord {e : Entry} (h : EntryOk e) :
+    IndexRecord (entryRecord e) (decide e.Regular) e.path := by
+  obtain ⟨hm, h9, _, hoid, hp, _⟩ := h
+  refine ⟨e.mode, e.oid, rfl, hm, ?_, h9, ?_, hp, ?_⟩
+  · intro h0; have := h0 ▸ hoid.1; simp at this
+  · intro h9o
+    rcases hoid.2 9 h9o with ⟨h1, _⟩ | ⟨h1, _⟩ <;> omega
+  · exact decide_eq_true_iff
+
+/-- Content held by `HEAD` at its path is never a local change unless
+    `protect` forces sealing its plaintext. -/
+theorem localChange_held {head : List Entry} {incoming : Option (List Entry)} {forced envelope : Bool}
+    {s : Entry} (h : Holds head s.oid s.path) :
+    LocalChange head incoming forced envelope s ↔ forced = true ∧ envelope = false := by
+  unfold LocalChange
+  constructor
+  · rintro (⟨hn, _⟩ | hf)
+    · exact absurd h hn
+    · exact hf
+  · exact Or.inr
+
+/-- Without known incoming commits (a rebase without a stopped commit),
+    only forced plaintext is local. -/
+theorem localChange_unknown {head : List Entry} {forced envelope : Bool} {s : Entry} :
+    LocalChange head none forced envelope s ↔ forced = true ∧ envelope = false := by
+  unfold LocalChange
+  constructor
+  · rintro (⟨_, m, hm, _⟩ | hf)
+    · cases hm
+    · exact hf
+  · exact Or.inr
+
+/-! ## The stored key -/
+
+inductive StoredKey | absent | damaged | stale | unlocked
+  deriving DecidableEq
+
+/-- The stored key file of an unlocked checkout holds the 55-byte public
+    configuration it was unlocked for, then the 64-byte key. A 64-byte file
+    (the key alone, from an earlier version) or no file at all means no
+    stored key; any other length is damaged. A key is used only for exactly
+    the configuration stored with it, and only if it authenticates that
+    configuration (`authentic`); otherwise it is stale. -/
+def storedKeySpec (present : Bool) (file current : List Nat) (authentic : Bool) : StoredKey :=
+  if present = false ∨ file.length = 64 then .absent
+  else if file.length ≠ 119 then .damaged
+  else if file.take 55 = current ∧ authentic = true then .unlocked
+  else .stale
+
+/-- A stored key is used only for the configuration it was stored with,
+    and only after it authenticates it. -/
+theorem storedKeySpec_unlocked {present : Bool} {file current : List Nat} {authentic : Bool}
+    (h : storedKeySpec present file current authentic = .unlocked) :
+    present = true ∧ file.length = 119 ∧ file.take 55 = current ∧ authentic = true := by
+  unfold storedKeySpec at h
+  by_cases h1 : present = false ∨ file.length = 64
+  · rw [if_pos h1] at h; cases h
+  · rw [if_neg h1] at h
+    by_cases h2 : file.length ≠ 119
+    · rw [if_pos h2] at h; cases h
+    · rw [if_neg h2] at h
+      by_cases h3 : file.take 55 = current ∧ authentic = true
+      · refine ⟨?_, by omega, h3.1, h3.2⟩
+        cases present
+        · exact absurd (Or.inl rfl) h1
+        · rfl
+      · rw [if_neg h3] at h; cases h
+
+/-! ## Git object replies (`git cat-file --batch`) -/
+
+/-- The type field of a blob reply. -/
+def blobField : List Nat := ascii " blob "
+
+def DecimalDigit (c : Nat) : Prop := 48 ≤ c ∧ c ≤ 57
+
+/-- The value of decimal digits, most significant first. -/
+def decimalValue (ds : List Nat) : Nat := ds.foldl (fun v c => v * 10 + (c - 48)) 0
+
+/-- Canonical decimal: at least one digit, digits only, and no leading zero
+    except in `0` itself. -/
+def CanonicalDecimal (ds : List Nat) : Prop :=
+  ds ≠ [] ∧ (∀ c ∈ ds, DecimalDigit c) ∧ (ds.head? = some 48 → ds = [48])
+
+/-- Git's reply header for the blob `oid` of `size` bytes:
+    `<oid> SP blob SP <size> LF`, with the size in canonical decimal of at
+    most 19 digits (any blob smaller than 10^19 bytes). -/
+def BatchHeader (header oid : List Nat) (size : Nat) : Prop :=
+  ∃ ds, header = oid ++ blobField ++ ds ++ [10] ∧ CanonicalDecimal ds ∧ ds.length ≤ 19 ∧
+    size = decimalValue ds
+
+/-- A reply header names one size: the reply for an object id cannot be
+    read as two different sizes. -/
+theorem batchHeader_unique {header oid : List Nat} {n n' : Nat}
+    (h : BatchHeader header oid n) (h' : BatchHeader header oid n') : n = n' := by
+  obtain ⟨ds, rfl, _, _, rfl⟩ := h
+  obtain ⟨ds', he, _, _, rfl⟩ := h'
+  simp only [List.append_assoc, List.append_cancel_left_eq, List.append_cancel_right_eq] at he
+  rw [he]
+
+inductive BlobRead | read | skip | tooLarge
+  deriving DecidableEq
+
+/-- Only a blob within the record bound is ever loaded; a larger one is
+    skipped unread where the caller allows it, else refused. -/
+def blobReadSpec (size : Nat) (skipLarge : Bool) : BlobRead :=
+  if size ≤ maxRecord then .read else if skipLarge then .skip else .tooLarge
+
 end Transcrypt.V3Policy

@@ -832,6 +832,436 @@ pub fn decode_pkt_len(header: &[u8; 4]) -> Result<usize, Refusal> {
     Ok(value)
 }
 
+// ---------------------------------------------------------------------------
+// Git snapshots: the inputs of the pre-commit decisions.
+//
+// A *listing* is the exact output of `git ls-files --stage -z`: records
+// `mode SP oid SP 0 TAB path`, each followed by NUL (tree listings are
+// rewritten to the same shape by the adapter). `parse_listing` checks one and
+// records where each record ends; every query below takes a listing with
+// those `ends`, and is only meaningful for a listing `parse_listing` accepted.
+// ---------------------------------------------------------------------------
+
+/// The bytes between an object id and the path in an index record.
+const OID_END: [u8; 3] = *b" 0\t";
+
+/// Where record `i` starts: after the NUL that ends record `i - 1`.
+fn record_start(ends: &[usize], i: usize) -> usize {
+    if i == 0 {
+        0
+    } else {
+        ends[i - 1] + 1
+    }
+}
+
+/// Whether `entry` is a stage-0 index record (`parse_index_entry`) whose
+/// object id `entry[7..path_start - 3]` passes `is_object_id`.
+fn record_ok(entry: &[u8]) -> bool {
+    match parse_index_entry(entry) {
+        Ok(parsed) => is_object_id(&entry[7..parsed.path_start - 3]),
+        Err(_) => false,
+    }
+}
+
+/// Check that `listing` is exactly `ends.len()` NUL-terminated index records
+/// (`record_ok`, so every mode, object id and path is well formed), and
+/// record in `ends[i]` the position of the NUL that ends record `i`. On
+/// failure `ends` must not be used.
+pub fn parse_listing(listing: &[u8], ends: &mut [usize]) -> bool {
+    let mut ok = true;
+    let mut start = 0;
+    let mut i = 0;
+    while ok && i < ends.len() {
+        let end = find_byte(listing, start, 0);
+        if end < listing.len() && record_ok(&listing[start..end]) {
+            ends[i] = end;
+            start = end + 1;
+            i += 1;
+        } else {
+            ok = false;
+        }
+    }
+    ok && start == listing.len()
+}
+
+/// The fields of one listing record: the record is `listing[start..end]`,
+/// its object id `listing[start + 7..oid_end]`, its path
+/// `listing[path_start..end]`, and `regular` says whether its mode is
+/// `100644` or `100755`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fields {
+    pub start: usize,
+    pub oid_end: usize,
+    pub path_start: usize,
+    pub end: usize,
+    pub regular: bool,
+}
+
+/// The fields of record `i` of a listing that `parse_listing` accepted with
+/// `ends`. The path starts after the first TAB (modes and object ids have
+/// none).
+pub fn listing_fields(listing: &[u8], ends: &[usize], i: usize) -> Option<Fields> {
+    if i >= ends.len() {
+        return None;
+    }
+    let start = record_start(ends, i);
+    let end = ends[i];
+    let tab = find_byte(listing, start, b'\t');
+    if end > listing.len() || tab >= end || tab - start < 10 {
+        return None;
+    }
+    let regular = matches_at(listing, start, &REGULAR_MODE) || matches_at(listing, start, &EXECUTABLE_MODE);
+    Some(Fields { start, oid_end: tab - 2, path_start: tab + 1, end, regular })
+}
+
+/// Whether the record `listing[start..end]` names object `oid`, and is at
+/// `path` (`same_path`) or at another path (`!same_path`). `oid` contains no
+/// TAB, so a record names it exactly when `oid SP 0 TAB` follows its mode.
+fn record_is(listing: &[u8], start: usize, end: usize, oid: &[u8], path: &[u8], same_path: bool) -> bool {
+    if start > end || end > listing.len() || end - start < 10 || end - start - 10 < oid.len() {
+        return false;
+    }
+    let at = start + 7 + oid.len();
+    if !matches_at(listing, start + 7, oid) || !matches_at(listing, at, &OID_END) {
+        return false;
+    }
+    let here = end - at - 3 == path.len() && matches_at(listing, at + 3, path);
+    here == same_path
+}
+
+/// The first record `j` in `from..to` that `record_is` (`oid`, `path`,
+/// `same_path`), or `to` if there is none.
+fn scan(listing: &[u8], ends: &[usize], from: usize, to: usize, oid: &[u8], path: &[u8], same_path: bool) -> usize {
+    let mut j = from;
+    let mut found = false;
+    while !found && j < to {
+        if record_is(listing, record_start(ends, j), ends[j], oid, path, same_path) {
+            found = true;
+        } else {
+            j += 1;
+        }
+    }
+    j
+}
+
+/// The position of a record that names `oid` at `path`, searched from
+/// `hint` to the end and then from the start, or `ends.len()` if there is
+/// none. Listings are sorted by path, so the hint of the previous match
+/// makes a pass over a whole listing linear.
+fn find_entry(listing: &[u8], ends: &[usize], oid: &[u8], path: &[u8], hint: usize) -> usize {
+    let n = ends.len();
+    let from = if hint < n { hint } else { n };
+    let j = scan(listing, ends, from, n, oid, path, true);
+    if j < n {
+        return j;
+    }
+    let k = scan(listing, ends, 0, from, oid, path, true);
+    if k < from {
+        k
+    } else {
+        n
+    }
+}
+
+/// For each record `i` of the listing `index` with `wanted[i]`, whether the
+/// listing `other` holds a record with its object id and path
+/// (`held[i]`); `held[i]` is false for the others. Fails, writing nothing,
+/// unless `wanted` and `held` have one slot per record.
+pub fn held_entries(
+    index: &[u8],
+    index_ends: &[usize],
+    wanted: &[bool],
+    other: &[u8],
+    other_ends: &[usize],
+    held: &mut [bool],
+) -> bool {
+    if wanted.len() != index_ends.len() || held.len() != index_ends.len() {
+        return false;
+    }
+    let mut hint = 0;
+    let mut i = 0;
+    while i < held.len() {
+        if wanted[i] {
+            match listing_fields(index, index_ends, i) {
+                Some(f) => {
+                    let j = find_entry(other, other_ends, &index[f.start + 7..f.oid_end], &index[f.path_start..f.end], hint);
+                    if j < other_ends.len() {
+                        held[i] = true;
+                        hint = j + 1;
+                    } else {
+                        held[i] = false;
+                    }
+                }
+                None => held[i] = false,
+            }
+        } else {
+            held[i] = false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The pre-commit hook's `local_change` input of `seal_action` for one
+/// staged protected entry: the user staged it (`HEAD` does not hold its blob
+/// at its path, the commits being merged, picked, reverted or rebased are
+/// known and do not hold it either), or `protect` forced it and it is
+/// plaintext (no `envelope`). `in_head` and `in_incoming` come from
+/// `held_entries`.
+pub fn is_local_change(in_head: bool, incoming_known: bool, in_incoming: bool, forced: bool, envelope: bool) -> bool {
+    (!in_head & incoming_known & !in_incoming) | (forced & !envelope)
+}
+
+/// Whether record `j` of `head` is a source the staged blob `oid` at `path`
+/// may have been moved from: it names `oid` at another path, and the index
+/// does not hold that blob at that path (the entry is gone or replaced).
+fn move_source_at(
+    index: &[u8],
+    index_ends: &[usize],
+    head: &[u8],
+    head_ends: &[usize],
+    oid: &[u8],
+    path: &[u8],
+    j: usize,
+) -> bool {
+    let start = record_start(head_ends, j);
+    if !record_is(head, start, head_ends[j], oid, path, false) {
+        return false;
+    }
+    let source = &head[start + 10 + oid.len()..head_ends[j]];
+    find_entry(index, index_ends, oid, source, 0) == index_ends.len()
+}
+
+/// The first `move_source_at` record in `from..`, or `head_ends.len()`.
+fn move_source_from(
+    index: &[u8],
+    index_ends: &[usize],
+    head: &[u8],
+    head_ends: &[usize],
+    oid: &[u8],
+    path: &[u8],
+    from: usize,
+) -> usize {
+    let mut j = from;
+    let mut found = false;
+    while !found && j < head_ends.len() {
+        if move_source_at(index, index_ends, head, head_ends, oid, path, j) {
+            found = true;
+        } else {
+            j += 1;
+        }
+    }
+    j
+}
+
+/// The next record of `head`, from `from` on, that the staged entry `i` of
+/// `index` may have been moved from (`move_source_at`), or `head_ends.len()`
+/// if there is none. The hook tries the candidates in `HEAD` order and
+/// re-encrypts from the first at which the record opens.
+pub fn next_move_source(
+    index: &[u8],
+    index_ends: &[usize],
+    i: usize,
+    head: &[u8],
+    head_ends: &[usize],
+    from: usize,
+) -> usize {
+    match listing_fields(index, index_ends, i) {
+        Some(f) => move_source_from(
+            index, index_ends, head, head_ends, &index[f.start + 7..f.oid_end], &index[f.path_start..f.end], from,
+        ),
+        None => head_ends.len(),
+    }
+}
+
+/// Whether the blob of entry `i` of `index` is at another path in `index`,
+/// `head` or `parent`: a record moved or copied there, which only the key
+/// can re-encrypt (the locked pre-commit check refuses it).
+pub fn blob_elsewhere(
+    index: &[u8],
+    index_ends: &[usize],
+    i: usize,
+    head: &[u8],
+    head_ends: &[usize],
+    parent: &[u8],
+    parent_ends: &[usize],
+) -> bool {
+    match listing_fields(index, index_ends, i) {
+        Some(f) => {
+            let oid = &index[f.start + 7..f.oid_end];
+            let path = &index[f.path_start..f.end];
+            if scan(index, index_ends, 0, index_ends.len(), oid, path, false) < index_ends.len() {
+                return true;
+            }
+            if scan(head, head_ends, 0, head_ends.len(), oid, path, false) < head_ends.len() {
+                return true;
+            }
+            scan(parent, parent_ends, 0, parent_ends.len(), oid, path, false) < parent_ends.len()
+        }
+        None => false,
+    }
+}
+
+/// Parse Git's `check-attr -z --stdin filter` answer for the paths of the
+/// records of `listing`, in order: one `parse_attr_record` per record and
+/// nothing else. Then `flags[i]` says whether record `i` is protected. The
+/// answer is checked against the listing's own paths, so it cannot describe
+/// any other file. On failure the flags must not be used.
+pub fn parse_listing_attrs(listing: &[u8], ends: &[usize], response: &[u8], flags: &mut [bool]) -> bool {
+    let mut ok = flags.len() == ends.len();
+    let mut at = 0;
+    let mut i = 0;
+    while ok && i < flags.len() {
+        match listing_fields(listing, ends, i) {
+            Some(f) => match parse_attr_record(response, at, &listing[f.path_start..f.end]) {
+                Ok(record) => {
+                    flags[i] = record.protected;
+                    at = record.next;
+                    i += 1;
+                }
+                Err(_) => ok = false,
+            },
+            None => ok = false,
+        }
+    }
+    ok && at == response.len()
+}
+
+/// The first protected record (`flags`) that cannot be protected: not a
+/// regular file (a symlink or submodule, which Git stores unfiltered) or
+/// reserved metadata (`is_reserved_path`); `flags.len()` if there is none.
+pub fn first_unselectable(listing: &[u8], ends: &[usize], flags: &[bool]) -> usize {
+    let mut i = 0;
+    let mut bad = false;
+    while !bad && i < flags.len() {
+        if flags[i] {
+            match listing_fields(listing, ends, i) {
+                Some(f) => bad = !f.regular | is_reserved_path(&listing[f.path_start..f.end]),
+                None => bad = true,
+            }
+        }
+        if !bad {
+            i += 1;
+        }
+    }
+    i
+}
+
+// ---------------------------------------------------------------------------
+// The stored key and Git object replies.
+// ---------------------------------------------------------------------------
+
+/// Length of the derived AES-SIV key.
+pub const KEY_LEN: usize = 64;
+/// Length of the stored key file: the public config it unlocks, then the
+/// key (119 = 55 + 64).
+pub const KEY_FILE_LEN: usize = 119;
+
+/// What the stored key file means for the current configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoredKey {
+    /// No stored key: no file, or one an earlier version wrote (the key
+    /// alone, without its config). The private-mode agent is asked.
+    Absent,
+    /// A file of any other length: refused until `unlock` rewrites it.
+    Damaged,
+    /// A key for another configuration (a pulled `rekey`), or one that does
+    /// not authenticate it: locked until `unlock`.
+    Stale,
+    /// The key was stored for exactly this configuration and authenticates
+    /// it.
+    Unlocked,
+}
+
+/// Decide what the stored key file means for configuration `current`.
+/// `present`: the file exists; `file`: its bytes (the adapter reads at most
+/// one byte more than `KEY_FILE_LEN`); `authentic`: the key
+/// `file[CONFIG_LEN..]` authenticates `current` (`authenticate_config`), which
+/// matters only for a file of `KEY_FILE_LEN` bytes. A key is used only for
+/// the configuration it was stored with, and only once it authenticates it.
+pub fn stored_key_state(present: bool, file: &[u8], current: &[u8], authentic: bool) -> StoredKey {
+    if !present || file.len() == KEY_LEN {
+        return StoredKey::Absent;
+    }
+    if file.len() != KEY_FILE_LEN {
+        return StoredKey::Damaged;
+    }
+    if !bytes_eq(&file[0..CONFIG_LEN], current) || !authentic {
+        return StoredKey::Stale;
+    }
+    StoredKey::Unlocked
+}
+
+/// The type field of a `cat-file --batch` reply for a blob.
+const BLOB_FIELD: [u8; 6] = *b" blob ";
+
+/// The value of the decimal digits `bytes[from..to]` (at most 19, so it fits
+/// in 64 bits), or `None` if one of them is not a digit.
+fn decimal(bytes: &[u8], from: usize, to: usize) -> Option<u64> {
+    let mut value: u64 = 0;
+    let mut ok = true;
+    let mut i = from;
+    while ok && i < to {
+        let c = bytes[i];
+        if c >= b'0' && c <= b'9' {
+            value = value * 10 + (c - b'0') as u64;
+            i += 1;
+        } else {
+            ok = false;
+        }
+    }
+    if ok {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// The size in Git's `cat-file --batch` reply header for object `oid`, which
+/// must be exactly `<oid> SP blob SP <size> LF` with `<size>` in canonical
+/// decimal (digits only, no leading zero) of at most 19 digits. A missing
+/// object, another type, another object id or any other header is refused,
+/// so bytes are never attributed to the wrong object.
+pub fn parse_batch_header(header: &[u8], oid: &[u8]) -> Option<u64> {
+    if !matches_at(header, 0, oid) || !matches_at(header, oid.len(), &BLOB_FIELD) {
+        return None;
+    }
+    // Both matched, so `oid.len() + 6 <= header.len()`.
+    let digits = oid.len() + 6;
+    let n = header.len();
+    // One to 19 digits, then LF.
+    if n - digits < 2 || n - digits > 20 || header[n - 1] != b'\n' {
+        return None;
+    }
+    if header[digits] == b'0' && n - digits != 2 {
+        return None;
+    }
+    decimal(header, digits, n - 1)
+}
+
+/// How to read the content of a blob of `size` bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobRead {
+    /// Read it: it may be a v3 record.
+    Read,
+    /// Skip it unread: larger than any record, and the caller allows that.
+    Skip,
+    /// Refuse: larger than any record.
+    TooLarge,
+}
+
+/// The read decision for a blob of `size` bytes: only blobs within the
+/// record bound are ever loaded.
+pub fn blob_read(size: u64, skip_large: bool) -> BlobRead {
+    if size <= MAX_RECORD as u64 {
+        BlobRead::Read
+    } else if skip_large {
+        BlobRead::Skip
+    } else {
+        BlobRead::TooLarge
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -1186,5 +1616,148 @@ mod tests {
             assert_eq!(&h[1 + CONFIG_LEN..], &len.to_be_bytes());
             assert_eq!(decode_be_u32(&encode_be_u32(len)), len);
         }
+    }
+
+    /// A listing of `(mode, oid digit, path)` records, and its `ends`.
+    fn listing(records: &[(&str, u8, &[u8])]) -> (std::vec::Vec<u8>, std::vec::Vec<usize>) {
+        let mut bytes = std::vec::Vec::new();
+        for (mode, digit, path) in records {
+            bytes.extend_from_slice(mode.as_bytes());
+            bytes.push(b' ');
+            bytes.extend_from_slice(&[*digit; 40]);
+            bytes.extend_from_slice(b" 0\t");
+            bytes.extend_from_slice(path);
+            bytes.push(0);
+        }
+        let mut ends = std::vec![0; records.len()];
+        assert!(parse_listing(&bytes, &mut ends));
+        (bytes, ends)
+    }
+
+    fn held(index: &(std::vec::Vec<u8>, std::vec::Vec<usize>), other: &(std::vec::Vec<u8>, std::vec::Vec<usize>))
+        -> std::vec::Vec<bool>
+    {
+        let mut out = std::vec![true; index.1.len()];
+        let wanted = std::vec![true; index.1.len()];
+        assert!(held_entries(&index.0, &index.1, &wanted, &other.0, &other.1, &mut out));
+        out
+    }
+
+    #[test]
+    fn listings_are_parsed_exactly() {
+        let (bytes, ends) = listing(&[("100644", b'a', b"x\ty"), ("120000", b'b', b"d/l")]);
+        let first = listing_fields(&bytes, &ends, 0).unwrap();
+        assert_eq!(&bytes[first.start + 7..first.oid_end], &[b'a'; 40]);
+        assert_eq!(&bytes[first.path_start..first.end], b"x\ty");
+        assert!(first.regular);
+        let second = listing_fields(&bytes, &ends, 1).unwrap();
+        assert_eq!(&bytes[second.path_start..second.end], b"d/l");
+        assert!(!second.regular);
+        assert_eq!(listing_fields(&bytes, &ends, 2), None);
+        assert!(parse_listing(b"", &mut []));
+        // Wrong count, truncated, extended, unmerged, bad object id, empty record.
+        assert!(!parse_listing(&bytes, &mut [0; 1]));
+        assert!(!parse_listing(&bytes, &mut [0; 3]));
+        assert!(!parse_listing(&bytes[..bytes.len() - 1], &mut [0; 2]));
+        assert!(!parse_listing(&[&bytes[..], b"\0"].concat(), &mut [0; 2]));
+        let unmerged = [b"100644 ".as_slice(), &[b'a'; 40], b" 1\tx\0"].concat();
+        assert!(!parse_listing(&unmerged, &mut [0; 1]));
+        let short = [b"100644 ".as_slice(), &[b'a'; 39], b" 0\tx\0"].concat();
+        assert!(!parse_listing(&short, &mut [0; 1]));
+        let upper = [b"100644 ".as_slice(), &[b'A'; 40], b" 0\tx\0"].concat();
+        assert!(!parse_listing(&upper, &mut [0; 1]));
+        assert!(!parse_listing(b"\0", &mut [0; 1]));
+    }
+
+    #[test]
+    fn snapshot_queries_compare_object_and_path() {
+        let index = listing(&[("100644", b'1', b"a"), ("100644", b'2', b"b"), ("100644", b'3', b"c"),
+            ("100644", b'4', b"moved")]);
+        let head = listing(&[("100644", b'1', b"a"), ("100755", b'2', b"b"), ("100644", b'9', b"c"),
+            ("100644", b'4', b"old"), ("100644", b'4', b"kept"), ("100644", b'4', b"moved")]);
+        // The mode does not matter; another blob at the path is not held.
+        assert_eq!(held(&index, &head), [true, true, false, true]);
+        assert_eq!(held(&head, &index), [true, true, false, false, false, true]);
+        let mut out = [true; 4];
+        assert!(held_entries(&index.0, &index.1, &[false, true, true, false], &head.0, &head.1, &mut out));
+        assert_eq!(out, [false, true, false, false]);
+        assert!(!held_entries(&index.0, &index.1, &[true; 3], &head.0, &head.1, &mut out));
+        let empty = listing(&[]);
+        assert_eq!(held(&index, &empty), [false; 4]);
+        // Move sources of `moved` (entry 3): the HEAD paths of its blob that
+        // left the index, in HEAD order, never its own path.
+        assert_eq!(next_move_source(&index.0, &index.1, 3, &head.0, &head.1, 0), 3);
+        assert_eq!(next_move_source(&index.0, &index.1, 3, &head.0, &head.1, 4), 4);
+        assert_eq!(next_move_source(&index.0, &index.1, 3, &head.0, &head.1, 5), 6);
+        assert_eq!(next_move_source(&index.0, &index.1, 0, &head.0, &head.1, 0), 6);
+        let kept = listing(&[("100644", b'4', b"kept"), ("100644", b'4', b"moved")]);
+        assert_eq!(next_move_source(&kept.0, &kept.1, 1, &head.0, &head.1, 0), 3);
+        assert_eq!(next_move_source(&kept.0, &kept.1, 1, &head.0, &head.1, 4), 6);
+        assert!(blob_elsewhere(&index.0, &index.1, 3, &empty.0, &empty.1, &head.0, &head.1));
+        assert!(!blob_elsewhere(&index.0, &index.1, 0, &head.0, &head.1, &head.0, &head.1));
+        assert!(blob_elsewhere(&kept.0, &kept.1, 1, &empty.0, &empty.1, &empty.0, &empty.1));
+        // `local_change`: changed and known not to come from a commit, or forced plaintext.
+        for (in_head, known, in_incoming, forced, envelope, expected) in [
+            (false, true, false, false, true, true), (true, true, false, false, false, false),
+            (false, false, false, false, true, false), (false, true, true, false, false, false),
+            (true, true, true, true, false, true), (true, true, true, true, true, false),
+        ] {
+            assert_eq!(is_local_change(in_head, known, in_incoming, forced, envelope), expected);
+        }
+    }
+
+    #[test]
+    fn listing_attributes_and_selectability() {
+        let (bytes, ends) = listing(&[("100644", b'a', b"a.env"), ("120000", b'b', b"link"),
+            ("100644", b'c', b".gitattributes"), ("100755", b'd', b"run")]);
+        let response = b"a.env\0filter\0transcrypt-v3\0link\0filter\0unspecified\0.gitattributes\0filter\0unset\0run\0filter\0transcrypt-v3\0";
+        let mut flags = [false; 4];
+        assert!(parse_listing_attrs(&bytes, &ends, response, &mut flags));
+        assert_eq!(flags, [true, false, false, true]);
+        assert_eq!(first_unselectable(&bytes, &ends, &flags), 4);
+        assert_eq!(first_unselectable(&bytes, &ends, &[true, true, true, true]), 1);
+        assert_eq!(first_unselectable(&bytes, &ends, &[false, false, true, false]), 2);
+        assert!(!parse_listing_attrs(&bytes, &ends, &response[..response.len() - 1], &mut flags));
+        assert!(!parse_listing_attrs(&bytes, &ends, &[&response[..], b"x"].concat(), &mut flags));
+        assert!(!parse_listing_attrs(&bytes, &ends, response, &mut [false; 3]));
+        let swapped = b"link\0filter\0unspecified\0a.env\0filter\0transcrypt-v3\0.gitattributes\0filter\0unset\0run\0filter\0transcrypt-v3\0";
+        assert!(!parse_listing_attrs(&bytes, &ends, swapped, &mut flags));
+    }
+
+    #[test]
+    fn stored_keys_unlock_only_their_own_authentic_config() {
+        let config = [7u8; CONFIG_LEN];
+        let mut file = std::vec::Vec::from(&config[..]);
+        file.extend_from_slice(&[1u8; KEY_LEN]);
+        assert_eq!(stored_key_state(true, &file, &config, true), StoredKey::Unlocked);
+        assert_eq!(stored_key_state(true, &file, &config, false), StoredKey::Stale);
+        let mut other = config;
+        other[54] = 8;
+        assert_eq!(stored_key_state(true, &file, &other, true), StoredKey::Stale);
+        assert_eq!(stored_key_state(false, &file, &config, true), StoredKey::Absent);
+        assert_eq!(stored_key_state(true, &[1u8; KEY_LEN], &config, true), StoredKey::Absent);
+        for n in [0, 1, KEY_LEN + 1, KEY_FILE_LEN - 1, KEY_FILE_LEN + 1] {
+            assert_eq!(stored_key_state(true, &std::vec![0u8; n], &config, true), StoredKey::Damaged, "{n}");
+        }
+    }
+
+    #[test]
+    fn batch_headers_name_the_object_and_a_canonical_size() {
+        let oid = b"0123456789abcdef0123456789abcdef01234567";
+        let header = |rest: &str| [oid.as_slice(), rest.as_bytes()].concat();
+        assert_eq!(parse_batch_header(&header(" blob 12\n"), oid), Some(12));
+        assert_eq!(parse_batch_header(&header(" blob 0\n"), oid), Some(0));
+        assert_eq!(parse_batch_header(&header(" blob 9999999999999999999\n"), oid), Some(9_999_999_999_999_999_999));
+        for bad in [" blob 012\n", " blob 00\n", " blob +12\n", " blob 12", " blob \n", " tree 12\n", " missing\n",
+                    " blob 1 2\n", " blob 12\n\n", " blob 10000000000000000000\n", "  blob 12\n"] {
+            assert_eq!(parse_batch_header(&header(bad), oid), None, "{bad:?}");
+        }
+        let mut other = *oid;
+        other[0] = b'f';
+        assert_eq!(parse_batch_header(&header(" blob 12\n"), &other), None);
+        assert_eq!(parse_batch_header(b"", oid), None);
+        assert_eq!(blob_read(MAX_RECORD as u64, false), BlobRead::Read);
+        assert_eq!(blob_read(MAX_RECORD as u64 + 1, true), BlobRead::Skip);
+        assert_eq!(blob_read(u64::MAX, false), BlobRead::TooLarge);
     }
 }

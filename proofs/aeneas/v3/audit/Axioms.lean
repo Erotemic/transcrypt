@@ -49,3 +49,16 @@ open Transcrypt.V3Verification
 #print axioms seal_action_spec
 #print axioms Transcrypt.V3Policy.sealSpec_repairs_only_local
 #print axioms decode_pkt_len_spec
+#print axioms parse_listing_spec
+#print axioms listing_fields_spec
+#print axioms held_entries_spec
+#print axioms is_local_change_spec
+#print axioms next_move_source_spec
+#print axioms blob_elsewhere_spec
+#print axioms parse_listing_attrs_spec
+#print axioms first_unselectable_spec
+#print axioms stored_key_state_spec
+#print axioms Transcrypt.V3Policy.storedKeySpec_unlocked
+#print axioms parse_batch_header_spec
+#print axioms Transcrypt.V3Policy.batchHeader_unique
+#print axioms blob_read_spec

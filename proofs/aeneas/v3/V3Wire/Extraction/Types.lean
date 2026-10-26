@@ -136,4 +136,33 @@ inductive SealAction where
 | Rebind : SealAction
 | Leave : SealAction
 
+/-- [transcrypt_v3_core::Fields]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 892:0-898:1
+    Visibility: public -/
+structure Fields where
+  start : Std.Usize
+  oid_end : Std.Usize
+  path_start : Std.Usize
+  «end» : Std.Usize
+  regular : Bool
+
+/-- [transcrypt_v3_core::StoredKey]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1162:0-1174:1
+    Visibility: public -/
+@[discriminant isize]
+inductive StoredKey where
+| Absent : StoredKey
+| Damaged : StoredKey
+| Stale : StoredKey
+| Unlocked : StoredKey
+
+/-- [transcrypt_v3_core::BlobRead]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1244:0-1251:1
+    Visibility: public -/
+@[discriminant isize]
+inductive BlobRead where
+| Read : BlobRead
+| Skip : BlobRead
+| TooLarge : BlobRead
+
 end transcrypt_v3_core
