@@ -799,6 +799,16 @@ fn legacy_keys_macro_redefinitions_and_crlf() {
     assert!(status.contains("key:        locked"), "{status}");
     unlock(&repo);
     assert_eq!(fs::metadata(repo.join(".git/transcrypt-v3/key")).unwrap().len(), 119);
+    // Any other length is damaged (the verified `stored_key_state`), and
+    // `unlock` repairs it.
+    let stored = fs::read(repo.join(".git/transcrypt-v3/key")).unwrap();
+    for damaged in [&stored[..118], &[&stored[..], b"x"].concat()[..]] {
+        fs::write(repo.join(".git/transcrypt-v3/key"), damaged).unwrap();
+        let err = run_fails(&repo, bin(), &["verify-index"], None);
+        assert!(err.contains("damaged .git/transcrypt-v3/key"), "{err}");
+    }
+    unlock(&repo);
+    assert_eq!(fs::read(repo.join(".git/transcrypt-v3/key")).unwrap(), stored);
     // A quoted macro redefinition in .git/info/attributes.
     fs::write(repo.join(".git/info/attributes"), b"\"[attr]transcrypt\" -diff\n").unwrap();
     fs::write(repo.join("a.env"), b"S=3\n").unwrap();

@@ -343,7 +343,7 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
 pub(crate) fn unlock(root: &Path, options: &Options) -> Result<(), String> {
     let config = load_config(root)?;
     check_hook_available(root)?;
-    let current = credential::state(root, &config)?;
+    let current = credential::state_to_unlock(root, &config)?;
     if matches!(current, State::Unlocked { private } if private == options.private) {
         install_filters(root)?;
         install_hooks(root)?;

@@ -111,6 +111,16 @@ pub(crate) fn state(root: &Path, config: &[u8]) -> Result<State, String> {
     Ok(lookup(root, config)?.0)
 }
 
+/// `state`, for `unlock`: a damaged stored key counts as locked, since
+/// unlocking replaces it. Every other command refuses it.
+pub(crate) fn state_to_unlock(root: &Path, config: &[u8]) -> Result<State, String> {
+    let file = read_key_file(root)?;
+    if matches!(stored_lookup(file.as_ref().map(|f| f.as_slice()), config), Err(StoredKey::Damaged)) {
+        return Ok(State::Locked);
+    }
+    state(root, config)
+}
+
 /// How this checkout is unlocked for `config`, with the key when it is.
 pub(crate) fn lookup(root: &Path, config: &[u8]) -> Result<(State, Option<Key>), String> {
     let key = |stored| Some(Key { root: root.to_owned(), config: config.to_vec(), stored });
