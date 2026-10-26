@@ -85,10 +85,11 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
 }
 
 /// `check_index` of `snapshot`; with `incremental` (the pre-commit hook),
-/// protected entries unchanged since `HEAD` get the keyless checks only.
-/// They are already in history, so authenticating them again on every
-/// commit would prevent nothing; `verify-index`, `hydrate`, `lock`, merge
-/// commits and the audit still authenticate everything.
+/// protected entries unchanged since both `HEAD` and `HEAD^1` get the
+/// keyless checks only. They are already in history, so authenticating
+/// them again on every commit would prevent nothing (`HEAD^1` counts
+/// because `--amend` makes it the parent); `verify-index`, `hydrate`,
+/// `lock`, merge commits and the audit still authenticate everything.
 fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged], key: Option<&Key>, incremental: bool)
     -> Result<Verified, String>
 {
@@ -106,23 +107,24 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
     if let Some(problem) = marked_unfiltered(root, &paths, Attributes::Staged)? {
         return Err(problem);
     }
-    let head_oid: HashMap<&[u8], &str> = head.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
-    let unchanged = |e: &Staged| head_oid.get(e.path.as_slice()) == Some(&e.oid.as_str());
-    // The first path of each blob, in `HEAD` and then in the index.
-    let mut first_path: HashMap<&str, &[u8]> = HashMap::new();
-    for entry in head.iter().chain(entries) {
-        first_path.entry(entry.oid.as_str()).or_insert(entry.path.as_slice());
+    // With `--amend` (and squash/fixup) the commit's parent is `HEAD^`; its
+    // files count too, as they do for the audit, which compares with the
+    // parent.
+    let parent = commit_files(root, "HEAD^1")?;
+    let oids = |files: &[Staged]| -> HashMap<Vec<u8>, String> {
+        files.iter().map(|e| (e.path.clone(), e.oid.clone())).collect()
+    };
+    let (head_oid, parent_oid) = (oids(head), oids(&parent));
+    let unchanged = |e: &Staged| head_oid.get(&e.path) == Some(&e.oid);
+    let settled = |e: &Staged| unchanged(e) && parent_oid.get(&e.path) == Some(&e.oid);
+    // Every path of each blob, in `HEAD`, `HEAD^1` and the index.
+    let mut paths_of: HashMap<&str, Vec<&[u8]>> = HashMap::new();
+    for entry in head.iter().chain(&parent).chain(entries) {
+        paths_of.entry(entry.oid.as_str()).or_default().push(entry.path.as_slice());
     }
     let protected = snapshot.protected()?;
     let staged_unprotected: Vec<&Staged> = entries.iter().zip(flags)
         .filter(|(e, p)| !**p && e.regular && !unchanged(e)).map(|(e, _)| e).collect();
-    // With `--amend` (and squash/fixup) the commit's parent is `HEAD^`; its
-    // files count too, as they do for the audit, which compares with the
-    // parent. Only a path new since `HEAD` is looked up there.
-    let parent = if staged_unprotected.iter().any(|e| !head_oid.contains_key(e.path.as_slice())) {
-        commit_files(root, "HEAD^1")?
-    } else { Vec::new() };
-    let parent_oid: HashMap<&[u8], &str> = parent.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect();
     let id = transcrypt_v3::config_id(config);
     let mut drifted: Vec<&[u8]> = Vec::new();
     for entry in staged_unprotected {
@@ -162,12 +164,14 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &[Staged],
                 (cherry-picked or rebased across a rekey?); run `transcrypt-v3 reencrypt` with that config's passphrase")),
             Ok(_) => {},
         }
-        match key.filter(|_| !incremental || !unchanged(staged)) {
+        match key.filter(|_| !incremental || !settled(staged)) {
             Some(key) => { key.open(&staged.path, &record).map_err(|e| format!("staged {name}: {e}; if it \
                 was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
             None if !record_envelope_ok(&record, &id) =>
                 return Err(format!("staged {name} is not v3 ciphertext for this repository")),
-            None => if let Some(other) = first_path.get(staged.oid.as_str()).filter(|p| **p != staged.path.as_slice()) {
+            // A copy already in history is reported where it was made.
+            None if settled(staged) => {},
+            None => if let Some(other) = paths_of[staged.oid.as_str()].iter().find(|p| **p != staged.path.as_slice()) {
                 return Err(format!("staged {name} holds the encrypted {}: a renamed or copied protected \
                     file must be committed while unlocked, which re-encrypts it for its new name",
                     String::from_utf8_lossy(other)));

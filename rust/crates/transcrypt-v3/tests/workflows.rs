@@ -1120,6 +1120,22 @@ fn probe_spoofs_and_amends_are_refused() {
     run(&repo, "git", &["add", "-A"], None);
     let err = run_fails(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
     assert!(err.contains("x.env") && err.contains("`lfs`"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard"], None);
+
+    // Eighth review: an amend that moves a record removed by `HEAD`, or
+    // that keeps a raw move `HEAD` committed, is refused like the audit
+    // refuses it: locked, and unlocked (an entry equal to `HEAD` is still
+    // authenticated when `HEAD^1` differs).
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, "git", &["checkout", "-q", "HEAD~1", "--", "x.env"], None);
+    run(&repo, "git", &["mv", "x.env", "y.env"], None);
+    let err = run_fails(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
+    assert!(err.contains("y.env holds the encrypted x.env"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "--amend", "--no-edit"], None);
+    run_fails(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin", "--no-hydrate"], Some(PASS));
+    let err = run_fails(&repo, "git", &["commit", "-q", "--amend", "--no-edit", "-m", "amended"], None);
+    assert!(err.contains("y.env"), "{err}");
 }
 
 /// Seventh review F3: a resumed migration that fails again stays

@@ -292,6 +292,7 @@ deliberate act. Its three Low findings are fixed:
 | H-71 | Low (hook/audit disagreement) | With `--amend` (squash, fixup) the hook compared with `HEAD`, the audit with the parent. | The hook also counts `HEAD^`'s files. Same test. |
 | H-72 | Low (convergence) | A resumed `init`/`migrate` that failed again rolled back the earlier run's setup, leaving a non-resumable state. | A failed resume undoes only its own changes and says to rerun. Test `a_failed_resume_of_migrate_stays_resumable`. |
 | H-73 | Low (flaky advice, found by a flaky test) | After `git mv`, a plain `git add` re-cleans only if Git notices a stat change, which a move in the same second as the last write may not show. | The advice (smudge error, user guide) is now `git add --renormalize -- PATH`, which always re-cleans. |
+| H-74 | Low (hook/audit disagreement; review 8) | H-71's fix was incomplete: the locked hook's moved-record check let `HEAD^1`'s paths lose to the index entry itself, so `--amend` could move a record `HEAD` had removed; and the incremental hook (no keyed check for entries equal to `HEAD`) let an amend keep a raw move that `HEAD` committed. | An entry skips the keyed check only if it equals both `HEAD` and `HEAD^1`; locked, a changed entry whose blob sits at any other path of `HEAD`, `HEAD^1` or the index is refused. `probe_spoofs_and_amends_are_refused`. |
 
 The hooks remain *stricter* than the audit in three deliberate ways:
 - they refuse a record copied (not moved) to an unprotected name;
