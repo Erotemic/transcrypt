@@ -12,10 +12,10 @@ use std::os::unix::ffi::OsStringExt;
 use crate::{
     credential::Key,
     git::{changed_files, config_blob, git, git_blob, git_command, protected_flags,
-        read_limited, tree_files, Attributes, Staged},
+        read_record, tree_files, Attributes, Staged},
 };
 use transcrypt_v3_core::{
-    is_object_id, is_reserved_path, record_envelope_ok, ID_LEN, MAX_RECORD,
+    is_object_id, is_reserved_path, record_envelope_ok, ID_LEN,
 };
 
 /// Result of `audit`.
@@ -139,7 +139,7 @@ impl AttributeIndex {
                 }
                 let mut command = git_command(Some(root));
                 command.env("GIT_INDEX_FILE", &self.file).args(["update-index", "-z", "--index-info"]);
-                let (status, _, errors) = crate::git::run_bounded_status(command, Some(info), 1 << 20)?;
+                let (status, _, errors) = crate::git::run_bounded_status(command, Some(&info), 1 << 20)?;
                 if !status.success() {
                     return Err(format!("cannot read a commit's .gitattributes: {}", String::from_utf8_lossy(&errors)));
                 }
@@ -161,7 +161,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
 {
     let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));
     let (mut entries, deleted, modified) = match parent {
-        Some(ref parent) => changed_files(root, commit, Some(parent))?,
+        Some(ref parent) => changed_files(root, commit, parent)?,
         None => (tree_files(root, commit)?, Vec::new(), Vec::new()),
     };
     let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|(p, _)| test(p));
@@ -295,7 +295,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
 /// ref> SP <remote oid>` lines on stdin.
 pub(crate) fn pre_push(root: &Path, remote: Option<&OsStr>) -> Result<(), String> {
     // Never silently drop refs: oversized input is refused, not truncated.
-    let input = read_limited(io::stdin(), MAX_RECORD).map_err(|_| "cannot read pre-push input")?;
+    let input = read_record(io::stdin()).map_err(|_| "cannot read pre-push input")?;
     let mut revs: Vec<OsString> = Vec::new();
     for line in input.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
         let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();

@@ -7,11 +7,11 @@
 //! `refs/notes`.
 
 use std::{fs, path::Path, process::Command};
-use transcrypt_v3_core::{record_envelope_ok, MAX_RECORD};
+use transcrypt_v3_core::record_envelope_ok;
 use zeroize::Zeroizing;
 use crate::{
     credential::Key,
-    git::read_limited,
+    git::read_record,
     load_config,
     worktree::Scratch,
 };
@@ -25,7 +25,7 @@ pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], ne
     // `None`: an encrypted side that cannot be opened while locked.
     let side = |file: &Path, path: &[u8]| -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         let input = fs::File::open(file).map_err(|_| "cannot read a diff input")?;
-        let bytes = Zeroizing::new(read_limited(input, MAX_RECORD)?);
+        let bytes = read_record(input)?;
         if !record_envelope_ok(&bytes, &id) { return Ok(Some(bytes)); }
         let Some(key) = &key else { return Ok(None) };
         // A staged `git mv` still holds the record of the old path, which

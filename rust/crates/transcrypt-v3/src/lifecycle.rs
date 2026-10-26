@@ -332,16 +332,6 @@ pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zer
     Err(format!("{}: {error}", String::from_utf8_lossy(&staged.path)))
 }
 
-/// Write `bytes` as a Git blob, unfiltered; its verified object id.
-pub(crate) fn hash_object(root: &Path, bytes: &[u8]) -> Result<String, String> {
-    let oid = git_with_input(root, &["hash-object", "-w", "--no-filters", "--stdin"], bytes)?;
-    let oid = String::from_utf8(oid).map_err(|_| "malformed git hash-object output")?;
-    let oid = oid.trim_end();
-    if !transcrypt_v3_core::is_object_id(oid.as_bytes()) {
-        return Err("malformed git hash-object output".into());
-    }
-    Ok(oid.to_owned())
-}
 
 /// Run from the post-checkout, post-merge and post-rewrite hooks. Only the
 /// private mode needs it (its smudge filter leaves ciphertext when Git's

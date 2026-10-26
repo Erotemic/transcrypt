@@ -27,10 +27,9 @@ use transcrypt_v3_core::{
     CONFIG_LEN, FRAME_HEADER_LEN,
 };
 use zeroize::Zeroizing;
+use crate::git::sigpipe_blocked;
 
 const SOCK: &str = "session.sock";
-const WIRE_LIMIT: usize = MAX_RECORD;
-const MAX_RESPONSE: usize = WIRE_LIMIT;
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -49,7 +48,7 @@ fn directory(root: &Path) -> Result<PathBuf, String> {
 /// key or the agent's socket. Anything but a real 0700 directory owned by
 /// this user is refused.
 pub(crate) fn existing_directory(root: &Path) -> Result<Option<PathBuf>, String> {
-    let path = crate::git::common_dir(root).join("transcrypt-v3");
+    let path = credential_directory(root);
     let meta = match fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -102,8 +101,13 @@ fn same_user(stream: &UnixStream) -> Result<(), String> {
     }
 }
 
+/// `.git/transcrypt-v3`, whether or not it exists.
+fn credential_directory(root: &Path) -> PathBuf {
+    crate::git::common_dir(root).join("transcrypt-v3")
+}
+
 pub(crate) fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
-    let path = crate::git::common_dir(root).join("transcrypt-v3");
+    let path = credential_directory(root);
     match fs::symlink_metadata(&path) {
         Ok(_) => {},
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -120,17 +124,17 @@ pub(crate) fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
 /// connected by its bare name from inside its (checked) directory; v3
 /// processes are single-threaded while they do so. Ownership and permission
 /// checks still use the absolute path.
-fn at_socket<T>(root: &Path, f: impl FnOnce(&Path) -> io::Result<T>) -> Result<io::Result<T>, String> {
-    let dir = directory(root)?;
+fn at_socket<T>(dir: &Path, f: impl FnOnce(&Path) -> io::Result<T>) -> Result<io::Result<T>, String> {
     let previous = std::env::current_dir().map_err(|_| "cannot read working directory")?;
-    std::env::set_current_dir(&dir).map_err(|_| "cannot enter the session directory")?;
+    std::env::set_current_dir(dir).map_err(|_| "cannot enter the session directory")?;
     let result = f(Path::new(SOCK));
     std::env::set_current_dir(&previous).map_err(|_| "cannot return to the repository root")?;
     Ok(result)
 }
 
-fn socket(root: &Path) -> Result<PathBuf, String> {
-    Ok(directory(root)?.join(SOCK))
+/// Connect to the agent's socket in `dir`.
+fn connect(dir: &Path) -> Result<io::Result<UnixStream>, String> {
+    at_socket(dir, |p| UnixStream::connect(p))
 }
 
 fn check_socket(path: &Path) -> Result<(), String> {
@@ -158,12 +162,13 @@ fn reply(stream: &mut UnixStream, response: Result<Vec<u8>, String>) -> io::Resu
 /// public config each time: a stale agent cannot authorize a newly changed
 /// configuration merely because the directory or socket still exists.
 pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u8], body: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
-    if config.len() != CONFIG_LEN || body.len() > WIRE_LIMIT || path_bytes.len() > MAX_PATH {
+    let config: &[u8; CONFIG_LEN] = config.try_into().map_err(|_| "invalid v3 agent request length")?;
+    if body.len() > MAX_RECORD || path_bytes.len() > MAX_PATH {
         return Err("invalid v3 agent request length".into());
     }
-    let path = socket(root)?;
-    check_socket(&path)?;
-    let mut stream = at_socket(root, |p| UnixStream::connect(p))?.map_err(|_| "v3 credential agent is not running; run unlock")?;
+    let dir = directory(root)?;
+    check_socket(&dir.join(SOCK))?;
+    let mut stream = connect(&dir)?.map_err(|_| "v3 credential agent is not running; run unlock")?;
     // Plaintext is about to be sent to, or accepted from, this peer.
     same_user(&stream)?;
     // Bound a broken local peer rather than hanging a Git operation forever.
@@ -171,17 +176,17 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
         .map_err(|_| "cannot set agent read timeout")?;
     stream.set_write_timeout(Some(Duration::from_secs(120)))
         .map_err(|_| "cannot set agent write timeout")?;
-    let config: &[u8; CONFIG_LEN] = config.try_into().map_err(|_| "invalid v3 agent request length")?;
     // Frame layout is defined (and proved to roundtrip) by the verified core.
-    stream.write_all(&encode_frame_header(op as u8, config, path_bytes.len() as u32))
-        .map_err(|_| "cannot send agent request header")?;
-    stream.write_all(path_bytes).map_err(|_| "cannot send protected Git pathname")?;
-    stream.write_all(&encode_be_u32(body.len() as u32)).map_err(|_| "cannot send body length")?;
-    stream.write_all(body).map_err(|_| "cannot send agent input")?;
+    sigpipe_blocked(|| {
+        stream.write_all(&encode_frame_header(op as u8, config, path_bytes.len() as u32))?;
+        stream.write_all(path_bytes)?;
+        stream.write_all(&encode_be_u32(body.len() as u32))?;
+        stream.write_all(body)
+    }).map_err(|_| "cannot send the request to the credential agent")?;
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).map_err(|_| "credential agent failed before replying")?;
     let size = decode_be_u32(header[1..5].try_into().map_err(|_| "malformed agent response")?) as usize;
-    if size > MAX_RESPONSE { return Err("credential agent response exceeds limit".into()); }
+    if size > MAX_RECORD { return Err("credential agent response exceeds limit".into()); }
     let mut value = Zeroizing::new(vec![0u8; size]);
     stream.read_exact(&mut value).map_err(|_| "incomplete credential agent response")?;
     match header[0] {
@@ -196,30 +201,31 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
 /// `idle`, the agent forgets the key and exits after that long without a
 /// request (session expiration).
 pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
-    let path = prepare_directory(root)?.join(SOCK);
+    let dir = prepare_directory(root)?;
+    let path = dir.join(SOCK);
     match fs::symlink_metadata(&path) {
         Ok(meta) => {
             if !meta.file_type().is_socket() { return Err("unsafe existing session socket path".into()); }
-            if at_socket(root, |p| UnixStream::connect(p))?.is_ok() {
+            if connect(&dir)?.is_ok() {
                 // An agent whose worktree config has changed (a pulled rekey)
                 // stops when it refuses this request; give it a moment.
                 let _ = request(root, config, Operation::Ping, &[], &[]);
                 let stale = (0..40).any(|_| {
                     thread::sleep(Duration::from_millis(25));
                     fs::symlink_metadata(&path).is_err()
-                        || at_socket(root, |p| UnixStream::connect(p)).is_ok_and(|r| r.is_err())
+                        || connect(&dir).is_ok_and(|r| r.is_err())
                 });
                 if !stale {
                     return Err("an agent for another .transcrypt/config is running (another worktree?); \
                         lock it there first".into());
                 }
-                if fs::symlink_metadata(&path).is_err() {
-                    return start_agent(root, config, key, idle);
-                }
             }
-            // A dead process may leave its socket inode; our 0700 parent is
-            // owned by this checkout's user. Refuse non-socket substitutes.
-            fs::remove_file(&path).map_err(|_| "cannot remove stale agent socket")?;
+            // A dead process may leave its socket inode (unless the stale
+            // agent removed it); our 0700 parent is owned by this checkout's
+            // user. Refuse non-socket substitutes.
+            if fs::symlink_metadata(&path).is_ok() {
+                fs::remove_file(&path).map_err(|_| "cannot remove stale agent socket")?;
+            }
         },
         Err(e) if e.kind() == io::ErrorKind::NotFound => {},
         Err(_) => return Err("cannot examine session socket".into()),
@@ -239,7 +245,7 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
     // The key, then the idle limit in seconds (0: none), over the pipe.
     let idle_seconds = idle.map_or(0u64, |d| d.as_secs().max(1));
     let sent = child.stdin.take().ok_or("agent key pipe missing")
-        .map(|mut pipe| pipe.write_all(&key[..]).and_then(|_| pipe.write_all(&idle_seconds.to_be_bytes())))?;
+        .map(|mut pipe| sigpipe_blocked(|| pipe.write_all(&key[..]).and_then(|_| pipe.write_all(&idle_seconds.to_be_bytes()))))?;
     if sent.is_err() {
         let _ = child.kill();
         let _ = child.wait();
@@ -268,7 +274,7 @@ pub(crate) fn stop(root: &Path, config: &[u8]) -> Result<(), String> {
     // The server unlinks its own socket on exit. The agent key is erased when
     // the process exits; we do not claim erasure of OS swap or crash dumps.
     for _ in 0..40 {
-        if fs::symlink_metadata(socket(root)?).is_err() { return Ok(()); }
+        if fs::symlink_metadata(directory(root)?.join(SOCK)).is_err() { return Ok(()); }
         thread::sleep(Duration::from_millis(25));
     }
     Err("agent acknowledged shutdown but socket still exists".into())
@@ -353,11 +359,11 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
         seconds => i32::try_from(seconds.saturating_mul(1000)).unwrap_or(i32::MAX),
     };
     authenticate_config(config, &key)?;
-    let path = directory(root)?.join(SOCK);
-    let listener = at_socket(root, |p| UnixListener::bind(p))?.map_err(|e| format!("cannot bind private credential socket: {e}"))?;
+    let dir = directory(root)?;
+    let path = dir.join(SOCK);
+    let listener = at_socket(&dir, |p| UnixListener::bind(p))?.map_err(|e| format!("cannot bind private credential socket: {e}"))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .map_err(|_| "cannot secure session socket")?;
-    let mut stopping = false;
     loop {
         // Wait for a client; past the idle limit, forget the key.
         let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
@@ -376,7 +382,8 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
             .map_err(|_| "cannot set agent outbound timeout")?;
         if same_user(&stream).is_err() { continue; }
         match transaction(&mut stream, config, &key) {
-            Ok(stop) => stopping = stop,
+            Ok(true) => break,
+            Ok(false) => {},
             Err(message) => {
                 let _ = reply(&mut stream, Err(message));
                 // A refused request may come from a checkout whose config has
@@ -387,7 +394,6 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
                 }
             },
         }
-        if stopping { break; }
     }
     drop(listener);
     let _ = fs::remove_file(&path);

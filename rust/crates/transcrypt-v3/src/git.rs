@@ -23,13 +23,13 @@ fn output(command: Command) -> Result<Vec<u8>, String> {
 /// Run a subprocess with `input` (if any) fed from another thread, at most
 /// `limit` bytes of output accepted (beyond that it is killed), and at most
 /// 64 KiB of its error output kept (the rest is drained so it never blocks).
-fn run_bounded(command: Command, input: Option<Vec<u8>>, limit: usize) -> Result<Vec<u8>, String> {
+fn run_bounded(command: Command, input: Option<&[u8]>, limit: usize) -> Result<Vec<u8>, String> {
     let desc = format!("{:?}", command);
-    let (status, data, errors) = run_bounded_status(command, input, limit)?;
+    let (status, mut data, errors) = run_bounded_status(command, input, limit)?;
     if !status.success() {
         return Err(format!("Git command failed ({desc}): {}", String::from_utf8_lossy(&errors)));
     }
-    Ok(data.to_vec())
+    Ok(std::mem::take(&mut *data))
 }
 
 /// A finished subprocess: exit status, output (wiped when dropped) and the
@@ -38,38 +38,64 @@ pub(crate) type Finished = (std::process::ExitStatus, Zeroizing<Vec<u8>>, Vec<u8
 
 /// `run_bounded`, returning the exit status (and output, which may be
 /// plaintext, kept in wiped memory) instead of failing on a non-zero exit.
-pub(crate) fn run_bounded_status(mut command: Command, input: Option<Vec<u8>>, limit: usize)
+pub(crate) fn run_bounded_status(mut command: Command, input: Option<&[u8]>, limit: usize)
     -> Result<Finished, String>
 {
     let desc = format!("{:?}", command);
     command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("cannot run {desc}: {e}"))?;
-    let writer = match (input, child.stdin.take()) {
-        (Some(bytes), Some(mut stdin)) => Some(std::thread::spawn(move || stdin.write_all(&bytes))),
-        _ => None,
-    };
+    let stdin = child.stdin.take();
     let mut stderr = child.stderr.take().ok_or("subprocess error pipe missing")?;
-    let errors = std::thread::spawn(move || {
-        let mut kept = Vec::new();
-        let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut kept);
-        let _ = io::copy(&mut stderr, &mut io::sink());
-        kept
-    });
     let mut stdout = child.stdout.take().ok_or("subprocess output pipe missing")?;
-    let data = read_wiped(&mut stdout, limit);
-    // Close our end first: a producer (or its children) still writing then
-    // gets EPIPE instead of blocking with the error pipe open.
-    drop(stdout);
-    if data.is_err() { let _ = child.kill(); }
-    let status = child.wait().map_err(|_| format!("cannot wait for {desc}"))?;
-    let written = writer.map(|w| w.join().map_err(|_| ()).and_then(|r| r.map_err(|_| ())));
-    let errors = errors.join().unwrap_or_default();
-    let data = data.map_err(|_| format!("output of {desc} exceeds the {} MiB limit", limit >> 20))?;
-    if matches!(written, Some(Err(()))) {
-        return Err(format!("cannot send input to {desc}: {}", String::from_utf8_lossy(&errors)));
+    std::thread::scope(|scope| {
+        let writer = input.zip(stdin).map(|(bytes, mut stdin)| scope.spawn(move || sigpipe_blocked(|| stdin.write_all(bytes))));
+        let errors = scope.spawn(move || {
+            let mut kept = Vec::new();
+            let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut kept);
+            let _ = io::copy(&mut stderr, &mut io::sink());
+            kept
+        });
+        let data = read_wiped(&mut stdout, limit);
+        // Close our end first: a producer (or its children) still writing then
+        // gets EPIPE instead of blocking with the error pipe open.
+        drop(stdout);
+        if data.is_err() { let _ = child.kill(); }
+        let status = child.wait().map_err(|_| format!("cannot wait for {desc}"))?;
+        let written = writer.map(|w| w.join().map_err(|_| ()).and_then(|r| r.map_err(|_| ())));
+        let errors = errors.join().unwrap_or_default();
+        let data = data.map_err(|_| format!("output of {desc} exceeds the {} MiB limit", limit >> 20))?;
+        if matches!(written, Some(Err(()))) {
+            return Err(format!("cannot send input to {desc}: {}", String::from_utf8_lossy(&errors)));
+        }
+        Ok((status, data, errors))
+    })
+}
+
+/// Run `f` with SIGPIPE blocked in this thread, so that a write to a pipe
+/// or socket whose reader is gone fails with EPIPE (an error that is
+/// reported, and rolled back from) instead of killing the process: `main`
+/// restores SIGPIPE's default so that `transcrypt-v3 status | head` ends
+/// quietly.
+pub(crate) fn sigpipe_blocked<T>(f: impl FnOnce() -> T) -> T {
+    // SAFETY: signal-mask calls on initialized sets; `sigwait` returns at
+    // once because the signal it waits for is pending.
+    unsafe {
+        let mut pipe: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut pipe);
+        libc::sigaddset(&mut pipe, libc::SIGPIPE);
+        let mut previous: libc::sigset_t = std::mem::zeroed();
+        libc::pthread_sigmask(libc::SIG_BLOCK, &pipe, &mut previous);
+        let result = f();
+        // Discard a SIGPIPE raised meanwhile, then restore the mask.
+        let mut pending: libc::sigset_t = std::mem::zeroed();
+        if libc::sigpending(&mut pending) == 0 && libc::sigismember(&pending, libc::SIGPIPE) == 1 {
+            let mut signal = 0;
+            libc::sigwait(&pipe, &mut signal);
+        }
+        libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+        result
     }
-    Ok((status, data, errors))
 }
 
 /// Read at most `limit` bytes into memory that is wiped when dropped,
@@ -114,7 +140,7 @@ pub(crate) fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
 pub(crate) fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
     let mut command = git_command(Some(root));
     command.args(arguments);
-    run_bounded(command, Some(input.to_vec()), GIT_OUTPUT_LIMIT)
+    run_bounded(command, Some(input), GIT_OUTPUT_LIMIT)
 }
 
 /// This worktree's Git directory and the one shared by all worktrees of the
@@ -155,11 +181,12 @@ pub(crate) fn repo_root() -> Result<PathBuf, String> {
     Ok(root)
 }
 
-pub(crate) fn read_limited<R: Read>(read: R, limit: usize) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    read.take((limit as u64) + 1).read_to_end(&mut out).map_err(|_| "cannot read input")?;
-    if out.len() > limit { return Err("input exceeds the 16 MiB v3 size limit".into()); }
-    Ok(out)
+/// The refusal of anything larger than a v3 record.
+pub(crate) const TOO_LARGE: &str = "input exceeds the 16 MiB v3 size limit";
+
+/// Read at most a v3 record's worth of bytes, into wiped memory.
+pub(crate) fn read_record(mut read: impl Read) -> Result<Zeroizing<Vec<u8>>, String> {
+    read_wiped(&mut read, MAX_RECORD).map_err(|e| if e == "cannot read input" { e } else { TOO_LARGE.into() })
 }
 
 /// The content of one Git blob, named by an id the verified core accepted
@@ -168,7 +195,7 @@ pub(crate) fn read_limited<R: Read>(read: R, limit: usize) -> Result<Vec<u8>, St
 /// blob is refused without being loaded. All reads of one process share a
 /// single `git cat-file --batch`.
 pub(crate) fn git_blob(root: &Path, oid: &str) -> Result<Vec<u8>, String> {
-    read_blob(root, oid, false)?.ok_or_else(|| "input exceeds the 16 MiB v3 size limit".into())
+    read_blob(root, oid, false)?.ok_or_else(|| TOO_LARGE.into())
 }
 
 /// Like `git_blob`, but `None` for a blob larger than any v3 record (an
@@ -225,8 +252,8 @@ impl Objects {
     fn blob(&mut self, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
         use io::BufRead;
         let input = self.input.as_mut().ok_or("Git object reader closed")?;
-        input.write_all(format!("{oid}\n").as_bytes())
-            .and_then(|_| input.flush()).map_err(|_| "cannot query git cat-file")?;
+        sigpipe_blocked(|| input.write_all(format!("{oid}\n").as_bytes()).and_then(|_| input.flush()))
+            .map_err(|_| "cannot query git cat-file")?;
         let mut header = Vec::new();
         (&mut self.output).take(160).read_until(b'\n', &mut header)
             .map_err(|_| "cannot read git cat-file reply")?;
@@ -234,7 +261,7 @@ impl Objects {
             .ok_or_else(|| format!("Git object {oid} is missing or not a blob"))?;
         if size > MAX_RECORD {
             if !skip_large {
-                return Err("input exceeds the 16 MiB v3 size limit".into());
+                return Err(TOO_LARGE.into());
             }
             // Skip the content (and its LF) without keeping it.
             let skipped = io::copy(&mut (&mut self.output).take(size as u64 + 1), &mut io::sink())
@@ -296,22 +323,28 @@ pub(crate) fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
     if !data.is_empty() && data.last() != Some(&0) {
         return Err("truncated Git listing".into());
     }
-    let mut entries = Vec::new();
-    for entry in data.split(|b| *b == 0).filter(|item| !item.is_empty()) {
-        let parsed = parse_index_entry(entry)
-            .map_err(|_| "malformed or unmerged Git index entry; resolve conflicts first")?;
-        let oid = &entry[7..parsed.path_start - 3];
-        if !is_object_id(oid) {
-            return Err("malformed Git object id in index entry".into());
-        }
-        entries.push(Staged {
-            regular: parsed.regular,
-            mode: String::from_utf8_lossy(&entry[..6]).into_owned(),
-            oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
-            path: entry[parsed.path_start..].to_vec(),
-        });
+    records(data).map(parse_entry).collect()
+}
+
+/// The non-empty NUL-separated records of Git `-z` output.
+fn records(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    data.split(|b| *b == 0).filter(|record| !record.is_empty())
+}
+
+/// One `<mode> SP <oid> SP 0 TAB <path>` record (see `parse_listing`).
+fn parse_entry(entry: &[u8]) -> Result<Staged, String> {
+    let parsed = parse_index_entry(entry)
+        .map_err(|_| "malformed or unmerged Git index entry; resolve conflicts first")?;
+    let oid = &entry[7..parsed.path_start - 3];
+    if !is_object_id(oid) {
+        return Err("malformed Git object id in index entry".into());
     }
-    Ok(entries)
+    Ok(Staged {
+        regular: parsed.regular,
+        mode: String::from_utf8_lossy(&entry[..6]).into_owned(),
+        oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
+        path: entry[parsed.path_start..].to_vec(),
+    })
 }
 
 /// The blobs of a commit's tree. `ls-tree -r -z` prints `<mode> SP <type> SP
@@ -320,13 +353,11 @@ pub(crate) fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
 /// verbatim, and then parsed and checked by the verified core exactly like an
 /// index record.
 pub(crate) fn tree_files(root: &Path, commit: &str) -> Result<Vec<Staged>, String> {
-    let data = git(root, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
-    let mut listing = Vec::with_capacity(data.len());
-    for entry in data.split(|b| *b == 0).filter(|item| !item.is_empty()) {
-        listing.extend_from_slice(&tree_record(entry)?);
-        listing.push(0);
-    }
-    parse_listing(&listing)
+    ls_tree(root, &["ls-tree", "-r", "-z", "--full-tree", commit])
+}
+
+fn ls_tree(root: &Path, arguments: &[&str]) -> Result<Vec<Staged>, String> {
+    records(&git(root, arguments)?).map(|entry| parse_entry(&tree_record(entry)?)).collect()
 }
 
 /// Rewrite one `ls-tree` record as `<mode> SP <oid> SP 0 TAB <path>`.
@@ -354,17 +385,16 @@ pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
     }
     let mut merged = Vec::new();
     let mut conflicted: Vec<Vec<u8>> = Vec::new();
-    for entry in listing.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+    for entry in records(&listing) {
         let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed Git index entry")?;
         if tab >= 2 && entry[tab - 2] == b' ' && matches!(entry[tab - 1], b'1'..=b'3') {
             let path = entry[tab + 1..].to_vec();
             if conflicted.last() != Some(&path) { conflicted.push(path); }
         } else {
-            merged.extend_from_slice(entry);
-            merged.push(0);
+            merged.push(parse_entry(entry)?);
         }
     }
-    Ok(Index { merged: parse_listing(&merged)?, listing, conflicted })
+    Ok(Index { merged, listing, conflicted })
 }
 
 pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
@@ -396,8 +426,16 @@ pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> 
 
 /// The object id Git gives `bytes` (nothing is written).
 pub(crate) fn blob_id(root: &Path, bytes: &[u8]) -> Result<String, String> {
-    let oid = git_with_input(root, &["hash-object", "--no-filters", "--stdin"], bytes)?;
-    let oid = String::from_utf8_lossy(&oid).trim().to_owned();
+    object_id(git_with_input(root, &["hash-object", "--no-filters", "--stdin"], bytes)?)
+}
+
+/// Write `bytes` as a Git blob, unfiltered; its verified object id.
+pub(crate) fn hash_object(root: &Path, bytes: &[u8]) -> Result<String, String> {
+    object_id(git_with_input(root, &["hash-object", "-w", "--no-filters", "--stdin"], bytes)?)
+}
+
+fn object_id(output: Vec<u8>) -> Result<String, String> {
+    let oid = String::from_utf8_lossy(&output).trim_end().to_owned();
     if !is_object_id(oid.as_bytes()) { return Err("malformed git hash-object output".into()); }
     Ok(oid)
 }
@@ -413,24 +451,16 @@ pub(crate) enum Attributes<'a> {
     Index(&'a Path),
 }
 
-/// For each path, whether Git's effective `filter` attribute is
-/// `transcrypt-v3`. Git evaluates its own attribute rules (patterns, nested
-/// files, macros, `.git/info/attributes`); the whole answer is parsed by the
-/// verified core (`parse_attr_response`), which requires the records to
-/// name exactly the requested paths, in order, and nothing else. Paths go to
-/// Git as raw bytes (`-z --stdin`), so any valid Unix name works. Patterns
-/// match case-sensitively (`core.ignorecase=false`) so that every clone, on
-/// every file system, selects the same files.
-pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<bool>, String> {
-    if paths.is_empty() { return Ok(Vec::new()); }
+/// `git check-attr -z --stdin <attributes>` for `paths`, sent as raw bytes
+/// (any valid Unix name works), from the attribute files `from` selects.
+/// Patterns match case-sensitively (`core.ignorecase=false`) so that every
+/// clone, on every file system, selects the same files. Returns the request
+/// and Git's answer.
+fn check_attr(root: &Path, paths: &[&[u8]], from: Attributes, attributes: &[&str]) -> Result<(Vec<u8>, Vec<u8>), String> {
     if paths.iter().any(|path| path.is_empty() || path.contains(&0)) {
         return Err("invalid Git path".into());
     }
-    let mut request = Vec::new();
-    for path in paths {
-        request.extend_from_slice(path);
-        request.push(0);
-    }
+    let request = nul_terminated(paths);
     let mut command = git_command(Some(root));
     command.args(["-c", "core.ignorecase=false", "check-attr"]);
     match from {
@@ -438,10 +468,24 @@ pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) ->
         Attributes::Worktree => {},
         Attributes::Index(file) => { command.arg("--cached").env("GIT_INDEX_FILE", file); },
     }
-    command.args(["-z", "--stdin", "filter"]);
-    let response = run_bounded(command, Some(request.clone()), GIT_OUTPUT_LIMIT)?;
-    // The verified core requires one record per requested path, in order,
-    // and nothing else (`parse_attr_response_spec`).
+    command.args(["-z", "--stdin"]).args(attributes);
+    let response = run_bounded(command, Some(&request), GIT_OUTPUT_LIMIT)?;
+    Ok((request, response))
+}
+
+/// Each path joined into one buffer, each followed by NUL.
+fn nul_terminated<P: AsRef<[u8]>>(paths: &[P]) -> Vec<u8> {
+    paths.iter().flat_map(|path| path.as_ref().iter().copied().chain([0])).collect()
+}
+
+/// For each path, whether Git's effective `filter` attribute is
+/// `transcrypt-v3`. Git evaluates its own attribute rules (patterns, nested
+/// files, macros, `.git/info/attributes`); the whole answer is parsed by the
+/// verified core (`parse_attr_response_spec`), which requires one record per
+/// requested path, in order, and nothing else.
+pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<bool>, String> {
+    if paths.is_empty() { return Ok(Vec::new()); }
+    let (request, response) = check_attr(root, paths, from, &["filter"])?;
     let mut flags = vec![false; paths.len()];
     if !parse_attr_response(&request, &response, &mut flags) {
         return Err("unexpected git check-attr output".into());
@@ -449,33 +493,30 @@ pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) ->
     Ok(flags)
 }
 
-/// Each path's `filter` attribute value (`unspecified`, `unset`, `set` or a
-/// driver name), for checks that only ever refuse: an answer that does not
-/// name exactly the requested paths in order is an error.
-pub(crate) fn filter_values(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<Vec<u8>>, String> {
+/// For each path, its value of each of `attributes` (`unspecified`, `unset`,
+/// `set` or a value), for checks that only ever refuse: an answer that does
+/// not name exactly the requested paths and attributes, in order, is an error.
+pub(crate) fn attr_values(root: &Path, paths: &[&[u8]], from: Attributes, attributes: &[&str])
+    -> Result<Vec<Vec<Vec<u8>>>, String>
+{
     if paths.is_empty() { return Ok(Vec::new()); }
-    let mut request = Vec::new();
-    for path in paths {
-        request.extend_from_slice(path);
-        request.push(0);
-    }
-    let mut command = git_command(Some(root));
-    command.args(["-c", "core.ignorecase=false", "check-attr"]);
-    match from {
-        Attributes::Staged => { command.arg("--cached"); },
-        Attributes::Worktree => {},
-        Attributes::Index(file) => { command.arg("--cached").env("GIT_INDEX_FILE", file); },
-    }
-    command.args(["-z", "--stdin", "filter"]);
-    let response = run_bounded(command, Some(request), GIT_OUTPUT_LIMIT)?;
+    let (_, response) = check_attr(root, paths, from, attributes)?;
     let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
-    if fields.len() != 3 * paths.len() + 1 || fields.last() != Some(&&b""[..]) {
+    let width = 3 * attributes.len();
+    if fields.len() != width * paths.len() + 1 || fields.last() != Some(&&b""[..]) {
         return Err("unexpected git check-attr output".into());
     }
-    paths.iter().zip(fields.chunks(3)).map(|(path, record)| {
-        if record[0] != *path || record[1] != b"filter" { return Err("unexpected git check-attr output".into()); }
-        Ok(record[2].to_vec())
+    paths.iter().zip(fields.chunks(width)).map(|(path, record)| {
+        record.chunks(3).zip(attributes).map(|(field, name)| match field {
+            [p, n, value] if p == path && *n == name.as_bytes() => Ok(value.to_vec()),
+            _ => Err("unexpected git check-attr output".into()),
+        }).collect()
     }).collect()
+}
+
+/// Each path's `filter` attribute value.
+pub(crate) fn filter_values(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<Vec<u8>>, String> {
+    Ok(attr_values(root, paths, from, &["filter"])?.into_iter().flatten().collect())
 }
 
 /// Whether a `filter` value hands the file to another named filter driver
@@ -492,9 +533,7 @@ pub(crate) fn other_filter(value: &[u8]) -> bool {
 /// show as a probe Git would not encrypt. The hooks and the audit use this
 /// one predicate.
 pub(crate) fn macro_resolves(root: &Path, index_dir: &Path, top: Option<&str>) -> Result<bool, String> {
-    let rules = git_with_input(root, &["hash-object", "-w", "--no-filters", "--stdin"], b"probe transcrypt\n")?;
-    let rules = String::from_utf8_lossy(&rules).trim().to_owned();
-    if !is_object_id(rules.as_bytes()) { return Err("malformed git hash-object output".into()); }
+    let rules = hash_object(root, b"probe transcrypt\n")?;
     let mut info = format!("100644 {rules}\ttranscrypt-v3-probe/.gitattributes\0").into_bytes();
     if let Some(top) = top {
         info.extend_from_slice(format!("100644 {top}\t.gitattributes\0").as_bytes());
@@ -503,7 +542,7 @@ pub(crate) fn macro_resolves(root: &Path, index_dir: &Path, top: Option<&str>) -
     let _ = std::fs::remove_file(&index);
     let mut command = git_command(Some(root));
     command.env("GIT_INDEX_FILE", &index).args(["update-index", "-z", "--index-info"]);
-    let result = run_bounded(command, Some(info), 1 << 20)
+    let result = run_bounded(command, Some(&info), 1 << 20)
         .and_then(|_| protected_flags(root, &[b"transcrypt-v3-probe/probe"], Attributes::Index(&index)));
     let _ = std::fs::remove_file(&index);
     Ok(result?.first() == Some(&true))
@@ -513,37 +552,17 @@ pub(crate) fn macro_resolves(root: &Path, index_dir: &Path, top: Option<&str>) -
 /// explicitly unset: the macro is broken for it, whatever any probe says
 /// (a rule can target the probe's own path). `None` when there is none.
 pub(crate) fn marked_unfiltered(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Option<String>, String> {
-    if paths.is_empty() { return Ok(None); }
-    let mut request = Vec::new();
-    for path in paths {
-        request.extend_from_slice(path);
-        request.push(0);
-    }
-    let mut command = git_command(Some(root));
-    command.args(["-c", "core.ignorecase=false", "check-attr"]);
-    match from {
-        Attributes::Staged => { command.arg("--cached"); },
-        Attributes::Worktree => {},
-        Attributes::Index(file) => { command.arg("--cached").env("GIT_INDEX_FILE", file); },
-    }
-    command.args(["-z", "--stdin", "transcrypt", "filter"]);
-    let response = run_bounded(command, Some(request), GIT_OUTPUT_LIMIT)?;
-    let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
-    if fields.len() != 6 * paths.len() + 1 {
-        return Err("unexpected git check-attr output".into());
-    }
-    for (path, record) in paths.iter().zip(fields.chunks(6)) {
-        if record[0] != *path || record[1] != b"transcrypt" || record[3] != *path || record[4] != b"filter" {
-            return Err("unexpected git check-attr output".into());
-        }
-        if record[2] == b"set" && !matches!(record[5], b"transcrypt-v3" | b"unset") {
+    let values = attr_values(root, paths, from, &["transcrypt", "filter"])?;
+    for (path, values) in paths.iter().zip(&values) {
+        let [mark, filter] = &values[..] else { return Err("unexpected git check-attr output".into()) };
+        if mark == b"set" && !matches!(&filter[..], b"transcrypt-v3" | b"unset") {
             let name = String::from_utf8_lossy(path);
-            return Ok(Some(if record[5] == b"unspecified" {
+            return Ok(Some(if filter == b"unspecified" {
                 format!("{name}: {}", crate::setup::MACRO_MISSING)
             } else {
                 format!("{name} is marked `transcrypt`, but another rule gives it the filter `{}` (from \
                     `git lfs track`?), so it would be stored unencrypted; narrow that rule",
-                    String::from_utf8_lossy(record[5]))
+                    String::from_utf8_lossy(filter))
             }));
         }
     }
@@ -568,8 +587,7 @@ pub(crate) type Deleted = Vec<(Vec<u8>, String)>;
 /// object ids of modified paths.
 pub(crate) type Changes = (Vec<Staged>, Deleted, Deleted);
 
-pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Changes, String> {
-    let Some(parent) = parent else { return Ok((tree_files(root, commit)?, Vec::new(), Vec::new())) };
+pub(crate) fn changed_files(root: &Path, commit: &str, parent: &str) -> Result<Changes, String> {
     let data = git(root, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
     parse_diff_tree(&data)
 }
@@ -583,7 +601,7 @@ fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
         return Err("truncated git diff-tree output".into());
     }
     let mut fields = data.split(|b| *b == 0);
-    let mut listing = Vec::new();
+    let mut entries = Vec::new();
     let mut deleted = Vec::new();
     let mut modified = Vec::new();
     while let Some(header) = fields.next() {
@@ -592,50 +610,32 @@ fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
         let parts: Vec<&[u8]> = header.strip_prefix(b":").ok_or("malformed git diff-tree output")?
             .split(|b| *b == b' ').collect();
         let [_, mode, old, oid, status] = parts[..] else { return Err("malformed git diff-tree output".into()) };
+        let old = || -> Result<_, String> {
+            if !is_object_id(old) { return Err("malformed git diff-tree output".into()); }
+            Ok((path.to_vec(), String::from_utf8_lossy(old).into_owned()))
+        };
         match status {
-            b"D" => {
-                if !is_object_id(old) { return Err("malformed git diff-tree output".into()); }
-                deleted.push((path.to_vec(), String::from_utf8_lossy(old).into_owned()));
-                continue
-            },
+            b"D" => { deleted.push(old()?); continue },
             b"A" => {},
-            b"M" | b"T" => {
-                if !is_object_id(old) { return Err("malformed git diff-tree output".into()); }
-                modified.push((path.to_vec(), String::from_utf8_lossy(old).into_owned()));
-            },
+            b"M" | b"T" => modified.push(old()?),
             _ => return Err("unexpected git diff-tree status".into()),
         }
-        listing.extend_from_slice(mode);
-        listing.push(b' ');
-        listing.extend_from_slice(oid);
-        listing.extend_from_slice(b" 0\t");
-        listing.extend_from_slice(path);
-        listing.push(0);
+        entries.push(parse_entry(&[mode, b" ", oid, b" 0\t", path].concat())?);
     }
-    Ok((parse_listing(&listing)?, deleted, modified))
+    Ok((entries, deleted, modified))
 }
 
 /// The `.transcrypt/config` blob of a commit, if it has one.
 pub(crate) fn config_blob(root: &Path, commit: &str) -> Result<Option<String>, String> {
-    let data = git(root, &["ls-tree", "-z", "--full-tree", commit, "--", ".transcrypt/config"])?;
-    let mut listing = Vec::new();
-    for entry in data.split(|b| *b == 0).filter(|e| !e.is_empty()) {
-        listing.extend_from_slice(&tree_record(entry)?);
-        listing.push(0);
-    }
-    Ok(parse_listing(&listing)?.into_iter().find(|e| e.path == b".transcrypt/config" && e.regular).map(|e| e.oid))
+    Ok(ls_tree(root, &["ls-tree", "-z", "--full-tree", commit, "--", ".transcrypt/config"])?.into_iter()
+        .find(|e| e.path == b".transcrypt/config" && e.regular).map(|e| e.oid))
 }
 
 /// Re-index exactly `paths`, whose worktree content cleans to the staged
 /// blob, and check that no staged blob or mode changed from `listing`.
 pub(crate) fn reindex(root: &Path, listing: &[u8], paths: &[Vec<u8>]) -> Result<(), String> {
     if paths.is_empty() { return Ok(()); }
-    let mut input = Vec::new();
-    for path in paths {
-        input.extend_from_slice(path);
-        input.push(0);
-    }
-    git_with_input(root, &["update-index", "-z", "--stdin"], &input)?;
+    git_with_input(root, &["update-index", "-z", "--stdin"], &nul_terminated(paths))?;
     if git(root, &["ls-files", "--stage", "-z"])? != listing {
         return Err("staged Git objects changed while refreshing the index; inspect `git diff --cached`".into());
     }
@@ -646,6 +646,23 @@ pub(crate) fn reindex(root: &Path, listing: &[u8], paths: &[Vec<u8>]) -> Result<
 mod tests {
     use super::*;
     use transcrypt_v3_core::is_object_id;
+
+    /// A subprocess that exits without reading its input is an error, not
+    /// a silent death by SIGPIPE (which `main` does not ignore).
+    #[test]
+    fn early_exit_of_a_subprocess_is_reported() {
+        // SAFETY: restoring a signal's default disposition is always valid.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let input = vec![b'x'; 4 << 20];
+        for _ in 0..20 {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 3"]);
+            match run_bounded_status(command, Some(&input), 1 << 20) {
+                Ok((status, _, _)) => assert_eq!(status.code(), Some(3)),
+                Err(e) => assert!(e.contains("cannot send input"), "{e}"),
+            }
+        }
+    }
 
     #[test]
     fn git_output_parsers_never_panic_and_accept_only_exact_records() {

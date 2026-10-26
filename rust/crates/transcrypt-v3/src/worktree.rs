@@ -9,14 +9,10 @@ use std::{
 };
 use std::os::unix::ffi::OsStringExt;
 use zeroize::Zeroizing;
-use crate::{fsat, git::read_limited};
-use transcrypt_v3_core::MAX_RECORD;
+use crate::{fsat, git::read_record};
 
 pub(crate) fn indexed_path(path: &[u8]) -> Result<PathBuf, String> {
-    #[cfg(unix)]
-    let relative = PathBuf::from(std::ffi::OsString::from_vec(path.to_vec()));
-    #[cfg(not(unix))]
-    let relative = PathBuf::from(String::from_utf8(path.to_vec()).map_err(|_| "non-UTF8 path unsupported")?);
+    let relative = PathBuf::from(OsString::from_vec(path.to_vec()));
     if relative.is_absolute() || relative.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir)) {
         return Err("unsafe protected relative path".into());
     }
@@ -93,7 +89,7 @@ impl Protected {
         let file = self.dir.open_regular(&self.leaf)
             .map_err(|_| "cannot read protected worktree file (missing, symlink or not regular)")?;
         let stamp = fsat::Stamp::of(&file).map_err(|_| "cannot stat protected worktree file")?;
-        let contents = Zeroizing::new(read_limited(&file, MAX_RECORD)?);
+        let contents = read_record(&file)?;
         if fsat::Stamp::of(&file).map_err(|_| "cannot stat protected worktree file")? != stamp {
             return Err("protected worktree file changed while it was read".into());
         }
@@ -153,11 +149,7 @@ pub(crate) fn write_repository_file(root: &Path, staging: &Staging, relative: &P
     let mut dir = fsat::Dir::open(root).map_err(|_| "cannot open repository root")?;
     for part in parents {
         let std::path::Component::Normal(name) = part else { return Err("unsafe repository file path".into()) };
-        match dir.mkdir(name, 0o777) {
-            Ok(()) => {},
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {},
-            Err(e) => return Err(format!("cannot create {}: {e}", relative.display())),
-        }
+        dir.mkdir(name, 0o777).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
         dir = dir.subdir(name).map_err(|_| format!("{} has a parent that is a symlink or not a directory", relative.display()))?;
     }
     let mut file = dir.create_new(leaf, 0o666).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
@@ -187,19 +179,21 @@ impl Staging {
     }
 }
 
-pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
+/// `.git/<name>`, created if missing: a real directory (not a symlink)
+/// that only this user can enter. `what` names it in errors.
+fn private_git_dir(root: &Path, name: &str, what: &str) -> Result<fsat::Dir, String> {
     let git_dir = fsat::Dir::open(&crate::git::git_dir(root)).map_err(|_| "cannot open the Git directory")?;
-    let name = OsStr::new("transcrypt-v3-staging");
-    match git_dir.mkdir(name, 0o700) {
-        Ok(()) => {},
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {},
-        Err(e) => return Err(format!("cannot create private staging directory: {e}")),
+    let unsafe_dir = || format!("unsafe .git/{name}; require a real 0700 directory");
+    git_dir.mkdir(OsStr::new(name), 0o700).map_err(|e| format!("cannot create private {what} directory: {e}"))?;
+    let dir = git_dir.subdir(OsStr::new(name)).map_err(|_| unsafe_dir())?;
+    if dir.mode().map_err(|_| format!("cannot examine private {what} directory"))? & 0o077 != 0 {
+        return Err(unsafe_dir());
     }
-    let dir = git_dir.subdir(name)
-        .map_err(|_| "unsafe .git/transcrypt-v3-staging; require a real 0700 directory")?;
-    if dir.mode().map_err(|_| "cannot examine private staging directory")? & 0o077 != 0 {
-        return Err("unsafe .git/transcrypt-v3-staging; require a real 0700 directory".into());
-    }
+    Ok(dir)
+}
+
+pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
+    let dir = private_git_dir(root, "transcrypt-v3-staging", "staging")?;
     dir.try_lock().map_err(|_| "another transcrypt-v3 hydrate or lock is running in this repository")?;
     for entry in dir.entries().map_err(|_| "cannot list private staging directory")? {
         let (regular, _) = dir.entry_kind(&entry).map_err(|_| "cannot examine stale staged file")?;
@@ -228,17 +222,7 @@ impl Scratch {
 
     pub(crate) fn create(root: &Path) -> Result<Scratch, String> {
         let path = crate::git::git_dir(root).join(Self::NAME);
-        let git_dir = fsat::Dir::open(&crate::git::git_dir(root)).map_err(|_| "cannot open the Git directory")?;
-        let name = OsStr::new(Self::NAME);
-        match git_dir.mkdir(name, 0o700) {
-            Ok(()) => {},
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {},
-            Err(e) => return Err(format!("cannot create private scratch directory: {e}")),
-        }
-        let dir = git_dir.subdir(name).map_err(|_| "unsafe .git/transcrypt-v3-scratch")?;
-        if dir.mode().map_err(|_| "cannot examine private scratch directory")? & 0o077 != 0 {
-            return Err("unsafe .git/transcrypt-v3-scratch; require a real 0700 directory".into());
-        }
+        let dir = private_git_dir(root, Self::NAME, "scratch")?;
         for entry in dir.entries().map_err(|_| "cannot list private scratch directory")? {
             let owner = entry.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<i32>().ok());
             // SAFETY: kill with signal 0 only checks whether the process exists.

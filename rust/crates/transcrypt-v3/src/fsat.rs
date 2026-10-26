@@ -96,10 +96,15 @@ impl Dir {
         self.openat(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode).map(File::from)
     }
 
+    /// Create a directory; one that already exists (whatever it is) is not
+    /// an error: open it with `subdir`, which refuses anything else.
     pub(crate) fn mkdir(&self, name: &OsStr, mode: libc::mode_t) -> io::Result<()> {
         let c = cstr(name)?;
         // SAFETY: valid dirfd and NUL-terminated name.
-        check(unsafe { libc::mkdirat(self.0.as_raw_fd(), c.as_ptr(), mode) }).map(|_| ())
+        match check(unsafe { libc::mkdirat(self.0.as_raw_fd(), c.as_ptr(), mode) }) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+            _ => Ok(()),
+        }
     }
 
     /// Atomically rename `from` in this directory to `to` in `to_dir`.

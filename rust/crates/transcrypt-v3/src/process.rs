@@ -2,8 +2,8 @@
 //! version 2): one process serves every clean and smudge of a Git command,
 //! instead of one process per file. Packet lengths are decoded by the
 //! verified core (`decode_pkt_len`), and every file goes through the same
-//! `Filters::convert` as the per-file filters (with the key loaded once). Any malformed exchange ends the
-//! process, which makes Git fail the command (the filter is required).
+//! `Filters::convert` as the per-file filters (with the key loaded once). Any malformed exchange
+//! ends the process, which makes Git fail the command (the filter is required).
 
 use std::{
     io::{self, Read, Write},
@@ -11,7 +11,7 @@ use std::{
 };
 use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD};
 use zeroize::Zeroizing;
-use crate::{git::append_wiped, Filters};
+use crate::{git::{append_wiped, TOO_LARGE}, Filters};
 
 /// The most data one packet carries.
 const MAX_DATA: usize = MAX_PKT_LEN - 4;
@@ -61,6 +61,24 @@ fn write_flush(out: &mut impl Write) -> io::Result<()> {
     out.write_all(b"0000")
 }
 
+/// Text packets, then a flush, sent to Git at once.
+fn write_list(out: &mut impl Write, lines: &[&str]) -> io::Result<()> {
+    for line in lines { write_text(out, line)?; }
+    write_flush(out)?;
+    out.flush()
+}
+
+/// The reply to one request: the converted content, or an error status.
+fn write_reply(out: &mut impl Write, converted: Option<&[u8]>) -> io::Result<()> {
+    let Some(data) = converted else { return write_list(out, &["status=error"]) };
+    write_text(out, "status=success")?;
+    write_flush(out)?;
+    for chunk in data.chunks(MAX_DATA) { write_packet(out, chunk)?; }
+    write_flush(out)?;
+    // An empty list keeps the status.
+    write_list(out, &[])
+}
+
 pub(crate) fn serve(root: &Path) -> Result<(), String> {
     let mut input = io::stdin().lock();
     let mut output = io::BufWriter::new(io::stdout().lock());
@@ -70,21 +88,14 @@ pub(crate) fn serve(root: &Path) -> Result<(), String> {
     if hello.first().map(Vec::as_slice) != Some(b"git-filter-client") || !hello.iter().any(|l| l == b"version=2") {
         return Err("unsupported Git filter protocol".into());
     }
-    write_text(&mut output, "git-filter-server").map_err(io_error)?;
-    write_text(&mut output, "version=2").map_err(io_error)?;
-    write_flush(&mut output).map_err(io_error)?;
-    output.flush().map_err(io_error)?;
+    write_list(&mut output, &["git-filter-server", "version=2"]).map_err(io_error)?;
     let capabilities = read_list(&mut input)?;
-    for capability in ["capability=clean", "capability=smudge"] {
-        if capabilities.iter().any(|c| c == capability.as_bytes()) {
-            write_text(&mut output, capability).map_err(io_error)?;
-        }
-    }
-    write_flush(&mut output).map_err(io_error)?;
-    output.flush().map_err(io_error)?;
+    let offered: Vec<&str> = ["capability=clean", "capability=smudge"].into_iter()
+        .filter(|wanted| capabilities.iter().any(|c| c == wanted.as_bytes())).collect();
+    write_list(&mut output, &offered).map_err(io_error)?;
     let mut filters = Filters::new(root);
     while let Some(request) = read_request(&mut input)? {
-        let value = |key: &[u8]| request.iter().find_map(|line| line.strip_prefix(key)).map(<[u8]>::to_vec);
+        let value = |key: &[u8]| request.iter().find_map(|line| line.strip_prefix(key));
         let (command, path) = (value(b"command="), value(b"pathname="));
         // The content, refused (but still read to the flush) beyond the bound.
         let mut content = Zeroizing::new(Vec::new());
@@ -93,30 +104,16 @@ pub(crate) fn serve(root: &Path) -> Result<(), String> {
             too_large |= content.len() + data.len() > MAX_RECORD;
             if !too_large { append_wiped(&mut content, &data); }
         }
-        let result = match (command.as_deref(), &path) {
-            _ if too_large => Err("input exceeds the 16 MiB v3 size limit".into()),
+        let result = match (command, path) {
+            _ if too_large => Err(TOO_LARGE.into()),
             (Some(b"clean"), Some(path)) => filters.convert(true, path, content),
             (Some(b"smudge"), Some(path)) => filters.convert(false, path, content),
             _ => Err("unsupported filter request".to_owned()),
         };
-        match result {
-            Ok(converted) => {
-                write_text(&mut output, "status=success").map_err(io_error)?;
-                write_flush(&mut output).map_err(io_error)?;
-                for chunk in converted.chunks(MAX_DATA) {
-                    write_packet(&mut output, chunk).map_err(io_error)?;
-                }
-                write_flush(&mut output).map_err(io_error)?;
-                // An empty list keeps the status.
-                write_flush(&mut output).map_err(io_error)?;
-            },
-            Err(e) => {
-                eprintln!("transcrypt-v3: {}: {e}", String::from_utf8_lossy(path.as_deref().unwrap_or_default()));
-                write_text(&mut output, "status=error").map_err(io_error)?;
-                write_flush(&mut output).map_err(io_error)?;
-            },
+        if let Err(e) = &result {
+            eprintln!("transcrypt-v3: {}: {e}", String::from_utf8_lossy(path.unwrap_or_default()));
         }
-        output.flush().map_err(io_error)?;
+        write_reply(&mut output, result.as_ref().ok().map(|c| c.as_slice())).map_err(io_error)?;
     }
     Ok(())
 }

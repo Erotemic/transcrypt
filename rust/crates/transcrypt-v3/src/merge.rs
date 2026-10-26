@@ -9,7 +9,7 @@ use transcrypt_v3_core::MAX_RECORD;
 use zeroize::Zeroizing;
 use crate::{
     credential::Key,
-    git::{git_command, read_limited, run_bounded_status},
+    git::{git_command, read_record, run_bounded_status},
     worktree::Scratch,
     load_config,
 };
@@ -23,7 +23,7 @@ pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_pa
     let key = Key::require(root, &config).map_err(|e| format!("{e} to merge protected files"))?;
     let decrypt = |file: &Path, required: bool| -> Result<Zeroizing<Vec<u8>>, String> {
         let input = fs::File::open(file).map_err(|_| "cannot read a merge input")?;
-        let record = read_limited(input, MAX_RECORD)?;
+        let record = read_record(input)?;
         if record.is_empty() { return Ok(Zeroizing::new(Vec::new())); }
         match key.open(git_path, &record) {
             Ok(plaintext) => Ok(plaintext),

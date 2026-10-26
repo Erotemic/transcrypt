@@ -21,10 +21,9 @@ use std::{
     env, fs,
     ffi::OsString,
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::ExitCode,
 };
-#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use zeroize::Zeroizing;
 mod audit;
@@ -40,7 +39,7 @@ mod session;
 mod setup;
 mod worktree;
 use credential::{Key, State};
-use transcrypt_v3_core::{parse_file_header, record_envelope_ok, smudge_action, Refusal, SmudgeAction, MAX_RECORD};
+use transcrypt_v3_core::{parse_file_header, record_envelope_ok, smudge_action, Refusal, SmudgeAction};
 use audit::*;
 use git::*;
 use lifecycle::*;
@@ -112,10 +111,25 @@ fn run() -> Result<(), String> {
     // All v3 paths, including the agent's short relative socket address,
     // are interpreted from the repository root.
     env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
-    let no_args = |name: &str| if args.len() == 1 { Ok(()) } else { Err(format!("{name} takes no arguments")) };
+    let file = |arg: &OsString| invoked_in.join(arg);
     match action {
-        "status" => { no_args(action)?; status(&root) },
-        "doctor" => { no_args(action)?; doctor(&root) },
+        "status" | "doctor" | "filter-process" | "lock" | "flush" | "check-encrypted" | "verify-index"
+            | "pre-commit" | "serve" | "uninstall" if args.len() > 1 => Err(format!("{action} takes no arguments")),
+        "status" => status(&root),
+        "doctor" => doctor(&root),
+        "filter-process" => process::serve(&root),
+        "lock" => lock(&root),
+        "flush" => flush(&root),
+        "check-encrypted" => worktree_encrypted(&root, &load_config(&root)?),
+        "verify-index" => verify_index_command(&root),
+        "pre-commit" => pre_commit(&root),
+        "serve" => session::serve(&root, &load_config(&root)?),
+        "uninstall" => uninstall(&root),
+        "hydrate" => match &args[1..] {
+            [] => hydrate(&root).map(|n| eprintln!("Decrypted {n} file(s).")),
+            [flag] if flag == "--auto" => auto_hydrate(&root),
+            _ => Err("hydrate takes no arguments".into()),
+        },
         "init" | "unlock" | "rekey" | "migrate" | "reencrypt" => {
             let mut options = Options { password_stdin: false, private: false, hydrate: true, timeout: None, yes: false,
                 patterns: Vec::new() };
@@ -151,7 +165,6 @@ fn run() -> Result<(), String> {
         "diff" => {
             // Git's external diff interface: path old-file old-hex old-mode
             // new-file new-hex new-mode [new-path rename-message].
-            let file = |arg: &OsString| invoked_in.join(arg);
             match &args[1..] {
                 [path, old, _, _, new, _, _] => diff::diff(&root, path.as_bytes(), &file(old), path.as_bytes(), &file(new)),
                 [path, old, _, _, new, _, _, new_path, _] =>
@@ -164,38 +177,21 @@ fn run() -> Result<(), String> {
             let [_, base, ours, theirs, path] = &args[..] else {
                 return Err("merge driver takes %O %A %B %P".into());
             };
-            let file = |arg: &OsString| invoked_in.join(arg);
             if merge::merge(&root, &file(base), &file(ours), &file(theirs), path.as_bytes())? {
                 Ok(())
             } else {
                 Err(format!("merge conflict in {}: resolve it in the decrypted file", path.to_string_lossy()))
             }
         },
-        "filter-process" => { no_args(action)?; process::serve(&root) },
         "clean" | "smudge" => {
             if args.len() != 2 { return Err("Git filter requires exactly one %f pathname".into()); }
-            let input = Zeroizing::new(read_limited(io::stdin(), MAX_RECORD)?);
+            let input = read_record(io::stdin())?;
             let output = Filters::new(&root).convert(action == "clean", args[1].as_bytes(), input)?;
             io::stdout().write_all(&output).map_err(|_| "cannot write output".into())
         },
         "pre-push" => {
             if args.len() > 3 { return Err("pre-push takes the remote name and URL".into()); }
             pre_push(&root, args.get(1).map(OsString::as_os_str))
-        },
-        "hydrate" if args.len() == 2 && args[1] == "--auto" => auto_hydrate(&root),
-        "lock" | "verify-index" | "pre-commit" | "hydrate" | "serve" | "uninstall" | "flush" | "check-encrypted" => {
-            no_args(action)?;
-            match action {
-                "lock" => lock(&root),
-                "flush" => flush(&root),
-                "check-encrypted" => worktree_encrypted(&root, &load_config(&root)?),
-                "verify-index" => verify_index_command(&root),
-                "pre-commit" => pre_commit(&root),
-                "hydrate" => hydrate(&root).map(|n| eprintln!("Decrypted {n} file(s).")),
-                "serve" => session::serve(&root, &load_config(&root)?),
-                "uninstall" => uninstall(&root),
-                _ => unreachable!(),
-            }
         },
         _ => Err(format!("unknown v3 operation; {USAGE}")),
     }
@@ -294,7 +290,8 @@ impl<'a> Filters<'a> {
             let key = Key::load(self.root, &config)?;
             self.current = Some((config, key));
         }
-        let Some((config, key)) = &self.current else { unreachable!() };
+        let Filters { root, current: Some((config, current_key)), stored, .. } = self else { unreachable!() };
+        let (root, key) = (*root, current_key.as_ref());
         let id = transcrypt_v3::config_id(config);
         let found = parse_file_header(&input).ok();
         if clean {
@@ -304,7 +301,7 @@ impl<'a> Filters<'a> {
             // path (verification then refuses to commit it); anything else
             // starting with such a header is refused.
             if found.is_some_and(|found| found != id) {
-                if blobs_at(self.root, git_path)?.contains(&blob_id(self.root, &input)?) { return Ok(input); }
+                if blobs_at(root, git_path)?.contains(&blob_id(root, &input)?) { return Ok(input); }
                 return Err(format!("{} starts like a record of another config but is not the one Git has \
                     for it; refusing to store it", String::from_utf8_lossy(git_path)));
             }
@@ -314,10 +311,9 @@ impl<'a> Filters<'a> {
                 // the record Git has for the path, if it opens to exactly
                 // these bytes, is their clean form.
                 // (Only plaintext needs this; a record goes on below.)
-                if found.is_none() && self.stored.is_none() { self.stored = Some(Key::stored(self.root)?); }
-                if let Some(stored) = self.stored.as_ref().and_then(Option::as_ref).filter(|_| found.is_none()) {
-                    for oid in blobs_at(self.root, git_path)? {
-                        let record = git_blob(self.root, &oid)?;
+                if let Some(stored) = if found.is_none() { stored_key(stored, root)? } else { None } {
+                    for oid in blobs_at(root, git_path)? {
+                        let record = git_blob(root, &oid)?;
                         if parse_file_header(&record).is_ok_and(|f| f == stored.config_id())
                             && stored.open(git_path, &record).is_ok_and(|pt| *pt == *input) {
                             return Ok(Zeroizing::new(record));
@@ -329,7 +325,7 @@ impl<'a> Filters<'a> {
                 // ciphertext), so a record of this configuration passes
                 // through unchanged. Plaintext is refused, never stored.
                 if record_envelope_ok(&input, &id) { return Ok(input); }
-                return Err(Key::require(self.root, config).err().unwrap_or_default());
+                return Err(Key::require(root, config).err().unwrap_or_default());
             };
             // `clean` returns a record that already opens at this path
             // unchanged and otherwise seals with the verified core's
@@ -338,7 +334,7 @@ impl<'a> Filters<'a> {
             if key.private() && *record != *input {
                 // Private mode: Git is staging plaintext of this file; if it
                 // was created readable by others, make it private now.
-                if let Some(target) = indexed_path(git_path).and_then(|p| find_protected(self.root, &p))? {
+                if let Some(target) = indexed_path(git_path).and_then(|p| find_protected(root, &p))? {
                     target.make_private()?;
                 }
             }
@@ -347,10 +343,9 @@ impl<'a> Filters<'a> {
         // The key for the config the record names: the worktree's, or the
         // stored key's own (Git may smudge files of a checkout before it
         // writes the new `.transcrypt/config`).
-        if self.stored.is_none() { self.stored = Some(Key::stored(self.root)?); }
         let key = match found {
-            Some(found) if found == id => key.as_ref(),
-            Some(found) => self.stored.as_ref().and_then(Option::as_ref).filter(|k| k.config_id() == found),
+            Some(found) if found == id => key,
+            Some(found) => stored_key(stored, root)?.filter(|k| k.config_id() == found),
             None => None,
         };
         let decided = key.map_or(id, Key::config_id);
@@ -360,7 +355,7 @@ impl<'a> Filters<'a> {
         // or fails.
         match smudge_action(&input, &decided, key.is_some()) {
             Ok(SmudgeAction::Keep) => {
-                if found.is_some_and(|found| found != id) && self.current.as_ref().is_some_and(|(_, k)| k.is_some()) {
+                if found.is_some_and(|found| found != id) && current_key.is_some() {
                     eprintln!("transcrypt-v3: {} is encrypted under another config, without a key here; \
                         it stays encrypted (`transcrypt-v3 status` tells whether it needs `reencrypt`)",
                         String::from_utf8_lossy(git_path));
@@ -385,9 +380,15 @@ impl<'a> Filters<'a> {
             },
             Err(Refusal::Foreign) => Err("the committed file is not v3 ciphertext (it was stored without the \
                 filter); refusing to present it as a protected file".into()),
-            Err(_) => Err("input exceeds the 16 MiB v3 size limit".into()),
+            Err(_) => Err(TOO_LARGE.into()),
         }
     }
+}
+
+/// The stored key, read at most once per process.
+fn stored_key<'k>(slot: &'k mut Option<Option<Key>>, root: &Path) -> Result<Option<&'k Key>, String> {
+    if slot.is_none() { *slot = Some(Key::stored(root)?); }
+    Ok(slot.as_ref().and_then(Option::as_ref))
 }
 
 /// A positive duration: a number with an optional unit `s`, `m` (the
@@ -489,31 +490,21 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn config_path(root: &Path) -> Result<PathBuf, String> {
-    let dir = root.join(".transcrypt");
-    let meta = fs::symlink_metadata(&dir).map_err(|_| "missing .transcrypt directory: run init or clone a v3 repository")?;
-    if !meta.is_dir() || meta.file_type().is_symlink() {
-        return Err("unsafe .transcrypt directory".into());
-    }
-    let file = dir.join("config");
-    let fmeta = fs::symlink_metadata(&file).map_err(|_| "missing committed .transcrypt/config")?;
-    if !fmeta.is_file() || fmeta.file_type().is_symlink() {
-        return Err("unsafe .transcrypt/config type".into());
-    }
-    Ok(file)
-}
-
+/// The public config in force: the worktree's `.transcrypt/config` (read
+/// without following symlinks), or the staged one when a sparse checkout
+/// leaves `.transcrypt/` out of the worktree.
 pub(crate) fn load_config(root: &Path) -> Result<Vec<u8>, String> {
-    // A sparse checkout may leave `.transcrypt/` out of the worktree; the
-    // staged config is then the one in force.
-    if fs::symlink_metadata(root.join(".transcrypt")).is_err() {
-        if let Some(staged) = indexed_files(root)?.into_iter().find(|e| e.path == b".transcrypt/config" && e.regular) {
-            let bytes = git_blob(root, &staged.oid)?;
-            transcrypt_v3_core::parse_config(&bytes).map_err(|_| "invalid v3 config grammar")?;
-            return Ok(bytes);
-        }
-    }
-    let bytes = fs::read(config_path(root)?).map_err(|e| format!("cannot read v3 config: {e}"))?;
+    let unsafe_config = |_| "unsafe .transcrypt/config (a symlink or not a regular file)".to_owned();
+    let bytes = match find_protected(root, Path::new(".transcrypt/config")).map_err(unsafe_config)? {
+        Some(file) => file.read()?.0.to_vec(),
+        None if fs::symlink_metadata(root.join(".transcrypt")).is_ok() => {
+            return Err("missing committed .transcrypt/config".into());
+        },
+        None => match indexed_files(root)?.into_iter().find(|e| e.path == b".transcrypt/config" && e.regular) {
+            Some(staged) => git_blob(root, &staged.oid)?,
+            None => return Err("missing .transcrypt directory: run init or clone a v3 repository".into()),
+        },
+    };
     transcrypt_v3_core::parse_config(&bytes).map_err(|_| "invalid v3 config grammar")?;
     Ok(bytes)
 }
