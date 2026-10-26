@@ -100,9 +100,9 @@ theorem is_object_id_spec (oid : Slice U8) :
   simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
   rw [env_objectId_iff, sliceBytes_length]
   have key := env_oid_loop_spec oid oid.len (by simp) (oid.length = 40 ∨ oid.length = 64)
-  simp only [bind_tc_ok]
-  -- The length test `n == 40 || n == 64` computes the admissible-length flag.
-  split_ifs <;> simp only [bind_tc_ok] <;> apply key <;> simp_all [UScalar.eq_equiv]
+  -- The length test `(n == 40) | (n == 64)` computes the admissible-length flag.
+  apply key
+  simp [UScalar.eq_equiv]
 
 /-- `record_envelope_ok` accepts exactly the records whose keyless envelope
     is valid for configuration id `id`. -/
@@ -115,47 +115,37 @@ theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize)
   have hrl : record.len.val = record.length := by simp
   have hbl := sliceBytes_length record
   have := usize_max_ge
-  step with FILE_MIN_LEN_spec as ⟨ i1, i1_post ⟩
+  step with MAX_RECORD_spec as ⟨ i1, i1_post ⟩
   split
-  · rename_i hlt
-    have : record.length < 38 := by
-      simp only [UScalar.lt_equiv, hrl, i1_post] at hlt; exact hlt
-    simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
-    intro _
-    rw [Transcrypt.V3Wire.file_truncated _ (by omega)]
-    simp
-  · rename_i hge
-    simp only [UScalar.lt_equiv, hrl, i1_post, not_lt] at hge
-    step with MAX_RECORD_spec as ⟨ i2, i2_post ⟩
-    split
-    · rename_i hgt
-      simp only [gt_iff_lt, UScalar.lt_equiv, i2_post, hrl] at hgt
-      simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and, hbl]
-      intro h; omega
-    · rename_i hgt
-      have hmax : record.length ≤ Transcrypt.V3Policy.maxRecord := by
-        simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, i2_post, hrl] at hgt
-        exact hgt
-      step with parse_file_header_spec as ⟨ r, hr ⟩
-      cases r with
-      | Ok found =>
-        simp only at hr ⊢
-        step*
-        rw [r_post, s_post, s1_post, hr, hbl, Option.some_inj]
-        simp only [hmax, true_and, Array.to_slice]
-        constructor
-        · intro h; simp only [wireBytes]; rw [h]
-        · intro h; exact map_val_injective h
-      | Err e =>
-        simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
-        intro _
-        cases e with
-        | Magic =>
-          simp only at hr
-          rw [hr.2]; simp
-        | Length =>
-          simp only at hr
-          omega
+  · rename_i hgt
+    simp only [gt_iff_lt, UScalar.lt_equiv, i1_post, hrl] at hgt
+    simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and, hbl]
+    intro h; omega
+  · rename_i hgt
+    have hmax : record.length ≤ Transcrypt.V3Policy.maxRecord := by
+      simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, i1_post, hrl] at hgt
+      exact hgt
+    step with parse_file_header_spec as ⟨ r, hr ⟩
+    cases r with
+    | Ok found =>
+      simp only at hr ⊢
+      step*
+      rw [r_post, s_post, s1_post, hr, hbl, Option.some_inj]
+      simp only [hmax, true_and, Array.to_slice]
+      constructor
+      · intro h; simp only [wireBytes]; rw [h]
+      · intro h; exact map_val_injective h
+    | Err e =>
+      simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
+      intro _
+      cases e with
+      | Magic =>
+        simp only at hr
+        rw [hr.2]; simp
+      | Length =>
+        simp only at hr
+        rw [Transcrypt.V3Wire.file_truncated _ (by omega)]
+        simp
 
 /-! ## Smudge decision -/
 

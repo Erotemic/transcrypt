@@ -710,10 +710,8 @@ pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
 /// `:<stage>:<path>` or text that Git could read as an option.
 pub fn is_object_id(oid: &[u8]) -> bool {
     let n = oid.len();
-    let mut ok = false;
-    if n == 40 || n == 64 {
-        ok = true;
-    }
+    // Non-short-circuit `|`: the translation of a `||` value does not typecheck.
+    let mut ok = (n == 40) | (n == 64);
     let mut i = 0;
     while ok && i < n {
         let c = oid[i];
@@ -729,9 +727,10 @@ pub fn is_object_id(oid: &[u8]) -> bool {
 /// deliberately formatted as a record for this configuration. This is the
 /// check run on pushed history and by server-side audits.
 pub fn record_envelope_ok(record: &[u8], id: &[u8; ID_LEN]) -> bool {
-    if record.len() < FILE_MIN_LEN || record.len() > MAX_RECORD {
+    if record.len() > MAX_RECORD {
         return false;
     }
+    // `parse_file_header` refuses records shorter than `FILE_MIN_LEN`.
     match parse_file_header(record) {
         Ok(found) => bytes_eq(&found, id),
         Err(_) => false,

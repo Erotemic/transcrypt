@@ -1501,7 +1501,7 @@ def parse_index_entry
             ok (core.result.Result.Ok { regular, path_start := i6 })
 
 /-- [transcrypt_v3_core::is_object_id]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-722:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-720:5
     Visibility: public -/
 @[rust_loop_body]
 def is_object_id_loop.body
@@ -1530,7 +1530,7 @@ def is_object_id_loop.body
   else ok (done false)
 
 /-- [transcrypt_v3_core::is_object_id]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-722:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-720:5
     Visibility: public -/
 @[rust_loop]
 def is_object_id_loop
@@ -1542,42 +1542,32 @@ def is_object_id_loop
     (ok1, i)
 
 /-- [transcrypt_v3_core::is_object_id]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 711:0-724:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 711:0-722:1
     Visibility: public -/
 def is_object_id (oid : Slice Std.U8) : RustM Bool := do
   let n ← core.slice.Slice.len oid
-  let ok1 ←
-    if n = 40#usize
-    then ok true
-    else if n = 64#usize
-         then ok true
-         else ok false
-  is_object_id_loop oid n ok1 0#usize
+  is_object_id_loop oid n ((n = 40#usize) || (n = 64#usize)) 0#usize
 
 /-- [transcrypt_v3_core::record_envelope_ok]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 731:0-739:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 729:0-738:1
     Visibility: public -/
 def record_envelope_ok
   (record : Slice Std.U8) (id : Array Std.U8 16#usize) : RustM Bool := do
   let i ← core.slice.Slice.len record
-  let i1 ← FILE_MIN_LEN
-  if i < i1
+  let i1 ← MAX_RECORD
+  if i > i1
   then ok false
   else
-    let i2 ← MAX_RECORD
-    if i > i2
-    then ok false
-    else
-      let r ← parse_file_header record
-      match r with
-      | core.result.Result.Ok found =>
-        let s ← lift (Array.to_slice found)
-        let s1 ← lift (Array.to_slice id)
-        bytes_eq s s1
-      | core.result.Result.Err _ => ok false
+    let r ← parse_file_header record
+    match r with
+    | core.result.Result.Ok found =>
+      let s ← lift (Array.to_slice found)
+      let s1 ← lift (Array.to_slice id)
+      bytes_eq s s1
+    | core.result.Result.Err _ => ok false
 
 /-- [transcrypt_v3_core::smudge_action]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 756:0-770:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 755:0-769:1
     Visibility: public -/
 def smudge_action
   (blob : Slice Std.U8) (id : Array Std.U8 16#usize) (unlocked : Bool) :
@@ -1603,7 +1593,7 @@ def smudge_action
     | core.result.Result.Err _ => ok (core.result.Result.Err Refusal.Foreign)
 
 /-- [transcrypt_v3_core::seal_action]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 793:0-805:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 792:0-804:1
     Visibility: public -/
 def seal_action
   (opens : Bool) (local_change : Bool) (envelope : Bool) (moved : Bool) :
@@ -1622,12 +1612,12 @@ def seal_action
     else ok SealAction.Leave
 
 /-- [transcrypt_v3_core::MAX_PKT_LEN]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 808:0-808:37
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 807:0-807:37
     Visibility: public -/
 @[global_simps, irreducible] def MAX_PKT_LEN : Std.Usize := 65520#usize
 
 /-- [transcrypt_v3_core::decode_pkt_len]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-829:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-828:5
     Visibility: public -/
 @[rust_loop_body]
 def decode_pkt_len_loop.body
@@ -1685,7 +1675,7 @@ def decode_pkt_len_loop.body
   else ok (done (value, false))
 
 /-- [transcrypt_v3_core::decode_pkt_len]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-829:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-828:5
     Visibility: public -/
 @[rust_loop]
 def decode_pkt_len_loop
@@ -1698,7 +1688,7 @@ def decode_pkt_len_loop
     (value, ok1, i)
 
 /-- [transcrypt_v3_core::decode_pkt_len]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 815:0-834:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 814:0-833:1
     Visibility: public -/
 def decode_pkt_len
   (header : Array Std.U8 4#usize) :

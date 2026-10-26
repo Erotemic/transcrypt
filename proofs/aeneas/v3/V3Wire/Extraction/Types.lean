@@ -119,7 +119,7 @@ structure IndexEntry where
   path_start : Std.Usize
 
 /-- [transcrypt_v3_core::SmudgeAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 743:0-749:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 742:0-748:1
     Visibility: public -/
 @[discriminant isize]
 inductive SmudgeAction where
@@ -127,7 +127,7 @@ inductive SmudgeAction where
 | Keep : SmudgeAction
 
 /-- [transcrypt_v3_core::SealAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 774:0-783:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 773:0-782:1
     Visibility: public -/
 @[discriminant isize]
 inductive SealAction where
