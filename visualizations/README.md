@@ -7,7 +7,7 @@ and evidence-color conventions in the supplied `aivm-secrets/visualizations/`
 repository.
 
 The visuals teach the *current experimental implementation* in source snapshot
-`16cc957` (October 25, 2026). The previous storyboard was authored before
+`88001fd` (October 25, 2026). The previous storyboard was authored before
 Git-attribute patterns and default stored-key unlock were implemented. They are not a substitute for the source, independent
 specification, Lean theorems, or cryptographic security analysis. In particular,
 no Manim scene simulates the executable or produces new proof evidence.
@@ -49,7 +49,7 @@ make list
 make preview SCENE=unlock BEAT=store   # instant SVG preview; no Manim
 make scene SCENE=unlock QUALITY=l       # one scene's beat clips, cached
 make focus SCENE=unlock QUALITY=l       # one scene + focused click-through HTML
-make pdf                                # all 20 static slides; no Manim
+make pdf                                # all 22 static slides; no Manim
 make pdf SCENE=unlock                   # one scene's slides only
 make pdf SLIDE=sealing                  # one specific slide only
 make pdf SCENES="clean crypto"          # selected scenes in deck order
@@ -63,7 +63,7 @@ then publishes a separate MP4 **for each named beat** under
 for the technical inspector, but the HTML slideshow uses the beat clips, never
 a full-scene player. The fingerprint manifest is shared with `make all`; an
 unchanged scene is reused. `make focus SCENE=unlock` also exports a focused
-`index-unlock.html` without generating the other 17 scenes. To force Manim to run again for that
+`index-unlock.html` without generating the other scenes. To force Manim to run again for that
 scene, use `make scene SCENE=unlock FORCE=1`; `NO_CACHE=1` additionally disables
 Manim's internal partial-movie cache if investigating stale frames.
 `make still` and `make segment SCENE=unlock ANIMATION=0,2` render partial
@@ -71,7 +71,7 @@ material without publishing it as a complete scene video.
 
 **PDF export never renders Manim**: it draws the precise selected static beats
 from the authored plan. `make pdf` does not build HTML, the technical inspector,
-or a video. It takes about a few seconds rather than rendering 18 MP4s.
+or a video. It takes about a few seconds rather than rendering the full scene catalog.
 A filtered export writes separate filenames, e.g.
 `.build/presentation/presentation-unlock.pdf` or
 `.build/presentation/presentation-sealing.pdf`, preserving the full
@@ -124,7 +124,7 @@ second copy:
 make all PYTHON=~/code/aivm-secrets/visualizations/.venv/bin/python QUALITY=l
 ```
 
-`all` renders each changed scene's beat sections only once and builds a **20-slide
+`all` renders each changed scene's beat sections only once and builds a **22-slide
 HTML presentation plus a 16:9 PDF**, speaker notes, and a separate technical
 storyboard inspector. Each HTML click advances precisely one named operation
 beat. It plays that beat's Manim section automatically and holds the final
@@ -216,10 +216,12 @@ that an operation is insecure. It indicates a required external premise.
 | `clone` | public ciphertext -> authenticated open -> local plaintext | conditional core versus native writer |
 | `lock` | local plaintext -> checked flush -> ciphertext -> forget key | `lock_action` proof versus filesystem/key deletion |
 | `attack` | tampered ciphertext -> gate -> rejection or actual publication | conditional authentication, A10 |
+| `status` | V0-V7 / P0-P6 roadmap progress with per-node evidence | internal gates complete, external R-01 pending |
 | `inventory` | actual production theorems versus model theorems | exact Lean proof inventory |
 | `contract` | worked `open_record_spec` | `Realizes` hypothesis visible |
 | `proof` | Rust -> Charon/Aeneas -> Lean | A3 translation soundness |
 | `lifecycle` | indexed record -> core -> Lean plan -> OS effects | source, model and tested are separate |
+| `adapter` | Git replies -> proved parser -> A4 input facts -> proved seal decision | tests of inputs are not proof of caller correspondence |
 | `assumptions` | trust boundary ledger | A3/A4/A5/A7/A8/A13/A19 |
 | `offline` | ciphertext metadata observed publicly | accepted information leakage |
 | `roadmap` | **remaining assurance work**, not already-delivered features | adapter correspondence, crypto audit, deployment |
@@ -228,6 +230,26 @@ The current source already implements and tests generic Git-attribute patterns,
 path-rebound renames, one-time v2 migration, and persistent **stored-key unlock
 by default** (with `--private` as an optional memory-only mode). None is an
 end-to-end Lean theorem about Git or the OS.
+
+The verification update adds `status` and `adapter` scenes and two slides
+(`milestones`, `adapter-correspondence`). Render them individually while
+reviewing proofs rather than rebuilding every animation:
+
+```bash
+make preview SCENE=status BEAT=review
+make preview SCENE=adapter BEAT=provenance
+make pdf SLIDE=milestones
+make pdf SLIDE=adapter-correspondence
+make focus SCENE=adapter QUALITY=l
+make html SCENE=status
+```
+
+The milestones slide distinguishes V0-V5 achieved, V6 internally reviewed with
+R-01 still open, V7 deferred, and product P0-P5 done/P6 pending. The adapter
+scene shows why proving `parse_attr_response_spec`, `is_object_id_spec` or
+`seal_action_spec` does **not** discharge Git input provenance, stored-key
+loading, or native OS effects. Optional remote enforcement is a deployment
+choice, not an uncompleted local core proof.
 
 For the **complete named proof inventory** and a worked `open_record_spec`
 statement, see [`PROOF-ATLAS.md`](PROOF-ATLAS.md).

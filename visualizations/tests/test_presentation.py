@@ -13,7 +13,7 @@ from tvis.slide_deck import load_slides, render_html, write_speaker_notes
 class PresentationTests(unittest.TestCase):
     def test_mixed_layouts_and_named_beats(self):
         deck=load_slides()
-        self.assertEqual(len(deck.slides),20)
+        self.assertEqual(len(deck.slides),22)
         self.assertEqual({slide.layout for slide in deck.slides},
                          {'cover','cinema','split','diagram','evidence','statement'})
         for slide in deck.slides:
@@ -103,7 +103,8 @@ class PresentationTests(unittest.TestCase):
                 for page in doc.pages:
                     self.assertEqual(tuple(round(float(x)) for x in page.mediabox[2:]),
                                      (PAGE_W,PAGE_H))
-                annotations=[a.get_object().get('/A') for a in doc.pages[4]['/Annots']]
+                clean_index=next(i for i, slide in enumerate(deck.slides) if slide.id == 'clean')
+                annotations=[a.get_object().get('/A') for a in doc.pages[clean_index]['/Annots']]
                 self.assertTrue(any('index.html#slide-clean' in str(a) for a in annotations))
             else:
                 self.assertTrue(path.read_bytes().startswith(b'%PDF-'))

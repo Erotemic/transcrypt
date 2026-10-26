@@ -1,6 +1,6 @@
 # What exactly is formalized in Transcrypt v3?
 
-**Source baseline:** `16cc957` (2026-10-25). This atlas explains the *tracked, compiled Lean verification reported for this snapshot*. It is not a claim that the entire Rust executable, Git, Unix or cryptographic libraries are formally verified. If the production source or generated snapshot changes, reconcile this inventory with [`PROOF-STATUS.md`](../proofs/aeneas/v3/PROOF-STATUS.md) before presenting it as current.
+**Source baseline:** `88001fd` (2026-10-25). This atlas explains the *tracked, compiled Lean verification reported for this snapshot*. It is not a claim that the entire Rust executable, Git, Unix or cryptographic libraries are formally verified. If the production source or generated snapshot changes, reconcile this inventory with [`PROOF-STATUS.md`](../proofs/aeneas/v3/PROOF-STATUS.md) before presenting it as current.
 
 ## Read the evidence levels literally
 
@@ -8,6 +8,34 @@
 - **PROVED IF `Realizes` — production Rust:** the same source-derived theorem, but it has an explicit hypothesis that the external `V3Primitives` implementation behaves exactly like the abstract `Suite` used in the specification (A5). The RustCrypto `Keyed` implementation is tested against independent implementations; no Lean theorem discharges `Realizes` for `Keyed`.
 - **PROVED — model:** Lean verifies a **separately defined sequencing model** of Git lifecycle functions, which calls the generated core functions. It does **not** prove the real Rust adapter calls the same functions on the same bytes or that native filesystem effects behave as modeled (A4).
 - **TESTED/ASSUMED:** the actual Git process, Unix filesystem, credential agent, Argon2id, SHA-256, AES-SIV implementation/security and hook deployment. Real tests and review provide evidence, not end-to-end Lean proofs.
+
+## Roadmap checkpoint (as of source snapshot `88001fd`)
+
+The [active roadmap](../docs/verification/V3-ROADMAP.md) separates completion
+of formal **core** proofs from completion of a product and from release review.
+The diagrams in `tvis.plans.status` and `tvis.plans.adapter` show the following
+claims with separate per-operation evidence labels:
+
+| Track | Status in the roadmap | What remains external |
+| --- | --- | --- |
+| V0-V4 | Format frozen, production codec/security-decision core source-proved | A3 translation; A5 `Realizes` for crypto calls |
+| V5 | Lifecycle-model theorems and real-Git/fault tests achieved for threat model | A4 effectful adapter, A7 Git, A8 OS effects |
+| V6 | Internal review, CI and docs complete; external R-01 open | Independent crypto/adapter security review |
+| V7 | Bash v3 deliberately deferred | Not a Rust v3 release blocker |
+| P0-P5 | Marked done, including arbitrary Git paths, stored-key default, transparent Git, migration and P5 core correspondence | Completion of P5 does **not** prove effectful adapter A4 |
+| P6 | Not complete | External R-01 release qualification |
+
+**Next concrete A4 reductions:** move native `cat-file --batch` response-frame
+checking into the extracted core; refine the adapter-derived
+`local_change`/`moved` inputs to `seal_action`; strengthen the verified decision
+boundary for stored-key selection. Keep `git check-attr` matching, the OS file
+writer, and the cryptographic implementation as explicit outside contracts.
+Existing stamps, OID snapshot design, real-Git tests and fault injection are
+security evidence, but not source-derived theorems about these side effects.
+
+Optional remote pre-push/server audit remains a **deployment condition** (A13),
+not a blanket guarantee made by local Lean proofs. A keyless envelope check
+proves shape, not cryptographic authenticity (A14).
 
 ## Production functions: source-derived proof inventory
 

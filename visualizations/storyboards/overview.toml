@@ -3,7 +3,7 @@
 [deck]
 title = "Transcrypt v3: from ordinary files to a public Git history"
 subtitle = "Where plaintext moves, which production functions are proved, and which assumptions remain"
-source_baseline = "16cc957 (2026-10-25), verified against coverage ledger and Rust source"
+source_baseline = "88001fd (2026-10-25), reconciled against V3-ROADMAP and PROOF-STATUS"
 reference_visual_style = "aivm-secrets/visualizations: editable beats, role colors, honest evidence levels"
 
 [[scene]]
@@ -22,7 +22,7 @@ file = "tvis/scenes/selection.py"
 class = "ProtectedSelection"
 plan = "tvis.plans.selection"
 status = "runtime-tested"
-claim = "In source snapshot 16cc957, native Git attribute patterns select protected paths; source-derived Lean checks parse Git answers and enforce canonical path policy, while Git evaluation is trusted under A19."
+claim = "In source snapshot 88001fd, native Git attribute patterns select protected paths; source-derived Lean checks parse Git answers and enforce canonical path policy, while Git evaluation is trusted under A19."
 narration = "The current implementation accepts native Git attribute patterns, including dot env files and directory wildcard patterns, with reserved metadata excluded. This is implemented and tested now, not a pending wish. Git performs the actual attribute matching. The production Rust parsing loop has a source-derived theorem for exact answers and path flags. Cryptographic sealing then binds the exact raw Git relative pathname, not a hardcoded dot secret suffix. The visualization marks Git as an external platform premise A19 and the parsing operation as Lean source-derived: the two steps are not interchangeable."
 sources = ["docs/verification/V3-USER-GUIDE.md", "docs/verification/V3-PROOF-COVERAGE.md", "docs/verification/V3-ASSUMPTIONS.md", "proofs/aeneas/v3/V3Wire/Verification/Path.lean", "proofs/aeneas/v3/V3Wire/Verification/Attr.lean", "rust/crates/transcrypt-v3-core/src/lib.rs"]
 optional_sources = ["docs/verification/V3-PRODUCT-CHARTER.md"]
@@ -128,6 +128,17 @@ sources = ["proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verificat
 proof_anchors = ["open_record_spec", "open_record_complete"]
 
 [[scene]]
+id = "status"
+file = "tvis/scenes/status.py"
+class = "VerificationStatus"
+plan = "tvis.plans.status"
+status = "architecture"
+claim = "V0-V5 achieved in their scoped roadmap; P0-P5 product tracks done, including core proof correspondence. V6 internal evidence exists but P6 / R-01 independent review is outstanding; Bash v3 V7 is deferred. This is not a whole-program verification percentage."
+narration = "The active roadmap distinguishes proof milestones from product milestones. V0 through V5 are achieved for their documented scope. Source-derived Lean contracts cover actual translated Rust encoders, parsers, and security decisions; seal, open and authentication require the Realizes primitive contract. The Lean hydrate, lock, verify and filter sequencing theorems are model proofs, not a source-derived proof of the effectful adapter. The product tracks P0 through P5 are implemented, tested and considered done for their scoped objectives: real adapter defects, arbitrary attribute-selected paths, stored derived keys by default, transparent Git use, migration, and core proof correspondence. P6, independent external cryptographic and adapter review R-01, is explicitly unfinished. V6 has its internal portion done, but is not release-certified. Bash v3 conformance V7 is intentionally deferred. Treat these as discrete evidence-backed statuses, not an invented percentage of verified executable code."
+sources = ["docs/verification/V3-ROADMAP.md", "docs/verification/V3-PRODUCT-CHARTER.md", "docs/verification/V3-PROOF-COVERAGE.md", "docs/verification/V3-ASSUMPTIONS.md", "proofs/aeneas/v3/PROOF-STATUS.md", "proofs/aeneas/v3/V3Wire/Verification/Bytes.lean", "proofs/aeneas/v3/V3Wire/Verification/Lifecycle.lean", "proofs/aeneas/v3/V3Wire/Verification/Codec.lean", "proofs/aeneas/v3/V3Wire/Verification/Filters.lean"]
+proof_anchors = ["seal_action_spec", "hydratePlan_spec", "encode_file_header_refines", "cleanModel_genuine"]
+
+[[scene]]
 id = "inventory"
 file = "tvis/scenes/inventory.py"
 class = "ProvenFunctionInventory"
@@ -172,6 +183,17 @@ sources = ["proofs/aeneas/v3/V3Wire/Verification/Lifecycle.lean", "proofs/aeneas
 proof_anchors = ["hydratePlan_spec", "lockEntry_spec", "verifyPlan_spec"]
 
 [[scene]]
+id = "adapter"
+file = "tvis/scenes/adapter.py"
+class = "AdapterCorrespondence"
+plan = "tvis.plans.adapter"
+status = "model-proof"
+claim = "The remaining A4 gap is the connection between proved byte/decision functions and production Git/OS inputs and effects. Git selection (A19), cat-file response framing, move provenance, stored-key loading and native filesystem effects are separately tested or assumed."
+narration = "A4 is not a missing branch in seal_action_spec. Git evaluates .gitattributes under A19; the actual Rust parse_attr_response parser is source-derived proved, including completeness for well-formed Git replies. The adapter creates the requests and obtains the reply. The is_object_id function is proved to recognize literal Git object ID syntax, but the effectful cat-file --batch framing and record consumption remain adapter review and test obligations. Rename repair is governed by seal_action_spec for supplied local_change and moved facts, not by a proof that the adapter computed those facts correctly. Stored key selection is implemented and tested; authenticate_config_spec checks the cryptographic configuration only conditional on Realizes. The actual stamp check, renameat, fsync and key deletion are native A8/A12 operations covered by tests and accepted race assumptions, not Lean effects. Next valuable steps extract pure response checks and input-selection decisions where that meaningfully shrinks A4. Do not pretend to have proved Git, Unix or RustCrypto."
+sources = ["docs/verification/V3-ASSUMPTIONS.md", "docs/verification/V3-PROOF-COVERAGE.md", "docs/verification/V3-ROADMAP.md", "docs/verification/V3-REVIEW-TRIAGE.md", "proofs/aeneas/v3/V3Wire/Verification/Attr.lean", "proofs/aeneas/v3/V3Wire/Verification/Envelope.lean", "proofs/aeneas/v3/V3Wire/Verification/Bytes.lean", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean"]
+proof_anchors = ["parse_attr_response_spec", "parse_attr_response_complete", "is_object_id_spec", "seal_action_spec", "authenticate_config_spec"]
+
+[[scene]]
 id = "assumptions"
 file = "tvis/scenes/assumptions.py"
 class = "TrustBoundary"
@@ -199,7 +221,7 @@ file = "tvis/scenes/roadmap.py"
 class = "ProductNorthStar"
 plan = "tvis.plans.roadmap"
 status = "design-goal"
-claim = "Already shipped in current source: arbitrary Git patterns, stored-key default, legacy migration, and path-rebound renames. Remaining goals focus on adapter correspondence, cryptographic external review, and deployment assurance."
+claim = "Already shipped in current source: arbitrary Git patterns, stored-key default, legacy migration, and path-rebound renames. Remaining assurance work targets A4 adapter correspondence and external R-01 review; remote audit deployment is optional (A13)."
 narration = "The code has moved beyond the older animation. Arbitrary Git attribute patterns are implemented. The default unlock stores its key locally, with optional private memory mode. One-time legacy migration and path-aware rename handling also exist and have regression tests. Remaining work is not to keep advertising those features as future promises. It is to reduce the explicit trusted base: make the real effectful Git and operating-system adapter correspond more directly to the proved core, seek independent cryptographic implementation review and improve verification that history audits are actually deployed where needed. Pinned extraction and proof rebuilding are already implemented maintenance mechanisms and should continue with every core change."
 sources = ["docs/verification/V3-ROADMAP.md", "docs/verification/V3-PROOF-COVERAGE.md", "docs/verification/V3-ASSUMPTIONS.md", "proofs/aeneas/v3/PROOF-STATUS.md"]
 optional_sources = ["docs/verification/V3-PRODUCT-CHARTER.md"]
