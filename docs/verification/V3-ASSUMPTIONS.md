@@ -9,7 +9,8 @@ the independent review, and are now implemented and tested; A19 was added
 with attribute-based selection. A20–A23 name the Git contracts of the
 [end-to-end security argument](V3-SECURITY-ARGUMENT.md), which now that the
 hook's inputs are computed by the verified core are the remaining
-assumptions of the pre-commit path. Older security-hardening priorities are
+assumptions of the pre-commit path. A24 (2026-10-26) names what the
+incremental hook trusts about history. Older security-hardening priorities are
 superseded by the charter where they conflict (for example, private worktree
 permissions are now an optional mode); the source-derived proof status and
 existing assumption meanings are not.
@@ -49,10 +50,11 @@ one.
 | A17 | The stored key is local-only, used only for the config it authenticates, and mode-independent | Decision PROVED (`stored_key_state`, `stored_key_authenticates_current_config`); file I/O TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
 | A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`seal_action`, `held_entries`, `is_local_change`, `next_move_source`, `hook_repairs_only_local_changes`); TESTED (real Git) + REVIEWED |
 | A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK |
-| A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record) | TESTED; parsing PROVED (`parse_listing_spec`) |
+| A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record), in byte order of paths, each path once | TESTED; parsing and order PROVED (`parse_listing_spec`: anything else is refused) |
 | A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
-| A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, cherry-pick, rebase suites) |
+| A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
+| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); discharged by the hook/audit of `HEAD` (REVIEWED + TESTED) |
 
 ## Detailed register
 
@@ -143,6 +145,14 @@ one.
     `listing_fields`, iterates the flagged positions, and its per-entry
     check is at least as strict as `hookEntry`);
   - the rewrite of `ls-tree` records to index records (`tree_record`, A20);
+  - sorting the object orders (`Listing::object_order`; a wrong order is
+    refused by the verified `object_order_ok`, so this only fails closed)
+    and merging the incoming trees by path (`Listing::merge`, parsed with
+    `unique = false`);
+  - counting an entry as settled only while no attribute file and not the
+    config changed since `HEAD` and `HEAD^1` (A24; `HookRun.settled` only
+    requires settled ⇒ held by both, so this restriction is stricter than
+    the model);
   - sizing `ends` by the listing's NUL count (fails closed: the parse then
     refuses);
   - the equality of the staged `.transcrypt/config` blob with the
@@ -566,15 +576,24 @@ one.
   exactly: one `mode SP oid SP 0 TAB path` record per stage-0 entry, each
   NUL-terminated, raw path bytes, nothing else. `ls-tree -r -z` prints a
   commit's tree, which the adapter rewrites record by record
-  (`tree_record`) to the same shape.
+  (`tree_record`) to the same shape. Both list paths in byte order of the
+  whole path, each once (for `ls-tree -r`, tree order with `name/` for
+  directories coincides with that order; tested with `a-b`, `a.c`, `a/b`,
+  `a0` and non-ASCII names).
 - **Trust boundary:** Git; the adapter's `tree_record` rewrite (reviewed,
   fuzz-tested in `git_output_parsers_never_panic_and_accept_only_exact_records`).
 - **Consequence if false:** the hook would check entries other than those
   Git commits.
 - **Evidence:** TESTED by every lifecycle suite (raw and non-UTF-8 paths,
   TABs and newlines in names); the parse PROVED both ways
-  (`parse_listing_spec`), so a listing of any other shape is refused.
-- **Status:** TESTED; parsing PROVED.
+  (`parse_listing_spec`), so a listing of any other shape, or out of order,
+  or with a path twice, is refused. A crafted tree (`git mktree` accepts a
+  repeated name, `git fsck` does not) therefore stops the hook, `verify-index`,
+  `lock` and `hydrate` with an explicit message
+  (`trees_listing_a_path_twice_are_refused`). The order is not trusted:
+  `Sorted` is a conclusion of the parse, and lookups rely on it only after
+  the parse checked it.
+- **Status:** TESTED; parsing and order PROVED.
 
 ### A21 — Object replies (new)
 
@@ -611,8 +630,39 @@ one.
 - **Consequence if false:** content of a commit could be treated as a local
   change and repaired (re-encrypted), i.e. laundered.
 - **Evidence:** TESTED (`merges_are_verified_before_the_merge_commit`,
-  hostile move in `git_lifecycle`, rebase and cherry-pick suites).
+  hostile move in `git_lifecycle`, rebase and cherry-pick suites, octopus
+  merges `octopus_merges_check_every_incoming_commit`). Each incoming tree
+  is parsed like any tree (each path once); the adapter merges them by path
+  for one lookup (`parse_listing` with `unique = false`).
 - **Status:** TESTED.
+
+### A24 — The history the incremental hook trusts (new)
+
+- **Claim:** every entry of `HEAD` whose path the committed attributes
+  select is a record that authenticates at its path under the committed
+  configuration (`HeadAuthentic` in `EndToEnd.lean`).
+- **Why it is needed:** the incremental pre-commit hook does not
+  authenticate an entry that is unchanged since `HEAD` and `HEAD^1`
+  (*settled*, H-74: a commit of 10 000 files takes 0.24 s); it checks only
+  the envelope. Theorem 1 states exactly that. With A24 the settled case
+  authenticates too (`hook_accepts_only_authenticated_ciphertext_given_history`).
+- **Discharge:** by induction over the hook's own runs. An entry is
+  settled only while no attribute file and not the config changed since
+  `HEAD` and `HEAD^1` (adapter rule, stricter than the model), so its
+  selection and configuration are those of the commit that introduced it,
+  whose hook (or a later full check: `verify-index` before merge commits,
+  `audit` at push) authenticated it. `HEAD` and `HEAD^1` are parsed as
+  sorted listings, so the entry that holds the blob is the only one at its
+  path (`Sorted.holds_oid`): a crafted tree cannot show one checked entry
+  and commit another (review H-76).
+- **Consequence if false:** a commit made without the hook
+  (`--no-verify`, a pulled commit) can hold a record that does not open at
+  its path; the next incremental commit keeps it without authenticating it.
+  `verify-index`, merge commits and the keyed `audit` (pre-push, A13)
+  authenticate every entry and refuse it.
+- **Evidence:** TESTED (`newly_protected_files_are_authenticated_by_the_hook`,
+  `trees_listing_a_path_twice_are_refused`, the H-74 suites); REVIEWED.
+- **Status:** use PROVED (model); discharge REVIEWED + TESTED.
 
 ## Ranked unresolved risks and *product* opportunities
 

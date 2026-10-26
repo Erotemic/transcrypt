@@ -1,6 +1,8 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
-**Last reconciled:** 2026-10-26, after the end-to-end campaign (the
+**Last reconciled:** 2026-10-26, after review round 9 (sorted listings,
+binary-search lookups and object orders in the verified core; A24), on top
+of the end-to-end campaign (the
 pre-commit hook's inputs, the stored-key decision and object replies moved
 into the verified core; the end-to-end statement
 [V3-SECURITY-ARGUMENT](V3-SECURITY-ARGUMENT.md)), on top of the
@@ -72,13 +74,15 @@ semantics silently or import legacy CBC into the proved core.
   `Realizes`. Lifecycle theorems are about Lean models of the adapter's
   loops.
 - The pre-commit hook's inputs are verified functions of Git's exact
-  listings (`Snapshot.lean`: `parse_listing`, `listing_fields`,
-  `parse_listing_attrs`, `first_unselectable`, `held_entries`,
-  `is_local_change`, `next_move_source`, `blob_elsewhere`), as are the
-  stored-key decision and `cat-file --batch` framing (`Objects.lean`).
-  `EndToEnd.lean` states what an accepted commit guarantees, with every
-  Git/crypto/adapter contract a named hypothesis
-  (`hook_accepts_only_authenticated_ciphertext`,
+  listings (`Snapshot.lean`: `parse_listing`, which also checks Git's byte
+  order of paths with `bytes_lt`, each path once; `listing_fields`,
+  `parse_listing_attrs`, `first_unselectable`, `held_entries` (binary
+  search), `is_local_change`, `object_order_ok`, `next_move_source`,
+  `blob_elsewhere` (through object orders)), as are the stored-key decision
+  and `cat-file --batch` framing (`Objects.lean`). `EndToEnd.lean` states
+  what an accepted commit guarantees, with every Git/crypto/adapter
+  contract a named hypothesis (`hook_accepts_only_authenticated_ciphertext`,
+  `hook_accepts_only_authenticated_ciphertext_given_history` with A24,
   `hook_repairs_only_local_changes`,
   `stored_key_authenticates_current_config`).
 - `bash proofs/aeneas/build-v3-tracked.sh` builds everything;
@@ -146,9 +150,28 @@ stable, but reordering loops inside a proved function renames them.
 - A new core function whose name equals a parameter name elsewhere renames
   that parameter in the generated code (`local_change1`): pick distinct
   names (`is_local_change`).
-- Searches over a listing take a hint and wrap around (two `scan`s); the
-  spec only says "found / not held", while sorted listings keep a pass
-  linear.
+- Listings are sorted (the parse proves it), so lookups are binary
+  searches: `find_path`/`find_object` keep `low ≤ high` with "everything
+  before `low` is before the target, nothing from `high` on is" and use
+  `loop.spec_decr_nat` with measure `high - low`; monotonicity comes from
+  `List.pairwise_iff_getElem` on `Sorted`/`PathOrdered`/`ObjectOrder`.
+  Lookups by object id take an *object order* the adapter sorts and the
+  core checks (`object_order_ok`); that each record has a slot is
+  pigeonhole (`ObjectOrder.surj`, via `Finset.eq_of_subset_of_card_le`).
+- Aeneas refuses an early `return` from a loop nested inside a `match`
+  arm ("Early returns inside of loops are not supported"): put the loop in
+  its own function (`move_source_from`).
+- `!f(x)` as a bool *value* (not a condition) translates to a `Prop` and
+  fails to typecheck, like `||`; write the value positively
+  (`bytes_lt(a, b) | bytes_eq(a, b)` for "not after").
+- The posts of `loop.spec_decr_nat` bodies are flattened: give
+  `⟨inv₁, …, invₙ, measure⟩`, not nested pairs. State invariants with
+  `order.val.length` rather than `order.length` so `xs[i]` index proofs
+  are found automatically.
+- After `simp only [Slice.len …]`, a trailing `let n ← len xs; ok (done n)`
+  becomes `ok (done xs.len)`; finish with `simp only [WP.spec_ok]`, not
+  `step`. Dot notation on a `def` over `List.Pairwise` (e.g.
+  `hO.lt_of_le` for `PathOrdered`) fails; call `PathOrdered.lt_of_le hO`.
 
 ## Adapter invariants
 
@@ -166,10 +189,16 @@ or `tests/git_lifecycle.rs`.
   snapshot, `listing_flags` (checked against the listing's own paths);
   never match patterns in Rust.
 - Hold index and tree snapshots as `Listing`s (the verified
-  `parse_listing`, entries from `listing_fields`), and compute the hook's
-  inputs (membership in `HEAD`/`HEAD^1`/incoming, local changes, move
-  sources, the keyless move check) only with the verified functions over
-  them; `EndToEnd.lean`'s `HookRun` lists the calls the hook relies on.
+  `parse_listing`, each path once; entries from `listing_fields`), and
+  compute the hook's inputs (membership in `HEAD`/`HEAD^1`/incoming, local
+  changes, move sources, the keyless move check) only with the verified
+  functions over them; `EndToEnd.lean`'s `HookRun` lists the calls the hook
+  relies on. Object orders come only from `Listing::object_order` (checked
+  by `object_order_ok`); several trees are combined only by
+  `Listing::merge` (the one `unique = false` parse).
+- Count a protected entry as settled (skipping authentication) only if
+  `HEAD` and `HEAD^1` hold it and no attribute file and not the config
+  changed since them (A24, H-77).
 - Replace a worktree file only through `Protected::replace` with the stamp
   from the read that justified it, while holding `staging_dir`. Write any
   other repository file only through `write_repository_file`.
@@ -216,7 +245,7 @@ or `tests/git_lifecycle.rs`.
 `lock` flushes all of them), submodules, bare repositories (audit).
 
 **Gates at this checkpoint.**
-- Rust: 145 tests across the workspace.
+- Rust: 152 tests across the workspace.
 - Bash: 218 bats tests.
 - Python vectors, the differential corpus and the Git transport tests.
 - Snapshot verify/compare.
@@ -234,9 +263,14 @@ The branch is unpushed: push needs the owner's credentials.
    - the `transcrypt` macro must resolve to the filter, checked on real
      paths too;
    - attribute queries are case-sensitive;
-   - records of other configs pass only as Git's own blobs.
+   - records of other configs pass only as Git's own blobs;
+   - Git's listings are trusted only after the verified parse checked their
+     order (each path once), and verified lookups stay sublinear (H-75,
+     H-76); an entry skips authentication only while the selection is
+     unchanged (H-77, A24).
 
-   Run a fresh round on any substantial change. The external human review
+   Round 9 (H-75 to H-77) reviewed the verified snapshot functions. Run a
+   fresh round on any substantial change. The external human review
    (R-01) is deliberately the **final** step; it is not a blocker for
    ongoing work.
 2. **Done:** the rebind decision is the verified `seal_action`
@@ -260,10 +294,16 @@ The branch is unpushed: push needs the owner's credentials.
 5. **Done:** the private-mode agent's optional idle timeout (`--timeout`).
 6. **Performance** (release build, 10 000 files, 300 protected): a commit
    with the hook takes 0.24 s, a protected edit 0.27 s, a `git mv` of a
-   protected file 0.36 s (unchanged by the verified inputs, 2026-10-26),
-   `git status` 0.04 s. The hook reads the
+   protected file 0.36 s, `git status` 0.04 s. The hook reads the
    index once, and authenticates only entries that differ from `HEAD` or
-   `HEAD^1` (the others get the keyless checks; H-74).
+   `HEAD^1` (the others get the keyless checks; H-74, A24). Every snapshot
+   lookup is a binary search (H-75): `verify-index` after rewriting 60 000
+   unprotected files takes 5.3 s (it was 32 s with linear scans), a locked
+   `verify-index` of a merge bringing 10 000 protected files 0.35 s.
+   **Next:** a mass rename of protected files is dominated by one
+   `git hash-object -w` process per re-encrypted file (about 5 ms each:
+   2 000 files take 10 s in the hook); write the records through one
+   `git hash-object -w --stdin-paths` or `fast-import` stream.
 7. **Simplification passes (two, reviewer-driven) are done**: shared
    helpers in `git.rs` (one check-attr builder, one listing parser,
    `push_blob_record`, `read_record`, `sigpipe_blocked`), one index

@@ -1,6 +1,7 @@
 # Transcrypt v3: the end-to-end security argument
 
-**Written 2026-10-26.** This document states, in one place, what the
+**Written 2026-10-26; settled entries and A24 added the same day (review
+round 9).** This document states, in one place, what the
 machine-checked proofs say about the product's main promise and exactly
 which assumptions that statement rests on. It is the readable companion of
 [`EndToEnd.lean`](../../proofs/aeneas/v3/V3Wire/Verification/EndToEnd.lean).
@@ -36,7 +37,8 @@ hook. The argument therefore has three parts:
 > `HEAD`, `HEAD^1`, each path's effective `filter` value under the
 > attributes being committed, and the object store. Assume:
 >
-> * Git printed the index, `HEAD` and `HEAD^1` listings exactly (**A20**);
+> * Git printed the index, `HEAD` and `HEAD^1` listings exactly (**A20**;
+>   that they are sorted is not assumed: the verified parse checks it);
 > * Git's `check-attr --cached` answer gives each index path's effective
 >   `filter` value under the committed attributes (**A19**);
 > * each blob the hook checked is the content of its entry's object id
@@ -49,15 +51,15 @@ hook. The argument therefore has three parts:
 >   `HookRun`, and its per-entry check is at least as strict as the model
 >   `hookEntry` (**A4**).
 >
-> If the hook accepted, then every entry of the index whose path the
-> committed attributes select is a **regular file** (not a symlink or
-> submodule), **not reserved metadata**, and its blob:
+> If the hook accepted, then the index, `HEAD` and `HEAD^1` list each path
+> once, in Git's byte order (`Sorted`), and every entry of the index whose
+> path the committed attributes select is a **regular file** (not a symlink
+> or submodule), **not reserved metadata**, and its blob:
 >
 > * **unlocked:** authenticates at exactly that path under the committed
 >   configuration (`OpensTo σ config path blob pt`); in the incremental
->   pre-commit hook an entry unchanged since both `HEAD` and `HEAD^1` may
->   instead carry the v3 envelope of that configuration (it was
->   authenticated when it was committed, and `audit` authenticates history);
+>   pre-commit hook an entry unchanged since both `HEAD` and `HEAD^1`
+>   (*settled*) may instead carry the v3 envelope of that configuration;
 > * **locked:** has the v3 envelope of that configuration, and is either
 >   unchanged since `HEAD` and `HEAD^1` or is not the blob of another path
 >   (no record moved without the key).
@@ -68,6 +70,38 @@ Together with AES-SIV unforgeability (**A10**), "authenticates at that path
 under the committed configuration" means the blob is ciphertext produced
 with the repository key for that path; `opensTo_unique` makes the plaintext
 unique.
+
+### Settled entries and the checked history (A24)
+
+The incremental hook trusts history for settled entries, so that an
+ordinary commit does not decrypt every protected file (0.24 s for 10 000
+files). What it trusts is now a named assumption:
+
+> **A24.** Every entry of `HEAD` whose path the committed attributes select
+> authenticates at its path under the committed configuration
+> (`HeadAuthentic`).
+
+`hook_accepts_only_authenticated_ciphertext_given_history` proves that
+with A24, a commit the hook accepted with the key stores at **every**
+selected path a record that authenticates there, settled or not.
+
+A24 is discharged by the history itself, by induction over accepted
+commits:
+* An entry counts as settled only if `HEAD` and `HEAD^1` both hold its blob
+  at its path **and** no attribute file and not the configuration changed
+  since `HEAD` and `HEAD^1` (adapter rule, stricter than the model; review
+  H-77). So a settled entry was selected, under the same configuration,
+  when it was committed, and the hook (or `verify-index` before a merge
+  commit) authenticated it then.
+* `HEAD` and `HEAD^1` are sorted (each path once; checked by the verified
+  parse, review H-76), so the entry that holds the blob is *the* entry at
+  that path (`Sorted.holds_oid`). A crafted tree that lists a path twice is
+  refused instead of letting one checked entry stand for another.
+* Commits made without the hook (`--no-verify`, pulled commits) break the
+  induction; for them A24 rests on the keyed `audit` (pre-push, A13), which
+  authenticates every changed entry and, when the attributes or the
+  configuration change, the whole tree. `verify-index` authenticates
+  everything, settled or not.
 
 ### How the proof goes
 
@@ -81,8 +115,9 @@ Every step is a theorem about the Aeneas translation of the production
 | Each entry's mode, object id and path | `listing_fields` (`listing_fields_spec`, `FieldsOf.slices`) | `Entry` |
 | The protected flags are Git's selection of exactly those paths | `parse_listing_attrs` (`parse_listing_attrs_spec`, both directions) | `attrResponse`, `Selected` |
 | No protected entry is a symlink, submodule or metadata | `first_unselectable` (`first_unselectable_spec`) | `Selectable` |
-| Unchanged since `HEAD` and `HEAD^1` | `held_entries` (`held_entries_spec`) | `Holds`, `Settled` |
-| The keyless move check | `blob_elsewhere` (`blob_elsewhere_spec`) | `BlobElsewhere` |
+| The listings are in Git's order, each path once | `parse_listing` with `bytes_lt`, `listing_ordered` (`parse_listing_spec`, `bytes_lt_spec`) | `BytesLt`, `Sorted` |
+| Unchanged since `HEAD` and `HEAD^1` | `held_entries` (`held_entries_spec`; binary search, `find_entry_spec`) | `Holds`, `Settled` |
+| The keyless move check | `blob_elsewhere` (`blob_elsewhere_spec`), through object orders checked by `object_order_ok` (`object_order_ok_spec`) | `BlobElsewhere` |
 | Each protected blob authenticates at its path | `open_record` (`open_record_spec`), in the model `hookPlan` (`hookPlan_spec`) | `OpensTo` |
 | Without the key: the envelope | `record_envelope_ok` (`record_envelope_ok_spec`) | `EnvelopeOk` |
 | Object replies are for the requested id and announced size | `parse_batch_header`, `blob_read` (`parse_batch_header_spec`, `blob_read_spec`) | `BatchHeader`, `blobReadSpec` |
@@ -134,7 +169,7 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 
 | Hypothesis in Lean | Meaning | Assumption | Evidence |
 | --- | --- | --- | --- |
-| `GitListing index g.index` (and `HEAD`, `HEAD^1`, incoming) | Git's listing is exactly its snapshot | A20 (refines A7) | TESTED (real Git, all lifecycle suites); the parse itself PROVED |
+| `GitListing index g.index` (and `HEAD`, `HEAD^1`, incoming) | Git's listing is exactly its snapshot | A20 (refines A7) | TESTED (real Git, all lifecycle suites); the parse and the path order PROVED |
 | `GitAttributes g response` | `check-attr --cached` reports the committed attributes | A19 | TESTED (Git 2.43, CI 2.34); the parse PROVED |
 | `GitObject g oid record` | bytes read by id are that object | A11, A21 | header and size decision PROVED; reading exactly the size and the LF TESTED; object identity ASSUMED (Git's hash) |
 | `Realizes inst prims σ` | the primitives compute AES-SIV / SHA-256 | A5 (with A9) | TESTED (vectors, differential) |
@@ -142,19 +177,22 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 | `hcfg` | the configuration used is the staged `.transcrypt/config` | A4 | REVIEWED + TESTED (`check_staged` compares the staged blob with it) |
 | `HookRun …`, `hookPlan … = ok true` | the adapter called the verified functions on these inputs and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
-| `hknown`, `hlazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, cherry-pick, rebase suites) |
+| `hknown`, `hlazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
+| `HeadAuthentic` (corollary) | the history the incremental hook trusts was checked | A24 | REVIEWED + TESTED (induction above; `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`) |
 | Unforgeability | only the key holder makes records that authenticate | A10 | ASSUMED (standard) |
 
 ## What is proved, tested and trusted
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (60 headline theorems, standard axioms only:
+  (67 headline theorems, standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
-* **PROVED (model):** the composition `hookPlan_spec` and the three
-  end-to-end theorems, about Lean models that call the generated functions.
+* **PROVED (model):** the composition `hookPlan_spec` and the end-to-end
+  theorems (with the A24 corollary), about Lean models that call the
+  generated functions.
 * **TESTED:** that the Rust adapter matches the models and contracts
-  (A4), Git's behavior (A7, A19–A23), the primitives (A5, A9).
+  (A4), Git's behavior (A7, A19–A23), the primitives (A5, A9); the
+  discharge of A24 by the hook and the audit (also REVIEWED).
 * **TRUSTED:** Lean and the Charon/Aeneas translation (A3), Git's object
   identity (A11), cryptographic hardness (A10).
 
