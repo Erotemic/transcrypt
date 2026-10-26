@@ -134,7 +134,15 @@ or `tests/git_lifecycle.rs`.
 - `hydrate` replaces only files that are authentic records for their path,
   and re-indexes only files holding the staged plaintext.
 - Run every subprocess through `run_bounded` (directly or via `git`,
-  `git_with_input`, `output`); never `Command::output()`.
+  `git_with_input`, `output`, `run_bounded_status`); never
+  `Command::output()` or `.status()`. Write to a pipe or socket only inside
+  `sigpipe_blocked` (`run_bounded` does): `main` gives SIGPIPE its default
+  action, so an unguarded write to a subprocess that exited early kills
+  the process silently, skipping rollback.
+- Read untrusted input with `read_record` (bounded, wiped as it grows).
+- The one `git add` with repository-derived paths is `migrate`'s
+  `--renormalize` (which `update-index` lacks); it is safe only because
+  every Git command runs with `GIT_LITERAL_PATHSPECS`.
 
 ## Product state (checkpoint)
 
