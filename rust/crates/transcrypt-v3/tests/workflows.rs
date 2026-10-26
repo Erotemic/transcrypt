@@ -2,111 +2,16 @@
 //! default stored-key unlock, against real Git: selection by
 //! `.gitattributes`, renames, unusual names, credential modes, policy
 //! changes and the reviewed `rekey` symlink attack.
-use std::io::Write;
+mod common;
+use common::*;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::{ffi::OsString, fs};
 
-const PASS: &[u8] = b"long correct horse battery staple test passphrase\n";
 const NEW: &[u8] = b"a completely different long passphrase\n";
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_transcrypt-v3")
-}
-
-fn exec(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> Output {
-    let mut command = Command::new(name);
-    command.args(args).current_dir(dir).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if input.is_some() {
-        command.stdin(Stdio::piped());
-    }
-    let mut child = command.spawn().unwrap();
-    if let Some(value) = input {
-        child.stdin.take().unwrap().write_all(value).unwrap();
-    }
-    child.wait_with_output().unwrap()
-}
-
-fn run(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
-    let out = exec(dir, name, args, input);
-    assert!(out.status.success(), "{name} {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
-    out.stdout
-}
-
-/// Run and return stderr (where v3 reports what it did).
-fn run_err(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> String {
-    let out = exec(dir, name, args, input);
-    assert!(out.status.success(), "{name} {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-fn run_fails(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> String {
-    let out = exec(dir, name, args, input);
-    assert!(!out.status.success(), "{name} {args:?} unexpectedly succeeded");
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-fn staged(repo: &Path, path: &str) -> Vec<u8> {
-    run(repo, "git", &["show", &format!(":{path}")], None)
-}
-
-fn committed(repo: &Path, path: &str) -> Vec<u8> {
-    run(repo, "git", &["show", &format!("HEAD:{path}")], None)
-}
-
-fn is_record(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"TV3F\0\x01")
-}
-
-struct Scratch {
-    root: PathBuf,
-    repos: Vec<PathBuf>,
-}
-
-impl Scratch {
-    fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "transcrypt-v3-flow-{tag}-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        Scratch { root, repos: Vec::new() }
-    }
-
-    /// A Git repository with one public commit, not yet using v3.
-    fn git_repo(&mut self, name: &str) -> PathBuf {
-        let repo = self.root.join(name);
-        fs::create_dir_all(&repo).unwrap();
-        run(&repo, "git", &["init", "-q"], None);
-        run(&repo, "git", &["config", "user.name", "Example"], None);
-        run(&repo, "git", &["config", "user.email", "example@example.test"], None);
-        fs::write(repo.join("README"), b"public\n").unwrap();
-        run(&repo, "git", &["add", "README"], None);
-        run(&repo, "git", &["commit", "-qm", "seed"], None);
-        self.repos.push(repo.clone());
-        repo
-    }
-
-    fn clone(&mut self, from: &str, name: &str) -> PathBuf {
-        run(&self.root, "git", &["clone", "-q", from, name], None);
-        let repo = self.root.join(name);
-        run(&repo, "git", &["config", "user.name", "Example"], None);
-        run(&repo, "git", &["config", "user.email", "example@example.test"], None);
-        self.repos.push(repo.clone());
-        repo
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        for repo in &self.repos {
-            let _ = exec(repo, bin(), &["lock"], None);
-        }
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
 
 /// The acceptance criterion of the product charter: `.env`, a file in a
 /// directory, a whole directory, a custom pattern, names with spaces,

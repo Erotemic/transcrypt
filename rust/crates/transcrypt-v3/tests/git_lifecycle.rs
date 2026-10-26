@@ -1,18 +1,7 @@
 //! End-to-end Git lifecycle. No Bash and no legacy crypto paths.
-use std::{fs, io::Write, path::Path, process::{Command, Stdio}};
-
-fn run(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
-    let mut command = Command::new(name);
-    command.args(args).current_dir(dir).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if input.is_some() { command.stdin(Stdio::piped()); }
-    let mut child = command.spawn().unwrap();
-    if let Some(value) = input {
-        child.stdin.take().unwrap().write_all(value).unwrap();
-    }
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "{name} {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
-    out.stdout
-}
+mod common;
+use common::*;
+use std::{fs, path::Path};
 
 /// Unlocked means exactly one private key file in a private directory, and
 /// no agent; locked means no key file.
@@ -34,34 +23,11 @@ fn assert_unlocked(root: &Path, expected: bool) {
     assert!(!dir.join("session.sock").exists(), "no agent in the default mode");
 }
 
-fn run_fails(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) {
-    let mut command = Command::new(name);
-    command.args(args).current_dir(dir).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if input.is_some() { command.stdin(Stdio::piped()); }
-    let mut child = command.spawn().unwrap();
-    if let Some(value) = input { child.stdin.take().unwrap().write_all(value).unwrap(); }
-    let out = child.wait_with_output().unwrap();
-    assert!(!out.status.success(), "{name} {args:?} unexpectedly succeeded");
-}
-
 #[test]
 fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
-    let temp = std::env::temp_dir().join(format!(
-        "transcrypt-v3-lifecycle-{}-{}", std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
-    fs::create_dir(&temp).unwrap();
-    let source = temp.join("source");
-    let clone = temp.join("clone");
-    fs::create_dir(&source).unwrap();
-    let bin = env!("CARGO_BIN_EXE_transcrypt-v3");
-    let pass = b"long correct horse battery staple test passphrase\n";
-    run(&source, "git", &["init", "-q"], None);
-    run(&source, "git", &["config", "user.name", "Example"], None);
-    run(&source, "git", &["config", "user.email", "example@example.test"], None);
-    fs::write(source.join("README"), b"public\n").unwrap();
-    run(&source, "git", &["add", "README"], None);
-    run(&source, "git", &["commit", "-qm", "seed"], None);
+    let mut scratch = Scratch::new("lifecycle");
+    let source = scratch.git_repo("source");
+    let (bin, pass) = (bin(), PASS);
     run(&source, bin, &["init", "--password-stdin", "*.secret"], Some(pass));
     assert_unlocked(&source, true);
     // The passphrase itself is stored nowhere.
@@ -74,7 +40,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     run(&source, "git", &["add", "account.secret", "ledger.secret"], None);
     run(&source, "git", &["commit", "-qm", "private data"], None);
     let object = run(&source, "git", &["show", "HEAD:account.secret"], None);
-    assert!(object.starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&object));
     assert!(!object.windows(7).any(|w| w == b"private"));
     let ledger_object = run(&source, "git", &["show", "HEAD:ledger.secret"], None);
     // A local .git/info/attributes override is the user's choice, but
@@ -95,7 +61,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     run(&source, "git", &["reset", "-q", "--", "nested"], None);
     fs::remove_dir_all(source.join("nested")).unwrap();
     run(&source, bin, &["verify-index"], None);
-    run(&temp, "git", &["clone", "-q", "source", "clone"], None);
+    let clone = scratch.clone("source", "clone");
     assert_eq!(fs::read(clone.join("account.secret")).unwrap(), object);
     assert_eq!(fs::read(clone.join("ledger.secret")).unwrap(), ledger_object);
     assert_unlocked(&clone, false);
@@ -169,8 +135,6 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     run(&clone, "git", &["reset", "-q", "HEAD", "--", "account.secret"], None);
     fs::write(clone.join("account.secret"), b"private content\n").unwrap();
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
-    run(&clone, "git", &["config", "user.name", "Example"], None);
-    run(&clone, "git", &["config", "user.email", "example@example.test"], None);
     fs::write(clone.join("account.secret"), b"updated secret\n").unwrap();
     run(&clone, "git", &["add", "account.secret"], None);
     run(&clone, "git", &["commit", "-qm", "update secret"], None);
@@ -194,7 +158,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     run(&clone, "git", &["update-index", "--cacheinfo", "100644", forged_oid.trim(), "account.secret"], None);
     run(&clone, "git", &["commit", "-qm", "plaintext staged around the filter"], None);
     let committed = run(&clone, "git", &["show", "HEAD:account.secret"], None);
-    assert!(committed.starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&committed));
     assert_eq!(run(&clone, bin, &["smudge", "account.secret"], Some(&committed)), b"STAGED PLAINTEXT\n");
     // A record moved to another path in a commit is never re-encrypted for
     // it: the hook refuses, it does not launder the move.
@@ -210,31 +174,16 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     assert_unlocked(&source, false);
     run(&clone, bin, &["lock"], None);
     assert_unlocked(&clone, false);
-    let _ = fs::remove_dir_all(&temp);
 }
-
 
 #[test]
 fn git_non_utf8_path_survives_filter_agent_commit_clone_and_hydration() {
     use std::os::unix::ffi::OsStringExt;
-    let temp = std::env::temp_dir().join(format!(
-        "transcrypt-v3-raw-path-{}-{}", std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
-    fs::create_dir(&temp).unwrap();
-    let source = temp.join("source");
-    let clone = temp.join("clone");
-    fs::create_dir(&source).unwrap();
-    let bin = env!("CARGO_BIN_EXE_transcrypt-v3");
-    let pass = b"long correct horse battery staple test passphrase\n";
+    let mut scratch = Scratch::new("raw-path");
+    let source = scratch.git_repo("source");
+    let (bin, pass) = (bin(), PASS);
     let name = std::ffi::OsString::from_vec(b"odd \xff'\nname.secret".to_vec());
     let payload = b"secret with a binary Git path\x00\xff";
-    run(&source, "git", &["init", "-q"], None);
-    run(&source, "git", &["config", "user.name", "Example"], None);
-    run(&source, "git", &["config", "user.email", "example@example.test"], None);
-    fs::write(source.join("README"), b"public\n").unwrap();
-    run(&source, "git", &["add", "README"], None);
-    run(&source, "git", &["commit", "-qm", "seed"], None);
     run(&source, bin, &["init", "--password-stdin", "*.secret"], Some(pass));
     fs::write(source.join(&name), payload).unwrap();
     // Git invokes the configured `%f` filter with the exact path byte string,
@@ -243,9 +192,9 @@ fn git_non_utf8_path_survives_filter_agent_commit_clone_and_hydration() {
     run(&source, "git", &["commit", "-qm", "raw-path encrypted record"], None);
     let index = run(&source, "git", &["ls-files", "-z"], None);
     assert!(index.split(|b| *b == 0).any(|part| part == b"odd \xff'\nname.secret"));
-    run(&temp, "git", &["clone", "-q", "source", "clone"], None);
+    let clone = scratch.clone("source", "clone");
     let committed_ciphertext = fs::read(clone.join(&name)).unwrap();
-    assert!(committed_ciphertext.starts_with(b"TV3F\0\x01"));
+    assert!(is_record(&committed_ciphertext));
     assert_ne!(committed_ciphertext, payload);
     run(&clone, bin, &["unlock", "--password-stdin"], Some(pass));
     run(&clone, bin, &["hydrate"], None);
@@ -253,6 +202,4 @@ fn git_non_utf8_path_survives_filter_agent_commit_clone_and_hydration() {
     run(&clone, bin, &["verify-index"], None);
     run(&clone, bin, &["lock"], None);
     assert_eq!(fs::read(clone.join(&name)).unwrap(), committed_ciphertext);
-    run(&source, bin, &["lock"], None);
-    let _ = fs::remove_dir_all(&temp);
 }
