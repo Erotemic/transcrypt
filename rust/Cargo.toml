@@ -1,10 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/transcrypt-protocol", "crates/transcrypt-policy", "crates/transcrypt-legacy", "crates/transcrypt-legacy-core", "crates/transcrypt-v3", "crates/transcrypt-v3-core"]
+members = ["crates/transcrypt-v3", "crates/transcrypt-v3-core"]
 
-# The Rust distribution keeps a zero-dependency core (see
-# docs/verification/04-dual-implementation-architecture.md): the protocol
-# parser must build with no external crates and no network access.
+# The legacy-v2 crates live in their own workspace, ../rust-legacy.
 [workspace.package]
 edition = "2021"
 license = "MIT"

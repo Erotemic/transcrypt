@@ -1,2 +1,2 @@
-95f5f5271e24e7c47a468606dba3d18195f47808f0306344a54aa655306b5695  rust/crates/transcrypt-protocol/src/base64_bits.rs
-1d3f32a821761edea25b3089b719b14b83c84e16206db435f0a7d1deec3afe5e  rust/crates/transcrypt-protocol/src/base64.rs
+95f5f5271e24e7c47a468606dba3d18195f47808f0306344a54aa655306b5695  rust-legacy/crates/transcrypt-protocol/src/base64_bits.rs
+1d3f32a821761edea25b3089b719b14b83c84e16206db435f0a7d1deec3afe5e  rust-legacy/crates/transcrypt-protocol/src/base64.rs

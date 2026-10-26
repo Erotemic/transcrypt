@@ -15,14 +15,14 @@ out="$root/proofs/aeneas/generated"
 mkdir -p "$out"
 llbc="$out/transcrypt-policy.llbc"
 (
-    cd "$root/rust/crates/transcrypt-policy"
+    cd "$root/rust-legacy/crates/transcrypt-policy"
     charon cargo --preset=aeneas --dest-file "$llbc"
 )
 aeneas -backend lean "$llbc" -dest "$out" -subdir Policy -split-files -namespace TranscryptGenerated.Policy
 {
     printf 'Rust source:\n'
     cd "$root"
-    sha256sum rust/crates/transcrypt-policy/src/lib.rs
+    sha256sum rust-legacy/crates/transcrypt-policy/src/lib.rs
     printf '\nTool versions:\n'
     rustc --version
     cargo --version

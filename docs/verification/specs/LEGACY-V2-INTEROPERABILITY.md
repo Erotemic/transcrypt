@@ -8,7 +8,7 @@ secure v3 protocol. The latter requires an independent, reviewed specification.
 The reason to write down this existing format first is practical: it lets the
 Bash implementation, Rust alternative, independent vectors and future Lean
 specification agree on precisely what an old repository means. The pure
-functions in `rust/crates/transcrypt-legacy-core/src/lib.rs` operate on these
+functions in `rust-legacy/crates/transcrypt-legacy-core/src/lib.rs` operate on these
 bytes, not on a duplicate model assembled for an SMT tool.
 
 ## 1. Domain and inputs

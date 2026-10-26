@@ -6,4 +6,4 @@ license = "MIT"
 edition = "2021"
 
 [dependencies]
-# Deliberately none: the core parser must build offline (see rust/README.md).
+# Deliberately none: the core parser must build offline (see rust-legacy/README.md).

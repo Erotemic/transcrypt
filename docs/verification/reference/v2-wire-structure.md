@@ -71,7 +71,7 @@ input may normalize on reserialization.
 
 ## Test evidence and next proof target
 
-`rust/crates/transcrypt-protocol/tests/v2_vectors.rs` derives a real legacy
+`rust-legacy/crates/transcrypt-protocol/tests/v2_vectors.rs` derives a real legacy
 AES-CBC blob from the OpenSSL operations used by Bash, roundtrips its bytes
 through Rust parsing/serialization, and exercises AES-CTR ciphertext with a
 non-block-aligned length. Unit tests cover padding-after-data rejection,

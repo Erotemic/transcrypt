@@ -172,9 +172,9 @@ before the cryptographic format is frozen.
 
 The first implemented cross-language filter boundary is the released **legacy
 v2 format**, specified in [the byte-exact v2 contract](specs/LEGACY-V2-INTEROPERABILITY.md).
-`rust/crates/transcrypt-legacy` is an actual Rust `clean` / `smudge` /
+`rust-legacy/crates/transcrypt-legacy` is an actual Rust `clean` / `smudge` /
 `textconv` implementation for Bash-initialized repos, while
-`rust/crates/transcrypt-legacy-core` contains its pure Aeneas-targeted
+`rust-legacy/crates/transcrypt-legacy-core` contains its pure Aeneas-targeted
 functions. This is *not* the final authenticated v3 suite. The current Rust-first remaining work is in `V3-ROADMAP.md`; the full
 Bash/upstream roadmap remains in `08-roadmap-and-pr-plan.md`. Generated Lean
 source and three narrow correspondence theorems have compiled; full codec

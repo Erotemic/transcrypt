@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/transcrypt-protocol", "crates/transcrypt-policy", "crates/transcrypt-legacy", "crates/transcrypt-legacy-core"]
+
+# Legacy-v2 compatibility evidence, kept apart from the v3 product workspace
+# in ../rust. These crates have no registry dependencies and build offline.
+[workspace.package]
+edition = "2021"
+license = "MIT"

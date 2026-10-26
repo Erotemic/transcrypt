@@ -67,7 +67,7 @@ Planning overlay applied (11 docs + 2 reference docs).
 ### M6 (partial) — Rust `transcrypt-protocol` core: legacy v2 parser
 (roadmap: M6 may partially proceed once the relevant spec slice is
 agreed; the v2 slice is the released format, so this is unblocked)
-- **New zero-dependency crate** `rust/crates/transcrypt-protocol`
+- **New zero-dependency crate** `rust-legacy/crates/transcrypt-protocol`
   (builds offline; layout per 04). Implements `detect_format`,
   `parse_v2`, a strict standard-base64 decoder (RFC 4648 vectors,
   residual-bit checks, CRLF-tolerant line breaks), and `V2Record`

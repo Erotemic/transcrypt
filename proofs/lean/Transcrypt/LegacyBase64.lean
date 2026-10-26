@@ -5,7 +5,7 @@ import Std.Tactic.BVDecide
 
   This deliberately does not import Aeneas-generated Rust functions.
   The obligations below state the mathematical laws corresponding to
-  `rust/crates/transcrypt-protocol/src/base64_bits.rs`.
+  `rust-legacy/crates/transcrypt-protocol/src/base64_bits.rs`.
 
   The Z3 solver has discharged all these *bit-vector* obligations locally;
   this Lean target additionally asks Lean's `bv_decide` to produce and

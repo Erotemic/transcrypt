@@ -1,8 +1,8 @@
 # Source-derived SMT proof bridge
 
 The `proofs/smt` runners now consume expressions read **from actual Rust
-functions** in `rust/crates/transcrypt-protocol/src/base64_bits.rs` and
-`rust/crates/transcrypt-policy/src/lib.rs`. They generate an ephemeral
+functions** in `rust-legacy/crates/transcrypt-protocol/src/base64_bits.rs` and
+`rust-legacy/crates/transcrypt-policy/src/lib.rs`. They generate an ephemeral
 `rust_source_model.h` and compile it into the Z3 checks.
 
 This replaces the former manually transcribed expressions and static source

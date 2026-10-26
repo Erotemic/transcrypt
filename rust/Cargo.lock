@@ -347,26 +347,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "transcrypt-legacy"
-version = "0.1.0"
-dependencies = [
- "transcrypt-legacy-core",
- "transcrypt-protocol",
-]
-
-[[package]]
-name = "transcrypt-legacy-core"
-version = "0.1.0"
-
-[[package]]
-name = "transcrypt-policy"
-version = "0.1.0"
-
-[[package]]
-name = "transcrypt-protocol"
-version = "0.1.0"
-
-[[package]]
 name = "transcrypt-v3"
 version = "0.1.0"
 dependencies = [

@@ -309,12 +309,12 @@ The branch is unpushed: push needs the owner's credentials.
    `push_blob_record`, `read_record`, `sigpipe_blocked`), one index
    snapshot per hook run, `filter.rs`/`attributes.rs`/`rekey.rs` split out
    of `main.rs`/`setup.rs`, shared test helpers in `tests/common`. Review
-   round 8 checked the refactor (no regression; H-74 found and fixed). Open
-   owner decision: the legacy crates (`transcrypt-policy`,
-   `transcrypt-legacy*`, `transcrypt-protocol`) are not used by v3; the
-   policy crate is referenced only by historical SMT checks
-   (`proofs/smt`, `proofs/sourcecheck`). Remove them, or move them to a
-   separate workspace.
+   round 8 checked the refactor (no regression; H-74 found and fixed). The
+   legacy crates (`transcrypt-policy`, `transcrypt-legacy*`,
+   `transcrypt-protocol`), unused by v3, now live in their own workspace,
+   `rust-legacy/` (owner decision), still tested in CI as the v2 parity
+   evidence against Bash and as the source of the historical SMT and
+   source-model checks (`proofs/smt`, `proofs/sourcecheck`).
 
 Remote enforcement is an **optional organizational control** (A13), not a
 hard dependency for using the product. Keyless enforcement detects obvious

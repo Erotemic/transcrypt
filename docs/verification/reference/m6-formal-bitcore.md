@@ -54,7 +54,7 @@ bounded *sample* of byte values. Nine claims were discharged with Z3 4.13.3:
 9. Every 2-byte tail roundtrips after zero-fill and removing padding.
 
 The functions actually used by the Rust codec live in
-`rust/crates/transcrypt-protocol/src/base64_bits.rs`, and are invoked from
+`rust-legacy/crates/transcrypt-protocol/src/base64_bits.rs`, and are invoked from
 `base64.rs`. The Z3 harness manually models **those exact operations**, but
 is not an automatically generated Rust extraction. The proof driver requires
 SHA-256 fingerprints for both production files, so it fails closed on later

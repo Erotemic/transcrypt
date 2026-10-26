@@ -15,8 +15,8 @@ from rust_expr import UnsupportedRust, eval_node, parse_function
 
 
 ROOT = Path(__file__).resolve().parents[2]
-POLICY = ROOT / "rust/crates/transcrypt-policy/src/lib.rs"
-BITCORE = ROOT / "rust/crates/transcrypt-protocol/src/base64_bits.rs"
+POLICY = ROOT / "rust-legacy/crates/transcrypt-policy/src/lib.rs"
+BITCORE = ROOT / "rust-legacy/crates/transcrypt-protocol/src/base64_bits.rs"
 
 
 class SourceModels(unittest.TestCase):

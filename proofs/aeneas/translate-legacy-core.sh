@@ -13,14 +13,14 @@ out="$root/proofs/aeneas/generated/LegacyCore"
 mkdir -p "$out"
 llbc="$out/transcrypt-legacy-core.llbc"
 (
-    cd "$root/rust/crates/transcrypt-legacy-core"
+    cd "$root/rust-legacy/crates/transcrypt-legacy-core"
     charon cargo --preset=aeneas --dest-file "$llbc"
 )
 aeneas -backend lean "$llbc" -dest "$out" -subdir Translation -split-files -namespace TranscryptGenerated.LegacyCore
 {
     echo 'Source under verification:'
     cd "$root"
-    sha256sum rust/crates/transcrypt-legacy-core/src/lib.rs
+    sha256sum rust-legacy/crates/transcrypt-legacy-core/src/lib.rs
     echo 'Tool versions:'
     rustc --version
     cargo --version

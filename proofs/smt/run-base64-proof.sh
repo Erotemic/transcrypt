@@ -8,7 +8,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 python3 proofs/sourcecheck/generate_z3_model.py \
     --kind base64 \
-    --source rust/crates/transcrypt-protocol/src/base64_bits.rs \
+    --source rust-legacy/crates/transcrypt-protocol/src/base64_bits.rs \
     --output "$tmp/rust_source_model.h"
 # A CI runner with libz3-dev installs the usual linker name. This container
 # has only a versioned runtime library; LIBZ3 lets it link explicitly.
