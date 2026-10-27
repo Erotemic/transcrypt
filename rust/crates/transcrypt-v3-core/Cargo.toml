@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Pure, no_std v3 wire-format parser intended for Aeneas verification"
+
+# The core is written in the subset Charon/Aeneas extract (docs/verification/
+# V3-HANDOFF.md): explicit comparisons instead of range `contains`, `match`
+# instead of `?`, and `len() == 0` on slices. Clippy's rewrites would leave it.
+[lints.clippy]
+manual_range_contains = "allow"
+question_mark = "allow"
+len_zero = "allow"

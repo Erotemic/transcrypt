@@ -1,71 +1,67 @@
 name: Tests
 
 on:
-  # Only run tests on push to main branch
   push:
-    branches: [main]
-  # Run tests for all pull request changes targeting main
+    branches: [master, "work/**"]
   pull_request:
-    branches: "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request supersedes a running one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Rust toolchain every Rust job uses (as scripts/build-release.sh does).
+  RUST_TOOLCHAIN: "1.98.0"
 
 jobs:
   lint:
     runs-on: ubuntu-24.04
-
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v2
-
-      # https://github.com/luizm/action-sh-checker
-      - name: Run shellcheck and shfmt
-        uses: luizm/action-sh-checker@master
-        with:
-          sh_checker_exclude: tests
-          sh_checker_comment: true
+      - uses: actions/checkout@v4
+      - name: Install pinned shellcheck and shfmt
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP"
+          curl -fsSLo shfmt https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64
+          curl -fsSLo shellcheck.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          sha256sum -c - <<'EOF'
+          1f57a384d59542f8fac5f503da1f3ea44242f46dff969569e80b524d64b71dbc  shfmt
+          6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  shellcheck.tar.xz
+          EOF
+          tar -xJf shellcheck.tar.xz
+          install -m 0755 shfmt bin/shfmt
+          install -m 0755 shellcheck-v0.10.0/shellcheck bin/shellcheck
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Lint shell scripts
+        run: scripts/lint-shell.sh
 
   test:
-    # See available runner images: https://github.com/actions/runner-images
-    # Test on older Ubuntu with OpenSSL < 1.1 and newer with OpenSSL >= 1.1
+    # The Bash implementation (v2) and its v3 Bats suites.
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        os: [
-            # ubuntu 20.04 runner was deprecated early 2025
-            # ubuntu-20.04,
-            ubuntu-22.04,
-            ubuntu-24.04,
-            ubuntu-latest,
-            # macOS 12 runner was deprecated late 2024
-            # macos-12,
-            # macOS 13 runner was deprecated Feb 2026
-            # macos-13,
-            macos-14,
-            macos-15,
-            macos-latest,
-          ]
-
+        os: [ubuntu-22.04, ubuntu-24.04, macos-14, macos-15]
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
-
-      - name: Print bash version
-        run: bash --version
-
-      - name: Print OpenSSL version
-        run: openssl version
-
-      - name: Print Git version
-        run: git version
-
+      - uses: actions/checkout@v4
+      - name: Print versions
+        run: |
+          bash --version | head -n 1
+          openssl version
+          git version
       # Configure default Git branch name to suppress hint warnings
       - name: Configure default Git branch to "main"
         run: git config --global init.defaultBranch main
-
-      - name: Install and set up bats-core
+      - name: Install bats-core
         run: |
-          git clone https://github.com/bats-core/bats-core.git /tmp/bats-core-repo
-          mkdir -p /tmp/bats-core
-          bash /tmp/bats-core-repo/install.sh /tmp/bats-core
-
+          git clone -q --depth 1 --branch v1.14.0 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats-core-repo"
+          bash "$RUNNER_TEMP/bats-core-repo/install.sh" "$RUNNER_TEMP/bats-core"
       # GNU parallel enables bats --jobs
       - name: Install GNU parallel
         run: |
@@ -74,44 +70,51 @@ jobs:
           else
             sudo apt-get update -qq && sudo apt-get install -y -qq parallel
           fi
-
       - name: Run tests
-        run: /tmp/bats-core/bin/bats --jobs 4 tests/v2/ tests/v3/
+        run: '"$RUNNER_TEMP/bats-core/bin/bats" --jobs 4 tests/v2/ tests/v3/'
 
   rust:
-    # v2 cores have no external dependencies; the secure-first v3 executable
-    # uses pinned RustCrypto crates and requires an initial Cargo fetch.
-    # Golden v3 test vectors are independently calculated, not copied from Rust.
+    # The v3 executable and the legacy-v2 parity crates, built from source.
+    # ubuntu-22.04 has Git 2.34, the oldest Git the adapter supports. macOS
+    # is not a release platform yet (docs/RELEASING.md): it is tested, but
+    # does not fail the run.
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
     strategy:
+      fail-fast: false
       matrix:
-        os:
-          - ubuntu-24.04
-          # Git 2.34: the oldest Git the adapter (and its pre-push audit) is tested on.
-          - ubuntu-22.04
-          - macos-latest
-
+        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm, macos-latest]
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Print Git version
-        run: git --version
-
-      - name: Print rustc version
-        run: rustc --version
-
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Print versions
+        run: |
+          git --version
+          rustc --version
       - name: Check Bash v2 byte contract
         run: bash tests/interop/check-bash-legacy-contract.sh
-
       - name: Check v3 proof input tooling (no mock proof claims)
         run: python3 proofs/aeneas/tests/test_v3_proof_inputs.py -v
-
       - name: Test legacy-v2 parity against Bash
         working-directory: rust-legacy
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: Test the v3 end-to-end Git lifecycle
         working-directory: rust
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
+      - name: Clippy (warnings are errors)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          (cd rust && cargo clippy --locked --workspace --all-targets -- -D warnings)
+          (cd rust-legacy && cargo clippy --locked --workspace --all-targets -- -D warnings)
       - name: Check dependencies against the RustSec advisory database
         if: matrix.os == 'ubuntu-24.04'
         working-directory: rust
@@ -119,8 +122,39 @@ jobs:
           cargo install --locked --version 0.22.2 cargo-audit
           cargo audit --deny warnings
 
+  linux-release:
+    # The release archives, built exactly as a release is (scripts/
+    # build-release.sh), with the suite run against the static binary on
+    # each architecture.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rustup if missing
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Build both archives and test the native one
+        run: scripts/build-release.sh --test --out dist
+      - name: Install from the archives
+        run: |
+          sh scripts/install.sh --from dist --prefix "$RUNNER_TEMP/install"
+          "$RUNNER_TEMP/install/bin/transcrypt-v3" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-archives-${{ matrix.os }}
+          path: dist/
+          retention-days: 7
+
   v3-reference:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -132,10 +166,8 @@ jobs:
         run: python tests/v3/reference/check_vectors.py -v
       - name: Verify the differential AES-SIV / Argon2id corpus
         run: python tests/v3/reference/differential.py
-
       - name: Verify raw Git %f pathname transport
         run: python -m unittest discover -s tests/v3/reference -p 'test_git_filter_paths.py' -v
-
       - name: Verify staged Git attributes and local override precedence
         run: python -m unittest discover -s tests/v3/reference -p 'test_git_staged_attributes.py' -v
 
@@ -145,29 +177,22 @@ jobs:
     # can compute per platform, including process-argv inspection.
     # Non-cryptographic by design: no user secrets, $TMPDIR only.
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
-        os:
-          - ubuntu-22.04
-          - ubuntu-24.04
-          - ubuntu-latest
-          - macos-14
-          - macos-15
-          - macos-latest
-
+        os: [ubuntu-22.04, ubuntu-24.04, macos-14, macos-15]
     steps:
-      - uses: actions/checkout@v2
-
+      - uses: actions/checkout@v4
       - name: Print openssl version
         run: openssl version
-
       - name: Run OpenSSL CLI feasibility probe
         run: bash contrib/verification/d02-openssl-cli-probe.sh
 
   proof-base64-lean:
     # Independent Lean check of equivalent pure bit-vector obligations.
-    # Aeneas extraction from Rust is a later, separate mandatory gate.
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: leanprover/lean-action@v1
@@ -180,6 +205,7 @@ jobs:
     # The tracked definitions come from the production Rust v3 codec. Compile
     # them together with the independent specification and imported theorems.
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Verify code provenance and snapshot regression tests
@@ -200,6 +226,7 @@ jobs:
     # No synthetic model: rerun the pinned real translator, diff the exact
     # checked-in Aeneas output, and require toolchain/dependency agreement.
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

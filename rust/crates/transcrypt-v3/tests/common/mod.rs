@@ -21,7 +21,12 @@ pub fn exec(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> Outp
     }
     let mut child = command.spawn().unwrap();
     if let Some(value) = input {
-        child.stdin.take().unwrap().write_all(value).unwrap();
+        // A command refused before it reads its input closes the pipe; its
+        // exit status, not this write, is what the test checks.
+        match child.stdin.take().unwrap().write_all(value) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {},
+            other => other.unwrap(),
+        }
     }
     child.wait_with_output().unwrap()
 }
@@ -146,7 +151,7 @@ impl Scratch {
     pub fn git_repo(&mut self, name: &str) -> PathBuf {
         let repo = self.root.join(name);
         fs::create_dir_all(&repo).unwrap();
-        run(&repo, "git", &["init", "-q"], None);
+        run(&repo, "git", &["init", "-q", "-b", "main"], None);
         Self::identify(&repo);
         fs::write(repo.join("README"), b"public\n").unwrap();
         commit(&repo, &["README"], "seed");

@@ -20,7 +20,7 @@
   },
   "purpose": "Production Rust v3 wire-codec generated Lean, not a crypto proof",
   "sources": {
-    "rust/crates/transcrypt-v3-core/Cargo.toml": "f868248d2434268e7d6aebac4c5aa9dcd3489acf8b1e0515865f99e9c9688255",
+    "rust/crates/transcrypt-v3-core/Cargo.toml": "6f10bc05329cd4b7df5087568563aa3a488a3608058e655232eb0708bc22f09a",
     "rust/crates/transcrypt-v3-core/hax.toml": "74002438549ca83e0a9c47864d6fa79e34145d242358d1082fe1503a4f13da50",
     "rust/crates/transcrypt-v3-core/src/lib.rs": "cfefc8004ad92522185e17782db921801e2b9092c292ef5bc55dc86feb667879"
   }

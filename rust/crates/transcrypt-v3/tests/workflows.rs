@@ -1151,11 +1151,11 @@ fn octopus_merges_check_every_incoming_commit() {
     let mut scratch = Scratch::new("octopus");
     let repo = scratch.repo("repo");
     for (branch, file) in [("one", "one.secret"), ("two", "two.secret")] {
-        run(&repo, "git", &["checkout", "-q", "-b", branch, "master"], None);
+        run(&repo, "git", &["checkout", "-q", "-b", branch, "main"], None);
         fs::write(repo.join(file), format!("{branch} plaintext\n")).unwrap();
         commit(&repo, &[file], branch);
     }
-    run(&repo, "git", &["checkout", "-q", "master"], None);
+    run(&repo, "git", &["checkout", "-q", "main"], None);
     fs::write(repo.join("README"), b"diverged\n").unwrap();
     commit(&repo, &["README"], "diverge");
     run(&repo, "git", &["merge", "-q", "--no-commit", "one", "two"], None);

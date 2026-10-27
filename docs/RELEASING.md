@@ -37,6 +37,24 @@ commit. Rebuilding a tag at any path on the same architecture gives the same
 `SHA256SUMS`. Whether an x86_64 and an arm64 *host* build identical
 binaries is checked, and reported, by every release run.
 
+## Continuous integration
+
+Every push to `master` or a `work/**` branch, and every pull request, runs
+`.github/workflows/run-bats-core-tests.yml`. On Linux it:
+
+- lints all tracked shell scripts (`scripts/lint-shell.sh`, with pinned,
+  checksum-verified shellcheck 0.10.0 and shfmt 3.10.0);
+- runs the Bash v2 and v3 Bats suites (Ubuntu 22.04 and 24.04);
+- tests both Rust workspaces from source on x86_64 (Git 2.34 and current)
+  and arm64, with clippy (warnings are errors) and `cargo audit`;
+- builds both release archives with `scripts/build-release.sh --test` on an
+  x86_64 and an arm64 runner, tests the static binary natively and installs
+  it with `scripts/install.sh`;
+- checks the proofs (snapshot provenance, the Lean build, the axiom audit
+  and re-extraction with the pinned translator).
+
+macOS jobs run too but do not fail the run (not a release platform yet).
+
 ## Releasing with GitHub
 
 1. Bump `version` in `rust/crates/transcrypt-v3/Cargo.toml` and commit.
