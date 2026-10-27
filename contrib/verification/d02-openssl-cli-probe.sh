@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# `ok` and `bad` only print (and record a failure), so `test && ok || bad`
+# reports exactly one of them.
+# shellcheck disable=SC2015
 #
 # D-01/D-02 feasibility probe: can a reviewed deterministic authenticated
 # encryption scheme be built from the plain OpenSSL CLI (the only runtime

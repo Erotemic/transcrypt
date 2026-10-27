@@ -4,8 +4,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 if ! command -v lake >/dev/null 2>&1; then
-  echo 'Missing Lake/Lean (elan). Install Lean, then rerun.' >&2
-  exit 2
+	echo 'Missing Lake/Lean (elan). Install Lean, then rerun.' >&2
+	exit 2
 fi
 python3 "$root/proofs/aeneas/v3_snapshot.py" stage
 cd "$root/proofs/aeneas/v3"

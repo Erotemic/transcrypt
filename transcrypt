@@ -299,7 +299,10 @@ _list_encrypted_files() {
 		# from the commit. Read the same index and objects through an empty
 		# temporary Git directory, free of local/global attribute overrides.
 		# Union the portable policy with the effective local policy above.
-		portable_repo=$(mktemp -d) || { rm -f -- "$listing_tmp"; return 1; }
+		portable_repo=$(mktemp -d) || {
+			rm -f -- "$listing_tmp"
+			return 1
+		}
 		if ! git init --bare -q "$portable_repo"; then
 			rm -f -- "$listing_tmp"
 			rm -rf -- "$portable_repo"
@@ -318,10 +321,10 @@ _list_encrypted_files() {
 			(
 				unset GIT_COMMON_DIR
 				GIT_DIR="$portable_repo" GIT_WORK_TREE="$worktree" \
-				GIT_INDEX_FILE="$index_file" GIT_OBJECT_DIRECTORY="$objects_dir" \
-				GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-				git -c core.attributesFile=/dev/null -c core.quotePath=false \
-				check-attr --cached filter -z --stdin
+					GIT_INDEX_FILE="$index_file" GIT_OBJECT_DIRECTORY="$objects_dir" \
+					GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+					git -c core.attributesFile=/dev/null -c core.quotePath=false \
+					check-attr --cached filter -z --stdin
 			) >>"$listing_tmp"; then
 			rm -f -- "$listing_tmp"
 			rm -rf -- "$portable_repo"
@@ -393,9 +396,9 @@ _is_transcrypt_v2_ciphertext() {
 # i.e. a Git filter attribute (staged or worktree view) names a context
 # whose password is configured in this repository.
 _path_has_local_key() {
-	local path=$1 flag p attr info ctx
+	local path=$1 flag attr info ctx
 	for flag in --cached ''; do
-		while IFS= read -r -d '' p && IFS= read -r -d '' attr && IFS= read -r -d '' info; do
+		while IFS= read -r -d '' _ && IFS= read -r -d '' attr && IFS= read -r -d '' info; do
 			case $info in
 			crypt) ctx='' ;;
 			crypt-*) ctx=".${info#crypt-}" ;;
@@ -626,6 +629,7 @@ git_textconv() {
 	decoded_tmp=$(mktemp 2>/dev/null || mktemp -t tmp)
 	# Expand the temporary path now: function locals vanish before EXIT trap.
 	printf -v cleanup_cmd 'rm -f -- %q' "$decoded_tmp"
+	# shellcheck disable=SC2064 # expanded now on purpose (see above)
 	trap "$cleanup_cmd" EXIT
 	if ENC_PASS=$password "$openssl_path" enc -d "-${cipher}" -md MD5 -pass env:ENC_PASS -a -in "$filename" -out "$decoded_tmp" 2>/dev/null; then
 		cat "$decoded_tmp"
@@ -685,11 +689,15 @@ git_pre_commit() {
 	# not an authenticated-ciphertext validator or remote server policy.
 	local tmp staged_paths secret_file num_procs num_jobs cleanup_cmd
 	tmp=$(mktemp) || return 1
-	staged_paths=$(mktemp) || { rm -f -- "$tmp"; return 1; }
+	staged_paths=$(mktemp) || {
+		rm -f -- "$tmp"
+		return 1
+	}
 	# EXIT traps run after function locals go out of scope if a failed
 	# check terminates the script. Capture the quoted paths *now* so the
 	# trap cannot lose them (or trip set -u) on the error path.
 	printf -v cleanup_cmd 'rm -f -- %q %q' "$tmp" "$staged_paths"
+	# shellcheck disable=SC2064 # expanded now on purpose (see above)
 	trap "$cleanup_cmd" EXIT
 	if ! _list_encrypted_files '' cached >"$staged_paths"; then
 		warn 'cannot enumerate the staged protected paths; refusing to commit'

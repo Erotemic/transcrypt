@@ -16,17 +16,22 @@ ref=refs/heads/transcrypt-v3-canary-$$
 blob=$(printf 'transcrypt-v3 enforcement canary: not a secret\n' | git hash-object -w --stdin)
 attributes=$(printf 'canary filter=transcrypt-v3\n' | git hash-object -w --stdin)
 canary=$(printf '100644 blob %s\t.gitattributes\000100644 blob %s\tcanary\000' "$attributes" "$blob" | git mktree -z)
-tree=$( { git ls-tree -z HEAD; printf '040000 tree %s\ttranscrypt-v3-canary\0' "$canary"; } | git mktree -z )
+tree=$({
+	git ls-tree -z HEAD
+	printf '040000 tree %s\ttranscrypt-v3-canary\0' "$canary"
+} | git mktree -z)
 commit=$(git commit-tree "$tree" -p HEAD -m 'transcrypt-v3 enforcement canary (must be rejected)')
 if out=$(git push --no-verify --porcelain "$remote" "$commit:$ref" 2>&1); then
-  git push --no-verify -q "$remote" ":$ref" || true
-  echo "FAIL $remote accepted an unencrypted protected file: deploy contrib/v3/pre-receive or a CI audit" >&2
-  exit 1
+	git push --no-verify -q "$remote" ":$ref" || true
+	echo "FAIL $remote accepted an unencrypted protected file: deploy contrib/v3/pre-receive or a CI audit" >&2
+	exit 1
 fi
 case $out in
-  *transcrypt-v3-canary/canary*"plaintext?"*)
-    echo "ok   $remote rejected an unencrypted protected file" ;;
-  *)
-    printf 'INCONCLUSIVE the push failed for another reason:\n%s\n' "$out" >&2
-    exit 2 ;;
+*transcrypt-v3-canary/canary*"plaintext?"*)
+	echo "ok   $remote rejected an unencrypted protected file"
+	;;
+*)
+	printf 'INCONCLUSIVE the push failed for another reason:\n%s\n' "$out" >&2
+	exit 2
+	;;
 esac

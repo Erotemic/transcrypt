@@ -6,30 +6,30 @@
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 for tool in cargo charon aeneas sha256sum; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        printf 'Missing %s: install compatible pinned Rust/Charon/Aeneas toolchains\n' "$tool" >&2
-        exit 2
-    fi
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		printf 'Missing %s: install compatible pinned Rust/Charon/Aeneas toolchains\n' "$tool" >&2
+		exit 2
+	fi
 done
 out="$root/proofs/aeneas/generated"
 mkdir -p "$out"
 llbc="$out/transcrypt-policy.llbc"
 (
-    cd "$root/rust-legacy/crates/transcrypt-policy"
-    charon cargo --preset=aeneas --dest-file "$llbc"
+	cd "$root/rust-legacy/crates/transcrypt-policy"
+	charon cargo --preset=aeneas --dest-file "$llbc"
 )
 aeneas -backend lean "$llbc" -dest "$out" -subdir Policy -split-files -namespace TranscryptGenerated.Policy
 {
-    printf 'Rust source:\n'
-    cd "$root"
-    sha256sum rust-legacy/crates/transcrypt-policy/src/lib.rs
-    printf '\nTool versions:\n'
-    rustc --version
-    cargo --version
-    charon --version || true
-    aeneas --version || true
-    printf '\nGenerated LLBC SHA-256:\n'
-    sha256sum "$llbc"
-} > "$out/PROVENANCE.txt"
+	printf 'Rust source:\n'
+	cd "$root"
+	sha256sum rust-legacy/crates/transcrypt-policy/src/lib.rs
+	printf '\nTool versions:\n'
+	rustc --version
+	cargo --version
+	charon --version || true
+	aeneas --version || true
+	printf '\nGenerated LLBC SHA-256:\n'
+	sha256sum "$llbc"
+} >"$out/PROVENANCE.txt"
 printf 'Generated Rust LLBC and candidate Lean translations under %s\n' "$out"
 printf 'NOTE: translation alone is not a proof; inspect opaque functions and compile refinement theorems.\n'
