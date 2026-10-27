@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Lint every tracked shell script (except the Bats suites in tests/) with
-# shellcheck and shfmt, as the CI lint job does. Pass --fix to apply shfmt's
-# formatting instead of reporting it. CI pins shellcheck 0.10.0 and shfmt
+# Lint every tracked shell script (except the Bats suites in tests/), as the
+# CI lint job does: ShellCheck, then shfmt. Pass --fix to apply shfmt's
+# formatting instead of reporting it. CI pins ShellCheck 0.10.0 and shfmt
 # 3.10.0; other versions may disagree on details.
 set -euo pipefail
 
