@@ -20,7 +20,8 @@ class ProofInputTests(unittest.TestCase):
     def setUp(self):
         self.workspace = tempfile.TemporaryDirectory()
         self.addCleanup(self.workspace.cleanup)
-        self.root = Path(self.workspace.name)
+        # Resolved: on macOS the temporary directory is under a symlink.
+        self.root = Path(self.workspace.name).resolve()
         self.project = self.root / 'rust/proofs/aeneas/generated/V3Core/lean'
         self.provenance = self.project.parent / 'PROVENANCE.txt'
         self.project.joinpath('V3Wire/Extraction').mkdir(parents=True)

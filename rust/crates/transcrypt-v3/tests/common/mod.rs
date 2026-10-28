@@ -133,12 +133,20 @@ pub struct Scratch {
 
 impl Scratch {
     pub fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "transcrypt-v3-{tag}-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        Scratch { root, repos: Vec::new() }
+        // Short paths under /tmp: the tests reach the agent's socket by its
+        // absolute path, and a socket address is at most 104 bytes on macOS
+        // and the BSDs, which macOS's per-user $TMPDIR alone nearly fills.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let base = if Path::new("/tmp").is_dir() { PathBuf::from("/tmp") } else { std::env::temp_dir() };
+        loop {
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = base.join(format!("tv3-{tag}-{}-{n}", std::process::id()));
+            match fs::create_dir(&root) {
+                Ok(()) => return Scratch { root, repos: Vec::new() },
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("cannot create {}: {e}", root.display()),
+            }
+        }
     }
 
     /// Set a commit identity in `repo`.
