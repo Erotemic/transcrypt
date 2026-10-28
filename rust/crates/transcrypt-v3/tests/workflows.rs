@@ -574,7 +574,7 @@ fn renames_during_rotation_and_rebase_stops_work() {
     commit(&repo, &["prod.env"], "rotate");
     run(&repo, bin(), &["audit"], None);
     // Stop at a commit during an interactive rebase and rename there.
-    run(&repo, "sh", &["-c", "GIT_SEQUENCE_EDITOR='sed -i s/^pick/edit/' exec git rebase -q -i HEAD~1"], None);
+    run(&repo, "sh", &["-c", "GIT_SEQUENCE_EDITOR='sed -i.orig s/^pick/edit/' exec git rebase -q -i HEAD~1"], None);
     run(&repo, "git", &["mv", "old.env", "older.env"], None);
     run(&repo, "git", &["commit", "-q", "--amend", "--no-edit"], None);
     run(&repo, "git", &["rebase", "--continue"], None);

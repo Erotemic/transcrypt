@@ -27,21 +27,23 @@ fn check(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(rc) }
 }
 
-/// Identity, size and change times of a file. Writing, truncating, replacing
-/// or chmod-ing a file changes its stamp, so comparing stamps just before a
-/// rename detects that the file changed since it was checked.
+/// Identity, size and modification time of a file. Writing, truncating or
+/// replacing a file changes its stamp, so comparing stamps just before a
+/// rename detects that the file changed since it was checked. Not ctime:
+/// FreeBSD's soft updates change a renamed file's ctime asynchronously,
+/// when they finish removing its old name, well after the rename returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Stamp([i64; 7]);
+pub(crate) struct Stamp([i64; 5]);
 
 impl Stamp {
     // The field types differ between platforms (Linux, macOS).
     #[allow(clippy::unnecessary_cast)]
     fn from_stat(st: &libc::stat) -> Stamp {
-        Stamp([
-            st.st_dev as i64, st.st_ino as i64, st.st_size as i64,
-            st.st_mtime as i64, st.st_mtime_nsec as i64,
-            st.st_ctime as i64, st.st_ctime_nsec as i64,
-        ])
+        #[cfg(target_os = "netbsd")]
+        let mtime_nsec = st.st_mtimensec;
+        #[cfg(not(target_os = "netbsd"))]
+        let mtime_nsec = st.st_mtime_nsec;
+        Stamp([st.st_dev as i64, st.st_ino as i64, st.st_size as i64, st.st_mtime as i64, mtime_nsec as i64])
     }
 
     /// The stamp of an open file.

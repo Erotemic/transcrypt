@@ -336,17 +336,21 @@ one.
 
 ### A12 — Stamps and the staging lock (new)
 
-- **Claim:** any write, truncation, replacement or chmod of a file changes
-  its (device, inode, size, mtime, ctime) stamp. All v3 processes take the
-  exclusive `flock` on `.git/transcrypt-v3-staging` before mutating the
-  worktree.
+- **Claim:** any write, truncation or replacement of a file changes its
+  (device, inode, size, mtime) stamp. All v3 processes take the exclusive
+  lock on `.git/transcrypt-v3-staging` before mutating the worktree.
 - **Consequence:** a concurrent edit between check and replace is lost.
 - **Evidence:** TESTED (`replacement_refuses_a_file_changed_since_it_was_checked`,
-  concurrent-entry refusal); ctime cannot be set by unprivileged
-  `utimensat`.
+  concurrent-entry refusal), on Linux and FreeBSD. ctime is deliberately
+  not part of the stamp: FreeBSD's UFS soft updates change a renamed file's
+  ctime asynchronously, hundreds of milliseconds after the rename (found by
+  the FreeBSD run of the end-to-end suite, where every `lock` right after a
+  `hydrate` was refused).
 - **Residual:** filesystems with coarse timestamps *and* writes that
-  preserve size and inode within one tick; non-v3 writers do not take the
-  lock.
+  preserve size and inode within one tick; a same-UID program that writes in
+  place and then restores the mtime (`touch -r`); a chmod between check and
+  replace (the replacement takes the mode read just before it is written);
+  non-v3 writers do not take the lock.
 - **Status:** TESTED.
 
 ### A13 — History is audited before others rely on it (new, deployment)
