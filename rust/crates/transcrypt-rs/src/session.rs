@@ -22,7 +22,7 @@ use std::{
 use transcrypt_rs::{authenticate_config, clean_file, config_array, decrypt_file, SecretKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
     authorize_agent_request, decode_be_u32, decode_frame_header, encode_be_u32, encode_frame_header, AgentOp,
-    CONFIG_LEN, FRAME_HEADER_LEN,
+    BE_U32_LEN, CONFIG_LEN, FRAME_HEADER_LEN,
 };
 use zeroize::Zeroizing;
 use crate::os::{self, sigpipe_blocked, Listener, Stream};
@@ -41,11 +41,9 @@ const STARTUP_WAIT: Duration = Duration::from_secs(3);
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(120);
 /// The number of `POLL` pauses in `wait`.
 const fn polls(wait: Duration) -> u128 { wait.as_millis() / POLL.as_millis() }
-/// Bytes of a big-endian length field (`encode_be_u32`) on the wire.
-const LEN_FIELD: usize = size_of::<u32>();
 /// A reply's header: its status byte, then the length of its result.
 const STATUS_LEN: usize = 1;
-const REPLY_HEADER_LEN: usize = STATUS_LEN + LEN_FIELD;
+const REPLY_HEADER_LEN: usize = STATUS_LEN + BE_U32_LEN;
 /// The idle limit the agent receives (in seconds, big-endian) for none.
 const NO_IDLE_LIMIT: u64 = 0;
 /// The shortest idle limit sent: a sub-second limit is not "none".
@@ -282,7 +280,7 @@ fn transaction(stream: &mut Stream, config: &[u8; CONFIG_LEN], key: &SecretKey) 
     if path_len > MAX_PATH { return Err("oversized agent Git pathname".into()); }
     let mut path_bytes = vec![0u8; path_len];
     stream.read_exact(&mut path_bytes).map_err(|_| "incomplete agent pathname")?;
-    let mut size_bytes = [0u8; LEN_FIELD];
+    let mut size_bytes = [0u8; BE_U32_LEN];
     stream.read_exact(&mut size_bytes).map_err(|_| "incomplete agent length")?;
     let size = decode_be_u32(&size_bytes) as usize;
     // The verified core decides, before the body is read, whether this

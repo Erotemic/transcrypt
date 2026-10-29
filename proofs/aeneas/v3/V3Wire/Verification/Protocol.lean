@@ -136,14 +136,16 @@ theorem setSlice!_tail {l ss : List U8} {i : Nat} (h : ss.length = l.length - i)
   have hd : List.drop (i + ss.length) l = [] := List.drop_of_length_le (by omega)
   simp only [List.setSlice!, hm, List.take_length, hd, List.append_nil]
 
-/-- `&mut out[22..]`: the view is the tail, and writing back a same-length
-    tail replaces exactly that tail. -/
-theorem index_mut_from_spec (out : Slice U8) (h : 22 ≤ out.length) :
+/-- `&mut out[FILE_HEADER_LEN..]`: the view is the tail, and writing back a
+    same-length tail replaces exactly that tail. -/
+theorem index_mut_from_spec (out : Slice U8) (h : Transcrypt.V3Wire.fileHeaderLen ≤ out.length) :
     core.Slice.Insts.CoreOpsIndexIndexMut.index_mut
       (core.ops.range.RangeFromUsize.Insts.CoreSliceIndexSliceIndexSliceSlice U8)
       out { start := FILE_HEADER_LEN } ⦃ r =>
-        r.1.val = out.val.drop 22 ∧
-        ∀ ss : Slice U8, ss.length = out.length - 22 → (r.2 ss).val = out.val.take 22 ++ ss.val ⦄ := by
+        r.1.val = out.val.drop Transcrypt.V3Wire.fileHeaderLen ∧
+        ∀ ss : Slice U8, ss.length = out.length - Transcrypt.V3Wire.fileHeaderLen →
+          (r.2 ss).val = out.val.take Transcrypt.V3Wire.fileHeaderLen ++ ss.val ⦄ := by
+  unfold_v3_bytes
   unfold core.Slice.Insts.CoreOpsIndexIndexMut.index_mut
   simp only [core.ops.range.RangeFromUsize.Insts.CoreSliceIndexSliceIndexSliceSlice.get_unchecked_mut,
     rust_primitives.slice.slice_slice_mut, rust_primitives.slice.slice_length]
@@ -156,11 +158,12 @@ theorem index_mut_from_spec (out : Slice U8) (h : 22 ≤ out.length) :
     · simp only [FILE_HEADER_LEN_val]
       exact setSlice!_tail (by simpa using hss) (by simpa using h)
 
-/-- `record[22..]` (shared borrow) is the tail of the record. -/
-theorem index_from_spec (record : Slice U8) (h : 22 ≤ record.length) :
+/-- `record[FILE_HEADER_LEN..]` (shared borrow) is the tail of the record. -/
+theorem index_from_spec (record : Slice U8) (h : Transcrypt.V3Wire.fileHeaderLen ≤ record.length) :
     core.Slice.Insts.CoreOpsIndexIndex.index
       (core.ops.range.RangeFromUsize.Insts.CoreSliceIndexSliceIndexSliceSlice U8)
-      record { start := FILE_HEADER_LEN } ⦃ r => r.val = record.val.drop 22 ⦄ := by
+      record { start := FILE_HEADER_LEN } ⦃ r => r.val = record.val.drop Transcrypt.V3Wire.fileHeaderLen ⦄ := by
+  unfold_v3_bytes
   unfold core.Slice.Insts.CoreOpsIndexIndex.index
   simp only [core.ops.range.RangeFromUsize.Insts.CoreSliceIndexSliceIndexSliceSlice.get,
     rust_primitives.slice.slice_slice, rust_primitives.slice.slice_length]
@@ -174,11 +177,13 @@ theorem index_from_spec (record : Slice U8) (h : 22 ≤ record.length) :
   exact List.take_of_length_le (by simp)
 
 theorem seal_record_loop_spec (base out : Slice U8) (header : Std.Array U8 22#usize) (i : Usize)
-    (hlen : 22 ≤ out.length) (hi : i.val ≤ 22) (h : Copied out.val base.val header.val 0 0 i.val) :
-    seal_record_loop out header i ⦃ r => Copied r.val base.val header.val 0 0 22 ⦄ := by
+    (hlen : Transcrypt.V3Wire.fileHeaderLen ≤ out.length) (hi : i.val ≤ Transcrypt.V3Wire.fileHeaderLen)
+    (h : Copied out.val base.val header.val 0 0 i.val) :
+    seal_record_loop out header i ⦃ r => Copied r.val base.val header.val 0 0 Transcrypt.V3Wire.fileHeaderLen ⦄ := by
   unfold seal_record_loop
-  apply copy_loop (val := fun o : Slice U8 => o.val) (bound := 22) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Slice U8 => o.val) (bound := Transcrypt.V3Wire.fileHeaderLen) _ _ _ _ _ _ _ _ hi h
   intro o j hj hc
+  unfold_v3_bytes
   unfold seal_record_loop.body
   have hhl : header.length = 22 := by simp
   have hol : o.length = out.length := by
@@ -202,7 +207,7 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
           MaySeal σ (wireBytes config) (sliceBytes path) (sliceBytes plaintext) ∧
           sliceBytes r.2 = sealedRecord σ (wireBytes config) (sliceBytes path) (sliceBytes plaintext)
       | core.result.Result.Err Refusal.Size =>
-          ¬ (plaintext.length ≤ maxFile ∧ out.length = plaintext.length + 38)
+          ¬ (plaintext.length ≤ maxFile ∧ out.length = plaintext.length + Transcrypt.V3Wire.fileMinLen)
       | core.result.Result.Err Refusal.Path => ¬ CanonicalProtectedPath (sliceBytes path)
       | core.result.Result.Err Refusal.Config => ¬ ConfigAuthentic σ (wireBytes config)
       | core.result.Result.Err Refusal.ConfigAuthentication => ¬ ConfigAuthentic σ (wireBytes config)
@@ -211,6 +216,7 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
       | core.result.Result.Err Refusal.Primitive => True
       | core.result.Result.Err _ => False ⦄ := by
   unfold seal_record
+  unfold_v3_bytes
   have hptl : plaintext.len.val = plaintext.length := by simp
   have houtl : out.len.val = out.length := by simp
   simp_len
@@ -240,9 +246,12 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
     have hcanon : CanonicalProtectedPath (sliceBytes path) := b_post.1 ‹b = true›
     step with h.config_id config as ⟨ cid, hcid ⟩
     step with encode_file_header_bytes as ⟨ header, hheader ⟩
-    step with seal_record_loop_spec out out header 0#usize (by omega) (by simp) (Copied.zero _ _ _ _) as ⟨ out1, hout1 ⟩
+    step with seal_record_loop_spec out out header 0#usize (by unfold_v3_bytes; omega) (by simp)
+      (Copied.zero _ _ _ _) as ⟨ out1, hout1 ⟩
+    unfold_v3_bytes
     have hout1l : out1.length = out.length := by have := hout1.1; simpa using this
-    step with index_mut_from_spec out1 (by omega) as ⟨ sub, back, hsub, hback ⟩
+    step with index_mut_from_spec out1 (by unfold_v3_bytes; omega) as ⟨ sub, back, hsub, hback ⟩
+    unfold_v3_bytes
     step with h.seal_file config path plaintext sub as ⟨ b2, s1, hs1l, hs1 ⟩
     split
     · rename_i hb2
@@ -308,7 +317,7 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
           ¬ ∃ pt, pt.length = out.length ∧
             sliceBytes record = sealedRecord σ (wireBytes config) (sliceBytes path) pt
       | core.result.Result.Err Refusal.Size =>
-          r.2 = out ∧ (maxRecord < record.length ∨ out.length + 38 ≠ record.length)
+          r.2 = out ∧ (maxRecord < record.length ∨ out.length + Transcrypt.V3Wire.fileMinLen ≠ record.length)
       | core.result.Result.Err Refusal.Path => r.2 = out ∧ ¬ CanonicalProtectedPath (sliceBytes path)
       | core.result.Result.Err Refusal.Config => r.2 = out ∧ ¬ ConfigAuthentic σ (wireBytes config)
       | core.result.Result.Err Refusal.ConfigAuthentication =>
@@ -320,6 +329,7 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
             id ≠ σ.digest16 (wireBytes config)
       | core.result.Result.Err _ => False ⦄ := by
   unfold open_record
+  unfold_v3_bytes
   have hrl : record.len.val = record.length := by simp
   have houtl : out.len.val = out.length := by simp
   simp_len
@@ -356,7 +366,8 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
       rw [hb1, ← hcid, s_post, hs1, wireBytes_inj]; rfl
     split
     · rename_i hb1t
-      step with index_from_spec record (by omega) as ⟨ s2, hs2 ⟩
+      step with index_from_spec record (by unfold_v3_bytes; omega) as ⟨ s2, hs2 ⟩
+      unfold_v3_bytes
       step with h.open_file config path s2 out as ⟨ b2, out1, hol1, hopen, hcomplete ⟩
       split
       · rename_i hb2
@@ -445,8 +456,8 @@ theorem open_record_complete (h : Realizes inst prims σ) (config : Std.Array U8
     open_record inst prims config path record out ⦃ r =>
       r.1 = core.result.Result.Ok () ∧ sliceBytes r.2 = pt ⦄ := by
   obtain ⟨hcanon, hauth, hmax, hrec⟩ := hop
-  have hreclen : record.length = pt.length + 38 := by
-    rw [← sliceBytes_length record, hrec, sealed_length]; rfl
+  have hreclen : record.length = pt.length + Transcrypt.V3Wire.fileMinLen := by
+    rw [← sliceBytes_length record, hrec, sealed_length]
   have hshape := sealed_shape σ (wireBytes config) (sliceBytes path) pt
   rw [← hrec] at hshape
   apply WP.spec_mono (open_record_spec h config path record out)

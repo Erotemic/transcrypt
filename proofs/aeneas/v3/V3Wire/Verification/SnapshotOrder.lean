@@ -190,8 +190,8 @@ theorem entryRecord_split (e : Entry) :
 
 /-- Records of entries with TAB-free six-byte modes and TAB-free object
     ids determine their entries. -/
-theorem entryRecord_inj {e e' : Entry} (hm : e.mode.length = 6) (hm' : e'.mode.length = 6)
-    (h9 : 9 ∉ e.mode) (h9' : 9 ∉ e'.mode) (ho : 9 ∉ e.oid) (ho' : 9 ∉ e'.oid)
+theorem entryRecord_inj {e e' : Entry} (hm : e.mode.length = modeLen) (hm' : e'.mode.length = modeLen)
+    (h9 : tab ∉ e.mode) (h9' : tab ∉ e'.mode) (ho : tab ∉ e.oid) (ho' : tab ∉ e'.oid)
     (h : entryRecord e = entryRecord e') : e = e' := by
   have hP : 9 ∉ e.mode ++ [32] ++ e.oid := by simp [h9, ho]
   have hP' : 9 ∉ e'.mode ++ [32] ++ e'.oid := by simp [h9', ho']
@@ -217,7 +217,7 @@ theorem entryRecord_inj {e e' : Entry} (hm : e.mode.length = 6) (hm' : e'.mode.l
     TAB-free mode, an object id and a nonempty path. -/
 theorem record_ok_spec (entry : Slice U8) :
     record_ok entry ⦃ b => b = true ↔ ∃ e : Entry, sliceBytes entry = entryRecord e ∧
-      e.mode.length = 6 ∧ 9 ∉ e.mode ∧ ObjectId e.oid ∧ e.path ≠ [] ⦄ := by
+      e.mode.length = modeLen ∧ tab ∉ e.mode ∧ ObjectId e.oid ∧ e.path ≠ [] ⦄ := by
   unfold record_ok
   have hl := sliceBytes_length entry
   step with parse_index_entry_spec as ⟨ r, hr ⟩
@@ -234,6 +234,7 @@ theorem record_ok_spec (entry : Slice U8) :
     have hPpos : 0 < P.length := List.length_pos_iff.mpr hp
     have hps : parsed.path_start.val = 10 + oid.length := by omega
     step as ⟨ i, hi ⟩
+    simp only [OID_END_LEN_val, Transcrypt.V3Policy.oidEndLen] at hi
     step with index_range_spec entry OID_START i (by simp; unfold_v3_bytes; omega) (by omega) as ⟨ s, hs ⟩
     have hso : sliceBytes s = oid := by
       rw [hs, List.extract_eq_take_drop, heq, hi, hps, OID_START_val]

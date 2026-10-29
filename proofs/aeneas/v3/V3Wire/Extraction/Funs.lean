@@ -1287,8 +1287,23 @@ def parse_attr_response
     else ok (false, flags1)
   else ok (false, flags1)
 
+/-- [transcrypt_v3_core::BE_U32_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 620:0-620:32
+    Visibility: public -/
+@[global_simps, irreducible] def BE_U32_LEN : Std.Usize := 4#usize
+
+/-- [transcrypt_v3_core::FRAME_CONFIG_START]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 622:0-622:40
+    Visibility: public -/
+@[global_simps, irreducible] def FRAME_CONFIG_START : Std.Usize := 1#usize
+
+/-- [transcrypt_v3_core::FRAME_LEN_START]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 625:0-625:38
+    Visibility: public -/
+@[global_simps, irreducible] def FRAME_LEN_START : Std.Usize := 56#usize
+
 /-- [transcrypt_v3_core::encode_be_u32]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 664:0-666:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 676:0-678:1
     Visibility: public -/
 def encode_be_u32 (x : Std.U32) : RustM (Array Std.U8 4#usize) := do
   let i ← x >>> 24#i32
@@ -1301,7 +1316,7 @@ def encode_be_u32 (x : Std.U32) : RustM (Array Std.U8 4#usize) := do
   ok (Array.make 4#usize [ i1, i3, i5, i6 ])
 
 /-- [transcrypt_v3_core::encode_frame_header]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 629:4-632:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 636:4-639:5
     Visibility: public -/
 @[rust_loop_body]
 def encode_frame_header_loop0.body
@@ -1313,14 +1328,14 @@ def encode_frame_header_loop0.body
   if i < CONFIG_LEN
   then
     let i1 ← Array.index_usize config i
-    let i2 ← 1#usize + i
+    let i2 ← FRAME_CONFIG_START + i
     let a ← Array.update out i2 i1
     let i3 ← i + 1#usize
     ok (cont (a, i3))
   else ok (done out)
 
 /-- [transcrypt_v3_core::encode_frame_header]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 629:4-632:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 636:4-639:5
     Visibility: public -/
 @[rust_loop]
 def encode_frame_header_loop0
@@ -1333,7 +1348,7 @@ def encode_frame_header_loop0
     (out, i)
 
 /-- [transcrypt_v3_core::encode_frame_header]: loop body 1:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 635:4-638:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 642:4-645:5
     Visibility: public -/
 @[rust_loop_body]
 def encode_frame_header_loop1.body
@@ -1341,18 +1356,17 @@ def encode_frame_header_loop1.body
   RustM (ControlFlow ((Array Std.U8 60#usize) × Std.Usize) (Array Std.U8
     60#usize))
   := do
-  if k < 4#usize
+  if k < BE_U32_LEN
   then
     let i ← Array.index_usize len k
-    let i1 ← 1#usize + CONFIG_LEN
-    let i2 ← i1 + k
-    let a ← Array.update out i2 i
+    let i1 ← FRAME_LEN_START + k
+    let a ← Array.update out i1 i
     let k1 ← k + 1#usize
     ok (cont (a, k1))
   else ok (done out)
 
 /-- [transcrypt_v3_core::encode_frame_header]: loop 1:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 635:4-638:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 642:4-645:5
     Visibility: public -/
 @[rust_loop]
 def encode_frame_header_loop1
@@ -1364,7 +1378,7 @@ def encode_frame_header_loop1
     (out, k)
 
 /-- [transcrypt_v3_core::encode_frame_header]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 625:0-640:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 632:0-647:1
     Visibility: public -/
 def encode_frame_header
   (opcode : Std.U8) (config : Array Std.U8 55#usize) (path_len : Std.U32) :
@@ -1377,7 +1391,7 @@ def encode_frame_header
   encode_frame_header_loop1 out1 len 0#usize
 
 /-- [transcrypt_v3_core::decode_be_u32]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 669:0-671:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 681:0-683:1
     Visibility: public -/
 def decode_be_u32 (b : Array Std.U8 4#usize) : RustM Std.U32 := do
   let i ← Array.index_usize b 0#usize
@@ -1396,7 +1410,7 @@ def decode_be_u32 (b : Array Std.U8 4#usize) : RustM Std.U32 := do
   ok (i10 ||| i12)
 
 /-- [transcrypt_v3_core::decode_frame_header]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 655:4-658:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 662:4-665:5
     Visibility: public -/
 @[rust_loop_body]
 def decode_frame_header_loop.body
@@ -1407,7 +1421,7 @@ def decode_frame_header_loop.body
   := do
   if i < CONFIG_LEN
   then
-    let i1 ← 1#usize + i
+    let i1 ← FRAME_CONFIG_START + i
     let i2 ← Array.index_usize input i1
     let a ← Array.update config i i2
     let i3 ← i + 1#usize
@@ -1415,7 +1429,7 @@ def decode_frame_header_loop.body
   else ok (done config)
 
 /-- [transcrypt_v3_core::decode_frame_header]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 655:4-658:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 662:4-665:5
     Visibility: public -/
 @[rust_loop]
 def decode_frame_header_loop
@@ -1428,85 +1442,110 @@ def decode_frame_header_loop
     (config, i)
 
 /-- [transcrypt_v3_core::decode_frame_header]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 652:0-661:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 659:0-673:1
     Visibility: public -/
 def decode_frame_header
   (input : Array Std.U8 60#usize) : RustM FrameHeader := do
   let config := Array.repeat 55#usize 0#u8
   let config1 ← decode_frame_header_loop input config 0#usize
-  let i ← 1#usize + CONFIG_LEN
-  let i1 ← Array.index_usize input i
-  let i2 ← 2#usize + CONFIG_LEN
-  let i3 ← Array.index_usize input i2
-  let i4 ← 3#usize + CONFIG_LEN
-  let i5 ← Array.index_usize input i4
-  let i6 ← 4#usize + CONFIG_LEN
-  let i7 ← Array.index_usize input i6
-  let i8 ← Array.index_usize input 0#usize
-  let i9 ← decode_be_u32 (Array.make 4#usize [ i1, i3, i5, i7 ])
-  ok { opcode := i8, config := config1, path_len := i9 }
+  let i ← Array.index_usize input FRAME_LEN_START
+  let i1 ← FRAME_LEN_START + 1#usize
+  let i2 ← Array.index_usize input i1
+  let i3 ← FRAME_LEN_START + 2#usize
+  let i4 ← Array.index_usize input i3
+  let i5 ← FRAME_LEN_START + 3#usize
+  let i6 ← Array.index_usize input i5
+  let i7 ← Array.index_usize input 0#usize
+  let i8 ← decode_be_u32 (Array.make 4#usize [ i, i2, i4, i6 ])
+  ok { opcode := i7, config := config1, path_len := i8 }
+
+/-- [transcrypt_v3_core::MODE_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 686:0-686:30
+    Visibility: public -/
+@[global_simps, irreducible] def MODE_LEN : Std.Usize := 6#usize
 
 /-- [transcrypt_v3_core::REGULAR_MODE]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 674:0-674:45
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 688:0-688:52
     Visibility: public -/
 @[global_simps, irreducible]
 def REGULAR_MODE : Array Std.U8 6#usize :=
   Array.make 6#usize [ 49#u8, 48#u8, 48#u8, 54#u8, 52#u8, 52#u8 ]
 
 /-- [transcrypt_v3_core::EXECUTABLE_MODE]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 675:0-675:48
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 689:0-689:55
     Visibility: public -/
 @[global_simps, irreducible]
 def EXECUTABLE_MODE : Array Std.U8 6#usize :=
   Array.make 6#usize [ 49#u8, 48#u8, 48#u8, 55#u8, 53#u8, 53#u8 ]
 
 /-- [transcrypt_v3_core::OID_START]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 678:0-678:31
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 692:0-692:31
     Visibility: public -/
 @[global_simps, irreducible] def OID_START : Std.Usize := 7#usize
 
+/-- [transcrypt_v3_core::OID_END_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 694:0-694:33
+    Visibility: public -/
+@[global_simps, irreducible] def OID_END_LEN : Std.Usize := 3#usize
+
+/-- [transcrypt_v3_core::OID_END]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 696:0-696:44 -/
+@[global_simps, irreducible]
+def OID_END : Array Std.U8 3#usize := Array.make 3#usize [ 32#u8, 48#u8, 9#u8 ]
+
+/-- [transcrypt_v3_core::ENTRY_FIXED_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 699:0-699:38
+    Visibility: public -/
+@[global_simps, irreducible] def ENTRY_FIXED_LEN : Std.Usize := 10#usize
+
 /-- [transcrypt_v3_core::parse_index_entry]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 696:0-708:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 717:0-736:1
     Visibility: public -/
 def parse_index_entry
   (entry : Slice Std.U8) : RustM (core.result.Result IndexEntry Refusal) := do
   let n ← core.slice.Slice.len entry
   let t ← find_byte entry 0#usize 9#u8
-  if t < 10#usize
+  if t >= n
   then ok (core.result.Result.Err Refusal.Index)
   else
-    let i ← n - t
-    if i < 2#usize
+    let path_start ← t + 1#usize
+    if path_start <= ENTRY_FIXED_LEN
     then ok (core.result.Result.Err Refusal.Index)
     else
-      let i1 ← Slice.index_usize entry 6#usize
-      if i1 != 32#u8
+      if path_start = n
       then ok (core.result.Result.Err Refusal.Index)
       else
-        let i2 ← t - 2#usize
-        let i3 ← Slice.index_usize entry i2
-        if i3 != 32#u8
+        let i ← Slice.index_usize entry MODE_LEN
+        if i != 32#u8
         then ok (core.result.Result.Err Refusal.Index)
         else
-          let i4 ← t - 1#usize
-          let i5 ← Slice.index_usize entry i4
-          if i5 != 48#u8
-          then ok (core.result.Result.Err Refusal.Index)
-          else
-            let s ← lift (Array.to_slice REGULAR_MODE)
-            let b ← matches_at entry 0#usize s
-            let regular ←
-              if b
-              then ok true
-              else
-                do
-                let s1 ← lift (Array.to_slice EXECUTABLE_MODE)
-                matches_at entry 0#usize s1
-            let i6 ← t + 1#usize
-            ok (core.result.Result.Ok { regular, path_start := i6 })
+          let i1 ← path_start - OID_END_LEN
+          let s ← lift (Array.to_slice OID_END)
+          let b ← matches_at entry i1 s
+          if b
+          then
+            let s1 ← lift (Array.to_slice REGULAR_MODE)
+            let b1 ← matches_at entry 0#usize s1
+            if b1
+            then ok (core.result.Result.Ok { regular := true, path_start })
+            else
+              let s2 ← lift (Array.to_slice EXECUTABLE_MODE)
+              let regular ← matches_at entry 0#usize s2
+              ok (core.result.Result.Ok { regular, path_start })
+          else ok (core.result.Result.Err Refusal.Index)
+
+/-- [transcrypt_v3_core::SHA1_OID_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 739:0-739:35
+    Visibility: public -/
+@[global_simps, irreducible] def SHA1_OID_LEN : Std.Usize := 40#usize
+
+/-- [transcrypt_v3_core::SHA256_OID_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 740:0-740:37
+    Visibility: public -/
+@[global_simps, irreducible] def SHA256_OID_LEN : Std.Usize := 64#usize
 
 /-- [transcrypt_v3_core::is_object_id]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-723:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-755:5
     Visibility: public -/
 @[rust_loop_body]
 def is_object_id_loop.body
@@ -1535,7 +1574,7 @@ def is_object_id_loop.body
   else ok (done false)
 
 /-- [transcrypt_v3_core::is_object_id]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-723:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-755:5
     Visibility: public -/
 @[rust_loop]
 def is_object_id_loop
@@ -1547,14 +1586,14 @@ def is_object_id_loop
     (ok1, i)
 
 /-- [transcrypt_v3_core::is_object_id]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 714:0-725:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 746:0-757:1
     Visibility: public -/
 def is_object_id (oid : Slice Std.U8) : RustM Bool := do
   let n ← core.slice.Slice.len oid
-  is_object_id_loop oid n ((n = 40#usize) || (n = 64#usize)) 0#usize
+  is_object_id_loop oid n ((n = SHA1_OID_LEN) || (n = SHA256_OID_LEN)) 0#usize
 
 /-- [transcrypt_v3_core::record_envelope_prefix_ok]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 744:0-754:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 776:0-786:1
     Visibility: public -/
 def record_envelope_prefix_ok
   (size : Std.Usize) («prefix» : Slice Std.U8) (id : Array Std.U8 16#usize) :
@@ -1573,7 +1612,7 @@ def record_envelope_prefix_ok
     | core.result.Result.Err _ => ok false
 
 /-- [transcrypt_v3_core::record_envelope_ok]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 732:0-734:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 764:0-766:1
     Visibility: public -/
 def record_envelope_ok
   (record : Slice Std.U8) (id : Array Std.U8 16#usize) : RustM Bool := do
@@ -1581,7 +1620,7 @@ def record_envelope_ok
   record_envelope_prefix_ok i record id
 
 /-- [transcrypt_v3_core::smudge_action]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 771:0-785:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 803:0-817:1
     Visibility: public -/
 def smudge_action
   (blob : Slice Std.U8) (id : Array Std.U8 16#usize) (unlocked : Bool) :
@@ -1607,7 +1646,7 @@ def smudge_action
     | core.result.Result.Err _ => ok (core.result.Result.Err Refusal.Foreign)
 
 /-- [transcrypt_v3_core::seal_action]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 808:0-820:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 840:0-852:1
     Visibility: public -/
 def seal_action
   (opens : Bool) (local_change : Bool) (envelope : Bool) (moved : Bool) :
@@ -1626,7 +1665,7 @@ def seal_action
     else ok SealAction.Leave
 
 /-- [transcrypt_v3_core::entry_check]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 842:0-850:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 874:0-882:1
     Visibility: public -/
 def entry_check
   (keyed : Bool) (incremental : Bool) (settled : Bool) : RustM EntryCheck := do
@@ -1642,13 +1681,26 @@ def entry_check
     then ok EntryCheck.Envelope
     else ok EntryCheck.EnvelopeNotMoved
 
+/-- [transcrypt_v3_core::PKT_HEADER_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 885:0-885:36
+    Visibility: public -/
+@[global_simps, irreducible] def PKT_HEADER_LEN : Std.Usize := 4#usize
+
 /-- [transcrypt_v3_core::MAX_PKT_LEN]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 853:0-853:37
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 887:0-887:37
     Visibility: public -/
 @[global_simps, irreducible] def MAX_PKT_LEN : Std.Usize := 65520#usize
 
+/-- [transcrypt_v3_core::HEX_RADIX]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 889:0-889:28 -/
+@[global_simps, irreducible] def HEX_RADIX : Std.Usize := 16#usize
+
+/-- [transcrypt_v3_core::HEX_LETTER_VALUE]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 891:0-891:32 -/
+@[global_simps, irreducible] def HEX_LETTER_VALUE : Std.U8 := 10#u8
+
 /-- [transcrypt_v3_core::decode_pkt_len]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-874:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-912:5
     Visibility: public -/
 @[rust_loop_body]
 def decode_pkt_len_loop.body
@@ -1658,7 +1710,7 @@ def decode_pkt_len_loop.body
   := do
   if ok1
   then
-    if i < 4#usize
+    if i < PKT_HEADER_LEN
     then
       let c ← Array.index_usize header i
       let (value1, ok2) ←
@@ -1667,7 +1719,7 @@ def decode_pkt_len_loop.body
           if c <= 57#u8
           then
             do
-            let i1 ← value * 16#usize
+            let i1 ← value * HEX_RADIX
             let i2 ← c - 48#u8
             let i3 ← lift (UScalar.cast .Usize i2)
             let value2 ← i1 + i3
@@ -1678,9 +1730,9 @@ def decode_pkt_len_loop.body
               if c <= 102#u8
               then
                 do
-                let i1 ← value * 16#usize
+                let i1 ← value * HEX_RADIX
                 let i2 ← c - 97#u8
-                let i3 ← i2 + 10#u8
+                let i3 ← i2 + HEX_LETTER_VALUE
                 let i4 ← lift (UScalar.cast .Usize i3)
                 let value2 ← i1 + i4
                 ok (value2, true)
@@ -1692,9 +1744,9 @@ def decode_pkt_len_loop.body
             if c <= 102#u8
             then
               do
-              let i1 ← value * 16#usize
+              let i1 ← value * HEX_RADIX
               let i2 ← c - 97#u8
-              let i3 ← i2 + 10#u8
+              let i3 ← i2 + HEX_LETTER_VALUE
               let i4 ← lift (UScalar.cast .Usize i3)
               let value2 ← i1 + i4
               ok (value2, true)
@@ -1706,7 +1758,7 @@ def decode_pkt_len_loop.body
   else ok (done (value, false))
 
 /-- [transcrypt_v3_core::decode_pkt_len]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-874:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-912:5
     Visibility: public -/
 @[rust_loop]
 def decode_pkt_len_loop
@@ -1719,7 +1771,7 @@ def decode_pkt_len_loop
     (value, ok1, i)
 
 /-- [transcrypt_v3_core::decode_pkt_len]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 860:0-879:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 898:0-917:1
     Visibility: public -/
 def decode_pkt_len
   (header : Array Std.U8 4#usize) :
@@ -1730,7 +1782,7 @@ def decode_pkt_len
   then
     if value != 0#usize
     then
-      if value <= 4#usize
+      if value <= PKT_HEADER_LEN
       then ok (core.result.Result.Err Refusal.Request)
       else
         if value > MAX_PKT_LEN
@@ -1742,13 +1794,8 @@ def decode_pkt_len
       else ok (core.result.Result.Ok value)
   else ok (core.result.Result.Err Refusal.Request)
 
-/-- [transcrypt_v3_core::OID_END]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 895:0-895:34 -/
-@[global_simps, irreducible]
-def OID_END : Array Std.U8 3#usize := Array.make 3#usize [ 32#u8, 48#u8, 9#u8 ]
-
 /-- [transcrypt_v3_core::record_start]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 898:0-904:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 933:0-939:1 -/
 def record_start
   (ends : Slice Std.Usize) (i : Std.Usize) : RustM Std.Usize := do
   if i = 0#usize
@@ -1758,12 +1805,12 @@ def record_start
        i2 + 1#usize
 
 /-- [transcrypt_v3_core::record_ok]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 908:0-913:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 943:0-948:1 -/
 def record_ok (entry : Slice Std.U8) : RustM Bool := do
   let r ← parse_index_entry entry
   match r with
   | core.result.Result.Ok parsed =>
-    let i ← parsed.path_start - 3#usize
+    let i ← parsed.path_start - OID_END_LEN
     let s ←
       core.Slice.Insts.CoreOpsIndexIndex.index
         (core.ops.range.RangeUsize.Insts.CoreSliceIndexSliceIndexSliceSlice
@@ -1772,7 +1819,7 @@ def record_ok (entry : Slice Std.U8) : RustM Bool := do
   | core.result.Result.Err _ => ok false
 
 /-- [transcrypt_v3_core::bytes_lt]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-927:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-962:1
     Visibility: public -/
 @[rust_loop_body]
 def bytes_lt_loop.body
@@ -1796,7 +1843,7 @@ def bytes_lt_loop.body
        ok (done (i1 < i2))
 
 /-- [transcrypt_v3_core::bytes_lt]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-927:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-962:1
     Visibility: public -/
 @[rust_loop]
 def bytes_lt_loop
@@ -1806,14 +1853,14 @@ def bytes_lt_loop
     i
 
 /-- [transcrypt_v3_core::bytes_lt]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 918:0-927:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 953:0-962:1
     Visibility: public -/
 @[reducible]
 def bytes_lt (a : Slice Std.U8) (b : Slice Std.U8) : RustM Bool := do
   bytes_lt_loop a b 0#usize
 
 /-- [transcrypt_v3_core::listing_fields]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1001:0-1013:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1036:0-1049:1
     Visibility: public -/
 def listing_fields
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (i : Std.Usize) :
@@ -1834,7 +1881,7 @@ def listing_fields
       then ok core.option.Option.None
       else
         let i3 ← tab - start
-        if i3 < 10#usize
+        if i3 < ENTRY_FIXED_LEN
         then ok core.option.Option.None
         else
           let s ← lift (Array.to_slice REGULAR_MODE)
@@ -1846,13 +1893,13 @@ def listing_fields
               do
               let s1 ← lift (Array.to_slice EXECUTABLE_MODE)
               matches_at listing start s1
-          let i4 ← tab - 2#usize
-          let i5 ← tab + 1#usize
+          let path_start ← tab + 1#usize
+          let i4 ← path_start - OID_END_LEN
           ok (core.option.Option.Some
-            { start, oid_end := i4, path_start := i5, «end», regular })
+            { start, oid_end := i4, path_start, «end», regular })
 
 /-- [transcrypt_v3_core::listing_ordered]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-956:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-991:1 -/
 @[rust_loop_body]
 def listing_ordered_loop.body
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (unique : Bool)
@@ -1894,7 +1941,7 @@ def listing_ordered_loop.body
   else ok (done true)
 
 /-- [transcrypt_v3_core::listing_ordered]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-956:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-991:1 -/
 @[rust_loop]
 def listing_ordered_loop
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (unique : Bool)
@@ -1906,7 +1953,7 @@ def listing_ordered_loop
     i
 
 /-- [transcrypt_v3_core::listing_ordered]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 932:0-956:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 967:0-991:1 -/
 @[reducible]
 def listing_ordered
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (unique : Bool) :
@@ -1915,7 +1962,7 @@ def listing_ordered
   listing_ordered_loop listing ends unique 1#usize
 
 /-- [transcrypt_v3_core::parse_listing]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-977:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1012:5
     Visibility: public -/
 @[rust_loop_body]
 def parse_listing_loop.body
@@ -1950,7 +1997,7 @@ def parse_listing_loop.body
   else ok (done (ends, false, start))
 
 /-- [transcrypt_v3_core::parse_listing]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-977:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1012:5
     Visibility: public -/
 @[rust_loop]
 def parse_listing_loop
@@ -1964,7 +2011,7 @@ def parse_listing_loop
     (ends, ok1, start, i)
 
 /-- [transcrypt_v3_core::parse_listing]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 964:0-983:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 999:0-1018:1
     Visibility: public -/
 def parse_listing
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (unique : Bool) :
@@ -1982,7 +2029,7 @@ def parse_listing
   else ok (false, ends1)
 
 /-- [transcrypt_v3_core::record_is]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1018:0-1028:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1054:0-1064:1 -/
 def record_is
   (listing : Slice Std.U8) (start : Std.Usize) («end» : Std.Usize)
   (oid : Slice Std.U8) (path : Slice Std.U8) (same_path : Bool) :
@@ -1996,10 +2043,10 @@ def record_is
     then ok false
     else
       let i1 ← «end» - start
-      if i1 < 10#usize
+      if i1 < ENTRY_FIXED_LEN
       then ok false
       else
-        let i2 ← i1 - 10#usize
+        let i2 ← i1 - ENTRY_FIXED_LEN
         let i3 ← core.slice.Slice.len oid
         if i2 < i3
         then ok false
@@ -2014,20 +2061,21 @@ def record_is
             if b1
             then
               let i5 ← «end» - «at»
-              let i6 ← i5 - 3#usize
+              let i6 ← i5 - OID_END_LEN
               let i7 ← core.slice.Slice.len path
               let here ←
                 if i6 = i7
-                then do
-                     let i8 ← «at» + 3#usize
-                     matches_at listing i8 path
+                then
+                  do
+                  let i8 ← «at» + OID_END_LEN
+                  matches_at listing i8 path
                 else ok false
               ok (here = same_path)
             else ok false
           else ok false
 
 /-- [transcrypt_v3_core::path_before]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1031:0-1036:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1067:0-1072:1 -/
 def path_before
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (j : Std.Usize)
   (path : Slice Std.U8) :
@@ -2044,7 +2092,7 @@ def path_before
     bytes_lt s path
 
 /-- [transcrypt_v3_core::path_at]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1039:0-1044:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1075:0-1080:1 -/
 def path_at
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (j : Std.Usize)
   (path : Slice Std.U8) :
@@ -2061,7 +2109,7 @@ def path_at
     bytes_eq s path
 
 /-- [transcrypt_v3_core::find_path]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1051:4-1058:5 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1087:4-1094:5 -/
 @[rust_loop_body]
 def find_path_loop.body
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (path : Slice Std.U8)
@@ -2081,7 +2129,7 @@ def find_path_loop.body
   else ok (done low)
 
 /-- [transcrypt_v3_core::find_path]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1051:4-1058:5 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1087:4-1094:5 -/
 @[rust_loop]
 def find_path_loop
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (path : Slice Std.U8)
@@ -2093,7 +2141,7 @@ def find_path_loop
     (low, high)
 
 /-- [transcrypt_v3_core::find_path]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1048:0-1060:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1084:0-1096:1 -/
 def find_path
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (path : Slice Std.U8) :
   RustM Std.Usize
@@ -2102,7 +2150,7 @@ def find_path
   find_path_loop listing ends path 0#usize high
 
 /-- [transcrypt_v3_core::find_entry]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1074:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1110:1 -/
 @[rust_loop_body]
 def find_entry_loop.body
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (oid : Slice Std.U8)
@@ -2126,7 +2174,7 @@ def find_entry_loop.body
   else ok (done i)
 
 /-- [transcrypt_v3_core::find_entry]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1074:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1110:1 -/
 @[rust_loop]
 def find_entry_loop
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (oid : Slice Std.U8)
@@ -2138,7 +2186,7 @@ def find_entry_loop
     j
 
 /-- [transcrypt_v3_core::find_entry]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1065:0-1074:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1101:0-1110:1 -/
 def find_entry
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (oid : Slice Std.U8)
   (path : Slice Std.U8) :
@@ -2148,7 +2196,7 @@ def find_entry
   find_entry_loop listing ends oid path j
 
 /-- [transcrypt_v3_core::held_entries]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1093:4-1106:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1129:4-1142:5
     Visibility: public -/
 @[rust_loop_body]
 def held_entries_loop.body
@@ -2187,7 +2235,7 @@ def held_entries_loop.body
   else ok (done held)
 
 /-- [transcrypt_v3_core::held_entries]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1093:4-1106:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1129:4-1142:5
     Visibility: public -/
 @[rust_loop]
 def held_entries_loop
@@ -2202,7 +2250,7 @@ def held_entries_loop
     (held, i)
 
 /-- [transcrypt_v3_core::held_entries]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1081:0-1108:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1117:0-1144:1
     Visibility: public -/
 def held_entries
   (index : Slice Std.U8) (index_ends : Slice Std.Usize) (wanted : Slice Bool)
@@ -2223,7 +2271,7 @@ def held_entries
       ok (true, held1)
 
 /-- [transcrypt_v3_core::is_local_change]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1116:0-1118:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1152:0-1154:1
     Visibility: public -/
 def is_local_change
   (in_head : Bool) (incoming_known : Bool) (in_incoming : Bool) (forced : Bool)
@@ -2234,7 +2282,7 @@ def is_local_change
     envelope)))
 
 /-- [transcrypt_v3_core::object_before]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1122:0-1130:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1158:0-1166:1 -/
 def object_before
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (j : Std.Usize)
   (oid : Slice Std.U8) («at» : Std.Usize) :
@@ -2254,7 +2302,7 @@ def object_before
     ok (b || (b1 && (j < «at»)))
 
 /-- [transcrypt_v3_core::object_order_ok]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1154:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1190:1
     Visibility: public -/
 @[rust_loop_body]
 def object_order_ok_loop.body
@@ -2289,7 +2337,7 @@ def object_order_ok_loop.body
   else ok (done true)
 
 /-- [transcrypt_v3_core::object_order_ok]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1154:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1190:1
     Visibility: public -/
 @[rust_loop]
 def object_order_ok_loop
@@ -2302,7 +2350,7 @@ def object_order_ok_loop
     t
 
 /-- [transcrypt_v3_core::object_order_ok]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1136:0-1154:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1172:0-1190:1
     Visibility: public -/
 def object_order_ok
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (order : Slice Std.Usize) :
@@ -2315,7 +2363,7 @@ def object_order_ok
   else object_order_ok_loop listing ends order 0#usize
 
 /-- [transcrypt_v3_core::find_object]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1162:4-1169:5 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1198:4-1205:5 -/
 @[rust_loop_body]
 def find_object_loop.body
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (order : Slice Std.Usize)
@@ -2337,7 +2385,7 @@ def find_object_loop.body
   else ok (done low)
 
 /-- [transcrypt_v3_core::find_object]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1162:4-1169:5 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1198:4-1205:5 -/
 @[rust_loop]
 def find_object_loop
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (order : Slice Std.Usize)
@@ -2351,7 +2399,7 @@ def find_object_loop
     (low, high)
 
 /-- [transcrypt_v3_core::find_object]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1159:0-1171:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1195:0-1207:1 -/
 def find_object
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (order : Slice Std.Usize)
   (oid : Slice Std.U8) («at» : Std.Usize) :
@@ -2361,7 +2409,7 @@ def find_object
   find_object_loop listing ends order oid «at» 0#usize high
 
 /-- [transcrypt_v3_core::names_oid]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1174:0-1179:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1210:0-1215:1 -/
 def names_oid
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (j : Std.Usize)
   (oid : Slice Std.U8) :
@@ -2379,7 +2427,7 @@ def names_oid
     bytes_eq s oid
 
 /-- [transcrypt_v3_core::move_source_at]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1184:0-1199:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1220:0-1235:1 -/
 def move_source_at
   (index : Slice Std.U8) (index_ends : Slice Std.Usize) (head : Slice Std.U8)
   (head_ends : Slice Std.Usize) (oid : Slice Std.U8) (path : Slice Std.U8)
@@ -2391,7 +2439,7 @@ def move_source_at
   let b ← record_is head start i oid path false
   if b
   then
-    let i1 ← start + 10#usize
+    let i1 ← start + ENTRY_FIXED_LEN
     let i2 ← core.slice.Slice.len oid
     let i3 ← i1 + i2
     let source ←
@@ -2404,7 +2452,7 @@ def move_source_at
   else ok false
 
 /-- [transcrypt_v3_core::move_source_from]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1224:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1260:1 -/
 @[rust_loop_body]
 def move_source_from_loop.body
   (index : Slice Std.U8) (index_ends : Slice Std.Usize) (head : Slice Std.U8)
@@ -2430,7 +2478,7 @@ def move_source_from_loop.body
        ok (done j)
 
 /-- [transcrypt_v3_core::move_source_from]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1224:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1260:1 -/
 @[rust_loop]
 def move_source_from_loop
   (index : Slice Std.U8) (index_ends : Slice Std.Usize) (head : Slice Std.U8)
@@ -2444,7 +2492,7 @@ def move_source_from_loop
     t
 
 /-- [transcrypt_v3_core::move_source_from]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1205:0-1224:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1241:0-1260:1 -/
 @[reducible]
 def move_source_from
   (index : Slice Std.U8) (index_ends : Slice Std.Usize) (head : Slice Std.U8)
@@ -2455,7 +2503,7 @@ def move_source_from
   move_source_from_loop index index_ends head head_ends head_order oid path t
 
 /-- [transcrypt_v3_core::next_move_source]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1232:0-1250:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1268:0-1286:1
     Visibility: public -/
 def next_move_source
   (index : Slice Std.U8) (index_ends : Slice Std.Usize) (i : Std.Usize)
@@ -2480,7 +2528,7 @@ def next_move_source
     move_source_from index index_ends head head_ends head_order oid path t
 
 /-- [transcrypt_v3_core::other_path_at]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1254:0-1261:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1290:0-1297:1 -/
 def other_path_at
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (order : Slice Std.Usize)
   (t : Std.Usize) (oid : Slice Std.U8) (path : Slice Std.U8) :
@@ -2500,7 +2548,7 @@ def other_path_at
   else ok false
 
 /-- [transcrypt_v3_core::elsewhere_in]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1266:0-1273:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1302:0-1309:1 -/
 def elsewhere_in
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (order : Slice Std.Usize)
   (oid : Slice Std.U8) (path : Slice Std.U8) :
@@ -2517,7 +2565,7 @@ def elsewhere_in
   else ok false
 
 /-- [transcrypt_v3_core::blob_elsewhere]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1280:0-1302:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1316:0-1338:1
     Visibility: public -/
 def blob_elsewhere
   (index : Slice Std.U8) (index_ends : Slice Std.Usize)
@@ -2546,7 +2594,7 @@ def blob_elsewhere
     ok ((b || b1) || b2)
 
 /-- [transcrypt_v3_core::parse_listing_attrs]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1325:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1361:5
     Visibility: public -/
 @[rust_loop_body]
 def parse_listing_attrs_loop.body
@@ -2579,7 +2627,7 @@ def parse_listing_attrs_loop.body
   else ok (done (flags, false, «at»))
 
 /-- [transcrypt_v3_core::parse_listing_attrs]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1325:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1361:5
     Visibility: public -/
 @[rust_loop]
 def parse_listing_attrs_loop
@@ -2593,7 +2641,7 @@ def parse_listing_attrs_loop
     (flags, ok1, «at», i)
 
 /-- [transcrypt_v3_core::parse_listing_attrs]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1309:0-1327:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1345:0-1363:1
     Visibility: public -/
 def parse_listing_attrs
   (listing : Slice Std.U8) (ends : Slice Std.Usize) (response : Slice Std.U8)
@@ -2611,7 +2659,7 @@ def parse_listing_attrs
   else ok (false, flags1)
 
 /-- [transcrypt_v3_core::first_unselectable]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1345:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1381:5
     Visibility: public -/
 @[rust_loop_body]
 def first_unselectable_loop.body
@@ -2648,7 +2696,7 @@ def first_unselectable_loop.body
     else ok (done i)
 
 /-- [transcrypt_v3_core::first_unselectable]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1345:5
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1381:5
     Visibility: public -/
 @[rust_loop]
 def first_unselectable_loop
@@ -2661,7 +2709,7 @@ def first_unselectable_loop
     (i, bad)
 
 /-- [transcrypt_v3_core::first_unselectable]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1332:0-1347:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1368:0-1383:1
     Visibility: public -/
 @[reducible]
 def first_unselectable
@@ -2671,17 +2719,17 @@ def first_unselectable
   first_unselectable_loop listing ends flags 0#usize false
 
 /-- [transcrypt_v3_core::KEY_LEN]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1354:0-1354:30
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1390:0-1390:30
     Visibility: public -/
 @[global_simps, irreducible] def KEY_LEN : Std.Usize := 64#usize
 
 /-- [transcrypt_v3_core::KEY_FILE_LEN]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1357:0-1357:36
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1393:0-1393:36
     Visibility: public -/
 @[global_simps, irreducible] def KEY_FILE_LEN : Std.Usize := 119#usize
 
 /-- [transcrypt_v3_core::stored_key_state]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1381:0-1392:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1417:0-1428:1
     Visibility: public -/
 def stored_key_state
   (present : Bool) (file : Slice Std.U8) (current : Slice Std.U8)
@@ -2709,14 +2757,26 @@ def stored_key_state
         else ok StoredKey.Stale
   else ok StoredKey.Absent
 
+/-- [transcrypt_v3_core::BLOB_FIELD_LEN]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1431:0-1431:32 -/
+@[global_simps, irreducible] def BLOB_FIELD_LEN : Std.Usize := 6#usize
+
 /-- [transcrypt_v3_core::BLOB_FIELD]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1395:0-1395:39 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1433:0-1433:52 -/
 @[global_simps, irreducible]
 def BLOB_FIELD : Array Std.U8 6#usize :=
   Array.make 6#usize [ 32#u8, 98#u8, 108#u8, 111#u8, 98#u8, 32#u8 ]
 
+/-- [transcrypt_v3_core::MAX_SIZE_DIGITS]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1436:0-1436:34 -/
+@[global_simps, irreducible] def MAX_SIZE_DIGITS : Std.Usize := 19#usize
+
+/-- [transcrypt_v3_core::DECIMAL_RADIX]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1438:0-1438:30 -/
+@[global_simps, irreducible] def DECIMAL_RADIX : Std.U64 := 10#u64
+
 /-- [transcrypt_v3_core::decimal]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1411:5 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1455:5 -/
 @[rust_loop_body]
 def decimal_loop.body
   (bytes : Slice Std.U8) («to» : Std.Usize) (value : Std.U64) (ok1 : Bool)
@@ -2732,7 +2792,7 @@ def decimal_loop.body
       then
         if c <= 57#u8
         then
-          let i1 ← value * 10#u64
+          let i1 ← value * DECIMAL_RADIX
           let i2 ← c - 48#u8
           let i3 ← lift (UScalar.cast .U64 i2)
           let value1 ← i1 + i3
@@ -2744,7 +2804,7 @@ def decimal_loop.body
   else ok (done (value, false))
 
 /-- [transcrypt_v3_core::decimal]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1411:5 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1455:5 -/
 @[rust_loop]
 def decimal_loop
   (bytes : Slice Std.U8) («to» : Std.Usize) (value : Std.U64) (ok1 : Bool)
@@ -2756,7 +2816,7 @@ def decimal_loop
     (value, ok1, i)
 
 /-- [transcrypt_v3_core::decimal]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1399:0-1417:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1443:0-1461:1 -/
 def decimal
   (bytes : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
   RustM (core.option.Option Std.U64)
@@ -2767,7 +2827,7 @@ def decimal
   else ok core.option.Option.None
 
 /-- [transcrypt_v3_core::parse_batch_header]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1424:0-1439:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1468:0-1488:1
     Visibility: public -/
 def parse_batch_header
   (header : Slice Std.U8) (oid : Slice Std.U8) :
@@ -2781,32 +2841,35 @@ def parse_batch_header
     let b1 ← matches_at header i s
     if b1
     then
-      let digits ← i + 6#usize
+      let digits ← i + BLOB_FIELD_LEN
       let n ← core.slice.Slice.len header
-      let i1 ← n - digits
-      if i1 < 2#usize
+      if n = digits
       then ok core.option.Option.None
       else
-        if i1 > 20#usize
+        let i1 ← n - 1#usize
+        let i2 ← Slice.index_usize header i1
+        if i2 != 10#u8
         then ok core.option.Option.None
         else
-          let i2 ← n - 1#usize
-          let i3 ← Slice.index_usize header i2
-          if i3 != 10#u8
+          let count ← i1 - digits
+          if count = 0#usize
           then ok core.option.Option.None
           else
-            let i4 ← Slice.index_usize header digits
-            if i4 = 48#u8
-            then
-              if i1 != 2#usize
-              then ok core.option.Option.None
-              else decimal header digits i2
-            else decimal header digits i2
+            if count > MAX_SIZE_DIGITS
+            then ok core.option.Option.None
+            else
+              let i3 ← Slice.index_usize header digits
+              if i3 = 48#u8
+              then
+                if count != 1#usize
+                then ok core.option.Option.None
+                else decimal header digits i1
+              else decimal header digits i1
     else ok core.option.Option.None
   else ok core.option.Option.None
 
 /-- [transcrypt_v3_core::blob_read]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1454:0-1462:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1503:0-1511:1
     Visibility: public -/
 def blob_read (size : Std.U64) (skip_large : Bool) : RustM BlobRead := do
   let i ← MAX_RECORD

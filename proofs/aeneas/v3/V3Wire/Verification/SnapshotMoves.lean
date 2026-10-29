@@ -307,7 +307,7 @@ def MovedFrom (es : List Entry) (oid path : List Nat) (h : Entry) : Prop :=
 theorem move_source_at_spec {index head : Slice U8} {index_ends head_ends : Slice Usize}
     {es hs : List Entry} (hI : ListingOf index index_ends es) (hIo : PathOrdered es)
     (hH : ListingOf head head_ends hs)
-    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) (j : Usize) (hj : j.val < hs.length) :
+    (oid path : Slice U8) (h9 : tab ∉ sliceBytes oid) (j : Usize) (hj : j.val < hs.length) :
     move_source_at index index_ends head head_ends oid path j ⦃ b =>
       b = true ↔ MovedFrom es (sliceBytes oid) (sliceBytes path) hs[j.val] ⦄ := by
   obtain ⟨hdrop, hend, hok⟩ := hH.record hj
@@ -333,23 +333,24 @@ theorem move_source_at_spec {index head : Slice U8} {index_ends head_ends : Slic
     have hDoid : (sliceBytes head).drop (st.val + oidStart) = hs[j.val].oid ++ [32, 48, 9] ++ hs[j.val].path ++
         (0 :: listingBytes (hs.drop (j.val + 1))) := by
       rw [← List.drop_drop, hst, hdrop, entryRecord_drop_oidStart _ hm]
-    have hD10 : (sliceBytes head).drop (st.val + 10 + hs[j.val].oid.length) =
+    have hD10 : (sliceBytes head).drop (st.val + entryFixedLen + hs[j.val].oid.length) =
         hs[j.val].path ++ (0 :: listingBytes (hs.drop (j.val + 1))) := by
-      rw [show st.val + 10 + hs[j.val].oid.length = (st.val + oidStart) + (hs[j.val].oid.length + 3) by unfold_v3_bytes; omega,
-        ← List.drop_drop, hDoid]
+      rw [show st.val + entryFixedLen + hs[j.val].oid.length = (st.val + oidStart) + (hs[j.val].oid.length + 3) by
+        unfold_v3_bytes; omega, ← List.drop_drop, hDoid]
       simp
-    have hsrc : (sliceBytes head).extract (st.val + 10 + oid.length) x.val = hs[j.val].path := by
+    have hsrc : (sliceBytes head).extract (st.val + entryFixedLen + oid.length) x.val = hs[j.val].path := by
       rw [List.extract_eq_take_drop, hxv, hrl, hol, hD10, show st.val + (hs[j.val].oid.length +
-        hs[j.val].path.length + 10) - (st.val + 10 + hs[j.val].oid.length) = hs[j.val].path.length by omega]
+        hs[j.val].path.length + entryFixedLen) - (st.val + entryFixedLen + hs[j.val].oid.length) =
+        hs[j.val].path.length by omega]
       simp
     have hLl := sliceBytes_length head
     have hmax := head.property
     step as ⟨ i1, hi1 ⟩
     step as ⟨ i3, hi3 ⟩
-    have hi3v : i3.val = st.val + 10 + oid.length := by rw [hi3, hi1]; simp
-    step with index_range_spec head i3 x (by omega) (by omega) as ⟨ source, source_post ⟩
+    have hi3v : i3.val = st.val + entryFixedLen + oid.length := by rw [hi3, hi1, ENTRY_FIXED_LEN_val]; simp
+    step with index_range_spec head i3 x (by unfold_v3_bytes; omega) (by omega) as ⟨ source, source_post ⟩
     rw [hi3v, hsrc] at source_post
-    have h9' : 9 ∉ sliceBytes oid := h9
+    have h9' : tab ∉ sliceBytes oid := h9
     step with find_entry_spec hI hIo oid source h9' as ⟨ r, hr1, hr2, hr3 ⟩
     simp only [decide_eq_true_eq]
     rw [source_post] at hr2 hr3
@@ -400,7 +401,7 @@ theorem ObjectOrder.slot_of {es : List Entry} {order : Slice Usize} (ho : Object
 theorem move_source_from_spec {index head : Slice U8} {index_ends head_ends : Slice Usize}
     {es hs : List Entry} (hI : ListingOf index index_ends es) (hIo : PathOrdered es)
     (hH : ListingOf head head_ends hs) {order : Slice Usize} (ho : ObjectOrder hs order)
-    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) (from_ : Nat) (hf : from_ ≤ hs.length) (t0 : Usize)
+    (oid path : Slice U8) (h9 : tab ∉ sliceBytes oid) (from_ : Nat) (hf : from_ ≤ hs.length) (t0 : Usize)
     (ht0 : t0.val ≤ order.val.length)
     (hbefore : ∀ t (h : t < order.val.length), t < t0.val →
       KeyLt (keyOf hs order.val[t].val) (sliceBytes oid, from_))
@@ -535,7 +536,7 @@ theorem next_move_source_spec {index head : Slice U8} {index_ends head_ends : Sl
     step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
     rw [hi1, hoid] at hso
     rw [hpath] at hsp
-    have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+    have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
     step with find_object_spec hH ho so from_ as ⟨ t, ht1, ht2, ht3 ⟩
     apply WP.spec_mono (move_source_from_spec hI hIo hH ho so sp h9 from_.val hf t ht1 ht2 ht3)
     intro r hr
@@ -552,7 +553,7 @@ theorem next_move_source_spec {index head : Slice U8} {index_ends head_ends : Sl
 
 theorem other_path_at_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
     (hL : ListingOf listing ends es) {order : Slice Usize} (ho : ObjectOrder es order) (t : Usize)
-    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) :
+    (oid path : Slice U8) (h9 : tab ∉ sliceBytes oid) :
     other_path_at listing ends order t oid path ⦃ b => b = true ↔
       ∃ h : t.val < order.val.length, ∃ e, es[(order.val[t.val]'h).val]? = some e ∧
         e.oid = sliceBytes oid ∧ e.path ≠ sliceBytes path ⦄ := by
@@ -594,7 +595,7 @@ theorem other_path_at_spec {listing : Slice U8} {ends : Slice Usize} {es : List 
     in the object order, at most one of them at `path`. -/
 theorem elsewhere_in_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
     (hL : ListingOf listing ends es) (hS : Sorted es) {order : Slice Usize} (ho : ObjectOrder es order)
-    (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) :
+    (oid path : Slice U8) (h9 : tab ∉ sliceBytes oid) :
     elsewhere_in listing ends order oid path ⦃ b => b = true ↔
       ∃ e ∈ es, e.oid = sliceBytes oid ∧ e.path ≠ sliceBytes path ⦄ := by
   unfold elsewhere_in
@@ -700,7 +701,7 @@ theorem blob_elsewhere_spec {index head parent : Slice U8} {index_ends head_ends
     step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
     rw [hi1, hoid] at hso
     rw [hpath] at hsp
-    have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+    have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
     step with elsewhere_in_spec hI hIs hIo so sp h9 as ⟨ b, hb ⟩
     step with elsewhere_in_spec hH hHs hHo so sp h9 as ⟨ b1, hb1 ⟩
     step with elsewhere_in_spec hP hPs hPo so sp h9 as ⟨ b2, hb2 ⟩

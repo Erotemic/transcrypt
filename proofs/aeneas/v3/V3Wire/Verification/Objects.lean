@@ -29,7 +29,7 @@ def storedKeyResult : Transcrypt.V3Policy.StoredKey → transcrypt_v3_core.Store
   | .unlocked => .Unlocked
 
 /-- **Stored key.** `stored_key_state` decides exactly `storedKeySpec`: a
-    key is `Unlocked` only for a 119-byte file whose first 55 bytes are the
+    key is `Unlocked` only for a `keyFileLen`-byte file whose first `configLen` bytes are the
     current configuration, and only if the key authenticates it
     (`storedKeySpec_unlocked`). -/
 theorem stored_key_state_spec (present : Bool) (file current : Slice U8) (authentic : Bool) :
@@ -136,7 +136,7 @@ def DecInv (bytes : Slice U8) (from_ to_ : Nat) (value : Nat) (ok : Bool) (i : N
   (ok = false → ∃ c ∈ (sliceBytes bytes).extract from_ to_, ¬ DecimalDigit c)
 
 theorem decimal_spec (bytes : Slice U8) (from_ to_ : Usize) (hft : from_.val ≤ to_.val)
-    (hto : to_.val ≤ bytes.length) (h19 : to_.val - from_.val ≤ 19) :
+    (hto : to_.val ≤ bytes.length) (h19 : to_.val - from_.val ≤ maxSizeDigits) :
     decimal bytes from_ to_ ⦃ r => match r with
       | core.option.Option.Some v => (∀ c ∈ (sliceBytes bytes).extract from_.val to_.val, DecimalDigit c) ∧
           v.val = decimalValue ((sliceBytes bytes).extract from_.val to_.val)
@@ -145,6 +145,7 @@ theorem decimal_spec (bytes : Slice U8) (from_ to_ : Usize) (hft : from_.val ≤
   have hto' : to_.val ≤ bytes.val.length := hto
   have hbl' : (sliceBytes bytes).length = bytes.val.length := hbl
   unfold decimal decimal_loop
+  unfold_v3_bytes
   step with loop.spec_decr_nat
     (fun s : U64 × Bool × Usize => 2 * (to_.val - s.2.2.val) + (if s.2.1 then 1 else 0))
     (fun s : U64 × Bool × Usize => DecInv bytes from_.val to_.val s.1.val s.2.1 s.2.2.val)
@@ -159,13 +160,13 @@ theorem decimal_spec (bytes : Slice U8) (from_ to_ : Usize) (hft : from_.val ≤
       split
       · rename_i hit
         have hi : i.val < to_.val := by scalar_tac
-        have hvlt : value.val < 10 ^ 18 := by
+        have hvlt : value.val < decimalRadix ^ (maxSizeDigits - 1) := by
           have := decimalValue_lt _ hd
           rw [← hv] at this
           have hl : ((sliceBytes bytes).extract from_.val i.val).length = i.val - from_.val := by
             rw [List.extract_eq_take_drop, List.length_take, List.length_drop, hbl']; omega
           rw [hl] at this
-          exact lt_of_lt_of_le this (Nat.pow_le_pow_right (by norm_num) (by omega))
+          exact lt_of_lt_of_le this (Nat.pow_le_pow_right (by norm_num) (by unfold_v3_bytes; omega))
         step as ⟨ hil, c, hc ⟩
         have hcv : (sliceBytes bytes)[i.val]! = c.val := by
           rw [sliceBytes_getElem! bytes i.val hil, hc]
@@ -178,8 +179,9 @@ theorem decimal_spec (bytes : Slice U8) (from_ to_ : Usize) (hft : from_.val ≤
           split
           · rename_i hc57
             have hdig : DecimalDigit c.val := ⟨by scalar_tac, by scalar_tac⟩
-            have h10 : value.val * 10 ≤ U64.max := by
-              have : (10 : Nat) ^ 18 * 10 ≤ U64.max := by simp [U64.max, U64.numBits]
+            have h10 : value.val * decimalRadix ≤ U64.max := by
+              have : decimalRadix ^ (maxSizeDigits - 1) * decimalRadix ≤ U64.max := by
+                simp [U64.max, U64.numBits, decimalRadix]
               nlinarith
             step*
             refine ⟨?_, by simp; omega⟩
@@ -189,7 +191,7 @@ theorem decimal_spec (bytes : Slice U8) (from_ to_ : Usize) (hft : from_.val ≤
               have : i3.val = c.val - 48 := by
                 have : c.val ≤ 255 := by scalar_tac
                 rw [i3_post, UScalar.cast_val_eq, i2_post1]; simp [UScalarTy.numBits]; omega
-              rw [this, i1_post]
+              rw [this, i1_post, DECIMAL_RADIX_val]
             · rw [show i4.val = i.val + 1 by scalar_tac, hext]
               intro x hx
               rcases List.mem_append.1 hx with hx | hx
@@ -222,14 +224,17 @@ theorem decimal_spec (bytes : Slice U8) (from_ to_ : Usize) (hft : from_.val ≤
 theorem blobField_length : blobField.length = 6 := by decide
 
 /-- `BatchHeader` as the sequence of checks `parse_batch_header` makes: the
-    object id, ` blob `, one to 19 digits after it (so 2 to 20 bytes with the
-    LF), a final LF, no leading zero, digits only, and the value. -/
+    object id, ` blob `, a final LF after it, one to `maxSizeDigits` digits
+    between them, no leading zero, digits only, and the value. -/
 theorem batchHeader_iff (H O : List Nat) (n : Nat) :
-    BatchHeader H O n ↔ O <+: H ∧ blobField <+: H.drop O.length ∧ O.length + 6 + 2 ≤ H.length ∧
-      H.length - (O.length + 6) ≤ 20 ∧ H[H.length - 1]! = 10 ∧
-      (H[O.length + 6]! = 48 → H.length - (O.length + 6) = 2) ∧
-      (∀ c ∈ H.extract (O.length + 6) (H.length - 1), DecimalDigit c) ∧
-      n = decimalValue (H.extract (O.length + 6) (H.length - 1)) := by
+    BatchHeader H O n ↔ O <+: H ∧ blobField <+: H.drop O.length ∧
+      O.length + blobField.length < H.length ∧ H[H.length - 1]! = lf ∧
+      0 < H.length - 1 - (O.length + blobField.length) ∧
+      H.length - 1 - (O.length + blobField.length) ≤ maxSizeDigits ∧
+      (H[O.length + blobField.length]! = digitZero → H.length - 1 - (O.length + blobField.length) = 1) ∧
+      (∀ c ∈ H.extract (O.length + blobField.length) (H.length - 1), DecimalDigit c) ∧
+      n = decimalValue (H.extract (O.length + blobField.length) (H.length - 1)) := by
+  rw [blobField_length]
   constructor
   · rintro ⟨ds, rfl, ⟨hne, hdig, hz⟩, h19, rfl⟩
     unfold_v3_bytes
@@ -243,7 +248,8 @@ theorem batchHeader_iff (H O : List Nat) (n : Nat) :
         show O.length + 6 + ds.length + 1 - 1 - (O.length + 6) = ds.length by omega]
       simp
     rw [hext]
-    refine ⟨by simp [List.append_assoc], ?_, by rw [hlen]; omega, by rw [hlen]; omega, ?_, ?_, hdig, rfl⟩
+    refine ⟨by simp [List.append_assoc], ?_, by rw [hlen]; omega, ?_, by rw [hlen]; omega,
+      by rw [hlen]; omega, ?_, hdig, rfl⟩
     · rw [show O ++ blobField ++ ds ++ [10] = O ++ (blobField ++ (ds ++ [10])) by simp, List.drop_left]
       exact List.prefix_append _ _
     · rw [hlen, show O.length + 6 + ds.length + 1 - 1 = (O ++ blobField ++ ds).length + 0 by
@@ -264,7 +270,12 @@ theorem batchHeader_iff (H O : List Nat) (n : Nat) :
       have := hz this
       subst this
       simp
-  · rintro ⟨hO, hB, hl, h20, hlf, hz, hdig, rfl⟩
+  · rintro ⟨hO, hB, hl', hlf, hc0, h19', hz', hdig, rfl⟩
+    unfold_v3_bytes
+    have hl : O.length + 6 + 2 ≤ H.length := by omega
+    have h20 : H.length - (O.length + 6) ≤ 20 := by omega
+    have hz : H[O.length + 6]! = 48 → H.length - (O.length + 6) = 2 := fun h => by have := hz' h; omega
+    clear hl' hc0 h19' hz'
     refine ⟨H.extract (O.length + 6) (H.length - 1), ?_, ⟨?_, hdig, ?_⟩, ?_, rfl⟩
     · obtain ⟨t, rfl⟩ := hO
       simp only [List.drop_left] at hB
@@ -315,7 +326,7 @@ theorem batchHeader_iff (H O : List Nat) (n : Nat) :
 
 /-- **Object reply headers.** `parse_batch_header` returns a size exactly
     when the header is Git's reply `<oid> SP blob SP <size> LF` for the
-    requested object id with a canonical decimal size of at most 19 digits
+    requested object id with a canonical decimal size of at most `maxSizeDigits` digits
     (`BatchHeader`), and that size (unique: `batchHeader_unique`). -/
 theorem parse_batch_header_spec (header oid : Slice U8) :
     parse_batch_header header oid ⦃ r => match r with
@@ -340,69 +351,75 @@ theorem parse_batch_header_spec (header oid : Slice U8) :
       have hBl := hB.length_le
       simp only [List.length_drop, blobField_length] at hBl
       have hO' : sliceBytes oid <+: sliceBytes header := by simpa using hO
+      have hBF : BLOB_FIELD_LEN.val = 6 := by rw [BLOB_FIELD_LEN_val, blobField_length]
       step*
       all_goals
-        have hd : digits.val = (sliceBytes oid).length + 6 := by rw [digits_post, hlenv, hOl]
+        have hd : digits.val = (sliceBytes oid).length + 6 := by rw [digits_post, hlenv, hOl, hBF]
         have hn : header.len.val = (sliceBytes header).length := by simp [hHl]
-      -- One to 19 digits.
+        have hBi := fun n => batchHeader_iff (sliceBytes header) (sliceBytes oid) n
+        simp only [blobField_length] at hBi
+      -- The LF after the digits.
       · intro n hB
-        have := ((batchHeader_iff _ _ _).mp hB).2.2.1
+        have := ((hBi n).mp hB).2.2.1
         scalar_tac
-      · intro n hB
-        have := ((batchHeader_iff _ _ _).mp hB).2.2.2.1
-        scalar_tac
-      -- The final LF.
       · rename_i hx10
         intro n hB
-        have h10 := ((batchHeader_iff _ _ _).mp hB).2.2.2.2.1
+        have h10 := ((hBi n).mp hB).2.2.2.1
         simp_bne at hx10
         apply hx10
-        rw [i3_post2]
+        rw [i2_post2]
         apply UScalar.eq_of_val_eq
-        rw [← sliceBytes_getElem! header i2.val (by scalar_tac), show i2.val = (sliceBytes header).length - 1 by
+        rw [← sliceBytes_getElem! header i1.val (by scalar_tac), show i1.val = (sliceBytes header).length - 1 by
           scalar_tac, h10]; rfl
+      -- One to `maxSizeDigits` digits.
+      · intro n hB
+        have := ((hBi n).mp hB).2.2.2.2.1
+        scalar_tac
+      · intro n hB
+        have := ((hBi n).mp hB).2.2.2.2.2.1
+        scalar_tac
       -- A leading zero.
-      · rename_i hx48 hne2
+      · rename_i hx48 hne1
         intro n hB
-        have hz := ((batchHeader_iff _ _ _).mp hB).2.2.2.2.2.1
-        have h48 : (sliceBytes header)[(sliceBytes oid).length + 6]! = 48 := by
-          rw [← hd, sliceBytes_getElem! header digits.val (by scalar_tac), ← i4_post2, hx48]; rfl
+        have hz := ((hBi n).mp hB).2.2.2.2.2.2.1
+        have h48 : (sliceBytes header)[(sliceBytes oid).length + 6]! = digitZero := by
+          rw [← hd, sliceBytes_getElem! header digits.val (by scalar_tac), ← i3_post2, hx48]; rfl
         have := hz h48
-        simp_bne at hne2
-        apply hne2
+        simp_bne at hne1
+        apply hne1
         apply UScalar.eq_of_val_eq
-        simp only [i1_post1, hn, hd]
+        simp only [count_post1, i1_post1, hn, hd]
         simp; omega
       -- The digits: `decimal` decides the rest.
       all_goals
-        have hd2 : digits.val ≤ i2.val := by scalar_tac
-        have hi2 : i2.val ≤ header.length := by scalar_tac
-        have h19 : i2.val - digits.val ≤ 19 := by scalar_tac
-        have hi2v : i2.val = (sliceBytes header).length - 1 := by scalar_tac
-        have hlf : (sliceBytes header)[(sliceBytes header).length - 1]! = 10 := by
+        have hd2 : digits.val ≤ i1.val := by scalar_tac
+        have hi1 : i1.val ≤ header.length := by scalar_tac
+        have h19 : i1.val - digits.val ≤ maxSizeDigits := by scalar_tac
+        have hi1v : i1.val = (sliceBytes header).length - 1 := by scalar_tac
+        have hlf : (sliceBytes header)[(sliceBytes header).length - 1]! = lf := by
           have := ‹¬(_ != 10#u8) = true›
           simp_bne at this
-          rw [← hi2v, sliceBytes_getElem! header i2.val (by scalar_tac), ← i3_post2, this]; rfl
-        apply WP.spec_mono (decimal_spec header digits i2 hd2 hi2 h19)
+          rw [← hi1v, sliceBytes_getElem! header i1.val (by scalar_tac), ← i2_post2, this]; rfl
+        apply WP.spec_mono (decimal_spec header digits i1 hd2 hi1 h19)
         rintro (_ | v) hr
         · intro n hB
           obtain ⟨c, hc, hnd⟩ := hr
-          rw [hd, hi2v] at hc
-          exact hnd (((batchHeader_iff _ _ _).mp hB).2.2.2.2.2.2.1 c hc)
+          rw [hd, hi1v] at hc
+          exact hnd (((hBi n).mp hB).2.2.2.2.2.2.2.1 c hc)
         · obtain ⟨hdig, hv⟩ := hr
-          rw [hd, hi2v] at hdig hv
+          rw [hd, hi1v] at hdig hv
           dsimp only
-          rw [batchHeader_iff]
-          refine ⟨hO', hB, by scalar_tac, by scalar_tac, hlf, fun h48 => ?_, hdig, hv⟩
+          rw [batchHeader_iff, blobField_length]
+          refine ⟨hO', hB, by scalar_tac, hlf, by scalar_tac, by scalar_tac, fun h48 => ?_, hdig, hv⟩
           first
-          | (have := ‹¬(i1 != 2#usize) = true›
+          | (have := ‹¬(count != 1#usize) = true›
              simp_bne at this
              have := congrArg UScalar.val this
-             simp only [i1_post1, hn, hd] at this
+             simp only [count_post1, i1_post1, hn, hd] at this
              simpa using this)
           | (exfalso
              apply ‹¬_ = 48#u8›
-             rw [i4_post2]
+             rw [i3_post2]
              apply UScalar.eq_of_val_eq
              rw [← sliceBytes_getElem! header digits.val (by scalar_tac), hd, h48]; rfl)
     · rename_i hb1t
@@ -412,7 +429,7 @@ theorem parse_batch_header_spec (header oid : Slice U8) :
       apply hb1t
       rw [hb1]
       refine ⟨?_, by rw [hlenv, ← hOl]; exact hB.2.1⟩
-      have := hB.2.2.1
+      have := hB.2.2.1; rw [blobField_length] at this
       rw [hlenv]; omega
   · rename_i hbt
     simp only [WP.spec_ok]

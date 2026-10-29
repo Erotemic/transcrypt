@@ -344,7 +344,7 @@ pub fn is_canonical_protected_path(path: &[u8]) -> bool {
         if i == n || path[i] == b'/' {
             ok = component_ok(path, start, i);
             start = i + 1;
-        } else if path[i] == 0 {
+        } else if path[i] == b'\0' {
             ok = false;
         }
         i += 1;
@@ -569,14 +569,14 @@ pub fn parse_attr_record(response: &[u8], start: usize, path: &[u8]) -> Result<A
     }
     let name = start + path.len();
     if !matches_at(response, start, path)
-        || response[name] != 0
+        || response[name] != b'\0'
         || !matches_at(response, name + 1, &FILTER_ATTR)
-        || response[name + 1 + FILTER_ATTR.len()] != 0
+        || response[name + 1 + FILTER_ATTR.len()] != b'\0'
     {
         return Err(Refusal::Attribute);
     }
     let value = name + FILTER_ATTR.len() + 2;
-    let end = find_byte(response, value, 0);
+    let end = find_byte(response, value, b'\0');
     if end == n {
         return Err(Refusal::Attribute);
     }
@@ -596,7 +596,7 @@ pub fn parse_attr_response(request: &[u8], response: &[u8], flags: &mut [bool]) 
     let mut i = 0;
     let mut k = 0;
     while ok && k < request.len() {
-        if request[k] == 0 {
+        if request[k] == b'\0' {
             if i < flags.len() {
                 match parse_attr_record(response, at, &request[start..k]) {
                     Ok(record) => {
@@ -616,10 +616,17 @@ pub fn parse_attr_response(request: &[u8], response: &[u8], flags: &mut [bool]) 
     ok && start == request.len() && i == flags.len() && at == response.len()
 }
 
+/// Length of a big-endian `u32` (`encode_be_u32`).
+pub const BE_U32_LEN: usize = 4;
+/// Where a request header's config starts: after the one-byte opcode.
+pub const FRAME_CONFIG_START: usize = 1;
+/// Where a request header's path length starts: after the opcode and the
+/// config (56 = 1 + 55).
+pub const FRAME_LEN_START: usize = 56;
 /// Length of a credential-agent request header: opcode, the 55-byte public
 /// config and the big-endian path length. The path and a big-endian body
 /// length follow (local IPC only, not part of the committed wire format).
-pub const FRAME_HEADER_LEN: usize = 1 + CONFIG_LEN + 4;
+pub const FRAME_HEADER_LEN: usize = FRAME_LEN_START + BE_U32_LEN;
 
 /// Encode an agent request header.
 pub fn encode_frame_header(opcode: u8, config: &[u8; CONFIG_LEN], path_len: u32) -> [u8; FRAME_HEADER_LEN] {
@@ -627,13 +634,13 @@ pub fn encode_frame_header(opcode: u8, config: &[u8; CONFIG_LEN], path_len: u32)
     out[0] = opcode;
     let mut i = 0;
     while i < CONFIG_LEN {
-        out[1 + i] = config[i];
+        out[FRAME_CONFIG_START + i] = config[i];
         i += 1;
     }
     let len = encode_be_u32(path_len);
     let mut k = 0;
-    while k < 4 {
-        out[1 + CONFIG_LEN + k] = len[k];
+    while k < BE_U32_LEN {
+        out[FRAME_LEN_START + k] = len[k];
         k += 1;
     }
     out
@@ -653,29 +660,43 @@ pub fn decode_frame_header(input: &[u8; FRAME_HEADER_LEN]) -> FrameHeader {
     let mut config = [0u8; CONFIG_LEN];
     let mut i = 0;
     while i < CONFIG_LEN {
-        config[i] = input[1 + i];
+        config[i] = input[FRAME_CONFIG_START + i];
         i += 1;
     }
-    let len = [input[1 + CONFIG_LEN], input[2 + CONFIG_LEN], input[3 + CONFIG_LEN], input[4 + CONFIG_LEN]];
+    let len = [
+        input[FRAME_LEN_START],
+        input[FRAME_LEN_START + 1],
+        input[FRAME_LEN_START + 2],
+        input[FRAME_LEN_START + 3],
+    ];
     FrameHeader { opcode: input[0], config, path_len: decode_be_u32(&len) }
 }
 
 /// Big-endian `u32` encoding used for agent frame lengths.
-pub fn encode_be_u32(x: u32) -> [u8; 4] {
+pub fn encode_be_u32(x: u32) -> [u8; BE_U32_LEN] {
     [(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8]
 }
 
 /// Inverse of `encode_be_u32`.
-pub fn decode_be_u32(b: &[u8; 4]) -> u32 {
+pub fn decode_be_u32(b: &[u8; BE_U32_LEN]) -> u32 {
     ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
 }
 
+/// Length of a Git file mode in an index or tree record.
+pub const MODE_LEN: usize = 6;
 /// Git modes of a regular file: non-executable and executable.
-pub const REGULAR_MODE: [u8; 6] = *b"100644";
-pub const EXECUTABLE_MODE: [u8; 6] = *b"100755";
+pub const REGULAR_MODE: [u8; MODE_LEN] = *b"100644";
+pub const EXECUTABLE_MODE: [u8; MODE_LEN] = *b"100755";
 /// Where an index or tree record's object id starts: after the mode
-/// (`REGULAR_MODE.len()` bytes) and one SP.
+/// (`MODE_LEN` bytes) and one SP.
 pub const OID_START: usize = 7;
+/// Length of `OID_END`.
+pub const OID_END_LEN: usize = 3;
+/// The bytes between an object id and the path in an index record.
+const OID_END: [u8; OID_END_LEN] = *b" 0\t";
+/// The bytes of an index or tree record besides its object id and path:
+/// the mode, SP, and `OID_END` (10 = 7 + 3).
+pub const ENTRY_FIXED_LEN: usize = 10;
 
 /// One parsed `git ls-files --stage -z` record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -691,21 +712,32 @@ pub struct IndexEntry {
 /// The path, which becomes AES-SIV associated data, is everything after the
 /// *first* TAB (Git paths may themselves contain TABs; modes and object ids
 /// cannot). Unmerged entries (stage 1-3) and malformed records are refused.
-/// The object id `entry[OID_START..path_start - 3]` is not inspected here: the
+/// The object id `entry[OID_START..path_start - OID_END_LEN]` is not inspected here: the
 /// adapter checks it with `is_object_id` before passing it to Git.
 pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
     let n = entry.len();
     let t = find_byte(entry, 0, b'\t');
-    // `t == n` when there is no TAB; the path after it must be nonempty.
-    if t < 10 || n - t < 2 {
+    // `t == n` when there is no TAB.
+    if t >= n {
         return Err(Refusal::Index);
     }
-    if entry[6] != b' ' || entry[t - 2] != b' ' || entry[t - 1] != b'0' {
+    let path_start = t + 1;
+    // The object id is the `path_start - ENTRY_FIXED_LEN` bytes between the
+    // mode's SP and `OID_END`; it and the path must be nonempty.
+    if path_start <= ENTRY_FIXED_LEN
+        || path_start == n
+        || entry[MODE_LEN] != b' '
+        || !matches_at(entry, path_start - OID_END_LEN, &OID_END)
+    {
         return Err(Refusal::Index);
     }
     let regular = matches_at(entry, 0, &REGULAR_MODE) || matches_at(entry, 0, &EXECUTABLE_MODE);
-    Ok(IndexEntry { regular, path_start: t + 1 })
+    Ok(IndexEntry { regular, path_start })
 }
+
+/// Lengths of a SHA-1 and a SHA-256 Git object name in hexadecimal digits.
+pub const SHA1_OID_LEN: usize = 40;
+pub const SHA256_OID_LEN: usize = 64;
 
 /// A Git object name as printed by `ls-files --stage` or `ls-tree`: 40
 /// (SHA-1) or 64 (SHA-256) lowercase hexadecimal digits. The adapter passes
@@ -714,7 +746,7 @@ pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
 pub fn is_object_id(oid: &[u8]) -> bool {
     let n = oid.len();
     // Non-short-circuit `|`: the translation of a `||` value does not typecheck.
-    let mut ok = (n == 40) | (n == 64);
+    let mut ok = (n == SHA1_OID_LEN) | (n == SHA256_OID_LEN);
     let mut i = 0;
     while ok && i < n {
         let c = oid[i];
@@ -849,30 +881,36 @@ pub fn entry_check(keyed: bool, incremental: bool, settled: bool) -> EntryCheck 
     }
 }
 
+/// Length of a pkt-line header: the packet length in hexadecimal digits.
+pub const PKT_HEADER_LEN: usize = 4;
 /// Largest pkt-line Git sends or accepts: 4 length digits plus 65516 data bytes.
 pub const MAX_PKT_LEN: usize = 65520;
+/// The radix of a pkt-line length.
+const HEX_RADIX: usize = 16;
+/// The value of the hexadecimal digit `a`.
+const HEX_LETTER_VALUE: u8 = 10;
 
-/// Decode the 4-byte header of a pkt-line in Git's long-running filter
+/// Decode the `PKT_HEADER_LEN`-byte header of a pkt-line in Git's long-running filter
 /// protocol: lowercase hexadecimal total length (header included). `Ok(0)`
 /// is a flush packet; otherwise the length is between 5 and `MAX_PKT_LEN`.
 /// Lengths 1 to 4 (special or empty packets, which the filter protocol never
 /// uses), uppercase or other digits, and oversized lengths are refused.
-pub fn decode_pkt_len(header: &[u8; 4]) -> Result<usize, Refusal> {
+pub fn decode_pkt_len(header: &[u8; PKT_HEADER_LEN]) -> Result<usize, Refusal> {
     let mut value = 0;
     let mut ok = true;
     let mut i = 0;
-    while ok && i < 4 {
+    while ok && i < PKT_HEADER_LEN {
         let c = header[i];
         if c >= b'0' && c <= b'9' {
-            value = value * 16 + (c - b'0') as usize;
+            value = value * HEX_RADIX + (c - b'0') as usize;
         } else if c >= b'a' && c <= b'f' {
-            value = value * 16 + (c - b'a' + 10) as usize;
+            value = value * HEX_RADIX + (c - b'a' + HEX_LETTER_VALUE) as usize;
         } else {
             ok = false;
         }
         i += 1;
     }
-    if !ok || (value != 0 && value <= 4) || value > MAX_PKT_LEN {
+    if !ok || (value != 0 && value <= PKT_HEADER_LEN) || value > MAX_PKT_LEN {
         return Err(Refusal::Request);
     }
     Ok(value)
@@ -891,9 +929,6 @@ pub fn decode_pkt_len(header: &[u8; 4]) -> Result<usize, Refusal> {
 // order* of the listing (`object_order_ok`).
 // ---------------------------------------------------------------------------
 
-/// The bytes between an object id and the path in an index record.
-const OID_END: [u8; 3] = *b" 0\t";
-
 /// Where record `i` starts: after the NUL that ends record `i - 1`.
 fn record_start(ends: &[usize], i: usize) -> usize {
     if i == 0 {
@@ -904,10 +939,10 @@ fn record_start(ends: &[usize], i: usize) -> usize {
 }
 
 /// Whether `entry` is a stage-0 index record (`parse_index_entry`) whose
-/// object id `entry[OID_START..path_start - 3]` passes `is_object_id`.
+/// object id `entry[OID_START..path_start - OID_END_LEN]` passes `is_object_id`.
 fn record_ok(entry: &[u8]) -> bool {
     match parse_index_entry(entry) {
-        Ok(parsed) => is_object_id(&entry[OID_START..parsed.path_start - 3]),
+        Ok(parsed) => is_object_id(&entry[OID_START..parsed.path_start - OID_END_LEN]),
         Err(_) => false,
     }
 }
@@ -966,7 +1001,7 @@ pub fn parse_listing(listing: &[u8], ends: &mut [usize], unique: bool) -> bool {
     let mut start = 0;
     let mut i = 0;
     while ok && i < ends.len() {
-        let end = find_byte(listing, start, 0);
+        let end = find_byte(listing, start, b'\0');
         if end < listing.len() && record_ok(&listing[start..end]) {
             ends[i] = end;
             start = end + 1;
@@ -1005,25 +1040,26 @@ pub fn listing_fields(listing: &[u8], ends: &[usize], i: usize) -> Option<Fields
     let start = record_start(ends, i);
     let end = ends[i];
     let tab = find_byte(listing, start, b'\t');
-    if end > listing.len() || tab >= end || tab - start < 10 {
+    if end > listing.len() || tab >= end || tab - start < ENTRY_FIXED_LEN {
         return None;
     }
     let regular = matches_at(listing, start, &REGULAR_MODE) || matches_at(listing, start, &EXECUTABLE_MODE);
-    Some(Fields { start, oid_end: tab - 2, path_start: tab + 1, end, regular })
+    let path_start = tab + 1;
+    Some(Fields { start, oid_end: path_start - OID_END_LEN, path_start, end, regular })
 }
 
 /// Whether the record `listing[start..end]` names object `oid`, and is at
 /// `path` (`same_path`) or at another path (`!same_path`). `oid` contains no
 /// TAB, so a record names it exactly when `oid SP 0 TAB` follows its mode.
 fn record_is(listing: &[u8], start: usize, end: usize, oid: &[u8], path: &[u8], same_path: bool) -> bool {
-    if start > end || end > listing.len() || end - start < 10 || end - start - 10 < oid.len() {
+    if start > end || end > listing.len() || end - start < ENTRY_FIXED_LEN || end - start - ENTRY_FIXED_LEN < oid.len() {
         return false;
     }
     let at = start + OID_START + oid.len();
     if !matches_at(listing, start + OID_START, oid) || !matches_at(listing, at, &OID_END) {
         return false;
     }
-    let here = end - at - 3 == path.len() && matches_at(listing, at + 3, path);
+    let here = end - at - OID_END_LEN == path.len() && matches_at(listing, at + OID_END_LEN, path);
     here == same_path
 }
 
@@ -1194,7 +1230,7 @@ fn move_source_at(
     if !record_is(head, start, head_ends[j], oid, path, false) {
         return false;
     }
-    let source = &head[start + 10 + oid.len()..head_ends[j]];
+    let source = &head[start + ENTRY_FIXED_LEN + oid.len()..head_ends[j]];
     find_entry(index, index_ends, oid, source) == index_ends.len()
 }
 
@@ -1391,11 +1427,19 @@ pub fn stored_key_state(present: bool, file: &[u8], current: &[u8], authentic: b
     StoredKey::Unlocked
 }
 
+/// Length of `BLOB_FIELD`.
+const BLOB_FIELD_LEN: usize = 6;
 /// The type field of a `cat-file --batch` reply for a blob.
-const BLOB_FIELD: [u8; 6] = *b" blob ";
+const BLOB_FIELD: [u8; BLOB_FIELD_LEN] = *b" blob ";
+/// The most decimal digits of a blob size in a reply: every number with
+/// that many digits fits in a `u64`.
+const MAX_SIZE_DIGITS: usize = 19;
+/// The radix of a blob size.
+const DECIMAL_RADIX: u64 = 10;
 
-/// The value of the decimal digits `bytes[from..to]` (at most 19, so it fits
-/// in 64 bits), or `None` if one of them is not a digit.
+/// The value of the decimal digits `bytes[from..to]` (at most
+/// `MAX_SIZE_DIGITS`, so it fits in 64 bits), or `None` if one of them is
+/// not a digit.
 fn decimal(bytes: &[u8], from: usize, to: usize) -> Option<u64> {
     let mut value: u64 = 0;
     let mut ok = true;
@@ -1403,7 +1447,7 @@ fn decimal(bytes: &[u8], from: usize, to: usize) -> Option<u64> {
     while ok && i < to {
         let c = bytes[i];
         if c >= b'0' && c <= b'9' {
-            value = value * 10 + (c - b'0') as u64;
+            value = value * DECIMAL_RADIX + (c - b'0') as u64;
             i += 1;
         } else {
             ok = false;
@@ -1418,24 +1462,29 @@ fn decimal(bytes: &[u8], from: usize, to: usize) -> Option<u64> {
 
 /// The size in Git's `cat-file --batch` reply header for object `oid`, which
 /// must be exactly `<oid> SP blob SP <size> LF` with `<size>` in canonical
-/// decimal (digits only, no leading zero) of at most 19 digits. A missing
+/// decimal (digits only, no leading zero) of at most `MAX_SIZE_DIGITS` digits. A missing
 /// object, another type, another object id or any other header is refused,
 /// so bytes are never attributed to the wrong object.
 pub fn parse_batch_header(header: &[u8], oid: &[u8]) -> Option<u64> {
     if !matches_at(header, 0, oid) || !matches_at(header, oid.len(), &BLOB_FIELD) {
         return None;
     }
-    // Both matched, so `oid.len() + 6 <= header.len()`.
-    let digits = oid.len() + 6;
+    // Both matched, so `digits <= header.len()`.
+    let digits = oid.len() + BLOB_FIELD_LEN;
     let n = header.len();
-    // One to 19 digits, then LF.
-    if n - digits < 2 || n - digits > 20 || header[n - 1] != b'\n' {
+    // The digits, then LF.
+    if n == digits || header[n - 1] != b'\n' {
         return None;
     }
-    if header[digits] == b'0' && n - digits != 2 {
+    let lf = n - 1;
+    let count = lf - digits;
+    if count == 0 || count > MAX_SIZE_DIGITS {
         return None;
     }
-    decimal(header, digits, n - 1)
+    if header[digits] == b'0' && count != 1 {
+        return None;
+    }
+    decimal(header, digits, lf)
 }
 
 /// How to read the content of a blob of `size` bytes.
@@ -1473,6 +1522,11 @@ mod tests {
         assert_eq!(CONFIG_PREFIX_LEN, CONFIG_MAGIC.len() + SALT_LEN);
         assert_eq!(CONFIG_LEN, CONFIG_PREFIX_LEN + TAG_LEN);
         assert_eq!(FILE_HEADER_LEN, FILE_MAGIC.len() + ID_LEN);
+        assert_eq!(FRAME_CONFIG_START, size_of::<u8>());
+        assert_eq!(FRAME_LEN_START, FRAME_CONFIG_START + CONFIG_LEN);
+        assert_eq!(BE_U32_LEN, size_of::<u32>());
+        assert_eq!(BLOB_FIELD_LEN, BLOB_FIELD.len());
+        assert_eq!(MAX_SIZE_DIGITS, u64::MAX.ilog10() as usize);
     }
 
     #[test]
@@ -1835,6 +1889,9 @@ mod tests {
     fn object_ids_start_after_the_mode() {
         assert_eq!(OID_START, REGULAR_MODE.len() + 1);
         assert_eq!(OID_START, EXECUTABLE_MODE.len() + 1);
+        assert_eq!(OID_START, MODE_LEN + 1);
+        assert_eq!(OID_END_LEN, OID_END.len());
+        assert_eq!(ENTRY_FIXED_LEN, OID_START + OID_END_LEN);
     }
 
     #[test]

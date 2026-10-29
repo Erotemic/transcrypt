@@ -16,26 +16,27 @@ namespace Transcrypt.V3Verification
 
 open transcrypt_v3_core
 
-open Transcrypt.V3Policy (hexValue)
+open Transcrypt.V3Policy (hexValue hexRadix pktHeaderLen)
 
 /-- Big-endian value of the first `k` digits of `l`, or `none` as soon as one
     of them is not a lowercase hexadecimal digit. -/
 def pktAcc (l : List Nat) : Nat → Option Nat
   | 0 => some 0
-  | k + 1 => (pktAcc l k).bind fun v => (hexValue l[k]!).map fun d => v * 16 + d
+  | k + 1 => (pktAcc l k).bind fun v => (hexValue l[k]!).map fun d => v * hexRadix + d
 
-theorem pkt_hexValue_lt {c d : Nat} (h : hexValue c = some d) : d < 16 := by
+theorem pkt_hexValue_lt {c d : Nat} (h : hexValue c = some d) : d < hexRadix := by
   unfold hexValue at h
   unfold_v3_bytes
   split_ifs at h <;> simp at h <;> omega
 
-theorem pktAcc_lt (l : List Nat) : ∀ k v, pktAcc l k = some v → v < 16 ^ k
+theorem pktAcc_lt (l : List Nat) : ∀ k v, pktAcc l k = some v → v < hexRadix ^ k
   | 0, v, h => by simp [pktAcc] at h; subst h; simp
   | k + 1, v, h => by
     simp only [pktAcc, Option.bind_eq_some_iff, Option.map_eq_some_iff] at h
     obtain ⟨w, hw, d, hd, rfl⟩ := h
     have h1 := pktAcc_lt l k w hw
     have h2 := pkt_hexValue_lt hd
+    unfold_v3_bytes
     rw [Nat.pow_succ]
     have : w * 16 + d < (w + 1) * 16 := by omega
     have : (w + 1) * 16 ≤ 16 ^ k * 16 := Nat.mul_le_mul_right _ h1
@@ -70,17 +71,17 @@ theorem pkt_hex_none {c : Nat} (h1 : ¬(digitZero ≤ c ∧ c ≤ digitNine)) (h
 /-- Invariant of the digit scan: `i` stays within the header and `ok` with
     `value` record exactly the decoded value of the first `i` digits. -/
 def PktInv (l : List Nat) (s : Usize × Bool × Usize) : Prop :=
-  s.2.2.val ≤ 4 ∧ pktAcc l s.2.2.val = if s.2.1 then some s.1.val else none
+  s.2.2.val ≤ pktHeaderLen ∧ pktAcc l s.2.2.val = if s.2.1 then some s.1.val else none
 
 /-- One digit step of `decode_pkt_len`. The program is restated from the
     body of `decode_pkt_len_loop` in `V3Wire/Extraction/Funs.lean` and must
     match it: `pkt_body_spec` applies this lemma with `step with`, which
     fails if the extraction changes. -/
-theorem pkt_digit_spec (c : U8) (value : Usize) (hv : value.val < 16 ^ 3) :
+theorem pkt_digit_spec (c : U8) (value : Usize) (hv : value.val < hexRadix ^ (pktHeaderLen - 1)) :
     (if c >= 48#u8 then
         if c <= 57#u8 then
           do
-          let i1 ← value * 16#usize
+          let i1 ← value * HEX_RADIX
           let i2 ← c - 48#u8
           let i3 ← lift (UScalar.cast .Usize i2)
           let value2 ← i1 + i3
@@ -89,9 +90,9 @@ theorem pkt_digit_spec (c : U8) (value : Usize) (hv : value.val < 16 ^ 3) :
           if c >= 97#u8 then
             if c <= 102#u8 then
               do
-              let i1 ← value * 16#usize
+              let i1 ← value * HEX_RADIX
               let i2 ← c - 97#u8
-              let i3 ← i2 + 10#u8
+              let i3 ← i2 + HEX_LETTER_VALUE
               let i4 ← lift (UScalar.cast .Usize i3)
               let value2 ← i1 + i4
               ok (value2, true)
@@ -101,18 +102,19 @@ theorem pkt_digit_spec (c : U8) (value : Usize) (hv : value.val < 16 ^ 3) :
         if c >= 97#u8 then
           if c <= 102#u8 then
             do
-            let i1 ← value * 16#usize
+            let i1 ← value * HEX_RADIX
             let i2 ← c - 97#u8
-            let i3 ← i2 + 10#u8
+            let i3 ← i2 + HEX_LETTER_VALUE
             let i4 ← lift (UScalar.cast .Usize i3)
             let value2 ← i1 + i4
             ok (value2, true)
           else ok (value, false)
         else ok (value, false) : RustM (Usize × Bool)) ⦃ p =>
-      (hexValue c.val).map (fun d => value.val * 16 + d) =
+      (hexValue c.val).map (fun d => value.val * hexRadix + d) =
         if p.2 then some p.1.val else none ⦄ := by
   have := usize_max_ge
   have hc := c.hBounds
+  unfold_v3_bytes
   split_ifs with h1 h2 h3 h4 h3 h4 <;> simp only [ge_iff_le, UScalar.le_equiv] at *
   · step*
     all_goals
@@ -137,33 +139,34 @@ theorem pkt_digit_spec (c : U8) (value : Usize) (hv : value.val < 16 ^ 3) :
   · simp only [WP.spec_ok, Bool.false_eq_true, ↓reduceIte, Option.map_eq_none_iff]
     exact pkt_hex_none (by unfold_v3_bytes; scalar_tac) (by unfold_v3_bytes; scalar_tac)
 
-/-- The loop body preserves `PktInv` and, on exit, has decoded all four digits. -/
+/-- The loop body preserves `PktInv` and, on exit, has decoded all `pktHeaderLen` digits. -/
 theorem pkt_body_spec (header : Std.Array U8 4#usize) (value : Usize) (ok1 : Bool) (i : Usize)
     (hinv : PktInv (wireBytes header) (value, ok1, i)) :
     decode_pkt_len_loop.body header value ok1 i ⦃ cf => match cf with
-      | .cont s' => PktInv (wireBytes header) s' ∧ 4 - s'.2.2.val < 4 - i.val
-      | .done r => pktAcc (wireBytes header) 4 = if r.2 then some r.1.val else none ⦄ := by
+      | .cont s' => PktInv (wireBytes header) s' ∧ pktHeaderLen - s'.2.2.val < pktHeaderLen - i.val
+      | .done r => pktAcc (wireBytes header) pktHeaderLen = if r.2 then some r.1.val else none ⦄ := by
   obtain ⟨hi, hacc⟩ := hinv
   simp only at hi hacc
   unfold decode_pkt_len_loop.body
   cases ok1
   · simp only [Bool.false_eq_true, ↓reduceIte, WP.spec_ok] at hacc ⊢
-    exact pktAcc_none_mono _ _ hacc 4 hi
+    exact pktAcc_none_mono _ _ hacc pktHeaderLen hi
   · simp only [↓reduceIte] at hacc ⊢
     have := usize_max_ge
     have hlen : header.length = 4 := by simp
     split
     · rename_i hlt
-      have hlt' : i.val < 4 := by simpa [UScalar.lt_equiv] using hlt
-      have hv : value.val < 16 ^ 3 := by
+      have hlt' : i.val < pktHeaderLen := by simpa [UScalar.lt_equiv] using hlt
+      have hv : value.val < hexRadix ^ (pktHeaderLen - 1) := by
         have := pktAcc_lt _ _ _ hacc
-        have : 16 ^ i.val ≤ 16 ^ 3 := Nat.pow_le_pow_right (by omega) (by omega)
+        have : hexRadix ^ i.val ≤ hexRadix ^ (pktHeaderLen - 1) :=
+          Nat.pow_le_pow_right (by unfold_v3_bytes; omega) (by unfold_v3_bytes; omega)
         omega
       step as ⟨ _, c, c_post ⟩
       step with pkt_digit_spec c value hv as ⟨ v1, o2, hp ⟩
       step*
       unfold PktInv
-      refine ⟨⟨show i1.val ≤ 4 by omega, ?_⟩, show 4 - i1.val < 4 - i.val by omega⟩
+      refine ⟨⟨show i1.val ≤ pktHeaderLen by omega, ?_⟩, show pktHeaderLen - i1.val < pktHeaderLen - i.val by omega⟩
       rw [i1_post, pktAcc, hacc, ← hp]
       have hb : (wireBytes header)[i.val]! = c.val := by
         rw [c_post]
@@ -171,24 +174,24 @@ theorem pkt_body_spec (header : Std.Array U8 4#usize) (value : Usize) (ok1 : Boo
         simp [wireBytes]
       simp [hb]
     · rename_i hge
-      have : i.val = 4 := by simp [UScalar.lt_equiv] at hge; omega
+      have : i.val = pktHeaderLen := by simp [UScalar.lt_equiv] at hge; omega
       simp only [WP.spec_ok, ↓reduceIte]
       rw [this] at hacc; exact hacc
 
 theorem pkt_loop_spec (header : Std.Array U8 4#usize) :
     decode_pkt_len_loop header 0#usize true 0#usize ⦃ r =>
-      pktAcc (wireBytes header) 4 = if r.2 then some r.1.val else none ⦄ := by
+      pktAcc (wireBytes header) pktHeaderLen = if r.2 then some r.1.val else none ⦄ := by
   unfold decode_pkt_len_loop
-  apply loop.spec_decr_nat (fun s => 4 - s.2.2.val) (PktInv (wireBytes header))
+  apply loop.spec_decr_nat (fun s => pktHeaderLen - s.2.2.val) (PktInv (wireBytes header))
   · rintro ⟨v, o, k⟩ hinv
     apply WP.spec_mono (pkt_body_spec header v o k hinv)
     rintro (⟨_, _, _⟩ | _) <;> exact id
   · simp [PktInv, pktAcc]
 
-/-- The spec's `PktLen` is exactly the four-digit decoded value. -/
+/-- The spec's `PktLen` is exactly the `pktHeaderLen`-digit decoded value. -/
 theorem pktLen_iff (header : Std.Array U8 4#usize) (n : Nat) :
-    Transcrypt.V3Policy.PktLen (wireBytes header) n ↔ pktAcc (wireBytes header) 4 = some n := by
-  have hlen : (wireBytes header).length = 4 := by simp [wireBytes]
+    Transcrypt.V3Policy.PktLen (wireBytes header) n ↔ pktAcc (wireBytes header) pktHeaderLen = some n := by
+  have hlen : (wireBytes header).length = pktHeaderLen := by simp [wireBytes]
   generalize wireBytes header = l at hlen ⊢
   match l, hlen with
   | [a, b, c, d], _ =>
@@ -208,8 +211,6 @@ theorem decode_pkt_len_spec (header : Std.Array U8 4#usize) :
           ∀ n, ¬ Transcrypt.V3Policy.PktLenAccepted (wireBytes header) n ⦄ := by
   unfold decode_pkt_len Transcrypt.V3Policy.PktLenAccepted
   step with pkt_loop_spec header as ⟨ value, ok1, hr ⟩
-  have hmax : MAX_PKT_LEN.val = 65520 := MAX_PKT_LEN_val
-  unfold Transcrypt.V3Policy.maxPktLen
   unfold_v3_bytes
   cases ok1
   · simp only [Bool.false_eq_true, ↓reduceIte] at hr ⊢
@@ -224,7 +225,8 @@ theorem decode_pkt_len_spec (header : Std.Array U8 4#usize) :
     clear hr hu
     split_ifs with h1 h2 h3 h3 <;>
       simp only [WP.spec_ok, true_and, not_and] <;>
-      simp only [bne_iff_ne, ne_eq, UScalar.le_equiv, gt_iff_lt, UScalar.lt_equiv, hmax] at * <;>
+      simp only [bne_iff_ne, ne_eq, UScalar.le_equiv, gt_iff_lt, UScalar.lt_equiv, MAX_PKT_LEN_val,
+        PKT_HEADER_LEN_val, Transcrypt.V3Policy.maxPktLen, Transcrypt.V3Policy.pktHeaderLen] at * <;>
       first
       | (rintro n rfl; scalar_tac)
       | scalar_tac

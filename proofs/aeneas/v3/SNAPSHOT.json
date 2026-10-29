@@ -3,10 +3,10 @@
   "generated": {
     "V3Wire/Assumptions/FunsExternal.lean": "64053f683eedf8dadb8268c2c143996dd8e86d3eb6af74cc95d7f2ea152c24fd",
     "V3Wire/Extraction.lean": "0b3238ef0d9482c14de3debc5334af60a9628ddd1ae37839f5faec14eb62e21d",
-    "V3Wire/Extraction/Funs.lean": "e870022114dcee59c798e503443fa8cf1639a5718824f1a9f0bef152f9967c5e",
+    "V3Wire/Extraction/Funs.lean": "0516105f1968b9e7f5a6af240cc44d06c29e9fb27fd2c367fb53b2d3efccf95f",
     "V3Wire/Extraction/FunsExternal.lean": "8b2b1665885a66ad131c1f4614b4cc1256896849a83db3f136fb40583599a202",
     "V3Wire/Extraction/FunsExternal_Template.lean": "1e1c62cbc9c8d0f35aa25d8a4002280804dd2ae3c1e54d79aae4a1143aa1031d",
-    "V3Wire/Extraction/Types.lean": "3e70b28c12ae9e6f07b1be86b768934bc501c19ffd97eee645d18b7009dd4b23",
+    "V3Wire/Extraction/Types.lean": "cfc74bdb2e7df99cd661d0c945e4059d37f7e586c1470262579d4c93e3326494",
     "lake-manifest.json": "e2d94b27225ba3ed9a4156d96d49d4d59a08f44d659b576f3765084f9859718d",
     "lakefile.toml": "e32a498814261b1e1cce0e907583152ca8ac853103297a7f4a6b4e8a27d53a8c",
     "lean-toolchain": "e0a7032ab1976a37a3e1e823816b4f490d462c1e864b21e1999c33cdac76e263"
@@ -22,6 +22,6 @@
   "sources": {
     "rust/crates/transcrypt-v3-core/Cargo.toml": "6f10bc05329cd4b7df5087568563aa3a488a3608058e655232eb0708bc22f09a",
     "rust/crates/transcrypt-v3-core/hax.toml": "2d0fa8af371d5995130f88ea703a43ffe4be3de7907be8860ce551d711978cc4",
-    "rust/crates/transcrypt-v3-core/src/lib.rs": "8ca989b42c996f7fdaf7753ee508c6553d425131d6610886edee7cb4cc3ad9b7"
+    "rust/crates/transcrypt-v3-core/src/lib.rs": "99b7522b739764bec91f1a3990de79ce694aacf01668449be0fad14360b580dd"
   }
 }

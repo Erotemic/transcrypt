@@ -177,12 +177,21 @@ stable, but reordering loops inside a proved function renames them.
   becomes `ok (done xs.len)`; finish with `simp only [WP.spec_ok]`, not
   `step`. Dot notation on a `def` over `List.Pairwise` (e.g.
   `hO.lt_of_le` for `PathOrdered`) fails; call `PathOrdered.lt_of_le hO`.
-- A named `usize` constant (`OID_START`) translates to an irreducible
-  `def`, so `step` posts mention `OID_START.val`: rewrite it with
-  `OID_START_val` (`= oidStart`), which `scalar_tac` also uses (with
-  `oidStart` and `modeLen` as `scalar_tac_simps`) to discharge bounds. State
-  theorems with the spec's name; `unfold_v3_bytes` before `omega` where the
-  number matters (relating it to the record's `10` fixed bytes).
+- No magic numbers in the core: every offset, length and radix is a named
+  constant (`MODE_LEN`, `OID_START`, `OID_END_LEN`, `ENTRY_FIXED_LEN`,
+  `SHA1_OID_LEN`, `BE_U32_LEN`, `FRAME_LEN_START`, `PKT_HEADER_LEN`,
+  `HEX_RADIX`, `MAX_SIZE_DIGITS`, ...), written as a literal (a computed
+  constant becomes an overflow-checked `RustM` value) with a unit test
+  checking how it is derived. Each translates to an irreducible `def`, so
+  `step` posts mention `X.val`: `X_val` in `Refinement.lean` rewrites it to
+  the spec's name (`OID_START_val : OID_START.val = oidStart`), and
+  `scalar_tac` uses both (`scalar_tac_simps`) to discharge bounds. State
+  theorems with the spec's names (`entryFixedLen`, `fileMinLen`, `tab`, ...);
+  `unfold_v3_bytes` (at the start of a proof, or inside a `by` argument)
+  turns them into numbers for `omega`, which treats a name as an unknown.
+  Beware `autoImplicit`: an unopened name such as `configLen` in a statement
+  silently becomes a variable; qualify it (`Transcrypt.V3Wire.configLen`) or
+  `open` it. `[MOD` is a token (`Nat.ModEq`): write `simp [ MODE_LEN_val]`.
 
 ## Adapter invariants
 

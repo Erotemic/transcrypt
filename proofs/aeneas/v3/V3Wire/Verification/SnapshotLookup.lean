@@ -139,7 +139,7 @@ theorem find_path_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entr
 /-- **Path lookup.** In a listing in path order, `find_entry` finds a record
     that names `oid` at `path` exactly when there is one. -/
 theorem find_entry_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
-    (hL : ListingOf listing ends es) (hO : PathOrdered es) (oid path : Slice U8) (h9 : 9 ∉ sliceBytes oid) :
+    (hL : ListingOf listing ends es) (hO : PathOrdered es) (oid path : Slice U8) (h9 : tab ∉ sliceBytes oid) :
     find_entry listing ends oid path ⦃ r => r.val ≤ es.length ∧
       (r.val < es.length → ∃ e, es[r.val]? = some e ∧ e.oid = sliceBytes oid ∧ e.path = sliceBytes path) ∧
       (r.val = es.length → ¬ Holds es (sliceBytes oid) (sliceBytes path)) ⦄ := by
@@ -283,7 +283,7 @@ theorem held_entries_spec {index other : Slice U8} {index_ends other_ends : Slic
           step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
           rw [hi2, hoid] at hso
           rw [hpath] at hsp
-          have h9 : 9 ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+          have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
           step with find_entry_spec hO hOrd so sp h9 as ⟨ j, hj1, hj2, hj3 ⟩
           step as ⟨ s, hil', hs ⟩
           step*

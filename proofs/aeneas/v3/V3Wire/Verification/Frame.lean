@@ -10,6 +10,7 @@ open CoreModels Aeneas
 open Aeneas.Std hiding namespace core alloc
 open RustM ControlFlow
 open Transcrypt.V3Policy
+open Transcrypt.V3Wire (configLen)
 
 namespace Transcrypt.V3Verification
 
@@ -76,36 +77,38 @@ theorem decode_be_u32_spec (b : Std.Array U8 4#usize) :
   rw [this]; rfl
 
 theorem encode_frame_header_loop0_spec (base out : Std.Array U8 60#usize)
-    (config : Std.Array U8 55#usize) (i : Usize) (hi : i.val ≤ 55)
-    (h : Copied out.val base.val config.val 1 0 i.val) :
-    encode_frame_header_loop0 config out i ⦃ r => Copied r.val base.val config.val 1 0 55 ⦄ := by
+    (config : Std.Array U8 55#usize) (i : Usize) (hi : i.val ≤ configLen)
+    (h : Copied out.val base.val config.val frameConfigStart 0 i.val) :
+    encode_frame_header_loop0 config out i ⦃ r =>
+      Copied r.val base.val config.val frameConfigStart 0 configLen ⦄ := by
   unfold encode_frame_header_loop0
-  apply copy_loop (val := fun o : Std.Array U8 60#usize => o.val) (bound := 55) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Std.Array U8 60#usize => o.val) (bound := configLen) _ _ _ _ _ _ _ _ hi h
   intro o j hj hc
   unfold encode_frame_header_loop0.body
-  have hsrc : config.length = 55 := by simp
+  have hsrc : config.length = configLen := by simp; rfl
   have hC := CONFIG_LEN_val
+  unfold_v3_bytes
   step*
   refine ⟨i3_post, by omega, ?_⟩
   rw [a_post, i3_post]
-  apply Copied.array_step hc (by rw [i2_post])
+  apply Copied.array_step hc (by rw [i2_post, FRAME_CONFIG_START_val])
   · simp_all [getElem!_pos]
   · simp; omega
 
 theorem encode_frame_header_loop1_spec (base out : Std.Array U8 60#usize)
-    (len : Std.Array U8 4#usize) (k : Usize) (hk : k.val ≤ 4)
-    (h : Copied out.val base.val len.val 56 0 k.val) :
-    encode_frame_header_loop1 out len k ⦃ r => Copied r.val base.val len.val 56 0 4 ⦄ := by
+    (len : Std.Array U8 4#usize) (k : Usize) (hk : k.val ≤ be32Len)
+    (h : Copied out.val base.val len.val frameLenStart 0 k.val) :
+    encode_frame_header_loop1 out len k ⦃ r => Copied r.val base.val len.val frameLenStart 0 be32Len ⦄ := by
   unfold encode_frame_header_loop1
-  apply copy_loop (val := fun o : Std.Array U8 60#usize => o.val) (bound := 4) _ _ _ _ _ _ _ _ hk h
+  apply copy_loop (val := fun o : Std.Array U8 60#usize => o.val) (bound := be32Len) _ _ _ _ _ _ _ _ hk h
   intro o j hj hc
   unfold encode_frame_header_loop1.body
-  have hsrc : len.length = 4 := by simp
-  have hC := CONFIG_LEN_val
+  have hsrc : len.length = be32Len := by simp
+  unfold_v3_bytes
   step*
   refine ⟨k1_post, by omega, ?_⟩
   rw [a_post, k1_post]
-  apply Copied.array_step hc (by rw [i2_post, i1_post, hC])
+  apply Copied.array_step hc (by rw [i1_post, FRAME_LEN_START_val])
   · simp_all [getElem!_pos]
   · simp; omega
 
@@ -119,6 +122,7 @@ theorem encode_frame_header_spec (opcode : U8) (config : Std.Array U8 55#usize) 
   step with encode_frame_header_loop0_spec a a config 0#usize (by simp) (Copied.zero _ _ _ _) as ⟨ o1, h1 ⟩
   step with encode_be_u32_spec as ⟨ len, hlen ⟩
   step with encode_frame_header_loop1_spec o1 o1 len 0#usize (by simp) (Copied.zero _ _ _ _) as ⟨ o2, h2 ⟩
+  unfold_v3_bytes
   have hval : o2.val = [opcode] ++ config.val ++ len.val := by
     apply list_eq_of_getElem! (by simp)
     intro k hk
@@ -142,15 +146,17 @@ theorem encode_frame_header_spec (opcode : U8) (config : Std.Array U8 55#usize) 
   rfl
 
 theorem decode_frame_header_loop_spec (input : Std.Array U8 60#usize) (base cfg : Std.Array U8 55#usize)
-    (i : Usize) (hi : i.val ≤ 55) (h : Copied cfg.val base.val input.val 0 1 i.val) :
-    decode_frame_header_loop input cfg i ⦃ r => Copied r.val base.val input.val 0 1 55 ⦄ := by
+    (i : Usize) (hi : i.val ≤ configLen) (h : Copied cfg.val base.val input.val 0 frameConfigStart i.val) :
+    decode_frame_header_loop input cfg i ⦃ r =>
+      Copied r.val base.val input.val 0 frameConfigStart configLen ⦄ := by
   unfold decode_frame_header_loop
-  apply copy_loop (val := fun o : Std.Array U8 55#usize => o.val) (bound := 55) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Std.Array U8 55#usize => o.val) (bound := configLen) _ _ _ _ _ _ _ _ hi h
   intro o j hj hc
   unfold decode_frame_header_loop.body
-  have hsrc : input.length = 60 := by simp
-  have hol : o.length = 55 := by simp
+  have hsrc : input.length = frameHeaderLen := by simp; rfl
+  have hol : o.length = configLen := by simp; rfl
   have hC := CONFIG_LEN_val
+  unfold_v3_bytes
   step*
   have hj55 : j.val < 55 := by
     have := ‹j < CONFIG_LEN›; simp only [UScalar.lt_equiv, hC] at this; exact this
@@ -158,27 +164,28 @@ theorem decode_frame_header_loop_spec (input : Std.Array U8 60#usize) (base cfg 
   rw [a_post, i3_post]
   apply Copied.array_step hc (by simp)
   · rw [i2_post2, getElem!_pos input.val (1 + j.val) (by simp; omega)]
-    simp only [i1_post]
+    simp only [i1_post, FRAME_CONFIG_START_val]
   · simp; omega
 
-/-- The production decoder reads the opcode, the 55 config bytes and the
+/-- The production decoder reads the opcode, the `configLen` config bytes and the
     big-endian path length exactly as laid out by `frameHeader`. -/
 @[step]
 theorem decode_frame_header_spec (input : Std.Array U8 60#usize) :
     decode_frame_header input ⦃ r =>
       r.opcode.val :: wireBytes r.config ++ be32 r.path_len.val = wireBytes input ⦄ := by
   unfold decode_frame_header
-  have hsrc : input.length = 60 := by simp
-  have hC := CONFIG_LEN_val
+  have hsrc : input.length = frameHeaderLen := by simp; rfl
+  have hS := FRAME_LEN_START_val
   step with decode_frame_header_loop_spec input _ _ 0#usize (by simp) (Copied.zero _ _ _ _) as ⟨ cfg, hcfg ⟩
   step*
-  subst i1_post2 i3_post2 i5_post2 i7_post2 i8_post2
-  rw [i9_post]
-  rw [hC] at i_post i2_post i4_post i6_post
+  subst i_post2 i2_post2 i4_post2 i6_post2 i7_post2
+  rw [i8_post]
+  rw [hS] at i1_post i3_post i5_post
+  unfold_v3_bytes
   have hcl : cfg.val.length = 55 := by simp
   have hil : input.val.length = 60 := by simp
   have hval : input.val = input.val[0] :: cfg.val ++
-      [input.val[i.val], input.val[i2.val], input.val[i4.val], input.val[i6.val]] := by
+      [input.val[FRAME_LEN_START.val], input.val[i1.val], input.val[i3.val], input.val[i5.val]] := by
     apply list_eq_of_getElem! (by simp)
     intro k hk
     have hk60 : k < 60 := by simpa using hk
@@ -192,7 +199,7 @@ theorem decode_frame_header_spec (input : Std.Array U8 60#usize) :
         List.getElem!_append_right _ _ _ (by omega), hcl]
       have : k - 1 - 55 < 4 := by omega
       rcases (show k = 56 ∨ k = 57 ∨ k = 58 ∨ k = 59 by omega) with rfl | rfl | rfl | rfl <;>
-        simp [i_post, i2_post, i4_post, i6_post, getElem!_pos, hil]
+        simp [hS, i1_post, i3_post, i5_post, getElem!_pos, hil]
   conv => rhs; rw [wireBytes, hval]
   simp [wireBytes, Std.Array.make]
 

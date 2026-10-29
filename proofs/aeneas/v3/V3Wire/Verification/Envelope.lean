@@ -89,7 +89,8 @@ theorem env_oid_loop_spec (oid : Slice U8) (n : Usize) (hn : n.val = oid.length)
 
 theorem env_objectId_iff (l : List Nat) :
     Transcrypt.V3Policy.ObjectId l ↔
-      (l.length = 40 ∨ l.length = 64) ∧ EnvHexUpTo l l.length := by
+      (l.length = Transcrypt.V3Policy.sha1OidLen ∨ l.length = Transcrypt.V3Policy.sha256OidLen) ∧
+        EnvHexUpTo l l.length := by
   unfold Transcrypt.V3Policy.ObjectId EnvHexUpTo
   refine and_congr Iff.rfl ⟨fun h k hk => ?_, fun h c hc => ?_⟩
   · rw [getElem!_pos l k hk]; exact h _ (List.getElem_mem hk)
@@ -104,8 +105,9 @@ theorem is_object_id_spec (oid : Slice U8) :
   unfold is_object_id
   simp_len
   rw [env_objectId_iff, sliceBytes_length]
-  have key := env_oid_loop_spec oid oid.len (by simp) (oid.length = 40 ∨ oid.length = 64)
-  -- The length test `(n == 40) | (n == 64)` computes the admissible-length flag.
+  have key := env_oid_loop_spec oid oid.len (by simp)
+    (oid.length = Transcrypt.V3Policy.sha1OidLen ∨ oid.length = Transcrypt.V3Policy.sha256OidLen)
+  -- The length test `(n == SHA1_OID_LEN) | (n == SHA256_OID_LEN)` computes the admissible-length flag.
   apply key
   simp [UScalar.eq_equiv]
 

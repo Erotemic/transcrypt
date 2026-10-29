@@ -68,6 +68,17 @@ abbrev pktHeaderLen : Nat := 4
 abbrev modeLen : Nat := 6
 /-- Where an index or tree record's object id starts: after the mode and a SP. -/
 abbrev oidStart : Nat := modeLen + 1
+/-- The bytes `SP 0 TAB` between a record's object id and its path. -/
+abbrev oidEndLen : Nat := 3
+/-- The bytes of an index or tree record besides its object id and path. -/
+abbrev entryFixedLen : Nat := oidStart + oidEndLen
+/-- A big-endian `u32` (`be32`). -/
+abbrev be32Len : Nat := 4
+/-- Where an agent request header's config starts: after the one-byte opcode;
+    its path length follows the config. -/
+abbrev frameConfigStart : Nat := 1
+abbrev frameLenStart : Nat := frameConfigStart + configLen
+abbrev frameHeaderLen : Nat := frameLenStart + be32Len
 
 /-- Unfold these bytes and lengths (and the wire lengths) to their numbers
     everywhere, for `omega`, which treats a named constant as an unknown. -/
@@ -82,7 +93,10 @@ macro "unfold_v3_bytes" : tactic =>
     Transcrypt.V3Policy.opEncrypt, Transcrypt.V3Policy.opDecrypt, Transcrypt.V3Policy.opStop,
     Transcrypt.V3Policy.keyLen, Transcrypt.V3Policy.keyFileLen, Transcrypt.V3Policy.sha1OidLen,
     Transcrypt.V3Policy.sha256OidLen, Transcrypt.V3Policy.maxSizeDigits,
-    Transcrypt.V3Policy.pktHeaderLen, Transcrypt.V3Policy.modeLen, Transcrypt.V3Policy.oidStart] at *)
+    Transcrypt.V3Policy.pktHeaderLen, Transcrypt.V3Policy.modeLen, Transcrypt.V3Policy.oidStart,
+    Transcrypt.V3Policy.oidEndLen, Transcrypt.V3Policy.entryFixedLen, Transcrypt.V3Policy.be32Len,
+    Transcrypt.V3Policy.frameConfigStart, Transcrypt.V3Policy.frameLenStart,
+    Transcrypt.V3Policy.frameHeaderLen] at *)
 
 def configDomain : List Nat := ascii "transcrypt/v3/config"
 def fileDomain : List Nat := ascii "transcrypt/v3/file"
@@ -272,8 +286,8 @@ def IndexRecord (entry : List Nat) (regular : Bool) (path : List Nat) : Prop :=
     (regular = true ↔ mode = regularMode ∨ mode = executableMode)
 
 /-- The adapter takes the object id of an accepted record as the bytes from
-    offset `oidStart` up to 3 bytes before the path, i.e.
-    `entry[OID_START..path_start-3]`.
+    offset `oidStart` up to `oidEndLen` bytes before the path, i.e.
+    `entry[OID_START..path_start - OID_END_LEN]`.
     For every record of the spec's shape that is exactly its object id. -/
 theorem indexRecord_oid {entry : List Nat} {regular : Bool} {path : List Nat}
     (h : IndexRecord entry regular path) :
@@ -298,7 +312,7 @@ def be32 (n : Nat) : List Nat := [n / 2^24 % 256, n / 2^16 % 256, n / 2^8 % 256,
 def frameHeader (opcode : Nat) (config : List Nat) (pathLen : Nat) : List Nat :=
   [opcode] ++ config ++ be32 pathLen
 
-theorem be32_length (n : Nat) : (be32 n).length = 4 := rfl
+theorem be32_length (n : Nat) : (be32 n).length = be32Len := rfl
 
 /-- Decoding big-endian bytes inverts `be32` below 2^32. -/
 theorem be32_decode (n : Nat) (h : n < 2^32) :

@@ -20,15 +20,17 @@ open RustM ControlFlow
 namespace Transcrypt.V3Verification
 
 open transcrypt_v3_core
+open Transcrypt.V3Wire (fileMagicLen idLen configMagicLen saltLen tagLen configLen fileHeaderLen fileMinLen)
 
 /-! ## File header encoder -/
 
 theorem encode_file_header_loop0_spec (base out : Std.Array U8 22#usize) (i : Usize)
-    (hi : i.val ≤ 6) (h : Copied out.val base.val FILE_MAGIC.val 0 0 i.val) :
-    encode_file_header_loop0 out i ⦃ r => Copied r.val base.val FILE_MAGIC.val 0 0 6 ⦄ := by
+    (hi : i.val ≤ fileMagicLen) (h : Copied out.val base.val FILE_MAGIC.val 0 0 i.val) :
+    encode_file_header_loop0 out i ⦃ r => Copied r.val base.val FILE_MAGIC.val 0 0 fileMagicLen ⦄ := by
   unfold encode_file_header_loop0
-  apply copy_loop (val := fun o : Std.Array U8 22#usize => o.val) (bound := 6) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Std.Array U8 22#usize => o.val) (bound := fileMagicLen) _ _ _ _ _ _ _ _ hi h
   intro o j hj hc
+  unfold_v3_bytes
   unfold encode_file_header_loop0.body
   simp_len
   step*
@@ -40,11 +42,12 @@ theorem encode_file_header_loop0_spec (base out : Std.Array U8 22#usize) (i : Us
   · simp; omega
 
 theorem encode_file_header_loop1_spec (base out : Std.Array U8 22#usize) (src : Std.Array U8 16#usize)
-    (j : Usize) (hj : j.val ≤ 16) (h : Copied out.val base.val src.val 6 0 j.val) :
-    encode_file_header_loop1 src out j ⦃ r => Copied r.val base.val src.val 6 0 16 ⦄ := by
+    (j : Usize) (hj : j.val ≤ idLen) (h : Copied out.val base.val src.val fileMagicLen 0 j.val) :
+    encode_file_header_loop1 src out j ⦃ r => Copied r.val base.val src.val fileMagicLen 0 idLen ⦄ := by
   unfold encode_file_header_loop1
-  apply copy_loop (val := fun o : Std.Array U8 22#usize => o.val) (bound := 16) _ _ _ _ _ _ _ _ hj h
+  apply copy_loop (val := fun o : Std.Array U8 22#usize => o.val) (bound := idLen) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
+  unfold_v3_bytes
   unfold encode_file_header_loop1.body
   have hsrc : src.length = 16 := by simp
   have ho : o.length = 22 := by simp
@@ -67,16 +70,17 @@ theorem encode_file_header_bytes (id : Std.Array U8 16#usize) :
   · exact Copied.zero _ _ _ _
   step with encode_file_header_loop1_spec o0 o0 id as ⟨ o1, h1 ⟩
   · exact Copied.zero _ _ _ _
-  exact copied_concat h0 h1 (by simp) (by simp) (by simp)
+  exact copied_concat h0 h1 (by simp) (by simp) (by simp; rfl)
 
 /-! ## Config encoder -/
 
 theorem encode_config_prefix_loop0_spec (base out : Std.Array U8 39#usize) (i : Usize)
-    (hi : i.val ≤ 7) (h : Copied out.val base.val CONFIG_MAGIC.val 0 0 i.val) :
-    encode_config_prefix_loop0 out i ⦃ r => Copied r.val base.val CONFIG_MAGIC.val 0 0 7 ⦄ := by
+    (hi : i.val ≤ configMagicLen) (h : Copied out.val base.val CONFIG_MAGIC.val 0 0 i.val) :
+    encode_config_prefix_loop0 out i ⦃ r => Copied r.val base.val CONFIG_MAGIC.val 0 0 configMagicLen ⦄ := by
   unfold encode_config_prefix_loop0
-  apply copy_loop (val := fun o : Std.Array U8 39#usize => o.val) (bound := 7) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Std.Array U8 39#usize => o.val) (bound := configMagicLen) _ _ _ _ _ _ _ _ hi h
   intro o j hj hc
+  unfold_v3_bytes
   unfold encode_config_prefix_loop0.body
   simp_len
   step*
@@ -88,11 +92,12 @@ theorem encode_config_prefix_loop0_spec (base out : Std.Array U8 39#usize) (i : 
   · simp; omega
 
 theorem encode_config_prefix_loop1_spec (base out : Std.Array U8 39#usize) (src : Std.Array U8 32#usize)
-    (j : Usize) (hj : j.val ≤ 32) (h : Copied out.val base.val src.val 7 0 j.val) :
-    encode_config_prefix_loop1 src out j ⦃ r => Copied r.val base.val src.val 7 0 32 ⦄ := by
+    (j : Usize) (hj : j.val ≤ saltLen) (h : Copied out.val base.val src.val configMagicLen 0 j.val) :
+    encode_config_prefix_loop1 src out j ⦃ r => Copied r.val base.val src.val configMagicLen 0 saltLen ⦄ := by
   unfold encode_config_prefix_loop1
-  apply copy_loop (val := fun o : Std.Array U8 39#usize => o.val) (bound := 32) _ _ _ _ _ _ _ _ hj h
+  apply copy_loop (val := fun o : Std.Array U8 39#usize => o.val) (bound := saltLen) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
+  unfold_v3_bytes
   unfold encode_config_prefix_loop1.body
   have hsrc : src.length = 32 := by simp
   have ho : o.length = 39 := by simp
@@ -106,11 +111,12 @@ theorem encode_config_prefix_loop1_spec (base out : Std.Array U8 39#usize) (src 
   · simp; omega
 
 theorem encode_config_loop0_spec (base out : Std.Array U8 55#usize) (src : Std.Array U8 39#usize)
-    (i : Usize) (hi : i.val ≤ 39) (h : Copied out.val base.val src.val 0 0 i.val) :
-    encode_config_loop0 out src i ⦃ r => Copied r.val base.val src.val 0 0 39 ⦄ := by
+    (i : Usize) (hi : i.val ≤ configMagicLen + saltLen) (h : Copied out.val base.val src.val 0 0 i.val) :
+    encode_config_loop0 out src i ⦃ r => Copied r.val base.val src.val 0 0 (configMagicLen + saltLen) ⦄ := by
   unfold encode_config_loop0
-  apply copy_loop (val := fun o : Std.Array U8 55#usize => o.val) (bound := 39) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Std.Array U8 55#usize => o.val) (bound := configMagicLen + saltLen) _ _ _ _ _ _ _ _ hi h
   intro o k hk hc
+  unfold_v3_bytes
   unfold encode_config_loop0.body
   have hsrc : src.length = 39 := by simp
   have ho : o.length = 55 := by simp
@@ -123,11 +129,12 @@ theorem encode_config_loop0_spec (base out : Std.Array U8 55#usize) (src : Std.A
   · simp; omega
 
 theorem encode_config_loop1_spec (base out : Std.Array U8 55#usize) (src : Std.Array U8 16#usize)
-    (j : Usize) (hj : j.val ≤ 16) (h : Copied out.val base.val src.val 39 0 j.val) :
-    encode_config_loop1 src out j ⦃ r => Copied r.val base.val src.val 39 0 16 ⦄ := by
+    (j : Usize) (hj : j.val ≤ tagLen) (h : Copied out.val base.val src.val (configMagicLen + saltLen) 0 j.val) :
+    encode_config_loop1 src out j ⦃ r => Copied r.val base.val src.val (configMagicLen + saltLen) 0 tagLen ⦄ := by
   unfold encode_config_loop1
-  apply copy_loop (val := fun o : Std.Array U8 55#usize => o.val) (bound := 16) _ _ _ _ _ _ _ _ hj h
+  apply copy_loop (val := fun o : Std.Array U8 55#usize => o.val) (bound := tagLen) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
+  unfold_v3_bytes
   unfold encode_config_loop1.body
   have hsrc : src.length = 16 := by simp
   have ho : o.length = 55 := by simp
@@ -149,7 +156,7 @@ theorem encode_config_prefix_bytes (salt : Std.Array U8 32#usize) :
   · exact Copied.zero _ _ _ _
   step with encode_config_prefix_loop1_spec o0 o0 salt as ⟨ o1, h1 ⟩
   · exact Copied.zero _ _ _ _
-  exact copied_concat h0 h1 (by simp) (by simp) (by simp)
+  exact copied_concat h0 h1 (by simp) (by simp) (by simp; rfl)
 
 /-- The production config encoder emits magic, salt and verifier tag. -/
 @[step]
@@ -162,17 +169,18 @@ theorem encode_config_bytes (c : Config) :
   step with encode_config_loop1_spec o0 o0 c.tag as ⟨ o1, h1 ⟩
   · exact Copied.zero _ _ _ _
   rw [← hp]
-  exact copied_concat h0 h1 (by simp) (by simp) (by simp)
+  exact copied_concat h0 h1 (by simp; rfl) (by simp) (by simp; rfl)
 
 /-! ## Decoders -/
 
 theorem decode_file_header_exact_loop_spec (input : Std.Array U8 22#usize)
-    (base id : Std.Array U8 16#usize) (j : Usize) (hj : j.val ≤ 16)
-    (h : Copied id.val base.val input.val 0 6 j.val) :
-    decode_file_header_exact_loop input id j ⦃ r => Copied r.val base.val input.val 0 6 16 ⦄ := by
+    (base id : Std.Array U8 16#usize) (j : Usize) (hj : j.val ≤ idLen)
+    (h : Copied id.val base.val input.val 0 fileMagicLen j.val) :
+    decode_file_header_exact_loop input id j ⦃ r => Copied r.val base.val input.val 0 fileMagicLen idLen ⦄ := by
   unfold decode_file_header_exact_loop
-  apply copy_loop (val := fun o : Std.Array U8 16#usize => o.val) (bound := 16) _ _ _ _ _ _ _ _ hj h
+  apply copy_loop (val := fun o : Std.Array U8 16#usize => o.val) (bound := idLen) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
+  unfold_v3_bytes
   unfold decode_file_header_exact_loop.body
   have hsrc : input.length = 22 := by simp
   have ho : o.length = 16 := by simp
@@ -188,12 +196,13 @@ theorem decode_file_header_exact_loop_spec (input : Std.Array U8 22#usize)
   · simp; omega
 
 theorem decode_config_exact_loop0_spec (input : Std.Array U8 55#usize)
-    (base salt : Std.Array U8 32#usize) (j : Usize) (hj : j.val ≤ 32)
-    (h : Copied salt.val base.val input.val 0 7 j.val) :
-    decode_config_exact_loop0 input salt j ⦃ r => Copied r.val base.val input.val 0 7 32 ⦄ := by
+    (base salt : Std.Array U8 32#usize) (j : Usize) (hj : j.val ≤ saltLen)
+    (h : Copied salt.val base.val input.val 0 configMagicLen j.val) :
+    decode_config_exact_loop0 input salt j ⦃ r => Copied r.val base.val input.val 0 configMagicLen saltLen ⦄ := by
   unfold decode_config_exact_loop0
-  apply copy_loop (val := fun o : Std.Array U8 32#usize => o.val) (bound := 32) _ _ _ _ _ _ _ _ hj h
+  apply copy_loop (val := fun o : Std.Array U8 32#usize => o.val) (bound := saltLen) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
+  unfold_v3_bytes
   unfold decode_config_exact_loop0.body
   have hsrc : input.length = 55 := by simp
   have ho : o.length = 32 := by simp
@@ -210,12 +219,13 @@ theorem decode_config_exact_loop0_spec (input : Std.Array U8 55#usize)
   · simp; omega
 
 theorem decode_config_exact_loop1_spec (input : Std.Array U8 55#usize)
-    (base tag : Std.Array U8 16#usize) (j : Usize) (hj : j.val ≤ 16)
-    (h : Copied tag.val base.val input.val 0 39 j.val) :
-    decode_config_exact_loop1 input tag j ⦃ r => Copied r.val base.val input.val 0 39 16 ⦄ := by
+    (base tag : Std.Array U8 16#usize) (j : Usize) (hj : j.val ≤ tagLen)
+    (h : Copied tag.val base.val input.val 0 (configMagicLen + saltLen) j.val) :
+    decode_config_exact_loop1 input tag j ⦃ r => Copied r.val base.val input.val 0 (configMagicLen + saltLen) tagLen ⦄ := by
   unfold decode_config_exact_loop1
-  apply copy_loop (val := fun o : Std.Array U8 16#usize => o.val) (bound := 16) _ _ _ _ _ _ _ _ hj h
+  apply copy_loop (val := fun o : Std.Array U8 16#usize => o.val) (bound := tagLen) _ _ _ _ _ _ _ _ hj h
   intro o k hk hc
+  unfold_v3_bytes
   unfold decode_config_exact_loop1.body
   have hsrc : input.length = 55 := by simp
   have ho : o.length = 16 := by simp
@@ -291,9 +301,10 @@ theorem eq_append3_of_matches_copied {inp M s t bs bt : List U8}
 theorem decode_file_header_exact_spec (input : Std.Array U8 22#usize) :
     decode_file_header_exact input ⦃ r => match r with
       | core.result.Result.Ok id => input.val = FILE_MAGIC.val ++ id.val
-      | core.result.Result.Err FormatError.Magic => input.val.take 6 ≠ FILE_MAGIC.val
+      | core.result.Result.Err FormatError.Magic => input.val.take Transcrypt.V3Wire.fileMagicLen ≠ FILE_MAGIC.val
       | core.result.Result.Err FormatError.Length => False ⦄ := by
   unfold decode_file_header_exact
+  unfold_v3_bytes
   simp only [lift, bind_tc_ok]
   step with matches_at_spec as ⟨ b, hb ⟩
   have hm := matches_magic_iff input.val FILE_MAGIC.val (by simp)
@@ -311,9 +322,10 @@ theorem decode_file_header_exact_spec (input : Std.Array U8 22#usize) :
 theorem decode_config_exact_spec (input : Std.Array U8 55#usize) :
     decode_config_exact input ⦃ r => match r with
       | core.result.Result.Ok c => input.val = CONFIG_MAGIC.val ++ c.salt.val ++ c.tag.val
-      | core.result.Result.Err FormatError.Magic => input.val.take 7 ≠ CONFIG_MAGIC.val
+      | core.result.Result.Err FormatError.Magic => input.val.take Transcrypt.V3Wire.configMagicLen ≠ CONFIG_MAGIC.val
       | core.result.Result.Err FormatError.Length => False ⦄ := by
   unfold decode_config_exact
+  unfold_v3_bytes
   simp only [lift, bind_tc_ok]
   step with matches_at_spec as ⟨ b, hb ⟩
   have hm := matches_magic_iff input.val CONFIG_MAGIC.val (by simp)
@@ -324,18 +336,19 @@ theorem decode_config_exact_spec (input : Std.Array U8 55#usize) :
     step with decode_config_exact_loop1_spec input (Array.repeat 16#usize 0#u8) as ⟨ t1, h2 ⟩
     · exact Copied.zero _ _ _ _
     exact eq_append3_of_matches_copied (by simp) (by simpa using hm.1 (hb.1 ‹_›))
-      (by simpa using h1) (by simpa using h2)
+      (by simpa using h1) (by unfold_v3_bytes; simpa using h2)
   · simpa using take_ne_of_not_matches (fun h => ‹¬b = true› (hb.2 (hm.2 h)))
 
 /-! ## Slice-boundary parsers -/
 
-theorem parse_config_loop_spec (input : Slice U8) (hlen : input.length = 55)
-    (base record : Std.Array U8 55#usize) (i : Usize) (hi : i.val ≤ 55)
+theorem parse_config_loop_spec (input : Slice U8) (hlen : input.length = configLen)
+    (base record : Std.Array U8 55#usize) (i : Usize) (hi : i.val ≤ configLen)
     (h : Copied record.val base.val input.val 0 0 i.val) :
-    parse_config_loop input record i ⦃ r => Copied r.val base.val input.val 0 0 55 ⦄ := by
+    parse_config_loop input record i ⦃ r => Copied r.val base.val input.val 0 0 configLen ⦄ := by
   unfold parse_config_loop
-  apply copy_loop (val := fun o : Std.Array U8 55#usize => o.val) (bound := 55) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Std.Array U8 55#usize => o.val) (bound := configLen) _ _ _ _ _ _ _ _ hi h
   intro o k hk hc
+  unfold_v3_bytes
   unfold parse_config_loop.body
   have ho : o.length = 55 := by simp
   have hID := CONFIG_LEN_val
@@ -347,13 +360,14 @@ theorem parse_config_loop_spec (input : Slice U8) (hlen : input.length = 55)
   · rw [i1_post2, Nat.zero_add, getElem!_pos input.val k.val i1]
   · simp; omega
 
-theorem parse_file_header_loop_spec (input : Slice U8) (hlen : 22 ≤ input.length)
-    (base header : Std.Array U8 22#usize) (i : Usize) (hi : i.val ≤ 22)
+theorem parse_file_header_loop_spec (input : Slice U8) (hlen : fileHeaderLen ≤ input.length)
+    (base header : Std.Array U8 22#usize) (i : Usize) (hi : i.val ≤ fileHeaderLen)
     (h : Copied header.val base.val input.val 0 0 i.val) :
-    parse_file_header_loop input header i ⦃ r => Copied r.val base.val input.val 0 0 22 ⦄ := by
+    parse_file_header_loop input header i ⦃ r => Copied r.val base.val input.val 0 0 fileHeaderLen ⦄ := by
   unfold parse_file_header_loop
-  apply copy_loop (val := fun o : Std.Array U8 22#usize => o.val) (bound := 22) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Std.Array U8 22#usize => o.val) (bound := fileHeaderLen) _ _ _ _ _ _ _ _ hi h
   intro o k hk hc
+  unfold_v3_bytes
   unfold parse_file_header_loop.body
   have ho : o.length = 22 := by simp
   have hID := FILE_HEADER_LEN_val
@@ -376,7 +390,7 @@ theorem config_shape_of_eq {l : List U8} (salt : Std.Array U8 32#usize)
   rw [hm]
   exact Transcrypt.V3Wire.decode_config_encode _ _ (by simp [wireBytes]) (by simp [wireBytes])
 
-theorem config_shape_none_of_take {l : List U8} (h : l.take 7 ≠ CONFIG_MAGIC.val) :
+theorem config_shape_none_of_take {l : List U8} (h : l.take configMagicLen ≠ CONFIG_MAGIC.val) :
     Transcrypt.V3Wire.decodeConfigShape (l.map (fun b => b.val)) = none := by
   apply Transcrypt.V3Wire.config_wrong_magic
   intro heq
@@ -390,10 +404,11 @@ theorem parse_config_spec (input : Slice U8) :
     parse_config input ⦃ r => match r with
       | core.result.Result.Ok c => Transcrypt.V3Wire.decodeConfigShape (sliceBytes input) =
           some (wireBytes c.salt, wireBytes c.tag)
-      | core.result.Result.Err FormatError.Magic => input.length = 55 ∧
+      | core.result.Result.Err FormatError.Magic => input.length = Transcrypt.V3Wire.configLen ∧
           Transcrypt.V3Wire.decodeConfigShape (sliceBytes input) = none
-      | core.result.Result.Err FormatError.Length => input.length ≠ 55 ⦄ := by
+      | core.result.Result.Err FormatError.Length => input.length ≠ Transcrypt.V3Wire.configLen ⦄ := by
   unfold parse_config
+  unfold_v3_bytes
   simp_len [bind_tc_ok]
   split
   · rename_i hne
@@ -408,8 +423,8 @@ theorem parse_config_spec (input : Slice U8) :
   · exact Copied.zero _ _ _ _
   step with decode_config_exact_spec rec as ⟨ r, hr ⟩
   have hrin : rec.val = input.val := by
-    rw [copied_full hrec (by simp) (by simp [h55])]
-    exact List.take_of_length_le (by simp [h55])
+    rw [copied_full hrec (by unfold_v3_bytes; simp) (by unfold_v3_bytes; simp [h55])]
+    exact List.take_of_length_le (by unfold_v3_bytes; simp [h55])
   unfold sliceBytes
   rw [← hrin]
   match r with
@@ -417,9 +432,10 @@ theorem parse_config_spec (input : Slice U8) :
   | core.result.Result.Err FormatError.Magic => exact ⟨h55, config_shape_none_of_take hr⟩
   | core.result.Result.Err FormatError.Length => exact hr.elim
 
-theorem file_shape_of_take {l : List U8} (id : Std.Array U8 16#usize) (hlen : 38 ≤ l.length)
-    (h : l.take 22 = FILE_MAGIC.val ++ id.val) :
+theorem file_shape_of_take {l : List U8} (id : Std.Array U8 16#usize) (hlen : fileMinLen ≤ l.length)
+    (h : l.take fileHeaderLen = FILE_MAGIC.val ++ id.val) :
     Transcrypt.V3Wire.decodeFileHeaderShape (l.map (fun b => b.val)) = some (wireBytes id) := by
+  unfold_v3_bytes
   have h6 : l.take 6 = FILE_MAGIC.val := by
     have : (l.take 22).take 6 = l.take 6 := by simp [List.take_take]
     rw [← this, h, List.take_append_of_le_length (by simp)]
@@ -435,7 +451,7 @@ theorem file_shape_of_take {l : List U8} (id : Std.Array U8 16#usize) (hlen : 38
     ← List.map_take, h16]
   rfl
 
-theorem file_shape_none_of_take {l : List U8} (h : l.take 6 ≠ FILE_MAGIC.val) :
+theorem file_shape_none_of_take {l : List U8} (h : l.take fileMagicLen ≠ FILE_MAGIC.val) :
     Transcrypt.V3Wire.decodeFileHeaderShape (l.map (fun b => b.val)) = none := by
   apply Transcrypt.V3Wire.file_wrong_magic
   intro heq
@@ -449,10 +465,11 @@ theorem parse_file_header_spec (input : Slice U8) :
     parse_file_header input ⦃ r => match r with
       | core.result.Result.Ok id => Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes input) =
           some (wireBytes id)
-      | core.result.Result.Err FormatError.Magic => 38 ≤ input.length ∧
+      | core.result.Result.Err FormatError.Magic => Transcrypt.V3Wire.fileMinLen ≤ input.length ∧
           Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes input) = none
-      | core.result.Result.Err FormatError.Length => input.length < 38 ⦄ := by
+      | core.result.Result.Err FormatError.Length => input.length < Transcrypt.V3Wire.fileMinLen ⦄ := by
   unfold parse_file_header FILE_MIN_LEN
+  unfold_v3_bytes
   simp_len [bind_tc_ok]
   have h1 := FILE_HEADER_LEN_val
   have h2 := TAG_LEN_val
@@ -462,17 +479,17 @@ theorem parse_file_header_spec (input : Slice U8) :
       have : ¬ input.len.val < i1.val := hge
       simp only [Slice.len_val] at this
       omega
-    step with parse_file_header_loop_spec input (by omega) (Array.repeat 22#usize 0#u8) as ⟨ hd, hhd ⟩
+    step with parse_file_header_loop_spec input (by unfold_v3_bytes; omega) (Array.repeat 22#usize 0#u8) as ⟨ hd, hhd ⟩
     · exact Copied.zero _ _ _ _
     step with decode_file_header_exact_spec hd as ⟨ r, hr ⟩
     have hrin : hd.val = input.val.take 22 := copied_full hhd (by simp) (by have : 38 ≤ input.val.length := h38; omega)
     unfold sliceBytes
     rw [hrin] at hr
     match r with
-    | core.result.Result.Ok id => exact file_shape_of_take id (by simpa using h38) hr
+    | core.result.Result.Ok id => exact file_shape_of_take id (by unfold_v3_bytes; simpa using h38) hr
     | core.result.Result.Err FormatError.Magic =>
       refine ⟨h38, file_shape_none_of_take ?_⟩
-      rwa [List.take_take, Nat.min_eq_left (by omega)] at hr
+      rwa [List.take_take, Nat.min_eq_left (by decide)] at hr
     | core.result.Result.Err FormatError.Length => exact hr.elim
 
 /-! ## Spec-facing corollaries -/
@@ -551,5 +568,5 @@ theorem parse_config_encode_config (c : Config) :
     simp only at hs ht
     rw [wireBytes_injective hs, wireBytes_injective ht]
   · cases e
-    · simp at hr
+    · simp at hr; exact absurd rfl hr
     · simp at hr

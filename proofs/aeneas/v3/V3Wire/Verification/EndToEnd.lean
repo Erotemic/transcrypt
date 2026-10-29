@@ -468,7 +468,7 @@ theorem hook_accepts_only_authenticated_ciphertext_given_history (g : GitState) 
 /-- **Stored-key unlock.** `Key::load` uses a stored key only when the
     verified `stored_key_state` says `Unlocked`, with `authentic` computed by
     the verified `authenticate_config` under the primitives built from the
-    stored key bytes (A17: the adapter builds them from `file[55..]`). Then
+    stored key bytes (A17: the adapter builds them from `file[CONFIG_LEN..]`). Then
     the file holds exactly the current configuration and the key
     authenticates it (`ConfigAuthentic`, relative to `Realizes`, A5). -/
 theorem stored_key_authenticates_current_config (hR : Realizes inst prims σ)
@@ -476,7 +476,8 @@ theorem stored_key_authenticates_current_config (hR : Realizes inst prims σ)
     (hcur : sliceBytes current = wireBytes config) (authentic : Bool)
     (hauth : authentic = true → ∃ c, authenticate_config inst prims config = ok (core.result.Result.Ok c))
     (hstate : stored_key_state present file current authentic = ok transcrypt_v3_core.StoredKey.Unlocked) :
-    present = true ∧ (sliceBytes file).length = 119 ∧ (sliceBytes file).take 55 = wireBytes config ∧
+    present = true ∧ (sliceBytes file).length = keyFileLen ∧
+      (sliceBytes file).take Transcrypt.V3Wire.configLen = wireBytes config ∧
       ConfigAuthentic σ (wireBytes config) := by
   have hs := spec_result (stored_key_state_spec present file current authentic) hstate
   have hu : storedKeySpec present (sliceBytes file) (sliceBytes current) authentic = .unlocked := by

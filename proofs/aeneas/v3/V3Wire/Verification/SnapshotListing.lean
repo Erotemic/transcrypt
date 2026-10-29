@@ -62,9 +62,9 @@ theorem off_mono (es : List Entry) {i j : Nat} (h : i ≤ j) : off es i ≤ off 
   rw [e, List.take_take, Nat.min_eq_left h, List.length_append]
   omega
 
-theorem entryRecord_length (e : Entry) (he : e.mode.length = 6) :
-    (entryRecord e).length = e.oid.length + e.path.length + 10 := by
-  simp [entryRecord, he]; omega
+theorem entryRecord_length (e : Entry) (he : e.mode.length = modeLen) :
+    (entryRecord e).length = e.oid.length + e.path.length + entryFixedLen := by
+  simp [entryRecord, he]; unfold_v3_bytes; omega
 
 /-- A record's tail after the mode and its space. -/
 theorem entryRecord_drop_oidStart (e : Entry) (he : e.mode.length = modeLen) (rest : List Nat) :
@@ -74,8 +74,8 @@ theorem entryRecord_drop_oidStart (e : Entry) (he : e.mode.length = modeLen) (re
   rw [this, List.drop_left' (by simp [he])]
 
 /-- After `P ++ [32, 48, 9]` with TAB-free `P`, the first TAB is at `|P| + 2`. -/
-theorem first_tab_of_prefix {P X : List Nat} (hP : 9 ∉ P) (h : P ++ [32, 48, 9] <+: X) :
-    X[P.length + 2]? = some 9 ∧ ∀ k < P.length + 2, X[k]? ≠ some 9 := by
+theorem first_tab_of_prefix {P X : List Nat} (hP : tab ∉ P) (h : P ++ [32, 48, 9] <+: X) :
+    X[P.length + 2]? = some tab ∧ ∀ k < P.length + 2, X[k]? ≠ some tab := by
   obtain ⟨t, rfl⟩ := h
   refine ⟨?_, fun k hk => ?_⟩
   · rw [List.getElem?_append_left (by simp), List.getElem?_append_right (by omega)]
@@ -90,7 +90,7 @@ theorem first_tab_of_prefix {P X : List Nat} (hP : 9 ∉ P) (h : P ++ [32, 48, 9
 
 /-- An object id followed by `SP 0 TAB` is determined by the record it
     starts: TAB-free ids, so the first TAB is right after it. -/
-theorem tab_prefix_iff {q o r : List Nat} (hq : 9 ∉ q) (ho : 9 ∉ o) :
+theorem tab_prefix_iff {q o r : List Nat} (hq : tab ∉ q) (ho : tab ∉ o) :
     q ++ [32, 48, 9] <+: o ++ [32, 48, 9] ++ r ↔ q = o := by
   constructor
   · intro h
@@ -148,7 +148,7 @@ theorem record_is_spec (listing : Slice U8) (start end_ : Usize) (oid path : Sli
     (e : Transcrypt.V3Policy.Entry) (rest : List Nat) (he : Transcrypt.V3Policy.EntryOk e)
     (hd : (sliceBytes listing).drop start.val = Transcrypt.V3Policy.entryRecord e ++ rest)
     (ht : end_.val = start.val + (Transcrypt.V3Policy.entryRecord e).length)
-    (h9 : 9 ∉ sliceBytes oid) :
+    (h9 : tab ∉ sliceBytes oid) :
     record_is listing start end_ oid path same ⦃ b =>
       b = true ↔ (e.oid = sliceBytes oid ∧ (e.path = sliceBytes path ↔ same = true)) ⦄ := by
   obtain ⟨hm, h9m, h0m, hoid, hp, h0p⟩ := he
@@ -203,18 +203,20 @@ theorem record_is_spec (listing : Slice U8) (start end_ : Usize) (oid path : Sli
     rw [hD] at this
     exact (tab_prefix_iff h9 h9o).mp (by simpa only [List.append_assoc] using this)
   have hpl : i6.val = e.path.length := by
-    rw [i6_post1, i5_post1, at_post, i4_post, OID_START_val, ht, hrl, hlenv, ← sliceBytes_length oid, hoid']
+    rw [i6_post1, OID_END_LEN_val, i5_post1, at_post, i4_post, OID_START_val, ht, hrl, hlenv,
+      ← sliceBytes_length oid, hoid']
     unfold_v3_bytes; omega
-  have hP : (sliceBytes listing).drop («at».val + 3) = e.path ++ rest := by
-    rw [at_post, i4_post, OID_START_val, hlenv, ← sliceBytes_length oid, hoid', show start.val + oidStart + e.oid.length + 3 =
-      (start.val + oidStart) + (e.oid.length + 3) by omega, ← List.drop_drop, hD]
+  have hP : (sliceBytes listing).drop («at».val + oidEndLen) = e.path ++ rest := by
+    rw [at_post, i4_post, OID_START_val, hlenv, ← sliceBytes_length oid, hoid', show start.val + oidStart +
+      e.oid.length + oidEndLen = (start.val + oidStart) + (e.oid.length + 3) by unfold_v3_bytes; omega,
+      ← List.drop_drop, hD]
     simp
   split
   · rename_i hi6
     have hpl' : path.length = e.path.length := by
       rw [← hpl]; have := congrArg UScalar.val hi6; simpa using this.symm
     step*
-    rw [x_post, hP] at here_post
+    rw [x_post, OID_END_LEN_val, hP] at here_post
     have hiff : here = true ↔ e.path = sliceBytes path := by
       rw [here_post]
       constructor
@@ -223,9 +225,9 @@ theorem record_is_spec (listing : Slice U8) (start end_ : Usize) (oid path : Sli
         exact ((List.prefix_of_prefix_length_le hpre (List.prefix_append _ _) hlen.le).eq_of_length
           hlen).symm
       · intro h
-        have hxl : «at».val + 3 ≤ listing.length := by
-          have := i6_post2; have := i5_post1; have := i5_post2
-          omega
+        have hxl : «at».val + oidEndLen ≤ listing.length := by
+          have := i6_post2; have := i5_post1; have := i5_post2; have := OID_END_LEN_val
+          unfold_v3_bytes; omega
         refine ⟨hxl, ?_⟩
         rw [← h]; exact List.prefix_append _ _
     rw [decide_eq_true_iff, Bool.eq_iff_iff, hiff]
@@ -268,8 +270,8 @@ def FirstFrom (es : List Entry) (P : Entry → Prop) (from_ to_ r : Nat) : Prop 
 /-- The first TAB of a record is right after its object id and `SP 0`. -/
 theorem record_tab {L : List Nat} {s : Nat} {e : Entry} {rest : List Nat} (he : EntryOk e)
     (hd : L.drop s = entryRecord e ++ rest) :
-    s + 9 + e.oid.length < L.length ∧ L[s + 9 + e.oid.length]! = 9 ∧
-      ∀ k, s ≤ k → k < s + 9 + e.oid.length → L[k]! ≠ 9 := by
+    s + 9 + e.oid.length < L.length ∧ L[s + 9 + e.oid.length]! = tab ∧
+      ∀ k, s ≤ k → k < s + 9 + e.oid.length → L[k]! ≠ tab := by
   obtain ⟨hm, h9m, _, hoid, hp, _⟩ := he
   unfold_v3_bytes
   have h9o := objectId_no_tab hoid
@@ -287,8 +289,8 @@ theorem record_tab {L : List Nat} {s : Nat} {e : Entry} {rest : List Nat} (he : 
   exact (getElem?_eq_some_iff' L k 9).mpr ⟨by omega, h9⟩
 
 /-- A six-byte mode is a prefix of a record exactly when it is its mode. -/
-theorem record_mode {L : List Nat} {s : Nat} {e : Entry} {rest : List Nat} (he : e.mode.length = 6)
-    (hd : L.drop s = entryRecord e ++ rest) (M : List Nat) (hM : M.length = 6) :
+theorem record_mode {L : List Nat} {s : Nat} {e : Entry} {rest : List Nat} (he : e.mode.length = modeLen)
+    (hd : L.drop s = entryRecord e ++ rest) (M : List Nat) (hM : M.length = modeLen) :
     M <+: L.drop s ↔ e.mode = M := by
   rw [hd, show entryRecord e ++ rest = e.mode ++ ([32] ++ e.oid ++ [32, 48, 9] ++ e.path ++ rest) by
     simp [entryRecord]]
@@ -304,7 +306,7 @@ theorem record_mode {L : List Nat} {s : Nat} {e : Entry} {rest : List Nat} (he :
     mode is regular. -/
 def FieldsOf (es : List Entry) (i : Nat) (f : Fields) : Prop :=
   ∃ e, es[i]? = some e ∧ f.start.val = off es i ∧ f.oid_end.val = off es i + oidStart + e.oid.length ∧
-    f.path_start.val = off es i + 10 + e.oid.length ∧
+    f.path_start.val = off es i + entryFixedLen + e.oid.length ∧
     f.end.val = off es i + (entryRecord e).length ∧ (f.regular = true ↔ e.Regular)
 
 @[step]
@@ -351,25 +353,25 @@ theorem listing_fields_spec {listing : Slice U8} {ends : Slice Usize} {es : List
           sliceBytes (Array.to_slice M) <+: (sliceBytes listing).drop st.val) →
         (c = true ↔ es[i.val].mode = m) := by
       intro M m hM c hc
-      have hml : m.length = 6 := by rw [← hM, sliceBytes_length]; simp
+      have hml : m.length = modeLen := by rw [← hM, sliceBytes_length]; simp
       rw [hc, hM, record_mode hm hdrop m hml]
       exact ⟨fun h => h.2, fun h => ⟨by omega, h⟩⟩
     step*
     have hb' := hmode _ _ REGULAR_MODE_bytes b (by rw [← s_post]; exact b_post)
     have hpost : ∀ (regular : Bool), (regular = true ↔ es[i.val].Regular) →
         (do
-          let i4 ← tab - 2#usize
-          let i5 ← tab + 1#usize
+          let path_start ← tab + 1#usize
+          let i4 ← path_start - OID_END_LEN
           ok (core.option.Option.Some
-            { start := st, oid_end := i4, path_start := i5, «end» := x, regular := regular }) :
+            { start := st, oid_end := i4, path_start, «end» := x, regular := regular }) :
             RustM (core.option.Option Fields)) ⦃ o => match o with
           | core.option.Option.None => es.length ≤ i.val
           | core.option.Option.Some f => i.val < es.length ∧ FieldsOf es i.val f ⦄ := by
       intro regular hr
       step*
       refine ⟨hi, es[i.val], by simp, hst, ?_, ?_, by rw [hxv, hst], hr⟩
-      · rw [i4_post1, htv, hst]; unfold_v3_bytes; omega
-      · rw [i5_post, htv, hst]; omega
+      · rw [i4_post1, OID_END_LEN_val, path_start_post, htv, hst]; unfold_v3_bytes; omega
+      · rw [path_start_post, htv, hst]; unfold_v3_bytes; omega
     split
     · rename_i hbt
       simp only [bind_tc_ok]
@@ -407,9 +409,10 @@ theorem FieldsOf.slices {listing : Slice U8} {ends : Slice Usize} {es : List Ent
   have hDoid : (sliceBytes listing).drop (off es i + oidStart) = e.oid ++ [32, 48, 9] ++ e.path ++
       (0 :: listingBytes (es.drop (i + 1))) := by
     rw [← List.drop_drop, hdrop, entryRecord_drop_oidStart e hm]
-  have hD10 : (sliceBytes listing).drop (off es i + 10 + e.oid.length) =
+  have hD10 : (sliceBytes listing).drop (off es i + entryFixedLen + e.oid.length) =
       e.path ++ (0 :: listingBytes (es.drop (i + 1))) := by
-    rw [show off es i + 10 + e.oid.length = (off es i + oidStart) + (e.oid.length + 3) by unfold_v3_bytes; omega,
+    rw [show off es i + entryFixedLen + e.oid.length = (off es i + oidStart) + (e.oid.length + 3) by
+      unfold_v3_bytes; omega,
       ← List.drop_drop, hDoid]
     simp
   refine ⟨e, he, hok, ?_, ?_, by omega, by unfold_v3_bytes; omega, by omega, by omega⟩
@@ -417,7 +420,7 @@ theorem FieldsOf.slices {listing : Slice U8} {ends : Slice Usize} {es : List Ent
       e.oid.length by omega]
     simp
   · rw [List.extract_eq_take_drop, hp, hend, hD10, show off es i + (entryRecord e).length -
-      (off es i + 10 + e.oid.length) = e.path.length by omega]
+      (off es i + entryFixedLen + e.oid.length) = e.path.length by omega]
     simp
 
 end Transcrypt.V3Verification

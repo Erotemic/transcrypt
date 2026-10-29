@@ -59,8 +59,49 @@ theorem extracted_magic_disjoint :
   simp [MAX_PKT_LEN, Transcrypt.V3Policy.maxPktLen]
 @[simp, scalar_tac_simps] theorem OID_START_val : OID_START.val = Transcrypt.V3Policy.oidStart := by
   simp [OID_START, Transcrypt.V3Policy.oidStart]
--- `scalar_tac` bounds offsets past the object id start with its number.
+@[simp, scalar_tac_simps] theorem MODE_LEN_val : MODE_LEN.val = Transcrypt.V3Policy.modeLen := by
+  -- A space: `[MOD` is a token (`Nat.ModEq` notation).
+  simp [ MODE_LEN, Transcrypt.V3Policy.modeLen]
+@[simp, scalar_tac_simps] theorem OID_END_LEN_val : OID_END_LEN.val = Transcrypt.V3Policy.oidEndLen := by
+  simp [OID_END_LEN, Transcrypt.V3Policy.oidEndLen]
+@[simp, scalar_tac_simps] theorem ENTRY_FIXED_LEN_val :
+    ENTRY_FIXED_LEN.val = Transcrypt.V3Policy.entryFixedLen := by
+  simp [ENTRY_FIXED_LEN]; rfl
+@[simp, scalar_tac_simps] theorem SHA1_OID_LEN_val : SHA1_OID_LEN.val = Transcrypt.V3Policy.sha1OidLen := by
+  simp [SHA1_OID_LEN, Transcrypt.V3Policy.sha1OidLen]
+@[simp, scalar_tac_simps] theorem SHA256_OID_LEN_val :
+    SHA256_OID_LEN.val = Transcrypt.V3Policy.sha256OidLen := by
+  simp [SHA256_OID_LEN, Transcrypt.V3Policy.sha256OidLen]
+@[simp, scalar_tac_simps] theorem BE_U32_LEN_val : BE_U32_LEN.val = Transcrypt.V3Policy.be32Len := by
+  simp [BE_U32_LEN, Transcrypt.V3Policy.be32Len]
+@[simp, scalar_tac_simps] theorem FRAME_CONFIG_START_val :
+    FRAME_CONFIG_START.val = Transcrypt.V3Policy.frameConfigStart := by
+  simp [FRAME_CONFIG_START, Transcrypt.V3Policy.frameConfigStart]
+@[simp, scalar_tac_simps] theorem FRAME_LEN_START_val :
+    FRAME_LEN_START.val = Transcrypt.V3Policy.frameLenStart := by
+  simp [FRAME_LEN_START]; rfl
+@[simp, scalar_tac_simps] theorem PKT_HEADER_LEN_val : PKT_HEADER_LEN.val = Transcrypt.V3Policy.pktHeaderLen := by
+  simp [PKT_HEADER_LEN, Transcrypt.V3Policy.pktHeaderLen]
+@[simp, scalar_tac_simps] theorem HEX_RADIX_val : HEX_RADIX.val = Transcrypt.V3Policy.hexRadix := by
+  simp [HEX_RADIX, Transcrypt.V3Policy.hexRadix]
+@[simp, scalar_tac_simps] theorem HEX_LETTER_VALUE_val :
+    HEX_LETTER_VALUE.val = Transcrypt.V3Policy.hexLetterValue := by
+  simp [HEX_LETTER_VALUE, Transcrypt.V3Policy.hexLetterValue]
+@[simp, scalar_tac_simps] theorem MAX_SIZE_DIGITS_val :
+    MAX_SIZE_DIGITS.val = Transcrypt.V3Policy.maxSizeDigits := by
+  simp [MAX_SIZE_DIGITS, Transcrypt.V3Policy.maxSizeDigits]
+@[simp, scalar_tac_simps] theorem DECIMAL_RADIX_val : DECIMAL_RADIX.val = Transcrypt.V3Policy.decimalRadix := by
+  simp [DECIMAL_RADIX, Transcrypt.V3Policy.decimalRadix]
+@[simp] theorem BLOB_FIELD_LEN_val : BLOB_FIELD_LEN.val = Transcrypt.V3Policy.blobField.length := by
+  simp [BLOB_FIELD_LEN, Transcrypt.V3Policy.blobField, Transcrypt.V3Policy.ascii]
+-- `scalar_tac` bounds offsets in records and headers with their numbers.
 attribute [scalar_tac_simps] Transcrypt.V3Policy.oidStart Transcrypt.V3Policy.modeLen
+  Transcrypt.V3Policy.oidEndLen Transcrypt.V3Policy.entryFixedLen Transcrypt.V3Policy.sha1OidLen
+  Transcrypt.V3Policy.sha256OidLen Transcrypt.V3Policy.be32Len Transcrypt.V3Policy.frameConfigStart
+  Transcrypt.V3Policy.frameLenStart Transcrypt.V3Policy.frameHeaderLen Transcrypt.V3Policy.pktHeaderLen
+  Transcrypt.V3Policy.hexRadix Transcrypt.V3Policy.hexLetterValue Transcrypt.V3Policy.maxSizeDigits
+  Transcrypt.V3Policy.decimalRadix Transcrypt.V3Wire.configLen Transcrypt.V3Wire.configMagicLen
+  Transcrypt.V3Wire.saltLen Transcrypt.V3Wire.tagLen
 @[simp] theorem KEY_LEN_val : KEY_LEN.val = 64 := by simp [KEY_LEN]
 @[simp] theorem KEY_FILE_LEN_val : KEY_FILE_LEN.val = 119 := by simp [KEY_FILE_LEN]
 

@@ -10,12 +10,10 @@ use std::{
     io::{self, Read, Write},
     path::Path,
 };
-use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD};
+use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD, PKT_HEADER_LEN};
 use zeroize::Zeroizing;
 use crate::{filter::Filters, git::{append_wiped, TOO_LARGE}};
 
-/// A pkt-line header: the packet's total length in 4 lowercase hex digits.
-const PKT_HEADER_LEN: usize = 4;
 /// The flush packet: a header of length 0.
 const FLUSH_PKT: &[u8; PKT_HEADER_LEN] = b"0000";
 /// The most data one packet carries.
