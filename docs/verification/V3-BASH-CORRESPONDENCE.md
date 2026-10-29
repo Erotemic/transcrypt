@@ -22,7 +22,7 @@ compatibility. The tables describe the current implementation.
 | pre-commit hook (checks the `Salted` prefix; since F-01 also decryption and salt) | pre-commit hook (`pre-commit`) | v3 encrypts protected files staged around the filter, re-encrypts `git mv` renames, then authenticates every staged record at its path. |
 | — | pre-push hook, `audit`, `contrib/v3/pre-receive` | No Bash equivalent: keyless refusal of plaintext in pushed history. |
 | — | `doctor`, `contrib/v3/check-remote-enforcement` | No Bash equivalent. |
-| `--add PATTERN`, editing `.gitattributes` (`filter=crypt diff=crypt merge=crypt`) | `protect PATTERN`, or `PATTERN transcrypt` in `.gitattributes` | Same selection model: Git's attributes. `transcrypt` is a macro for `filter=transcrypt-rs diff=transcrypt-rs merge=transcrypt-v3 -text`. `unprotect` reverses it. |
+| `--add PATTERN`, editing `.gitattributes` (`filter=crypt diff=crypt merge=crypt`) | `protect PATTERN`, or `PATTERN transcrypt` in `.gitattributes` | Same selection model: Git's attributes. `transcrypt` is a macro for `filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text`. `unprotect` reverses it. |
 | `-C`, `--context`, `--list-contexts` | — | v3 has one passphrase per repository. |
 | `-r`, `--rekey` | `rekey` | A new config (fresh salt) and every secret re-encrypted, staged as one change to commit. Refuses uncommitted edits. History stays readable with the old passphrase, as with Bash. |
 | `-u`, `--uninstall` | `uninstall` | Locks first and leaves **ciphertext** (Bash leaves plaintext); removes only the filters, hooks and key v3 installed. |
@@ -41,7 +41,7 @@ compatibility. The tables describe the current implementation.
 | Where the secret lives | Password in plaintext in `.git/config` (`transcrypt.password`) | The Argon2id-derived key (never the passphrase) in `.git/transcrypt-v3/key`, mode 0600, outside `git config`, until `lock`. Optional private mode: in memory only (a non-dumpable agent behind a 0600 socket) |
 | Selection | `.gitattributes` patterns with `filter=crypt` (or `crypt-<context>`) | `.gitattributes` patterns with `filter=transcrypt-v3` (the `transcrypt` macro); parsed answers from `git check-attr`, never a second glob engine |
 | Public metadata | Cipher in `.git/config` (local, not committed) | `.transcrypt/config` (committed, authenticated by the key) |
-| Git integration | `filter=crypt diff=crypt merge=crypt`, textconv with `cachetextconv` (plaintext in `refs/notes/textconv`) | `filter=transcrypt-rs diff=transcrypt-rs merge=transcrypt-v3 -text` via the committed `transcrypt` macro; drivers configured locally. No textconv cache. |
+| Git integration | `filter=crypt diff=crypt merge=crypt`, textconv with `cachetextconv` (plaintext in `refs/notes/textconv`) | `filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text` via the committed `transcrypt` macro; drivers configured locally. No textconv cache. |
 | Renames | Path-independent CBC ciphertext moves freely (and so can be swapped between files undetected) | Records are path-bound; the pre-commit hook re-encrypts `git mv` renames; a keyless audit refuses unbound moves |
 | Diffs | textconv with `cachetextconv`: plaintext cached in `refs/notes/textconv` | External diff driver: each side authenticated at its path, no cache |
 | Merging | `merge=crypt` driver: decrypt, `git merge-file`, re-encrypt | Same idea: authenticated decryption of all three versions, merged in a private 0700 directory, the result re-encrypted |

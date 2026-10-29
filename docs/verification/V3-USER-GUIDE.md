@@ -71,7 +71,7 @@ or edit `.gitattributes` yourself. These two lines are equivalent:
 
 ```gitattributes
 config/production.yaml transcrypt
-config/production.yaml filter=transcrypt-rs diff=transcrypt-rs merge=transcrypt-v3 -text
+config/production.yaml filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text
 ```
 
 A file is protected exactly when Git's effective `filter` attribute for it

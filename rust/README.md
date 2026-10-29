@@ -2,7 +2,8 @@
 
 `transcrypt-rs` encrypts the files you choose in a Git repository with
 Argon2id and AES-256-SIV, binding each record to its exact path. The user guide
-is [`V3-USER-GUIDE.md`](../docs/verification/V3-USER-GUIDE.md); the current status,
+is [`V3-USER-GUIDE.md`](../docs/verification/V3-USER-GUIDE.md), a map of the code is
+[`CODE-MAP.md`](../docs/CODE-MAP.md); the current status,
 proof boundary and assumptions are in
 [`V3-HANDOFF.md`](../docs/verification/V3-HANDOFF.md),
 [`V3-SECURITY-ARGUMENT.md`](../docs/verification/V3-SECURITY-ARGUMENT.md) and

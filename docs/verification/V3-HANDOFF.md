@@ -21,7 +21,7 @@ optional mode, not prerequisites.
 The implementation now follows it:
 - **Selection by `.gitattributes`.** `protect PATTERN` writes
   `PATTERN transcrypt` (a committed macro for
-  `filter=transcrypt-rs diff=transcrypt-rs merge=transcrypt-v3 -text`).
+  `filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text`).
   Git's `check-attr` answers are parsed by the verified core. The path
   policy is suffix-free, except for the reserved `.transcrypt/`,
   `.gitattributes` and `.gitmodules`.

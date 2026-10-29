@@ -99,7 +99,7 @@ files are consulted depends on the check:
   `audit`.
 
 The committed macro
-`[attr]transcrypt filter=transcrypt-rs diff=transcrypt-rs merge=transcrypt-v3 -text`
+`[attr]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text`
 lets a rule read `PATTERN transcrypt`. Until this revision only `*.secret`
 paths were valid. Every previously valid path is still valid, except
 `.transcrypt/*.secret`, which no prototype repository is known to contain.
