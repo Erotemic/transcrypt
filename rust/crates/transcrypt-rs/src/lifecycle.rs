@@ -195,9 +195,14 @@ fn check_unprotected(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], snapsho
                 so write it with the file's exact case): nothing would ever decrypt it there. Protect that \
                 name, move the file back, or stage its plaintext", String::from_utf8_lossy(path)));
         }
-        // As strict as the audit: an unreadable old blob is an error.
-        if head_oid.get(path).or(parent_oid.get(path)).map(|old| is_record(root, old, id)).transpose()? == Some(true) {
-            drifted.push(path);
+        // Either old blob may be the record: `HEAD^1` is the parent of an
+        // amended commit. As strict as the audit: an unreadable one is an
+        // error, not a plaintext.
+        for old in [head_oid.get(path), parent_oid.get(path)].into_iter().flatten() {
+            if is_record(root, old, id)? {
+                drifted.push(path);
+                break;
+            }
         }
     }
     // A file encrypted in `HEAD` that another named filter now claims

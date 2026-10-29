@@ -899,6 +899,16 @@ fn protection_lost_to_another_filter_is_refused() {
     run(&repo, bin(), &["unprotect", "*.env"], None);
     run(&repo, "git", &["commit", "-qm", "unprotect"], None);
     run(&repo, bin(), &["audit", "HEAD~1..HEAD"], None);
+    // Amending that commit into an lfs takeover is drift from the amended
+    // commit's parent, `HEAD^1`, which holds a.env encrypted, though `HEAD`
+    // holds it in plaintext (the hook cannot tell an amend apart).
+    let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    attributes.extend_from_slice(b"*.env filter=lfs diff=lfs merge=lfs -text\n");
+    fs::write(repo.join(".gitattributes"), attributes).unwrap();
+    fs::write(repo.join("a.env"), b"A=amended\n").unwrap();
+    run(&repo, "git", &["add", ".gitattributes", "a.env"], None);
+    let err = run_fails(&repo, "git", &["commit", "-q", "--amend", "-m", "unprotect into lfs"], None);
+    assert!(err.contains("a.env") && err.contains("`lfs`"), "{err}");
 }
 
 /// Fourth review F-2/F-3/F-4/F-6: patterns inside submodules are refused;
