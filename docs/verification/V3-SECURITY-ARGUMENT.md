@@ -48,7 +48,7 @@ hook. The argument therefore has three parts:
 > * the configuration used is the one staged as `.transcrypt/config`
 >   (checked by the adapter, **A4**);
 > * the adapter acted only on the verified core's results, as listed in
->   `HookRun`, and its per-entry check is at least as strict as the model
+>   `HookEvidence`, and its per-entry check is at least as strict as the model
 >   `hookEntry` (**A4**).
 >
 > If the hook accepted, then the index, `HEAD` and `HEAD^1` list each path
@@ -169,13 +169,13 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 
 | Hypothesis in Lean | Meaning | Assumption | Evidence |
 | --- | --- | --- | --- |
-| `GitListing index g.index` (and `HEAD`, `HEAD^1`, incoming) | Git's listing is exactly its snapshot | A20 (refines A7) | TESTED (real Git, all lifecycle suites); the parse and the path order PROVED |
-| `GitAttributes g response` | `check-attr --cached` reports the committed attributes | A19 | TESTED (Git 2.43, CI 2.34); the parse PROVED |
+| `GitListing run.index.bytes g.index` (and `HEAD`, `HEAD^1`, incoming; `HookContracts`) | Git's listing is exactly its snapshot | A20 (refines A7) | TESTED (real Git, all lifecycle suites); the parse and the path order PROVED |
+| `GitAttributes g run.response` | `check-attr --cached` reports the committed attributes | A19 | TESTED (Git 2.43, CI 2.34); the parse PROVED |
 | `GitObject g oid record` | bytes read by id are that object | A11, A21 | header and size decision PROVED; reading exactly the size and the LF TESTED; object identity ASSUMED (Git's hash) |
 | `Realizes inst prims σ` | the primitives compute AES-SIV / SHA-256 | A5 (with A9) | TESTED (vectors, differential) |
 | `hid : wireBytes id = σ.digest16 config` | the configuration id is the suite's digest | A5 | TESTED (vectors) |
 | `hcfg` | the configuration used is the staged `.transcrypt/config` | A4 | REVIEWED + TESTED (`check_staged` compares the staged blob with it) |
-| `HookRun …`, `hookPlan … = ok true` | the adapter called the verified functions on these inputs and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
+| `run : HookEvidence g`, `hookPlan … = ok true` | the adapter called the verified functions on these inputs and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
 | `hknown`, `hlazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | `HeadAuthentic` (corollary) | the history the incremental hook trusts was checked | A24 | REVIEWED + TESTED (induction above; `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`) |

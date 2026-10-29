@@ -143,11 +143,11 @@ one.
     (`hook_accepts_only_authenticated_ciphertext`,
     `hook_repairs_only_local_changes`,
     `stored_key_authenticates_current_config`) take the adapter's observed
-    results of these calls as hypotheses (`HookRun`), so what remains of A4
+    results of these calls as hypotheses (`HookEvidence`), so what remains of A4
     on this path is listed below. See [the security argument](V3-SECURITY-ARGUMENT.md).
 - **Residual:** the adapter Rust itself is not proved. On the pre-commit
   path what remains reviewed and tested, not proved, is:
-  - that the adapter acts on the verified results as `HookRun` and the
+  - that the adapter acts on the verified results as `HookEvidence` and the
     models `hookPlan`/`hookEntry` say (it builds entries from
     `listing_fields`, iterates the flagged positions, and its per-entry
     check is at least as strict as `hookEntry`);
@@ -157,7 +157,7 @@ one.
     and merging the incoming trees by path (`Listing::merge`, parsed with
     `unique = false`);
   - counting an entry as settled only while no attribute file and not the
-    config changed since `HEAD` and `HEAD^1` (A24; `HookRun.settled` only
+    config changed since `HEAD` and `HEAD^1` (A24; `HookEvidence.settled` only
     requires settled ⇒ held by both, so this restriction is stricter than
     the model);
   - sizing `ends` by the listing's NUL count (fails closed: the parse then

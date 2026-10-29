@@ -65,7 +65,7 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
 | `Objects` | `stored_key_state` | `stored_key_state_spec` | Exactly `storedKeySpec` (`Unlocked` only for a 119-byte file holding exactly the current config whose key authenticates it) |
 | `Objects` | `parse_batch_header` (over `decimal`) | `parse_batch_header_spec`, `batchHeader_iff` | `Some size` exactly for `BatchHeader header oid size` (the requested id, ` blob `, canonical decimal of at most 19 digits, LF) |
 | `Objects` | `blob_read` | `blob_read_spec` | Exactly `blobReadSpec` (read only within `maxRecord`) |
-| `EndToEnd` | models over the above | `hookPlan_spec`, `hook_accepts_only_authenticated_ciphertext`, `hook_accepts_only_authenticated_ciphertext_given_history`, `hook_repairs_only_local_changes`, `stored_key_authenticates_current_config` | The pre-commit hook's end-to-end statements, with every Git/crypto/adapter contract a named hypothesis (`GitListing` A20, `GitAttributes` A19, `GitObject` A11/A21, `Realizes` A5, `HookRun` A4, `HeadAuthentic` A24); the snapshots are `Sorted` (from the parse, not assumed); see `docs/verification/V3-SECURITY-ARGUMENT.md` |
+| `EndToEnd` | models over the above | `hookPlan_spec`, `hook_accepts_only_authenticated_ciphertext`, `hook_accepts_only_authenticated_ciphertext_given_history`, `hook_repairs_only_local_changes`, `stored_key_authenticates_current_config` | The pre-commit hook's end-to-end statements, with every Git/crypto/adapter contract a named hypothesis (`GitListing` A20, `GitAttributes` A19, `GitObject` A11/A21, `Realizes` A5, `HookEvidence` A4, `HeadAuthentic` A24); the snapshots are `Sorted` (from the parse, not assumed); see `docs/verification/V3-SECURITY-ARGUMENT.md` |
 | spec (`V3Policy`) | — | `opensTo_unique`, `seal_opens`, `lock_flush_recoverable`, `objectId_plain`, `opensTo_envelopeOk`, `indexRecord_oid`, `smudgeSpec_keep_envelope`, `entryOk_indexRecord`, `localChange_held`, `localChange_unknown`, `bytesLt_irrefl`, `bytesLt_trans`, `bytesLt_total`, `Sorted.eq_of_path`, `Sorted.holds_oid`, `storedKeySpec_unlocked`, `batchHeader_unique` | Spec-level consequences used above (`indexRecord_oid`: the adapter's `entry[7..path_start-3]` is the record's object id; `Sorted.holds_oid`: in a sorted snapshot `Holds` names the one entry at the path) |
 
 ## Explicit assumptions in the statements
@@ -90,7 +90,7 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
   sorts it and the core checks it.
 - **End-to-end contracts** (`EndToEnd`): `GitListing` (A20),
   `GitAttributes` (A19), `GitObject` (A11, A21), `Realizes` (A5), the
-  observed call results `HookRun` and the per-entry model `hookPlan` (A4),
+  observed call results `HookEvidence` and the per-entry model `hookPlan` (A4),
   the sequencing state (A23); Git commits the checked index (A22).
 
 ## Not covered by Lean

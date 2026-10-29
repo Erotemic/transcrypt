@@ -17,15 +17,17 @@ and names every assumption it rests on.
 * **Adapter contracts** (`docs/verification/V3-ASSUMPTIONS.md`): Git reports
   its snapshots exactly (`GitListing`, A20), answers `check-attr` with the
   committed attributes (`GitAttributes`, A19), and an object read by id
-  returns that object (`GitObject`, A11, A21); the crypto primitives realize
-  the abstract suite (`Realizes`, A5); Git commits the index the hook
-  checked (A22, stated in prose: the conclusion is about `g.index`).
-* **The run.** `HookRun` lists the results the adapter obtained from the
-  verified core: the listing parse, the attribute flags, the selectability
-  check, the `HEAD`/`HEAD^1` membership, the keyless move check, each
-  entry's fields, and the per-entry checks `hookPlan` (a model of the loop
-  in `check_staged`, like `verifyPlan`). The adapter acts only on these
-  results (A4).
+  returns that object (`GitObject`, A11, A21), gathered for one run as
+  `HookContracts`; the crypto primitives realize the abstract suite
+  (`Realizes`, A5); Git commits the index the hook checked (A22, stated in
+  prose: the conclusion is about `g.index`).
+* **The run.** `HookEvidence` is what the adapter obtained from the
+  verified core: the three snapshots (`OrderedListing`, as the adapter's
+  `OrderedListing`: parsed, each path once, with checked object orders),
+  the attribute flags, the selectability check, the `HEAD`/`HEAD^1`
+  membership, the keyless move check, each entry's fields, and the
+  per-entry checks `hookPlan` (a model of the loop in `check_staged`, like
+  `verifyPlan`). The adapter acts only on these results (A4).
 
 `hook_accepts_only_authenticated_ciphertext`: if the run accepted, every
 path the committed attributes select is a regular, non-reserved entry whose
@@ -201,66 +203,101 @@ theorem listingBytes_count (es : List Entry) (h : ∀ e ∈ es, EntryOk e) :
     rw [ih (fun x hx => h x (by simp [hx])), List.count_eq_zero_of_not_mem hn]
     simp; omega
 
-/-- A listing Git printed exactly, parsed by the verified core with one slot
-    per NUL (as the adapter allocates), gives exactly its entries, and,
-    accepted with `unique`, they are sorted: each path once (`Sorted`). -/
-theorem listing_of_git {listing : Slice U8} {ends0 ends : Slice Usize} {es : List Entry}
-    (hg : GitListing listing es) (hlen : ends0.length = (sliceBytes listing).count 0)
-    (hp : parse_listing listing ends0 true = ok (true, ends)) : ListingOf listing ends es ∧ Sorted es := by
-  have := spec_result (parse_listing_spec listing ends0 true) hp
-  obtain ⟨hL, hs⟩ := this.2 es ⟨hg.1, hg.2, by rw [hlen, hg.2, listingBytes_count es hg.1]⟩
+/-! ## Snapshots as the adapter holds them -/
+
+/-- A snapshot as the adapter's `Listing` holds it: Git's bytes, parsed by
+    the verified core with one slot per NUL (as the adapter allocates);
+    `unique`: each path once (an index or one tree; a merge of several trees
+    may repeat a path). -/
+structure ParsedListing (unique : Bool) where
+  bytes : Slice U8
+  ends0 : Slice Usize
+  ends : Slice Usize
+  ends0_len : ends0.length = (sliceBytes bytes).count 0
+  parse : parse_listing bytes ends0 unique = ok (true, ends)
+
+/-- A snapshot with its object order, as the adapter's `OrderedListing`:
+    the order the adapter sorted, checked by the core. -/
+structure OrderedListing extends ParsedListing true where
+  order : Slice Usize
+  order_ok : object_order_ok bytes ends order = ok true
+
+/-- A snapshot of what Git printed exactly gives exactly its entries, sorted:
+    each path once (`Sorted`). -/
+theorem ParsedListing.of_git {es : List Entry} (l : ParsedListing true) (hg : GitListing l.bytes es) :
+    ListingOf l.bytes l.ends es ∧ Sorted es := by
+  have := spec_result (parse_listing_spec l.bytes l.ends0 true) l.parse
+  obtain ⟨hL, hs⟩ := this.2 es ⟨hg.1, hg.2, by rw [l.ends0_len, hg.2, listingBytes_count es hg.1]⟩
   exact ⟨hL, orderedAs_true.mp (hs.mp rfl)⟩
 
 /-- The same for the adapter's merge of several trees (paths may repeat):
     the entries are in path order (`PathOrdered`). -/
-theorem merged_listing_of_git {listing : Slice U8} {ends0 ends : Slice Usize} {es : List Entry}
-    (hg : GitListing listing es) (hlen : ends0.length = (sliceBytes listing).count 0)
-    (hp : parse_listing listing ends0 false = ok (true, ends)) : ListingOf listing ends es ∧ PathOrdered es := by
-  have := spec_result (parse_listing_spec listing ends0 false) hp
-  obtain ⟨hL, hs⟩ := this.2 es ⟨hg.1, hg.2, by rw [hlen, hg.2, listingBytes_count es hg.1]⟩
+theorem ParsedListing.of_git_merged {es : List Entry} (l : ParsedListing false) (hg : GitListing l.bytes es) :
+    ListingOf l.bytes l.ends es ∧ PathOrdered es := by
+  have := spec_result (parse_listing_spec l.bytes l.ends0 false) l.parse
+  obtain ⟨hL, hs⟩ := this.2 es ⟨hg.1, hg.2, by rw [l.ends0_len, hg.2, listingBytes_count es hg.1]⟩
   exact ⟨hL, orderedAs_false.mp (hs.mp rfl)⟩
+
+/-- An ordered snapshot of what Git printed: its entries, sorted, and its
+    order is an object order of them (`ObjectOrder`). -/
+theorem OrderedListing.of_git {es : List Entry} (l : OrderedListing) (hg : GitListing l.bytes es) :
+    ListingOf l.bytes l.ends es ∧ Sorted es ∧ ObjectOrder es l.order := by
+  obtain ⟨hL, hs⟩ := l.toParsedListing.of_git hg
+  exact ⟨hL, hs, (spec_result (object_order_ok_spec hL l.order) l.order_ok).mp rfl⟩
 
 /-! ## The hook's final check -/
 
-/-- The results the adapter obtained from the verified core in the hook's
-    final check (`check_staged`, after any sealing): it refuses the commit
-    unless they are as shown, and builds each protected entry's check from
-    them (A4). `n` is the number of index entries. -/
-structure HookRun (g : GitState) (index head parent response : Slice U8)
-    (ends0 ends hends0 hends pends0 pends iorder horder porder : Slice Usize)
-    (flags0 flags all inHead0 inHead inParent0 inParent : Slice Bool) (entries : List HookEntry) : Prop where
-  /-- The three listings, parsed with one slot per NUL, each path once. -/
-  ends0_len : ends0.length = (sliceBytes index).count 0
-  parse : parse_listing index ends0 true = ok (true, ends)
-  hends0_len : hends0.length = (sliceBytes head).count 0
-  head_parse : parse_listing head hends0 true = ok (true, hends)
-  pends0_len : pends0.length = (sliceBytes parent).count 0
-  parent_parse : parse_listing parent pends0 true = ok (true, pends)
-  /-- Their object orders (sorted by the adapter), checked by the core. -/
-  index_order : object_order_ok index ends iorder = ok true
-  head_order : object_order_ok head hends horder = ok true
-  parent_order : object_order_ok parent pends porder = ok true
-  /-- The protected flags: Git's answer checked against the listing's paths. -/
+/-- What the adapter obtained from the verified core in the hook's final
+    check (`check_staged`, after any sealing): it refuses the commit unless
+    the results are as shown, and builds each protected entry's check from
+    them (A4). -/
+structure HookEvidence (g : GitState) where
+  /-- The index, `HEAD` and `HEAD^1`, each path once, with object orders. -/
+  index : OrderedListing
+  head : OrderedListing
+  parent : OrderedListing
+  /-- The protected flags: Git's `check-attr` answer, checked against the
+      index's own paths. -/
+  response : Slice U8
+  flags0 : Slice Bool
+  flags : Slice Bool
   flags0_len : flags0.length = g.index.length
-  attrs : parse_listing_attrs index ends response flags0 = ok (true, flags)
+  attrs : parse_listing_attrs index.bytes index.ends response flags0 = ok (true, flags)
   /-- No protected entry is unselectable. -/
-  selectable : ∃ sel : Usize, first_unselectable index ends flags = ok sel ∧ sel.val = g.index.length
+  selectable : ∃ sel : Usize, first_unselectable index.bytes index.ends flags = ok sel ∧ sel.val = g.index.length
   /-- Membership in `HEAD` (every entry) and `HEAD^1` (protected entries). -/
+  all : Slice Bool
+  inHead0 : Slice Bool
+  inHead : Slice Bool
+  inParent0 : Slice Bool
+  inParent : Slice Bool
   all_true : all.val = List.replicate g.index.length true
   inHead0_len : inHead0.length = g.index.length
-  in_head : held_entries index ends all head hends inHead0 = ok (true, inHead)
+  in_head : held_entries index.bytes index.ends all head.bytes head.ends inHead0 = ok (true, inHead)
   inParent0_len : inParent0.length = g.index.length
-  in_parent : held_entries index ends flags parent pends inParent0 = ok (true, inParent)
+  in_parent : held_entries index.bytes index.ends flags parent.bytes parent.ends inParent0 = ok (true, inParent)
   /-- One check per protected entry, in index order. -/
+  entries : List HookEntry
   positions : entries.map (fun e => e.index.val) = (List.range g.index.length).filter (fun i => flags.val[i]!)
   /-- Each check's path is the entry's path field (`listing_fields`). -/
-  fields : ∀ e ∈ entries, ∃ f, listing_fields index ends e.index = ok (core.option.Option.Some f) ∧
-    sliceBytes e.path = (sliceBytes index).extract f.path_start.val f.end.val
+  fields : ∀ e ∈ entries, ∃ f, listing_fields index.bytes index.ends e.index = ok (core.option.Option.Some f) ∧
+    sliceBytes e.path = (sliceBytes index.bytes).extract f.path_start.val f.end.val
   /-- An entry counts as settled only if both `HEAD` and `HEAD^1` hold it
       (the adapter also requires unchanged attribute files and config). -/
   settled : ∀ e ∈ entries, e.settled = true → (inHead.val[e.index.val]! && inParent.val[e.index.val]!) = true
-  elsewhere : ∀ e ∈ entries,
-    blob_elsewhere index ends iorder e.index head hends horder parent pends porder = ok e.elsewhere
+  elsewhere : ∀ e ∈ entries, blob_elsewhere index.bytes index.ends index.order e.index head.bytes head.ends
+    head.order parent.bytes parent.ends parent.order = ok e.elsewhere
+
+/-- **A20, A19, A11, A21.** The adapter contracts the hook relies on, for
+    one run: Git reported the index, `HEAD` and `HEAD^1` exactly, and the
+    committed attributes' `filter` values, and every blob checked is the
+    content of its entry's object id. -/
+structure HookContracts (g : GitState) (run : HookEvidence g) : Prop where
+  index : GitListing run.index.bytes g.index
+  head : GitListing run.head.bytes g.head
+  parent : GitListing run.parent.bytes g.parent
+  attributes : GitAttributes g run.response
+  objects : ∀ e ∈ run.entries, ∃ x, g.index[e.index.val]? = some x ∧ GitObject g x.oid e.record
 
 /-- **End-to-end security of the pre-commit hook.** Assume the adapter
     contracts: Git reports the index, `HEAD` and `HEAD^1` exactly (A20) and
@@ -269,9 +306,9 @@ structure HookRun (g : GitState) (index head parent response : Slice U8)
     primitives realize the suite `σ` (A5), whose digest gives the
     configuration id (A5); and the configuration is the one committed as
     `.transcrypt/config` (checked by the adapter, A4). If the hook's final
-    check accepted (`HookRun`, `hookPlan` returned `true`), then every entry of
-    the index Git commits (A22) that the committed attributes select is a
-    regular, non-reserved file whose blob
+    check accepted (`HookEvidence`, `hookPlan` returned `true`), then every
+    entry of the index Git commits (A22) that the committed attributes select
+    is a regular, non-reserved file whose blob
 
     * with the key, authenticates at exactly its own path under the
       committed configuration — or, in the incremental hook, is unchanged
@@ -286,20 +323,13 @@ structure HookRun (g : GitState) (index head parent response : Slice U8)
     "unchanged since `HEAD`" names the one entry `HEAD` has at that path.
     With A24 the settled case authenticates too
     (`hook_accepts_only_authenticated_ciphertext_given_history`). -/
-theorem hook_accepts_only_authenticated_ciphertext (g : GitState)
-    (index head parent response : Slice U8) (ends0 ends hends0 hends pends0 pends : Slice Usize)
-    (iorder horder porder : Slice Usize)
-    (flags0 flags all inHead0 inHead inParent0 inParent : Slice Bool) (entries : List HookEntry)
+theorem hook_accepts_only_authenticated_ciphertext (g : GitState) (run : HookEvidence g)
     (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (keyed incremental : Bool)
     (hR : Realizes inst prims σ)
     (hid : wireBytes id = σ.digest16 (wireBytes config))
-    (hindex : GitListing index g.index) (hhead : GitListing head g.head) (hparent : GitListing parent g.parent)
-    (hattr : GitAttributes g response)
-    (hobj : ∀ e ∈ entries, ∃ x, g.index[e.index.val]? = some x ∧ GitObject g x.oid e.record)
+    (hgit : HookContracts g run)
     (hcfg : ∃ c ∈ g.index, c.path = ascii ".transcrypt/config" ∧ c.Regular ∧ g.blob c.oid = some (wireBytes config))
-    (hrun : HookRun g index head parent response ends0 ends hends0 hends pends0 pends iorder horder porder
-      flags0 flags all inHead0 inHead inParent0 inParent entries)
-    (hcheck : hookPlan inst prims config id keyed incremental entries = ok true) :
+    (hcheck : hookPlan inst prims config id keyed incremental run.entries = ok true) :
     (∃ c ∈ g.index, c.path = ascii ".transcrypt/config" ∧ g.blob c.oid = some (wireBytes config)) ∧
     (Sorted g.index ∧ Sorted g.head ∧ Sorted g.parent) ∧
     ∀ x ∈ g.index, Selected (g.filter x.path) →
@@ -309,57 +339,54 @@ theorem hook_accepts_only_authenticated_ciphertext (g : GitState)
         (keyed = false → EnvelopeOk content (σ.digest16 (wireBytes config)) ∧
           (Settled g.head g.parent x ∨ ¬ BlobElsewhere [g.index, g.head, g.parent] x)) := by
   -- The verified parses give exactly Git's snapshots, each path once.
-  obtain ⟨hL, hLs⟩ := listing_of_git hindex hrun.ends0_len hrun.parse
-  obtain ⟨hH, hHs⟩ := listing_of_git hhead hrun.hends0_len hrun.head_parse
-  obtain ⟨hP, hPs⟩ := listing_of_git hparent hrun.pends0_len hrun.parent_parse
+  -- The verified parses give exactly Git's snapshots, each path once.
+  obtain ⟨hL, hLs, hIo⟩ := run.index.of_git hgit.index
+  obtain ⟨hH, hHs, hHo⟩ := run.head.of_git hgit.head
+  obtain ⟨hP, hPs, hPo⟩ := run.parent.of_git hgit.parent
   refine ⟨by obtain ⟨c, hc, hp, _, hb⟩ := hcfg; exact ⟨c, hc, hp, hb⟩, ⟨hLs, hHs, hPs⟩, ?_⟩
-  -- The object orders.
-  have hIo := (spec_result (object_order_ok_spec hL iorder) hrun.index_order).mp rfl
-  have hHo := (spec_result (object_order_ok_spec hH horder) hrun.head_order).mp rfl
-  have hPo := (spec_result (object_order_ok_spec hP porder) hrun.parent_order).mp rfl
   -- The flags are Git's selection of each entry.
-  have hflags := (spec_result (parse_listing_attrs_spec hL response flags0) hrun.attrs).2
+  have hflags := (spec_result (parse_listing_attrs_spec hL run.response run.flags0) run.attrs).2
     (g.index.map (fun e => g.filter e.path)) ⟨by simp, by
-      intro v hv; obtain ⟨e, he, rfl⟩ := List.mem_map.1 hv; exact hattr.1 e he,
-      hrun.flags0_len, hattr.2⟩
-  have hfl : flags.val = g.index.map (fun e => decide (Selected (g.filter e.path))) := by
+      intro v hv; obtain ⟨e, he, rfl⟩ := List.mem_map.1 hv; exact hgit.attributes.1 e he,
+      run.flags0_len, hgit.attributes.2⟩
+  have hfl : run.flags.val = g.index.map (fun e => decide (Selected (g.filter e.path))) := by
     rw [hflags.2, List.map_map]; rfl
   -- No protected entry is unselectable.
-  obtain ⟨sel, hsel0, hsel_none⟩ := hrun.selectable
-  have hsel := spec_result (first_unselectable_spec hL flags (by
+  obtain ⟨sel, hsel0, hsel_none⟩ := run.selectable
+  have hsel := spec_result (first_unselectable_spec hL run.flags (by
     rw [Slice.length, hfl, List.length_map])) hsel0
   -- Membership in `HEAD` and `HEAD^1`.
-  have hinH := spec_result (held_entries_spec hL hH hHs.pathOrdered all inHead0 (by
-    rw [Slice.length, hrun.all_true, List.length_replicate]) hrun.inHead0_len) hrun.in_head
-  have hinP := spec_result (held_entries_spec hL hP hPs.pathOrdered flags inParent0 (by
-    rw [Slice.length, hfl, List.length_map]) hrun.inParent0_len) hrun.in_parent
-  have hplan := spec_result (hookPlan_spec hR config id keyed incremental entries) hcheck rfl
+  have hinH := spec_result (held_entries_spec hL hH hHs.pathOrdered run.all run.inHead0 (by
+    rw [Slice.length, run.all_true, List.length_replicate]) run.inHead0_len) run.in_head
+  have hinP := spec_result (held_entries_spec hL hP hPs.pathOrdered run.flags run.inParent0 (by
+    rw [Slice.length, hfl, List.length_map]) run.inParent0_len) run.in_parent
+  have hplan := spec_result (hookPlan_spec hR config id keyed incremental run.entries) hcheck rfl
   intro x hx hsx
   obtain ⟨k, hk, rfl⟩ := List.getElem_of_mem hx
-  have hfk : flags.val[k]! = true := by
+  have hfk : run.flags.val[k]! = true := by
     rw [hfl, getElem!_pos _ k (by simp; omega)]; simp [hsx]
   refine ⟨hsel.2.1 k _ (by rw [hsel_none]; exact hk) (List.getElem?_eq_getElem hk) hfk, ?_⟩
   -- The entry's check.
-  have hmem : k ∈ entries.map (fun e => e.index.val) := by
-    rw [hrun.positions]; exact List.mem_filter.mpr ⟨List.mem_range.mpr hk, hfk⟩
+  have hmem : k ∈ run.entries.map (fun e => e.index.val) := by
+    rw [run.positions]; exact List.mem_filter.mpr ⟨List.mem_range.mpr hk, hfk⟩
   obtain ⟨e, he, hek⟩ := List.mem_map.1 hmem
   have hacc := hplan e he
-  obtain ⟨x', hx', hobj'⟩ := hobj e he
+  obtain ⟨x', hx', hobj'⟩ := hgit.objects e he
   rw [hek, List.getElem?_eq_getElem hk, Option.some.injEq] at hx'
   subst hx'
   -- Its path is the entry's path.
-  obtain ⟨f, hf, hpath⟩ := hrun.fields e he
+  obtain ⟨f, hf, hpath⟩ := run.fields e he
   have hfs := spec_result (listing_fields_spec hL e.index) hf
   obtain ⟨y, hy, -, -, hyp, -⟩ := FieldsOf.slices hL hfs.2
   rw [hek, List.getElem?_eq_getElem hk, Option.some.injEq] at hy
   subst hy
   rw [hyp] at hpath
   -- A settled entry is `Settled`.
-  have hall : all.val[k]! = true := by
-    rw [hrun.all_true, getElem!_pos _ k (by simp; omega)]; simp
+  have hall : run.all.val[k]! = true := by
+    rw [run.all_true, getElem!_pos _ k (by simp; omega)]; simp
   have hsett : e.settled = true → Settled g.head g.parent g.index[k] := by
     intro hs
-    have := hrun.settled e he hs
+    have := run.settled e he hs
     rw [hek, Bool.and_eq_true, hinH.2.2 k _ hk (List.getElem?_eq_getElem hk),
       hinP.2.2 k _ hk (List.getElem?_eq_getElem hk)] at this
     simp only [hall, hfk, true_and] at this
@@ -367,7 +394,7 @@ theorem hook_accepts_only_authenticated_ciphertext (g : GitState)
   -- `elsewhere` is exactly `BlobElsewhere`.
   have hels : e.elsewhere = true ↔ BlobElsewhere [g.index, g.head, g.parent] g.index[k] := by
     have := spec_result (blob_elsewhere_spec hL hLs hIo hH hHs hHo hP hPs hPo e.index (by omega))
-      (hrun.elsewhere e he)
+      (run.elsewhere e he)
     simp only [hek] at this
     exact this
   refine ⟨_, hobj', ?_, ?_⟩
@@ -408,26 +435,18 @@ def HeadAuthentic (σ : Suite) (config : List Nat) (g : GitState) : Prop :=
     `hook_accepts_only_authenticated_ciphertext` and A24, an accepted commit
     made with the key, incremental or not, stores at every path the
     committed attributes select a record that authenticates at that path. -/
-theorem hook_accepts_only_authenticated_ciphertext_given_history (g : GitState)
-    (index head parent response : Slice U8) (ends0 ends hends0 hends pends0 pends : Slice Usize)
-    (iorder horder porder : Slice Usize)
-    (flags0 flags all inHead0 inHead inParent0 inParent : Slice Bool) (entries : List HookEntry)
+theorem hook_accepts_only_authenticated_ciphertext_given_history (g : GitState) (run : HookEvidence g)
     (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (incremental : Bool)
     (hR : Realizes inst prims σ)
     (hid : wireBytes id = σ.digest16 (wireBytes config))
-    (hindex : GitListing index g.index) (hhead : GitListing head g.head) (hparent : GitListing parent g.parent)
-    (hattr : GitAttributes g response)
-    (hobj : ∀ e ∈ entries, ∃ x, g.index[e.index.val]? = some x ∧ GitObject g x.oid e.record)
+    (hgit : HookContracts g run)
     (hcfg : ∃ c ∈ g.index, c.path = ascii ".transcrypt/config" ∧ c.Regular ∧ g.blob c.oid = some (wireBytes config))
-    (hrun : HookRun g index head parent response ends0 ends hends0 hends pends0 pends iorder horder porder
-      flags0 flags all inHead0 inHead inParent0 inParent entries)
-    (hcheck : hookPlan inst prims config id true incremental entries = ok true)
+    (hcheck : hookPlan inst prims config id true incremental run.entries = ok true)
     (hhist : HeadAuthentic σ (wireBytes config) g) :
     ∀ x ∈ g.index, Selected (g.filter x.path) →
       Selectable x ∧ ∃ content, g.blob x.oid = some content ∧ ∃ pt, OpensTo σ (wireBytes config) x.path content pt := by
-  obtain ⟨-, -, h⟩ := hook_accepts_only_authenticated_ciphertext (keyed := true) (hR := hR) (hid := hid)
-    (hindex := hindex) (hhead := hhead) (hparent := hparent) (hattr := hattr) (hobj := hobj)
-    (hcfg := hcfg) (hrun := hrun) (hcheck := hcheck)
+  obtain ⟨-, -, h⟩ := hook_accepts_only_authenticated_ciphertext g run config id true incremental hR hid hgit
+    hcfg hcheck
   intro x hx hsx
   obtain ⟨hsel, content, hc, hk, -⟩ := h x hx hsx
   refine ⟨hsel, content, hc, ?_⟩
@@ -490,29 +509,26 @@ theorem sealResult_eq_rebind {a : Transcrypt.V3Policy.SealAction} :
     record that authenticates at a `HEAD` path it was moved from
     (`MoveSource`). -/
 theorem hook_repairs_only_local_changes (g : GitState)
-    (index head incomingL : Slice U8) (iends0 ends hends0 hends mends horder : Slice Usize)
-    (flags inHead0 inHead inInc0 inInc : Slice Bool) (i : Usize) (hi : i.val < g.index.length)
+    (index head : ParsedListing true) (flags inHead0 inHead inInc0 inInc : Slice Bool)
+    (i : Usize) (hi : i.val < g.index.length)
     (config : Std.Array U8 55#usize) (path record openBuf : Slice U8)
     (forced known opens envelope moved localc : Bool) (act : transcrypt_v3_core.SealAction)
     (hR : Realizes inst prims σ)
-    (hindex : GitListing index g.index) (hilen : iends0.length = (sliceBytes index).count 0)
-    (hparse : parse_listing index iends0 true = ok (true, ends))
-    (hhead : GitListing head g.head) (hhlen : hends0.length = (sliceBytes head).count 0)
-    (hhparse : parse_listing head hends0 true = ok (true, hends))
+    (hindex : GitListing index.bytes g.index) (hhead : GitListing head.bytes g.head)
     (hflen : flags.length = g.index.length) (hfi : flags.val[i.val]! = true)
     (hInHead0 : inHead0.length = g.index.length)
-    (hinH : held_entries index ends flags head hends inHead0 = ok (true, inHead))
-    (hknown : known = true → ∃ m, ∃ mends0 : Slice Usize, g.incoming = some m ∧ GitListing incomingL m ∧
-      mends0.length = (sliceBytes incomingL).count 0 ∧ parse_listing incomingL mends0 false = ok (true, mends) ∧
-      inInc0.length = g.index.length ∧ held_entries index ends flags incomingL mends inInc0 = ok (true, inInc))
+    (hinH : held_entries index.bytes index.ends flags head.bytes head.ends inHead0 = ok (true, inHead))
+    (hknown : known = true → ∃ m, ∃ incoming : ParsedListing false, g.incoming = some m ∧
+      GitListing incoming.bytes m ∧ inInc0.length = g.index.length ∧
+      held_entries index.bytes index.ends flags incoming.bytes incoming.ends inInc0 = ok (true, inInc))
     (hlazy : known = false → g.incoming = none ∨ inHead.val[i.val]! = true)
     (hlocal : is_local_change inHead.val[i.val]! known (known && inInc.val[i.val]!) forced envelope = ok localc)
     (hopens : ∀ pt r, open_record inst prims config path record openBuf = ok (r, pt) →
       (opens = true ↔ r = core.result.Result.Ok ()))
     (henvelope : ∀ r, parse_file_header record = ok r → (envelope = true ↔ ∃ x, r = core.result.Result.Ok x))
-    (hmoved : moved = true → ∃ (from_ j : Usize) (src buf pt : Slice U8), from_.val ≤ g.head.length ∧
-      object_order_ok head hends horder = ok true ∧
-      next_move_source index ends i head hends horder from_ = ok j ∧ j.val < g.head.length ∧
+    (hmoved : moved = true → ∃ (horder : Slice Usize) (from_ j : Usize) (src buf pt : Slice U8),
+      from_.val ≤ g.head.length ∧ object_order_ok head.bytes head.ends horder = ok true ∧
+      next_move_source index.bytes index.ends i head.bytes head.ends horder from_ = ok j ∧ j.val < g.head.length ∧
       sliceBytes src = (g.head[j.val]?).elim [] (·.path) ∧
       open_record inst prims config src record buf = ok (core.result.Result.Ok (), pt))
     (hseal : seal_action opens localc envelope moved = ok act)
@@ -531,8 +547,8 @@ theorem hook_repairs_only_local_changes (g : GitState)
     · exact Or.inr (sealResult_eq_rebind.mp hact.symm)
   obtain ⟨hloc, hop⟩ := sealSpec_repairs_only_local hspec
   -- The verified parses give exactly Git's snapshots, each path once.
-  obtain ⟨hL, hLs⟩ := listing_of_git hindex hilen hparse
-  obtain ⟨hH, hHs⟩ := listing_of_git hhead hhlen hhparse
+  obtain ⟨hL, hLs⟩ := index.of_git hindex
+  obtain ⟨hH, hHs⟩ := head.of_git hhead
   -- `HEAD` membership.
   have hheld := spec_result (held_entries_spec hL hH hHs.pathOrdered flags inHead0 hflen hInHead0) hinH
   have hh : inHead.val[i.val]! = true ↔ Holds g.head g.index[i.val].oid g.index[i.val].path := by
@@ -547,8 +563,8 @@ theorem hook_repairs_only_local_changes (g : GitState)
       rcases hlazy hk with hn | hin
       · rw [hn, localChange_unknown]
       · rw [localChange_held (hh.mp hin)]
-    · obtain ⟨m, mends0, hm, hgm, hmlen, hmparse, hlen, hinc⟩ := hknown hk
-      obtain ⟨hM, hMo⟩ := merged_listing_of_git hgm hmlen hmparse
+    · obtain ⟨m, incoming, hm, hgm, hlen, hinc⟩ := hknown hk
+      obtain ⟨hM, hMo⟩ := incoming.of_git_merged hgm
       have hheldM := spec_result (held_entries_spec hL hM hMo flags inInc0 hflen hlen) hinc
       have hii : inInc.val[i.val]! = true ↔ Holds m g.index[i.val].oid g.index[i.val].path := by
         rw [hheldM.2.2 i.val _ hi (List.getElem?_eq_getElem hi), hfi]; simp
@@ -571,7 +587,7 @@ theorem hook_repairs_only_local_changes (g : GitState)
     have hsr : sealSpec opens localc envelope moved = .rebind := sealResult_eq_rebind.mp hact.symm
     obtain ⟨he, hm⟩ := sealSpec_rebind_moved hsr
     refine ⟨he, ?_⟩
-    obtain ⟨from_, j, src, buf, pt, hfrom, hord, hnext, hj, hsrc, hopen⟩ := hmoved hm
+    obtain ⟨horder, from_, j, src, buf, pt, hfrom, hord, hnext, hj, hsrc, hopen⟩ := hmoved hm
     have hHo := (spec_result (object_order_ok_spec hH horder) hord).mp rfl
     have hfirst := spec_result (next_move_source_spec hL hLs.pathOrdered hH hHo i hi from_ hfrom) hnext
     obtain ⟨h, hhj, hms⟩ := hfirst.2.2.2 hj

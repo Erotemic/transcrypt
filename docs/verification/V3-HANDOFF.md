@@ -199,7 +199,7 @@ or `tests/git_lifecycle.rs`.
   `parse_listing`, each path once; entries from `listing_fields`), and
   compute the hook's inputs (membership in `HEAD`/`HEAD^1`/incoming, local
   changes, move sources, the keyless move check) only with the verified
-  functions over them; `EndToEnd.lean`'s `HookRun` lists the calls the hook
+  functions over them; `EndToEnd.lean`'s `HookEvidence` lists the calls the hook
   relies on. Object orders come only from `Listing::object_order` (checked
   by `object_order_ok`); several trees are combined only by
   `Listing::merge` (the one `unique = false` parse).
