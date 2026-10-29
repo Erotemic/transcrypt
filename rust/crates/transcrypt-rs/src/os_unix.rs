@@ -36,7 +36,7 @@ pub(crate) fn default_sigpipe() {
 /// Run `f` with SIGPIPE blocked in this thread, so that a write to a pipe
 /// or socket whose reader is gone fails with EPIPE (an error that is
 /// reported, and rolled back from) instead of killing the process: `main`
-/// restores SIGPIPE's default so that `transcrypt-v3 status | head` ends
+/// restores SIGPIPE's default so that `transcrypt-rs status | head` ends
 /// quietly.
 pub(crate) fn sigpipe_blocked<T>(f: impl FnOnce() -> T) -> T {
     // SAFETY: signal-mask calls on initialized sets; `sigwait` returns at

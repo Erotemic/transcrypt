@@ -346,13 +346,13 @@ For the external review (R-01), in reading order:
    [V3-PROOF-COVERAGE](V3-PROOF-COVERAGE.md); independent spec
    `proofs/lean/Transcrypt/V3Policy.lean`.
 4. Implementation map: core `rust/crates/transcrypt-v3-core/src/lib.rs`;
-   primitives `rust/crates/transcrypt-v3/src/lib.rs` (`Keyed`,
+   primitives `rust/crates/transcrypt-rs/src/lib.rs` (`Keyed`,
    `derive_key`, `clean_file`); adapter `src/{main,git,worktree,setup,audit}.rs`; agent
    `src/session.rs`; fd-relative filesystem `src/fsat.rs`; adapter call-site
    table in V3-ASSUMPTIONS.
-5. Adversarial evidence: `rust/crates/transcrypt-v3/tests/{adversarial,git_lifecycle}.rs`.
+5. Adversarial evidence: `rust/crates/transcrypt-rs/tests/{adversarial,git_lifecycle}.rs`.
 6. Cryptographic evidence: `tests/v3/reference/{check_vectors,differential}.py`,
-   `rust/crates/transcrypt-v3/tests/{v3_vectors,v3_differential}.rs`; this
+   `rust/crates/transcrypt-rs/tests/{v3_vectors,v3_differential}.rs`; this
    document, sections 1–2.
 7. Requested focus: AES-SIV AD construction and the config-tag-as-verifier
    design; `aes-siv` crate; the locked-filter envelope pass-through (A14);

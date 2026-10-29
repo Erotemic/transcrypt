@@ -1,6 +1,6 @@
 name: Release
 
-# transcrypt-v3 release archives: Linux (x86_64, arm64; static), FreeBSD
+# transcrypt-rs release archives: Linux (x86_64, arm64; static), FreeBSD
 # (x86_64), Windows (x86_64; static CRT) and macOS (arm64, x86_64). Every
 # archive is built by scripts/build-release.sh, the same script used without
 # CI, and every binary is tested on its own OS (the whole suite, against the
@@ -108,7 +108,7 @@ jobs:
         run: |
           git config --global user.name CI
           git config --global user.email ci@example.test
-          TRANSCRYPT_V3_TEST_BIN="$RUNNER_TEMP\\install\\bin\\transcrypt-v3.exe" cargo test --locked -p transcrypt-v3
+          TRANSCRYPT_RS_TEST_BIN="$RUNNER_TEMP\\install\\bin\\transcrypt-rs.exe" cargo test --locked -p transcrypt-rs
 
   test-freebsd:
     # The suite against the FreeBSD archive's binary, installed by install.sh.
@@ -141,7 +141,7 @@ jobs:
               git config --global user.name CI
               git config --global user.email ci@example.test
               git config --global init.defaultBranch main
-              cd rust && TRANSCRYPT_V3_TEST_BIN="$HOME/install/bin/transcrypt-v3" cargo test --locked -p transcrypt-v3
+              cd rust && TRANSCRYPT_RS_TEST_BIN="$HOME/install/bin/transcrypt-rs" cargo test --locked -p transcrypt-rs
             '
 
   publish:
@@ -178,13 +178,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
-            --title "transcrypt-v3 ${GITHUB_REF_NAME#v3-}" --notes-file - \
+            --title "transcrypt-rs ${GITHUB_REF_NAME#v3-}" --notes-file - \
             release/*.tar.gz release/*.zip release/SHA256SUMS <<'EOF'
-          transcrypt-v3 for Linux (x86_64, arm64; static), FreeBSD 14.4 and later (x86_64),
+          transcrypt-rs for Linux (x86_64, arm64; static), FreeBSD 14.4 and later (x86_64),
           macOS (arm64, x86_64) and Windows 10 1803 and later (x86_64). It needs only Git 2.34 or later
           (on Windows, Git for Windows). Each binary passed the full test suite on its own OS.
           Install: `scripts/install.sh` (Linux, FreeBSD, macOS) or `scripts/install.ps1` (Windows) from
-          the repository, or unpack the archive for your system and put `transcrypt-v3` on your PATH.
+          the repository, or unpack the archive for your system and put `transcrypt-rs` on your PATH.
           Verify with `sha256sum -c SHA256SUMS` and `gh attestation verify <archive> --repo Erotemic/transcrypt`.
           Rebuild and compare: `scripts/build-release.sh` at this tag (docs/RELEASING.md).
           EOF

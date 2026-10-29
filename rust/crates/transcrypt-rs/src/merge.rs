@@ -18,7 +18,7 @@ use crate::{
 /// the stored result has conflict markers. On any error `ours` is left as
 /// it was, which Git records as a conflict.
 pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_path: &[u8]) -> Result<bool, String> {
-    transcrypt_v3::validate_protected_path(git_path)?;
+    transcrypt_rs::validate_protected_path(git_path)?;
     let config = load_config(root)?;
     let key = Key::require(root, &config).map_err(|e| format!("{e} to merge protected files"))?;
     let decrypt = |file: &Path, required: bool| -> Result<Zeroizing<Vec<u8>>, String> {

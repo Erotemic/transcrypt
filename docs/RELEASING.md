@@ -1,4 +1,4 @@
-# Releasing transcrypt-v3
+# Releasing transcrypt-rs
 
 Release binaries are static Linux executables for **x86_64** and **arm64**
 (aarch64). Each is one file with no dependencies except Git 2.34 or later at
@@ -21,13 +21,13 @@ tests need an arm64 machine (or `qemu-user` binfmt).
 
 The output in `dist/` is:
 
-- `transcrypt-v3-<version>-x86_64-linux.tar.gz`
-- `transcrypt-v3-<version>-aarch64-linux.tar.gz`
+- `transcrypt-rs-<version>-x86_64-linux.tar.gz`
+- `transcrypt-rs-<version>-aarch64-linux.tar.gz`
 - `SHA256SUMS`
 
-Each archive holds `transcrypt-v3`, `LICENSE` and the user guide as
+Each archive holds `transcrypt-rs` (`.exe` on Windows), `LICENSE` and the user guide as
 `README.md`. The script refuses a working tree with uncommitted changes
-(`--allow-dirty` overrides, and the binary's `transcrypt-v3 --version` then
+(`--allow-dirty` overrides, and the binary's `transcrypt-rs --version` then
 says `-dirty`).
 
 **Reproducibility.** The toolchain is pinned (`RUST_TOOLCHAIN`, default
@@ -57,7 +57,7 @@ macOS jobs run too but do not fail the run (not a release platform yet).
 
 ## Releasing with GitHub
 
-1. Bump `version` in `rust/crates/transcrypt-v3/Cargo.toml` and commit.
+1. Bump `version` in `rust/crates/transcrypt-rs/Cargo.toml` and commit.
 2. Tag the commit `v3-<version>` (for example `v3-0.1.0`) and push the tag.
 3. `.github/workflows/release.yml` builds both archives on an x86_64 and an
    arm64 runner with the same script, tests each natively, compares the two

@@ -21,7 +21,7 @@ optional mode, not prerequisites.
 The implementation now follows it:
 - **Selection by `.gitattributes`.** `protect PATTERN` writes
   `PATTERN transcrypt` (a committed macro for
-  `filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text`).
+  `filter=transcrypt-rs diff=transcrypt-rs merge=transcrypt-v3 -text`).
   Git's `check-attr` answers are parsed by the verified core. The path
   policy is suffix-free, except for the reserved `.transcrypt/`,
   `.gitattributes` and `.gitmodules`.
@@ -57,13 +57,13 @@ semantics silently or import legacy CBC into the proved core.
 | Bash ↔ v3 command and mechanism map | `docs/verification/V3-BASH-CORRESPONDENCE.md` |
 | Wire/AAD/Git behavior | `docs/verification/specs/V3-AUTHENTICATED-P0.md` |
 | Verified pure core (codec + every decision) | `rust/crates/transcrypt-v3-core/src/lib.rs` |
-| Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-v3/src/lib.rs` |
-| Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-v3/src/*.rs`: filters, lifecycle, credentials, Git, worktree, setup, attributes, rekey, audit, migrate, agent, fd-relative FS (module map in `main.rs`) |
+| Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-rs/src/lib.rs` |
+| Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-rs/src/*.rs`: filters, lifecycle, credentials, Git, worktree, setup, attributes, rekey, audit, migrate, agent, fd-relative FS (module map in `main.rs`) |
 | Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
 | Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle,Snapshot,Objects,EndToEnd}.lean` |
 | Theorem ledger | `proofs/aeneas/v3/PROOF-STATUS.md` |
-| Tests | `rust/crates/transcrypt-v3/tests/{workflows,git_lifecycle,adversarial,v3_vectors,v3_differential}.rs`, `tests/v3/reference/` (`differential.py` regenerates the OpenSSL/argon2 corpus); Bash v2: `tests/v2`, `tests/v3` (bats) |
+| Tests | `rust/crates/transcrypt-rs/tests/{workflows,git_lifecycle,adversarial,v3_vectors,v3_differential}.rs`, `tests/v3/reference/` (`differential.py` regenerates the OpenSSL/argon2 corpus); Bash v2: `tests/v2`, `tests/v3` (bats) |
 
 ## Verified state
 

@@ -1,9 +1,9 @@
 [package]
-name = "transcrypt-v3"
+name = "transcrypt-rs"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Authenticated deterministic Rust Transcrypt v3 proof of concept"
+description = "Transcrypt v3 in Rust: authenticated encryption of the files you choose, in Git"
 
 [dependencies]
 transcrypt-v3-core = { path = "../transcrypt-v3-core" }
@@ -46,5 +46,5 @@ windows-sys = { version = "=0.61.2", features = [
 ] }
 
 [[bin]]
-name = "transcrypt-v3"
+name = "transcrypt-rs"
 path = "src/main.rs"

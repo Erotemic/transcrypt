@@ -98,7 +98,7 @@ one.
 ### A4 — Adapter-to-core correspondence
 
 - **Claim:** the effectful adapter (every module of
-  `rust/crates/transcrypt-v3/src/` other than the core) passes the core the right bytes (exact Git path, on-disk config,
+  `rust/crates/transcrypt-rs/src/` other than the core) passes the core the right bytes (exact Git path, on-disk config,
   staged record), acts only on `Ok` results, and acts on the *same* bytes it
   checked.
 - **Trust boundary:** our unverified Rust.
@@ -174,7 +174,7 @@ one.
   `[domain, config, path]` (three S2V components, not a concatenation),
   SHA-256 truncation, exact output lengths, and never reports false success.
   These are the clauses of Lean's `Realizes`.
-- **Trust boundary:** `transcrypt-v3/src/lib.rs` plus A9.
+- **Trust boundary:** `transcrypt-rs/src/lib.rs` plus A9.
 - **Consequence:** the C-02 theorems would be about a different primitive.
 - **Evidence:**
   - TESTED by `v3_differential.rs` against OpenSSL AES-SIV and reference
@@ -358,7 +358,7 @@ one.
 - **Claim:** plaintext committed where no v3 filter ran never reaches a
   shared remote. Examples: a clone that never ran `unlock`, merges and
   rebases that skip `pre-commit`, `--no-verify`.
-- **Trust boundary:** the installed `pre-push` hook, or `transcrypt-v3 audit`
+- **Trust boundary:** the installed `pre-push` hook, or `transcrypt-rs audit`
   in CI or a server-side hook.
 - **Consequence:** plaintext published.
 - **Evidence:** TESTED (pre-push refuses a `--no-verify` plaintext commit; a
@@ -733,7 +733,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 
 ## Adapter call-site table (A4)
 
-Each effect in `rust/crates/transcrypt-v3/src/{main,git,worktree,setup,audit,session,fsat,lib}.rs` and the
+Each effect in `rust/crates/transcrypt-rs/src/{main,git,worktree,setup,audit,session,fsat,lib}.rs` and the
 verified decision that gates it:
 
 | Adapter action | Gate (verified core function) | Inputs passed | Acts only on |

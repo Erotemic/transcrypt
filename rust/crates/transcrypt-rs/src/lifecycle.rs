@@ -142,7 +142,7 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
     let protected = snapshot.protected()?;
     let staged_unprotected: Vec<&Staged> = entries.iter().zip(flags).zip(&in_head)
         .filter(|((e, p), unchanged)| !**p && e.regular && !**unchanged).map(|((e, _), _)| e).collect();
-    let id = transcrypt_v3::config_id(config);
+    let id = transcrypt_rs::config_id(config);
     let mut drifted: Vec<&[u8]> = Vec::new();
     for entry in staged_unprotected {
         let path = entry.path.as_slice();
@@ -162,13 +162,13 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
     // `unprotect` and `-filter` exclusions are deliberate and allowed.
     let values = filter_values(root, &drifted, Attributes::Staged)?;
     for (path, value) in drifted.iter().zip(&values).filter(|(_, v)| !other_filter(v)) {
-        eprintln!("transcrypt-v3: note: {} was encrypted in HEAD and is now staged unencrypted (`filter` is {}): \
+        eprintln!("transcrypt-rs: note: {} was encrypted in HEAD and is now staged unencrypted (`filter` is {}): \
             it is no longer selected by .gitattributes", String::from_utf8_lossy(path), String::from_utf8_lossy(value));
     }
     if let Some((path, value)) = drifted.iter().zip(values).find(|(_, v)| other_filter(v)) {
         return Err(format!("{} was encrypted and would now be stored unencrypted for the filter `{}`: a \
             .gitattributes rule (e.g. from `git lfs track`) overrides `transcrypt`. Narrow that rule, or \
-            `transcrypt-v3 unprotect` the file deliberately", String::from_utf8_lossy(path),
+            `transcrypt-rs unprotect` the file deliberately", String::from_utf8_lossy(path),
             String::from_utf8_lossy(&value)));
     }
     // An entry unchanged since `HEAD` and `HEAD^1` was checked when it was
@@ -190,9 +190,9 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
         let name = staged.name();
         match parse_file_header(&record) {
             Err(_) => return Err(format!("staged {name} is not encrypted (was it staged before it was protected?); \
-                run `transcrypt-v3 protect` or `git add --renormalize -- {name}`")),
+                run `transcrypt-rs protect` or `git add --renormalize -- {name}`")),
             Ok(found) if found != id => return Err(format!("staged {name} is encrypted under another config \
-                (cherry-picked or rebased across a rekey?); run `transcrypt-v3 reencrypt` with that config's passphrase")),
+                (cherry-picked or rebased across a rekey?); run `transcrypt-rs reencrypt` with that config's passphrase")),
             Ok(_) => {},
         }
         match key.filter(|_| !incremental || !settled) {
@@ -295,7 +295,7 @@ fn verify(root: &Path, seal: bool) -> Result<(), String> {
     }
     check_staged(root, &config, snapshot, &head, key.as_ref(), seal)?;
     if key.is_none() {
-        eprintln!("transcrypt-v3: locked; checked staged record envelopes only");
+        eprintln!("transcrypt-rs: locked; checked staged record envelopes only");
     }
     Ok(())
 }
@@ -309,8 +309,8 @@ pub(crate) fn verify_index_command(root: &Path) -> Result<(), String> {
 pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
     verify(root, true)?;
     if let Some(file) = crate::attributes::filter_overrides(root).first() {
-        eprintln!("transcrypt-v3: warning: {file} sets `filter`, which can unprotect files that \
-            .gitattributes protects; see `transcrypt-v3 doctor`");
+        eprintln!("transcrypt-rs: warning: {file} sets `filter`, which can unprotect files that \
+            .gitattributes protects; see `transcrypt-rs doctor`");
     }
     Ok(())
 }
@@ -382,12 +382,12 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
         let plaintext: Zeroizing<Vec<u8>> = match seal_action(opens, local, envelope, moved.is_some()) {
             SealAction::Keep | SealAction::Leave => continue,
             SealAction::Seal => {
-                eprintln!("transcrypt-v3: encrypting {name}, which was staged unencrypted");
+                eprintln!("transcrypt-rs: encrypting {name}, which was staged unencrypted");
                 Zeroizing::new(record)
             },
             SealAction::Rebind => {
                 let Some((source, plaintext)) = moved else { continue };
-                eprintln!("transcrypt-v3: re-encrypting {name} for its new name (it was {})",
+                eprintln!("transcrypt-rs: re-encrypting {name} for its new name (it was {})",
                     String::from_utf8_lossy(source));
                 plaintext
             },
@@ -444,9 +444,9 @@ pub(crate) fn auto_hydrate(root: &Path) -> Result<(), String> {
     }
     match hydrate(root) {
         Ok(0) => {},
-        Ok(n) => eprintln!("transcrypt-v3: decrypted {n} file(s) with mode 0600."),
-        Err(e) => eprintln!("transcrypt-v3: automatic decryption skipped: {e}\n\
-            Inspect with `transcrypt-v3 status`, then run `transcrypt-v3 hydrate`."),
+        Ok(n) => eprintln!("transcrypt-rs: decrypted {n} file(s) with mode 0600."),
+        Err(e) => eprintln!("transcrypt-rs: automatic decryption skipped: {e}\n\
+            Inspect with `transcrypt-rs status`, then run `transcrypt-rs hydrate`."),
     }
     Ok(())
 }
@@ -486,7 +486,7 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
         // is encrypted again by `git add`, since the paths are protected.
         staged_protected(root, index.merged)?
     };
-    let id = transcrypt_v3::config_id(&config);
+    let id = transcrypt_rs::config_id(&config);
     let mut pending = Vec::new();
     let mut refresh = Vec::new();
     let mut kept = Vec::new();
@@ -603,7 +603,7 @@ pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
             .map_err(|e| format!("cannot check worktree {}: {e}", other.display()))?;
         if !encrypted {
             return Err(format!("worktree {} still holds plaintext ({}); lock it there first",
-                other.display(), String::from_utf8_lossy(&errors).trim().trim_start_matches("transcrypt-v3: ")));
+                other.display(), String::from_utf8_lossy(&errors).trim().trim_start_matches("transcrypt-rs: ")));
         }
     }
     Ok(())
@@ -705,7 +705,7 @@ fn untracked_protected(root: &Path) -> Result<(), String> {
 /// file present has the v3 envelope of this config, and no untracked file
 /// is protected.
 pub(crate) fn worktree_encrypted(root: &Path, config: &[u8]) -> Result<(), String> {
-    let id = transcrypt_v3::config_id(config);
+    let id = transcrypt_rs::config_id(config);
     for staged in protected_entries(root, indexed_files(root)?, Attributes::Staged)? {
         if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
             let (contents, _) = target.read()?;

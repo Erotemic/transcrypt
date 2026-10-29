@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/transcrypt-v3", "crates/transcrypt-v3-core"]
+members = ["crates/transcrypt-rs", "crates/transcrypt-v3-core"]
 
 # The legacy-v2 crates live in their own workspace, ../rust-legacy.
 [workspace.package]

@@ -21,7 +21,7 @@ are in the [disposition](V3-REVIEW-TRIAGE.md).
 
 The current implementation is an experimental [byte-exact v3 AES-SIV /
 Argon2id candidate](specs/V3-AUTHENTICATED-P0.md) with Rust crates
-`transcrypt-v3-core` and `transcrypt-v3`. Independent reference vectors and
+`transcrypt-v3-core` and `transcrypt-rs`. Independent reference vectors and
 real-Git tests accompany source-derived Lean refinements of the codec and
 pure decision core. This is **not a formally verified executable or an
 independently audited release**. The next product work is guided by the

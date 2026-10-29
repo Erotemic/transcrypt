@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
-use transcrypt_v3::{initialize_config, unlock_config, SecretKey};
+use transcrypt_rs::{initialize_config, unlock_config, SecretKey};
 use transcrypt_v3_core::{parse_file_header, record_envelope_ok, SALT_LEN};
 use crate::{
     attributes::{edit_attributes, filter_overrides, protect, restore_worktree_attributes, worktree_attributes},
@@ -56,7 +56,7 @@ fn expected_config() -> Result<[(&'static str, String); 7], String> {
         ("filter.transcrypt-v3.smudge", format!("{program} smudge %f")),
         // Preferred by Git when present: one process per Git command.
         ("filter.transcrypt-v3.process", format!("{program} filter-process")),
-        ("merge.transcrypt-v3.name", "transcrypt-v3: merge decrypted protected files".into()),
+        ("merge.transcrypt-v3.name", "transcrypt-rs: merge decrypted protected files".into()),
         ("merge.transcrypt-v3.driver", format!("{program} merge %O %A %B %P")),
         ("diff.transcrypt-v3.command", format!("{program} diff")),
     ])
@@ -113,12 +113,14 @@ fn ours(name: &str, command: &str, text: &str) -> bool {
     let legacy = if name == "pre-commit" { Some("verify-index") } else { None };
     let Some(line) = text.strip_prefix("#!/bin/sh\nexec ").and_then(|t| t.strip_suffix('\n')) else { return false };
     let Some((path, rest)) = shell_unquote(line) else { return false };
-    // The exact form v3 writes, for a binary named transcrypt-v3 (on
-    // Windows, `transcrypt-v3.exe` or `transcrypt-v3`, in any case).
-    Path::new(&path).file_name().and_then(|n| n.to_str()).is_some_and(|name| if cfg!(windows) {
-        name.eq_ignore_ascii_case("transcrypt-v3.exe") || name.eq_ignore_ascii_case("transcrypt-v3")
-    } else {
-        name == "transcrypt-v3"
+    // The exact form v3 writes, for a binary named transcrypt-rs or (before
+    // the rename) transcrypt-v3; on Windows also with `.exe`, in any case.
+    Path::new(&path).file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+        ["transcrypt-rs", "transcrypt-v3"].iter().any(|ours| if cfg!(windows) {
+            name.eq_ignore_ascii_case(ours) || name.eq_ignore_ascii_case(&format!("{ours}.exe"))
+        } else {
+            name == *ours
+        })
     })
         && [Some(command), legacy].into_iter().flatten()
             .any(|c| rest == c && line == format!("{} {c}", shell_quote(&path)))
@@ -228,7 +230,7 @@ pub(crate) fn init(root: &Path, options: &Options) -> Result<(), String> {
             return Err(format!("{e}; initialization rolled back"));
         }
     } else {
-        eprintln!("Choose what to encrypt, for example:\n  transcrypt-v3 protect .env 'secrets/**'");
+        eprintln!("Choose what to encrypt, for example:\n  transcrypt-rs protect .env 'secrets/**'");
     }
     eprintln!("Then commit:\n  git commit -m 'Enable transcrypt-v3'");
     Ok(())
@@ -288,7 +290,7 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
 {
     // An existing config not yet in `HEAD` is an interrupted `init`: rerunning
     // with the same passphrase completes it.
-    let committed = ".transcrypt already exists: this repository is set up; run `transcrypt-v3 unlock`";
+    let committed = ".transcrypt already exists: this repository is set up; run `transcrypt-rs unlock`";
     let interrupted = if uncommitted_setup(root, committed)? {
         Some(load_config(root).map_err(|e| format!("{e} (left by an interrupted init? to start over: \
             `git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`)"))?)
@@ -301,7 +303,7 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
             let key = unlock_config(&password, existing).map_err(|e| format!("{e}: an interrupted init left \
                 .transcrypt/config under another passphrase; rerun with that one, or start over: \
                 `git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`"))?;
-            (transcrypt_v3::config_array(existing)?.to_owned(), key)
+            (transcrypt_rs::config_array(existing)?.to_owned(), key)
         },
         None => new_config(&password)?,
     };
@@ -359,7 +361,7 @@ pub(crate) fn unlock(root: &Path, options: &Options) -> Result<(), String> {
     let mode = if options.private { "private mode: key in memory until lock or logout" }
         else { "key stored in .git/transcrypt-v3/key until lock" };
     if !options.hydrate {
-        eprintln!("Unlocked ({mode}). Run `transcrypt-v3 hydrate` to decrypt the worktree.");
+        eprintln!("Unlocked ({mode}). Run `transcrypt-rs hydrate` to decrypt the worktree.");
         return Ok(());
     }
     // Unlocking is complete; hydration is a separate, all-or-nothing step
@@ -367,7 +369,7 @@ pub(crate) fn unlock(root: &Path, options: &Options) -> Result<(), String> {
     match hydrate(root) {
         Ok(n) => eprintln!("Unlocked ({mode}); decrypted {n} file(s)."),
         Err(e) => eprintln!("Unlocked ({mode}), but decryption changed nothing: {e}\n\
-            Inspect with `transcrypt-v3 status`, then run `transcrypt-v3 hydrate`."),
+            Inspect with `transcrypt-rs status`, then run `transcrypt-rs hydrate`."),
     }
     Ok(())
 }
@@ -405,7 +407,7 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
     for dir in ["transcrypt-v3-staging", "transcrypt-v3-scratch"] {
         let _ = fs::remove_dir(git_dir(root).join(dir));
     }
-    eprintln!("Removed transcrypt-v3 from this checkout; protected files stay encrypted.\n\
+    eprintln!("Removed transcrypt-rs from this checkout; protected files stay encrypted.\n\
         WARNING: without the filter, a protected file you add now is committed as plaintext. To stop \
         using v3, commit the removal of the `transcrypt` lines and .transcrypt/ (history stays encrypted).");
     Ok(())
@@ -421,7 +423,7 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
             return Ok(());
         }
     };
-    println!("repository: v3 config {}", hex(&transcrypt_v3::config_id(&config)[..4]));
+    println!("repository: v3 config {}", hex(&transcrypt_rs::config_id(&config)[..4]));
     let (state, key) = credential::lookup(root, &config)?;
     println!("key:        {}", match state {
         State::Unlocked { private: false } => "unlocked (stored in .git/transcrypt-v3/key)",
@@ -435,7 +437,7 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
         counts[2] += 1;
         println!("  {:<22} {}", "conflicted", String::from_utf8_lossy(&path));
     }
-    let id = transcrypt_v3::config_id(&config);
+    let id = transcrypt_rs::config_id(&config);
     for staged in protected_entries(root, index.merged, Attributes::Staged)? {
         let state = file_state(root, &id, key.as_ref(), &staged).unwrap_or("error");
         counts[match state { "ciphertext" => 0, "plaintext" => 1, "modified" | "modified or plaintext" | "deleted" => 2, _ => 3 }] += 1;
@@ -446,7 +448,7 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
     if counts[3] > 0 && key.is_some() {
         println!("note:       the pre-commit hook encrypts files you staged unencrypted and re-encrypts files you \
             renamed; files encrypted under an earlier config (cherry-picked or rebased across a rekey) need \
-            `transcrypt-v3 reencrypt`");
+            `transcrypt-rs reencrypt`");
     }
     let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     let untracked: Vec<&[u8]> = records(&untracked).collect();
@@ -455,7 +457,7 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
         println!("note:       {loose} untracked protected file(s); `git add` encrypts them");
     }
     if key.is_some() && counts[0] > 0 {
-        println!("hint:       run `transcrypt-v3 hydrate` to decrypt ciphertext in the worktree");
+        println!("hint:       run `transcrypt-rs hydrate` to decrypt ciphertext in the worktree");
     }
     if hooks_bypassed(root) {
         println!("warning:    {HOOKS_BYPASSED}");
@@ -504,7 +506,7 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         Ok(settings) => for (name, value) in settings {
             let what = if value == "true" { format!("{name} is true") }
                 else if name.ends_with(".name") { format!("{name} is set") }
-                else { format!("{name} runs this transcrypt-v3") };
+                else { format!("{name} runs this transcrypt-rs") };
             report(effective(name).as_deref() == Some(value.as_str()), &what);
         },
         Err(e) => report(false, &e),
@@ -514,7 +516,7 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
     if config.is_ok() {
         match entries.and_then(|entries| staged_protected(root, entries)) {
             Ok(protected) if protected.is_empty() => println!("note no tracked file is protected yet: \
-                `transcrypt-v3 protect PATTERN` (for example .env)"),
+                `transcrypt-rs protect PATTERN` (for example .env)"),
             Ok(protected) => println!("note {} tracked file(s) protected by .gitattributes", protected.len()),
             Err(e) => report(false, &format!("protected-file selection: {e}")),
         }
@@ -552,9 +554,9 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         println!("note {}", os::CHECKOUTS_PRIVATE[os::checkouts_private() as usize]);
     }
     println!("note remote enforcement cannot be checked from here: deploy contrib/v3/pre-receive or \
-        `transcrypt-v3 audit` in CI on every shared remote");
+        `transcrypt-rs audit` in CI on every shared remote");
     if failures > 0 {
-        return Err(format!("{failures} protection(s) missing; run `transcrypt-v3 unlock` to reinstall filters and hooks"));
+        return Err(format!("{failures} protection(s) missing; run `transcrypt-rs unlock` to reinstall filters and hooks"));
     }
     Ok(())
 }

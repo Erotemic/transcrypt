@@ -20,7 +20,7 @@ use crate::{
 /// `new` (at `new_path`), as Git's external diff interface supplies them.
 pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], new: &Path) -> Result<(), String> {
     let config = load_config(root)?;
-    let id = transcrypt_v3::config_id(&config);
+    let id = transcrypt_rs::config_id(&config);
     let key = Key::load(root, &config)?;
     // `None`: an encrypted side that cannot be opened while locked.
     let side = |file: &Path, path: &[u8]| -> Result<Option<Zeroizing<Vec<u8>>>, String> {

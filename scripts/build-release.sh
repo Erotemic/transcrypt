@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the transcrypt-v3 release archives, reproducible from the source
+# Build the transcrypt-rs release archives, reproducible from the source
 # commit. CI (.github/workflows/release.yml) runs exactly this script.
 #
 #   scripts/build-release.sh [--test] [--allow-dirty] [--out DIR] [TARGET...]
@@ -23,8 +23,8 @@
 # the Windows zip. The Rust toolchain is pinned (RUST_TOOLCHAIN, default
 # below) so that anyone can rebuild an archive and compare its checksum.
 # An archive for another OS is tested there by running the suite against
-# its binary: TRANSCRYPT_V3_TEST_BIN=/path/to/transcrypt-v3 cargo test -p
-# transcrypt-v3 (docs/RELEASING.md).
+# its binary: TRANSCRYPT_RS_TEST_BIN=/path/to/transcrypt-rs cargo test -p
+# transcrypt-rs (docs/RELEASING.md).
 set -euo pipefail
 # A failure inside $(...) (a missing tool, a bad checksum) stops the script.
 shopt -s inherit_errexit
@@ -99,7 +99,7 @@ if [ "$allow_dirty" = 0 ] && [ -n "$(git status --porcelain --untracked-files=no
 fi
 commit="$(git rev-parse HEAD)"
 [ "$allow_dirty" = 0 ] || commit="$commit-dirty"
-version="$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/crates/transcrypt-v3/Cargo.toml | head -n 1)"
+version="$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/crates/transcrypt-rs/Cargo.toml | head -n 1)"
 # Archive timestamps are the commit's, not the build's.
 SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
 export SOURCE_DATE_EPOCH
@@ -110,7 +110,7 @@ cargo=(rustup run "$toolchain" cargo)
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 export CARGO_PROFILE_RELEASE_LTO=true
 export CARGO_TARGET_DIR="$root/rust/target/release-dist"
-export TRANSCRYPT_V3_COMMIT="$commit"
+export TRANSCRYPT_RS_COMMIT="$commit"
 # Stripped, path-independent binaries. RUSTFLAGS applies only to the target
 # (not to host build scripts) because --target is always given.
 common_flags="-C strip=symbols --remap-path-prefix=$root=/transcrypt --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
@@ -238,26 +238,26 @@ for target in "${targets[@]}"; do
 	echo "== $target"
 	flags="$(link_flags "$target")"
 	RUSTFLAGS="$flags $common_flags" \
-		"${cargo[@]}" build --manifest-path rust/Cargo.toml --release --locked -p transcrypt-v3 --target "$target"
-	bin="$CARGO_TARGET_DIR/$target/release/transcrypt-v3$exe"
+		"${cargo[@]}" build --manifest-path rust/Cargo.toml --release --locked -p transcrypt-rs --target "$target"
+	bin="$CARGO_TARGET_DIR/$target/release/transcrypt-rs$exe"
 	check_self_contained "$target" "$bin"
 	if runs="$("$bin" --version 2>/dev/null)"; then
 		echo "$runs"
 		if [ "$test" = 1 ]; then
 			# The suite, run against the release binary itself.
-			TRANSCRYPT_V3_TEST_BIN="$bin" "${cargo[@]}" test --manifest-path rust/Cargo.toml --locked \
-				-p transcrypt-v3 -p transcrypt-v3-core
+			TRANSCRYPT_RS_TEST_BIN="$bin" "${cargo[@]}" test --manifest-path rust/Cargo.toml --locked \
+				-p transcrypt-rs -p transcrypt-v3-core
 		fi
 	elif [ "$test" = 1 ]; then
 		echo "build-release: cannot execute $target binaries here; test it on $os (docs/RELEASING.md)" >&2
 	fi
-	name="transcrypt-v3-$version-$arch-$os"
+	name="transcrypt-rs-$version-$arch-$os"
 	stage="$(mktemp -d)"
 	mkdir "$stage/$name"
-	cp "$bin" "$stage/$name/transcrypt-v3$exe"
+	cp "$bin" "$stage/$name/transcrypt-rs$exe"
 	cp LICENSE "$stage/$name/LICENSE"
-	cp docs/transcrypt-v3.md "$stage/$name/README.md"
-	chmod 0755 "$stage/$name/transcrypt-v3$exe"
+	cp docs/verification/V3-USER-GUIDE.md "$stage/$name/README.md"
+	chmod 0755 "$stage/$name/transcrypt-rs$exe"
 	chmod 0644 "$stage/$name/LICENSE" "$stage/$name/README.md"
 	archive "$out/$name.$ext" "$stage" "$name"
 	rm -r -- "$stage"

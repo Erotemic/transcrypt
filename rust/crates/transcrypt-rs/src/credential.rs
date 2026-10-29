@@ -21,12 +21,12 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
-use transcrypt_v3::{authenticate_config, clean_file, decrypt_file, SecretKey, KEY_SIZE};
+use transcrypt_rs::{authenticate_config, clean_file, decrypt_file, SecretKey, KEY_SIZE};
 use transcrypt_v3_core::{stored_key_state, StoredKey, CONFIG_LEN, ID_LEN, KEY_FILE_LEN};
 use crate::{fsat, session::{self, Operation}};
 
 const KEY_FILE: &str = "key";
-const DAMAGED: &str = "damaged .git/transcrypt-v3/key; run `transcrypt-v3 unlock` again";
+const DAMAGED: &str = "damaged .git/transcrypt-v3/key; run `transcrypt-rs unlock` again";
 // The verified decision's layout is this adapter's: the config, then the key.
 const _: () = assert!(KEY_FILE_LEN == CONFIG_LEN + KEY_SIZE && transcrypt_v3_core::KEY_LEN == KEY_SIZE);
 
@@ -59,8 +59,8 @@ impl Key {
         match lookup(root, config)? {
             (_, Some(key)) => Ok(key),
             (State::Stale, None) => Err("the stored key does not match .transcrypt/config (it was rekeyed?); \
-                run `transcrypt-v3 unlock` with the current passphrase".into()),
-            _ => Err("this checkout is locked; run `transcrypt-v3 unlock`".into()),
+                run `transcrypt-rs unlock` with the current passphrase".into()),
+            _ => Err("this checkout is locked; run `transcrypt-rs unlock`".into()),
         }
     }
 
@@ -80,7 +80,7 @@ impl Key {
 
     /// The public identifier of this key's config (records name it).
     pub(crate) fn config_id(&self) -> [u8; ID_LEN] {
-        transcrypt_v3::config_id(&self.config)
+        transcrypt_rs::config_id(&self.config)
     }
 
     /// Whether this is the private mode (in-memory agent, private files).

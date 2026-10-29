@@ -1,4 +1,4 @@
-//! The `transcrypt-v3` command: the effectful adapter around the verified
+//! The `transcrypt-rs` command: the effectful adapter around the verified
 //! core (`transcrypt-v3-core`), outside the Aeneas proof boundary.
 //!
 //! - `main.rs`: command dispatch, the passphrase and the public config.
@@ -20,7 +20,7 @@
 //! - `audit.rs`: keyless history audit and the pre-push hook.
 //! - `merge.rs` and `diff.rs`: the merge and diff drivers for protected files.
 #[cfg(not(any(unix, windows)))]
-compile_error!("transcrypt-v3 requires Unix or Windows");
+compile_error!("transcrypt-rs requires Unix or Windows");
 
 use std::{
     env, fs,
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("transcrypt-v3: {err}");
+            eprintln!("transcrypt-rs: {err}");
             ExitCode::FAILURE
         }
     }
@@ -91,9 +91,9 @@ fn run() -> Result<(), String> {
     }
     if matches!(action, "version" | "--version" | "-V") {
         // Release builds (scripts/build-release.sh) record their commit.
-        match option_env!("TRANSCRYPT_V3_COMMIT") {
-            Some(commit) => println!("transcrypt-v3 {} ({commit})", env!("CARGO_PKG_VERSION")),
-            None => println!("transcrypt-v3 {}", env!("CARGO_PKG_VERSION")),
+        match option_env!("TRANSCRYPT_RS_COMMIT") {
+            Some(commit) => println!("transcrypt-rs {} ({commit})", env!("CARGO_PKG_VERSION")),
+            None => println!("transcrypt-rs {}", env!("CARGO_PKG_VERSION")),
         }
         return Ok(());
     }
@@ -214,44 +214,44 @@ fn run() -> Result<(), String> {
     }
 }
 
-const USAGE: &str = "usage: transcrypt-v3 init|protect|unprotect|unlock|status|doctor|lock|rekey|hydrate|\
+const USAGE: &str = "usage: transcrypt-rs init|protect|unprotect|unlock|status|doctor|lock|rekey|hydrate|\
     verify-index|audit|migrate|uninstall|help|version (clean, smudge, filter-process, diff, merge, pre-commit and \
     pre-push are invoked by Git)";
 
 const HELP: &str = "\
-transcrypt-v3: authenticated encryption of the files you choose, in Git.
+transcrypt-rs: authenticated encryption of the files you choose, in Git.
 
 Typical workflow
-  transcrypt-v3 init [PATTERN...]
+  transcrypt-rs init [PATTERN...]
                             create .transcrypt/config, set up .gitattributes, install the
                             filters and hooks, unlock, and protect the given patterns
-  transcrypt-v3 protect PATTERN...
+  transcrypt-rs protect PATTERN...
                             encrypt the files matching each .gitattributes pattern (for
                             example .env, 'config/*.key', 'private/**'); stages the change
-  transcrypt-v3 unprotect PATTERN...
+  transcrypt-rs unprotect PATTERN...
                             stop encrypting those files: their next commit is plaintext
-  transcrypt-v3 unlock      authenticate the passphrase once; the derived key is stored in
+  transcrypt-rs unlock      authenticate the passphrase once; the derived key is stored in
                             .git/transcrypt-v3/key and Git works normally from then on
-  transcrypt-v3 status      show the unlock state and each protected file
-  transcrypt-v3 doctor      check that filters, attributes, hooks and the staged index
+  transcrypt-rs status      show the unlock state and each protected file
+  transcrypt-rs doctor      check that filters, attributes, hooks and the staged index
                             protect this checkout (non-zero exit if anything is missing)
-  transcrypt-v3 lock        replace plaintext by the committed ciphertext and forget the key;
+  transcrypt-rs lock        replace plaintext by the committed ciphertext and forget the key;
                             refuses if any protected file has uncommitted changes
-  transcrypt-v3 rekey       change the passphrase: a new config and every protected file
+  transcrypt-rs rekey       change the passphrase: a new config and every protected file
                             re-encrypted, staged for you to commit
-  transcrypt-v3 reencrypt [--yes]
+  transcrypt-rs reencrypt [--yes]
                             re-encrypt staged files still encrypted under an earlier config
                             (cherry-picked or rebased across a rekey): lists them with the
                             commits that brought them, asks for that config's passphrase
-  transcrypt-v3 audit [<rev-list args>]
+  transcrypt-rs audit [<rev-list args>]
                             check, without the key, that every protected file in the given
                             commits (default HEAD) is v3 ciphertext; authenticates them when
                             unlocked. The pre-push hook runs it on the commits being pushed;
                             run it in CI or a server hook to enforce it for everyone
-  transcrypt-v3 uninstall   lock, then remove the filters and hooks from this checkout
-  transcrypt-v3 migrate     convert a repository protected by Bash transcrypt (v2): run it
+  transcrypt-rs uninstall   lock, then remove the filters and hooks from this checkout
+  transcrypt-rs migrate     convert a repository protected by Bash transcrypt (v2): run it
                             where Bash transcrypt has decrypted the files; keeps your patterns
-  transcrypt-v3 version     print the version (and, for release builds, the source commit)
+  transcrypt-rs version     print the version (and, for release builds, the source commit)
 
 Options
   --password-stdin          (init, unlock, rekey, migrate, reencrypt) read the passphrase from stdin

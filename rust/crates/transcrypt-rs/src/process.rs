@@ -112,7 +112,7 @@ pub(crate) fn serve(root: &Path) -> Result<(), String> {
             _ => Err("unsupported filter request".to_owned()),
         };
         if let Err(e) = &result {
-            eprintln!("transcrypt-v3: {}: {e}", String::from_utf8_lossy(path.unwrap_or_default()));
+            eprintln!("transcrypt-rs: {}: {e}", String::from_utf8_lossy(path.unwrap_or_default()));
         }
         write_reply(&mut output, result.as_ref().ok().map(|c| c.as_slice())).map_err(io_error)?;
     }

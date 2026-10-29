@@ -10,11 +10,11 @@ use std::{fs, time::Duration};
 
 pub const PASS: &[u8] = b"long correct horse battery staple test passphrase\n";
 
-/// The binary under test: the one Cargo built, or `TRANSCRYPT_V3_TEST_BIN`
+/// The binary under test: the one Cargo built, or `TRANSCRYPT_RS_TEST_BIN`
 /// (a release binary, tested on the machine it was built for).
 pub fn bin() -> &'static str {
     static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    BIN.get_or_init(|| std::env::var("TRANSCRYPT_V3_TEST_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_transcrypt-v3").into()))
+    BIN.get_or_init(|| std::env::var("TRANSCRYPT_RS_TEST_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_transcrypt-rs").into()))
 }
 
 pub fn exec(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> Output {

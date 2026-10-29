@@ -81,5 +81,5 @@ contracts. Standalone SMT exercises are not milestones for this project.
 The final authenticated v3 suite remains blocked on the reviewed format and
 portable Bash crypto decisions in `10-decisions-and-blockers.md`.
 
-The v3 product does not depend on these crates; `transcrypt-v3 migrate`
+The v3 product does not depend on these crates; `transcrypt-rs migrate`
 converts a Bash v2 repository directly.

@@ -194,7 +194,7 @@ fn private_git_dir(root: &Path, name: &str, what: &str) -> Result<fsat::Dir, Str
 
 pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
     let dir = private_git_dir(root, "transcrypt-v3-staging", "staging")?;
-    dir.try_lock().map_err(|_| "another transcrypt-v3 hydrate or lock is running in this repository")?;
+    dir.try_lock().map_err(|_| "another transcrypt-rs hydrate or lock is running in this repository")?;
     for entry in dir.entries().map_err(|_| "cannot list private staging directory")? {
         let (regular, _) = dir.entry_kind(&entry).map_err(|_| "cannot examine stale staged file")?;
         if !regular {

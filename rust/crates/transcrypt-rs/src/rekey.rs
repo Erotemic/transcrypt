@@ -2,7 +2,7 @@
 //! re-encrypted) and `reencrypt` (records still under an earlier config
 //! brought forward).
 
-use transcrypt_v3::unlock_config;
+use transcrypt_rs::unlock_config;
 use transcrypt_v3_core::parse_file_header;
 use crate::{
     credential::Key,
@@ -47,7 +47,7 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     // The new records, written as Git objects, and one index update.
     let mut update = IndexUpdate::default();
     for (staged, plaintext) in &plaintexts {
-        update.add(&staged.mode, &staged.path, &transcrypt_v3::encrypt_file(&config, &key, &staged.path, plaintext)?);
+        update.add(&staged.mode, &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?);
     }
     update.add("100644", b".transcrypt/config", &config);
     update.apply(root, &[])?;
@@ -58,7 +58,7 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
         session::stop(root, &old_config)?;
     }
     activate(root, &config, &key, old_key.private(), None)
-        .map_err(|e| format!("{e}; the rekey is staged: run `transcrypt-v3 unlock` with the NEW passphrase"))?;
+        .map_err(|e| format!("{e}; the rekey is staged: run `transcrypt-rs unlock` with the NEW passphrase"))?;
     drop(staging);
     // The worktree plaintext now cleans to the new staged records.
     let paths: Vec<Vec<u8>> = verified.protected.iter().map(|e| e.path.clone()).collect();
@@ -78,7 +78,7 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
 pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
     let config = load_config(root)?;
     let key = Key::require(root, &config)?;
-    let id = transcrypt_v3::config_id(&config);
+    let id = transcrypt_rs::config_id(&config);
     let mut stale: Vec<(Staged, Vec<u8>, [u8; transcrypt_v3_core::ID_LEN])> = Vec::new();
     for staged in staged_protected(root, indexed_files(root)?)? {
         let record = git_blob(root, &staged.oid)?;
@@ -102,7 +102,7 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
             let bytes = git_blob(root, &oid)?;
             if bytes != config && transcrypt_v3_core::parse_config(&bytes).is_ok()
                 && !configs.iter().any(|(c, _, _)| *c == bytes) {
-                let id = transcrypt_v3::config_id(&bytes);
+                let id = transcrypt_rs::config_id(&bytes);
                 configs.push((bytes, id, format!("{} {subject}", &commit[..commit.len().min(12)])));
             }
         }
@@ -140,7 +140,7 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         let confirmed = !options.password_stdin && rpassword::prompt_password("Type yes to continue: ")
             .is_ok_and(|answer| answer.trim() == "yes");
         if !confirmed {
-            return Err("not confirmed; review those commits, then run `transcrypt-v3 reencrypt --yes`".into());
+            return Err("not confirmed; review those commits, then run `transcrypt-rs reencrypt --yes`".into());
         }
     }
     // Every earlier passphrase is asked for and checked before any write.
@@ -157,7 +157,7 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
     let staging = staging_dir(root)?;
     for (old, old_id, old_key) in &keys {
         for (staged, record, _) in stale.iter().filter(|(_, _, f)| f == old_id) {
-            let plaintext = transcrypt_v3::decrypt_file(old, old_key, &staged.path, record)
+            let plaintext = transcrypt_rs::decrypt_file(old, old_key, &staged.path, record)
                 .map_err(|e| format!("{}: {e}", staged.name()))?;
             update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?);
             replace_if_holds(root, &staging, &staged.path, record, &plaintext, key.private())?;

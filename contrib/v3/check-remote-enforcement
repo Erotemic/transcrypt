@@ -1,6 +1,6 @@
 #!/bin/sh
 # Check that a Git remote refuses unencrypted protected files, i.e. that it
-# runs the transcrypt-v3 audit (contrib/v3/pre-receive or an equivalent).
+# runs the transcrypt-rs audit (contrib/v3/pre-receive or an equivalent).
 #
 #   contrib/v3/check-remote-enforcement <remote>
 #

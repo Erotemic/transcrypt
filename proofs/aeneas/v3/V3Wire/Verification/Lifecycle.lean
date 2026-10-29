@@ -4,7 +4,7 @@ import V3Wire.Verification.Filters
 /-!
 End-to-end lifecycle guarantees for multi-file Git operations.
 
-The effectful adapter (`rust/crates/transcrypt-v3/src/main.rs`) iterates over
+The effectful adapter (`rust/crates/transcrypt-rs/src/main.rs`) iterates over
 the staged protected entries and calls the verified core for every decision.
 Its sequencing is modeled here by small Lean functions (`hydratePlan`,
 `lockPlan`, `verifyPlan`) that call the *Aeneas-generated* core functions in

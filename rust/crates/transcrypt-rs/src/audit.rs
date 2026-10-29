@@ -220,7 +220,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     }
     if protected.is_empty() && moved_away.is_empty() && was_record.is_empty() { return Ok(()); }
     if let Some(config_oid) = &config_oid {
-        let id = transcrypt_v3::config_id(&git_blob(root, config_oid)?);
+        let id = transcrypt_rs::config_id(&git_blob(root, config_oid)?);
         let is_record = |oid: &str| crate::git::is_record(root, oid, &id);
         for (entry, from) in moved_away {
             if is_record(&entry.oid)? {
@@ -248,7 +248,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
         let bytes = git_blob(root, &config_oid)?;
         transcrypt_v3_core::parse_config(&bytes)
             .map_err(|_| format!("commit {commit}: invalid v3 configuration"))?;
-        let id = transcrypt_v3::config_id(&bytes);
+        let id = transcrypt_rs::config_id(&bytes);
         let key = if keyed { Key::load(root, &bytes)? } else { None };
         state.configs.insert(config_oid.clone(), (bytes, id, key));
     }
@@ -312,5 +312,5 @@ pub(crate) fn pre_push(root: &Path, remote: Option<&OsStr>) -> Result<(), String
         }
     }
     audit(root, &revs, true, None).map(|_| ())
-        .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-v3 audit`"))
+        .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-rs audit`"))
 }

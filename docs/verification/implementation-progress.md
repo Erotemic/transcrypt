@@ -300,7 +300,7 @@ harden crash/rollback and filesystem races.
 
 ### Secure v3 endpoint step: no disk-resident derived key
 
-- Added a dedicated Unix credential agent (`rust/crates/transcrypt-v3/src/session.rs`).
+- Added a dedicated Unix credential agent (`rust/crates/transcrypt-rs/src/session.rs`).
   The key is sent once over a private pipe, kept in the agent, and never
   returned over Git-filter IPC or written to `.git`.
 - Switched `clean`, `smudge`, pre-commit index validation, hydrate, and lock

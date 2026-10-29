@@ -1,6 +1,6 @@
 //! Independent reference vectors from OpenSSL-backed Python AESSIV + argon2-cffi.
 //! No Python is needed to run these Rust tests.
-use transcrypt_v3::{decrypt_file, encrypt_file, unlock_config};
+use transcrypt_rs::{decrypt_file, encrypt_file, unlock_config};
 use transcrypt_v3_core::{parse_config, parse_file_header};
 
 mod common;

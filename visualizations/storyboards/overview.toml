@@ -36,7 +36,7 @@ plan = "tvis.plans.unlock"
 status = "runtime-tested"
 claim = "Default unlock derives a local key with trusted Argon2id, conditionally proved config authentication, then tested native credential storage A17; --private selects optional memory agent."
 narration = "Follow the passphrase across four operations. The developer provides it locally along with the salt in the public configuration. Argon2id runs in external RustCrypto code and is supported by differential tests, not a Lean correctness theorem. The actual production authenticate_config function has a source-derived Lean proof conditional on Realizes for the external crypto primitive. Only if authentication succeeds does the native adapter activate the unlocked mode. The default stores a derived key in private Git metadata, surviving reboot; optional private mode uses an in-memory agent. Key persistence, OS permissions and exposure to same-UID processes remain outside Lean."
-sources = ["rust/crates/transcrypt-v3/src/setup.rs", "rust/crates/transcrypt-v3/src/lib.rs", "rust/crates/transcrypt-v3/src/credential.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-ASSUMPTIONS.md", "docs/verification/V3-PROOF-COVERAGE.md"]
+sources = ["rust/crates/transcrypt-rs/src/setup.rs", "rust/crates/transcrypt-rs/src/lib.rs", "rust/crates/transcrypt-rs/src/credential.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-ASSUMPTIONS.md", "docs/verification/V3-PROOF-COVERAGE.md"]
 proof_anchors = ["authenticate_config_spec"]
 
 [[scene]]
@@ -47,7 +47,7 @@ plan = "tvis.plans.clean"
 status = "source-derived-proof"
 claim = "Git invokes a real tested clean adapter; seal_record is proved against the independent spec only under Realizes, while Git object behavior and AES-SIV are external premises."
 narration = "The developer edits a normal plaintext file selected by Git attributes. Git passes both bytes and pathname to a native Rust clean-filter adapter, which is tested but not fully source-derived proved. The extracted seal_record function has a conditional Lean theorem for the exact record and context; the proof requires the external Keyed crypto primitive to realize its specification. The input plaintext remains in the unlocked local worktree. The output token changes to a ciphertext v3 envelope only after the crypto call; the public Git index and remote hold the resulting record. Follow the dedicated sealing scene to see the RustCrypto step separately from the proof."
-sources = ["rust/crates/transcrypt-v3/src/main.rs", "rust/crates/transcrypt-v3/src/lib.rs", "rust/crates/transcrypt-v3-core/src/lib.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-PROOF-COVERAGE.md"]
+sources = ["rust/crates/transcrypt-rs/src/main.rs", "rust/crates/transcrypt-rs/src/lib.rs", "rust/crates/transcrypt-v3-core/src/lib.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-PROOF-COVERAGE.md"]
 proof_anchors = ["seal_record_spec"]
 
 [[scene]]
@@ -58,7 +58,7 @@ plan = "tvis.plans.crypto"
 status = "source-derived-proof"
 claim = "Source-derived seal_record correctness is conditional on Realizes; RustCrypto performs AES-SIV, while 22-byte header encoding has its own source-derived theorem."
 narration = "This scene deliberately shows the same core twice, before and after its call to an external primitive. The source-derived seal_record theorem states exactly which authenticated record and refusal branches the production Rust core implements, provided its Keyed primitive satisfies Realizes. The primitive actually computes AES-SIV over plaintext using three distinct associated data components: domain, public configuration and exact Git pathname. Cryptographic correctness and hardness are trusted and extensively tested, not proved in Lean. When the tag and ciphertext return, the core arranges the fixed header, whose 22-byte layout has a separate unconditional source-derived theorem. This is why one green badge cannot be painted over the entire transaction."
-sources = ["rust/crates/transcrypt-v3-core/src/lib.rs", "rust/crates/transcrypt-v3/src/lib.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "proofs/aeneas/v3/V3Wire/Verification/Codec.lean", "docs/verification/V3-ASSUMPTIONS.md"]
+sources = ["rust/crates/transcrypt-v3-core/src/lib.rs", "rust/crates/transcrypt-rs/src/lib.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "proofs/aeneas/v3/V3Wire/Verification/Codec.lean", "docs/verification/V3-ASSUMPTIONS.md"]
 proof_anchors = ["seal_record_spec", "encode_file_header_refines"]
 
 [[scene]]
@@ -80,7 +80,7 @@ plan = "tvis.plans.rename"
 status = "source-derived-proof"
 claim = "Production seal_action decides how a moved staged record is handled; native old-path lookup is tested, and resealing the new path is conditionally proved under Realizes."
 narration = "A normal Git move may transfer ciphertext whose associated data still names its original path. Merely copying this record would not give valid authentication for the new location. The tested adapter checks staged objects by plain object IDs and compares current worktree facts with HEAD. The actual production seal_action decision has a source-derived Lean theorem: the combination of an authentic old-path record, changes and move flags determines Seal, Rebind or Refuse. Rebinding calls the source-derived open and seal functions with the old and new exact raw path, under the explicit crypto premise Realizes. External Git rename detection and adapter correspondence are still covered by tests, not a complete Lean proof."
-sources = ["rust/crates/transcrypt-v3/src/lifecycle.rs", "rust/crates/transcrypt-v3-core/src/lib.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "proofs/aeneas/v3/V3Wire/Verification/Bytes.lean", "docs/verification/V3-ASSUMPTIONS.md", "docs/verification/V3-PROOF-COVERAGE.md"]
+sources = ["rust/crates/transcrypt-rs/src/lifecycle.rs", "rust/crates/transcrypt-v3-core/src/lib.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "proofs/aeneas/v3/V3Wire/Verification/Bytes.lean", "docs/verification/V3-ASSUMPTIONS.md", "docs/verification/V3-PROOF-COVERAGE.md"]
 proof_anchors = ["seal_action_spec", "seal_record_spec"]
 
 [[scene]]
@@ -91,7 +91,7 @@ plan = "tvis.plans.audit"
 status = "runtime-tested"
 claim = "Source-derived record_envelope_ok checks keyless envelope shape, not tag authenticity; actual history traversal is tested Rust/Git, and remote enforcement exists only where installed."
 narration = "An auditor may have no key. It can still walk a Git commit tree and require selected paths to contain well-formed encrypted envelopes rather than obvious plaintext. The production record_envelope_ok shape checker has a source-derived theorem, but a hostile record can mimic the same shape without being a genuine authenticated ciphertext. Full cryptographic verification requires an unlocked key and the open_record condition. Real audit and pre-push traversal use Git commands through a tested adapter. A protected remote needs a deployed server hook or mandatory audit; deployment is not guaranteed by the Lean theorem. The two trust boundaries A13 and A14 must remain visible on every audit visualization."
-sources = ["rust/crates/transcrypt-v3/src/audit.rs", "rust/crates/transcrypt-v3/src/lifecycle.rs", "proofs/aeneas/v3/V3Wire/Verification/Envelope.lean", "docs/verification/V3-ASSUMPTIONS.md", "docs/verification/V3-PROOF-COVERAGE.md"]
+sources = ["rust/crates/transcrypt-rs/src/audit.rs", "rust/crates/transcrypt-rs/src/lifecycle.rs", "proofs/aeneas/v3/V3Wire/Verification/Envelope.lean", "docs/verification/V3-ASSUMPTIONS.md", "docs/verification/V3-PROOF-COVERAGE.md"]
 proof_anchors = ["record_envelope_ok_spec"]
 
 [[scene]]
@@ -102,7 +102,7 @@ plan = "tvis.plans.clone"
 status = "source-derived-proof"
 claim = "After public clone, the current default unlock stores a derived local key; open_record is conditional source-derived proof, while smudge/hydrate publication is tested native behavior."
 narration = "A public clone obtains ciphertext records and a public authenticated configuration. In this snapshot the default unlock uses a derived local key stored under Git private metadata and --private switches to a memory-only agent. The stored key is not a Lean theorem about workstation secrecy. The source-derived open_record theorem ensures that an accepted record opens to exactly the authenticated bytes for this config and pathname if the external primitive realizes its contract. Native hydrate and smudge use the result to place plaintext in the checkout; the actual writes and Git timing remain tested adapter assumptions. The remote retains its ciphertext."
-sources = ["rust/crates/transcrypt-v3/src/session.rs", "rust/crates/transcrypt-v3/src/credential.rs", "rust/crates/transcrypt-v3/src/worktree.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-PROOF-COVERAGE.md", "docs/verification/V3-ASSUMPTIONS.md"]
+sources = ["rust/crates/transcrypt-rs/src/session.rs", "rust/crates/transcrypt-rs/src/credential.rs", "rust/crates/transcrypt-rs/src/worktree.rs", "proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-PROOF-COVERAGE.md", "docs/verification/V3-ASSUMPTIONS.md"]
 proof_anchors = ["open_record_spec", "open_record_complete"]
 
 [[scene]]
@@ -113,7 +113,7 @@ plan = "tvis.plans.lock"
 status = "runtime-tested"
 claim = "Actual lock_action is source-derived proved, but real staged snapshot checks, file replacement and key deletion are tested effects; lockEntry is a separate model theorem."
 narration = "The unlocked checkout is plaintext and has a usable local key. Lock does not simply delete that key: first the native Rust adapter checks the index and uncommitted edits, reseals the candidate content, and prepares the worktree replacement. The actual lock_action decision has a Lean theorem, while lockEntry_spec is a separate theorem about a Lean-defined sequencing model. The real writer uses stamped file checks, filesystem writes and renames that are tested and reviewed, not source-derived proved. If any worktree cannot safely flush, the key remains available. Only after every worktree succeeds does lock forget the stored key or stop the optional memory agent. This is not secure erasure of all prior plaintext copies."
-sources = ["rust/crates/transcrypt-v3/src/lifecycle.rs", "rust/crates/transcrypt-v3/src/credential.rs", "proofs/aeneas/v3/V3Wire/Verification/Bytes.lean", "proofs/aeneas/v3/V3Wire/Verification/Lifecycle.lean", "docs/verification/V3-ASSUMPTIONS.md"]
+sources = ["rust/crates/transcrypt-rs/src/lifecycle.rs", "rust/crates/transcrypt-rs/src/credential.rs", "proofs/aeneas/v3/V3Wire/Verification/Bytes.lean", "proofs/aeneas/v3/V3Wire/Verification/Lifecycle.lean", "docs/verification/V3-ASSUMPTIONS.md"]
 proof_anchors = ["lock_action_spec", "lockEntry_spec"]
 
 [[scene]]
@@ -124,7 +124,7 @@ plan = "tvis.plans.attack"
 status = "source-derived-proof"
 claim = "The verified open_record gate does not release untrusted bytes on a failed authentication; cryptographic unforgeability is assumed, not proved in Lean."
 narration = "A public history can be copied and edited by an offline adversary. Suppose someone changes a ciphertext byte, swaps the object from another path, or copies it from another repository. The decoder accepts only a record that authenticates under the expected configuration and exact pathname. The Lean theorem connects the production open record decision to this precise specification. Under the assumption that the AES SIV library implements the intended primitive, failed authentication releases no plaintext; the core zeroes the affected output buffer. The mathematical theorem proves the core's control logic, not the computational hardness of forging the tag."
-sources = ["proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-ASSUMPTIONS.md", "tests/v3/reference/check_vectors.py", "rust/crates/transcrypt-v3/src/lib.rs"]
+sources = ["proofs/aeneas/v3/V3Wire/Verification/Protocol.lean", "docs/verification/V3-ASSUMPTIONS.md", "tests/v3/reference/check_vectors.py", "rust/crates/transcrypt-rs/src/lib.rs"]
 proof_anchors = ["open_record_spec", "open_record_complete"]
 
 [[scene]]

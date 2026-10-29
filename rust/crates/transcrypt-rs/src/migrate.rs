@@ -140,7 +140,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     };
     let rollback = match init_with_rollback(root, options, Some(password)) {
         Ok(rollback) => rollback,
-        Err(e) if resuming => return Err(format!("{e}; rerun `transcrypt-v3 migrate` to complete the conversion")),
+        Err(e) if resuming => return Err(format!("{e}; rerun `transcrypt-rs migrate` to complete the conversion")),
         Err(e) => { restore_bash(); return Err(format!("{e}; the conversion was rolled back")); },
     };
     let mut rewritten = Vec::new();
@@ -153,7 +153,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
             }
         }
         if resuming {
-            return Err(format!("{e}; fix that, then rerun `transcrypt-v3 migrate` to complete the conversion"));
+            return Err(format!("{e}; fix that, then rerun `transcrypt-rs migrate` to complete the conversion"));
         }
         rollback.run();
         restore_bash();
@@ -161,7 +161,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     }
     eprintln!("Converted {} file(s) from Bash transcrypt to v3; review and commit:\n  \
         git commit -m 'Convert to transcrypt-v3'\n\
-        Then clone the repository afresh and check that `transcrypt-v3 unlock` decrypts it. Only then \
+        Then clone the repository afresh and check that `transcrypt-rs unlock` decrypts it. Only then \
         remove the v2 password from .git/config (`git config --remove-section transcrypt`).\n\
         Earlier commits keep their v2 ciphertext, readable with the v2 password: if that password \
         or the history was ever exposed, change the secrets themselves.", selected.len());

@@ -99,7 +99,7 @@ files are consulted depends on the check:
   `audit`.
 
 The committed macro
-`[attr]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text`
+`[attr]transcrypt filter=transcrypt-rs diff=transcrypt-rs merge=transcrypt-v3 -text`
 lets a rule read `PATTERN transcrypt`. Until this revision only `*.secret`
 paths were valid. Every previously valid path is still valid, except
 `.transcrypt/*.secret`, which no prototype repository is known to contain.
@@ -421,10 +421,10 @@ Remaining limits:
   `V3Primitives` trait. Translated by Charon/Aeneas and proved against
   `proofs/lean/Transcrypt/V3Policy.lean`; see
   `proofs/aeneas/v3/PROOF-STATUS.md`.
-- `rust/crates/transcrypt-v3/src/lib.rs`: KDF and AES-SIV adapter invoking
+- `rust/crates/transcrypt-rs/src/lib.rs`: KDF and AES-SIV adapter invoking
   external cryptographic libraries. Their algorithmic correctness and
   constant-time behavior are separate trusted assumptions.
-- `rust/crates/transcrypt-v3/src/main.rs`: Git/OS adapter, to be tested under
+- `rust/crates/transcrypt-rs/src/main.rs`: Git/OS adapter, to be tested under
   fault injection and eventually related to a transition specification.
 - `tests/v3/reference/check_vectors.py`: independent Python reference using
   argon2-cffi and OpenSSL-backed `cryptography.AESSIV`; generates committed
@@ -433,7 +433,7 @@ Remaining limits:
   the tracked extraction and its refinement proofs build in CI.
 
 Bash correspondence: the released Bash 2.x script has **not** been changed
-to support this format (`transcrypt-v3 migrate` converts its repositories). They must implement exactly the same
+to support this format (`transcrypt-rs migrate` converts its repositories). They must implement exactly the same
 ordered AAD and record grammar to become interoperable. Existing Bash
 legacy behavior is not a requirement on this secure-first Rust implementation.
 

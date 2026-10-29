@@ -4,16 +4,18 @@
 # `filter=transcrypt-v3`) to this repository.
 #
 # Install in a bare repository as hooks/pre-receive (mode 0755) with
-# `transcrypt-v3` on the hook's PATH, or set TRANSCRYPT_V3 to its path. No
+# `transcrypt-rs` on the hook's PATH, or set TRANSCRYPT_RS to its path. No
 # key is needed: every protected blob in the new commits must be a v3 record
 # for the .transcrypt/config committed alongside it. This is a keyless
 # envelope check: it stops plaintext, not a deliberately forged record. See
 # docs/verification/V3-USER-GUIDE.md ("Keep plaintext out of the remote").
 set -eu
-bin=${TRANSCRYPT_V3:-transcrypt-v3}
+# (TRANSCRYPT_V3 and TRANSCRYPT_V3_MAX_COMMITS, the names before the
+# program was renamed, are still honored.)
+bin=${TRANSCRYPT_RS:-${TRANSCRYPT_V3:-transcrypt-rs}}
 # Work budget per pushed ref: a push that adds more commits is refused
 # rather than letting one push occupy the server indefinitely.
-max_commits=${TRANSCRYPT_V3_MAX_COMMITS:-20000}
+max_commits=${TRANSCRYPT_RS_MAX_COMMITS:-${TRANSCRYPT_V3_MAX_COMMITS:-20000}}
 status=0
 while read -r _old new ref; do
 	case $new in

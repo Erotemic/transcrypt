@@ -163,9 +163,9 @@ fn foreign_truncated_and_plaintext_index_entries_fail_closed() {
 fn help_and_status_report_state_without_changing_anything() {
     let mut scratch = Scratch::new("status");
     let help = String::from_utf8(run(&scratch.root, bin(), &["help"], None)).unwrap();
-    assert!(help.contains("transcrypt-v3 unlock") && help.contains("transcrypt-v3 protect PATTERN"));
+    assert!(help.contains("transcrypt-rs unlock") && help.contains("transcrypt-rs protect PATTERN"));
     let version = String::from_utf8(run(&scratch.root, bin(), &["--version"], None)).unwrap();
-    assert!(version.starts_with(&format!("transcrypt-v3 {}", env!("CARGO_PKG_VERSION"))), "{version}");
+    assert!(version.starts_with(&format!("transcrypt-rs {}", env!("CARGO_PKG_VERSION"))), "{version}");
     let repo = scratch.repo("repo");
     let text = |repo: &Path| String::from_utf8(run(repo, bin(), &["status"], None)).unwrap();
     let unlocked = text(&repo);
@@ -598,7 +598,7 @@ fn server_pre_receive_hook_refuses_plaintext_pushes() {
     run(&repo, "git", &["remote", "add", "origin", "../remote.git"], None);
     let push = |args: &[&str]| {
         let mut command = Command::new("git");
-        command.args(args).current_dir(&repo).env("TRANSCRYPT_V3", bin())
+        command.args(args).current_dir(&repo).env("TRANSCRYPT_RS", bin())
             .stdout(Stdio::piped()).stderr(Stdio::piped());
         command.output().unwrap()
     };
@@ -779,6 +779,7 @@ fn remote_enforcement_check_detects_unprotected_remotes() {
         // Git for Windows' sh runs the script there.
         let mut command = if cfg!(windows) { let mut sh = Command::new("sh"); sh.arg(&script); sh } else { Command::new(&script) };
         let out = command.arg(format!("../{name}")).current_dir(&repo)
+            // The variable's name before the rename, still honored.
             .env("TRANSCRYPT_V3", bin()).output().unwrap();
         let text = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
         assert_eq!(out.status.success(), protected, "{name}: {text}");

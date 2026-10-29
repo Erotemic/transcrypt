@@ -1,6 +1,6 @@
 # Transcrypt v3 user guide (experimental Rust)
 
-`transcrypt-v3` encrypts the files **you choose** in a Git repository. You
+`transcrypt-rs` encrypts the files **you choose** in a Git repository. You
 select them with ordinary `.gitattributes` patterns (`.env`,
 `config/production.yaml`, `private/**`, `*.key`). Git stores those files
 as authenticated ciphertext, so the repository and its history can be
@@ -34,8 +34,8 @@ What it protects, and what it does not (see the
 
 ```bash
 cd transcrypt/rust
-cargo build --release -p transcrypt-v3
-# put target/release/transcrypt-v3 on your PATH; Git filters record its absolute path
+cargo build --release -p transcrypt-rs
+# put target/release/transcrypt-rs on your PATH; Git filters record its absolute path
 ```
 
 Requirements: Unix (Linux or macOS) and Git 2.34 or newer.
@@ -44,7 +44,7 @@ Requirements: Unix (Linux or macOS) and Git 2.34 or newer.
 
 ```bash
 cd my-repo
-transcrypt-v3 init .env 'secrets/**'   # choose a passphrase (16+ bytes, asked twice)
+transcrypt-rs init .env 'secrets/**'   # choose a passphrase (16+ bytes, asked twice)
 git commit -m "Enable transcrypt v3"
 ```
 
@@ -63,7 +63,7 @@ history is public.
 Choose more files at any time:
 
 ```bash
-transcrypt-v3 protect config/production.yaml '*.pem'
+transcrypt-rs protect config/production.yaml '*.pem'
 git commit -m "Protect production config"
 ```
 
@@ -71,7 +71,7 @@ or edit `.gitattributes` yourself. These two lines are equivalent:
 
 ```gitattributes
 config/production.yaml transcrypt
-config/production.yaml filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text
+config/production.yaml filter=transcrypt-rs diff=transcrypt-rs merge=transcrypt-v3 -text
 ```
 
 A file is protected exactly when Git's effective `filter` attribute for it
@@ -84,7 +84,7 @@ valid path works, including non-UTF-8 names and executable files.
 Git and v3 must read them; `protect` refuses a pattern that would select
 them.
 
-`transcrypt-v3 unprotect PATTERN` removes a `PATTERN transcrypt` line and
+`transcrypt-rs unprotect PATTERN` removes a `PATTERN transcrypt` line and
 stages the selected files' **plaintext**. Their next commit publishes them
 unencrypted, which is the point; the command lists them.
 
@@ -92,7 +92,7 @@ unencrypted, which is the point; the command lists them.
 
 ```bash
 git clone <url> my-repo && cd my-repo   # protected files arrive as ciphertext
-transcrypt-v3 unlock                     # once per clone
+transcrypt-rs unlock                     # once per clone
 ```
 
 `unlock` checks the passphrase against the committed config **before**
@@ -106,7 +106,7 @@ background process:
 
 If decryption cannot run (for example, a protected file is a symlink), it
 changes nothing; unlock still succeeds and tells you why. Fix the cause and
-run `transcrypt-v3 hydrate`, which is safe to rerun at any time.
+run `transcrypt-rs hydrate`, which is safe to rerun at any time.
 `unlock --no-hydrate` leaves the ciphertext in place.
 
 **Where the key is.** The key is derived from your passphrase by Argon2id;
@@ -116,16 +116,16 @@ worktrees of the clone). It is not in `.git/config`, so `git config --list`
 does not show it. But anything that copies `.git` (a backup, a tarball, a
 support bundle) copies the key. Whoever has it can decrypt this repository's
 history, just as whoever can read your unlocked checkout can read its files.
-`transcrypt-v3 lock` deletes it.
+`transcrypt-rs lock` deletes it.
 
-**Private mode (optional).** `transcrypt-v3 unlock --private` keeps the key
+**Private mode (optional).** `transcrypt-rs unlock --private` keeps the key
 only in the memory of a small background agent until `lock` or logout,
 never on disk. It also keeps decrypted files private to you (mode 0600):
 - Git writes plaintext only when your umask is private.
 - Otherwise the post-checkout, post-merge and post-rewrite hooks decrypt
   with mode 0600 right after Git finishes.
 - After `git restore`, `git reset --hard` or `git stash pop` (no hook runs),
-  run `transcrypt-v3 hydrate`.
+  run `transcrypt-rs hydrate`.
 
 Other programs running as your user can still use the agent while you are
 unlocked. `unlock --private --timeout=15m` (or `90s`, `2h`) also makes the
@@ -137,16 +137,16 @@ or `unlock --private`.
 
 | Task | Command |
 | --- | --- |
-| See what is protected, locked, decrypted or modified | `transcrypt-v3 status` |
-| Check that this checkout is protected | `transcrypt-v3 doctor` (non-zero exit if something is missing) |
+| See what is protected, locked, decrypted or modified | `transcrypt-rs status` |
+| Check that this checkout is protected | `transcrypt-rs doctor` (non-zero exit if something is missing) |
 | Check that a remote refuses plaintext | `contrib/v3/check-remote-enforcement origin` |
 | Edit, stage and commit protected files | as usual: `git add`, `git commit` |
 | Rename or move one | `git mv` as usual (see below) |
-| Check the staged files without committing | `transcrypt-v3 verify-index` |
-| Check commits before pushing | `transcrypt-v3 audit origin/main..HEAD` (the pre-push hook does this) |
-| Remove plaintext and forget the key | `transcrypt-v3 lock` (safe to repeat; so is `unlock`) |
-| Change the passphrase | `transcrypt-v3 rekey`, then commit the staged change |
-| Remove v3 from this checkout | `transcrypt-v3 uninstall` (locks first; files stay encrypted) |
+| Check the staged files without committing | `transcrypt-rs verify-index` |
+| Check commits before pushing | `transcrypt-rs audit origin/main..HEAD` (the pre-push hook does this) |
+| Remove plaintext and forget the key | `transcrypt-rs lock` (safe to repeat; so is `unlock`) |
+| Change the passphrase | `transcrypt-rs rekey`, then commit the staged change |
+| Remove v3 from this checkout | `transcrypt-rs uninstall` (locks first; files stay encrypted) |
 
 **Renames.** Each record is bound to its path, and `git mv` keeps the old
 record. When you commit, the pre-commit hook re-encrypts a renamed file for
@@ -168,15 +168,15 @@ key. Adding a plaintext protected file fails until you unlock.
 **After someone else rekeys.** Once you pull a commit that changed
 `.transcrypt/config`, your stored key no longer matches. Pulled files stay
 encrypted, `status` says so, and `git add` refuses plaintext until you run
-`transcrypt-v3 unlock` with the new passphrase.
+`transcrypt-rs unlock` with the new passphrase.
 
 **Work from before a rekey.** A commit cherry-picked or rebased onto a
 `rekey` keeps the records it was made with, under the earlier config. Git
 keeps working, and smudge and `status` say which files are affected. Then:
 
 ```bash
-transcrypt-v3 reencrypt        # lists the files and the commits that brought them
-transcrypt-v3 reencrypt --yes  # after review; asks for the earlier passphrase
+transcrypt-rs reencrypt        # lists the files and the commits that brought them
+transcrypt-rs reencrypt --yes  # after review; asks for the earlier passphrase
 git commit --amend --no-edit
 ```
 
@@ -189,7 +189,7 @@ Anyone who knows an earlier passphrase (for example someone you rekeyed
 to remove) can produce records under it, so re-encrypt only work you
 recognize. A `git stash` made before a rekey can be recovered the same
 way after `git stash pop`: `git checkout --theirs FILE`, `git add FILE`,
-`transcrypt-v3 reencrypt`.
+`transcrypt-rs reencrypt`.
 
 All worktrees of a clone share one stored key. Unlocking a worktree that
 is on a commit from before a rekey replaces it, and the other worktrees
@@ -227,7 +227,7 @@ catch this:
 - The `pre-push` hook installed by `init`/`unlock` audits every commit you
   push, including merges, rebases and `--no-verify` commits. A merge commit
   is also verified before it is made (`pre-merge-commit`).
-- `transcrypt-v3 audit <rev-list arguments>` needs no key. Run it in CI or a
+- `transcrypt-rs audit <rev-list arguments>` needs no key. Run it in CI or a
   server hook to refuse plaintext from any checkout. Each commit is judged
   by its own `.gitattributes`. Without the key, the audit checks that every
   protected file is a v3 record for the committed config, and that no record
@@ -240,13 +240,13 @@ For example, in GitHub Actions (any CI works the same way):
 ```yaml
 - uses: actions/checkout@v4
   with: { fetch-depth: 0 }
-- run: cargo install --locked --path rust/crates/transcrypt-v3   # or a released binary
-- run: transcrypt-v3 audit --all     # every commit on every branch; no key needed
+- run: cargo install --locked --path rust/crates/transcrypt-rs   # or a released binary
+- run: transcrypt-rs audit --all     # every commit on every branch; no key needed
 ```
 
 On a self-hosted server, install
 [`contrib/v3/pre-receive`](../../contrib/v3/pre-receive) as the bare
-repository's `hooks/pre-receive`, with `transcrypt-v3` on its `PATH` (or
+repository's `hooks/pre-receive`, with `transcrypt-rs` on its `PATH` (or
 `TRANSCRYPT_V3` set to it). It refuses more than 20000 commits per ref
 (`TRANSCRYPT_V3_MAX_COMMITS`). Confirm either setup with
 `contrib/v3/check-remote-enforcement <remote>`. It pushes a harmless
@@ -261,7 +261,7 @@ Run this in a checkout where Bash transcrypt is set up and has decrypted
 the files:
 
 ```bash
-transcrypt-v3 migrate        # choose the new v3 passphrase
+transcrypt-rs migrate        # choose the new v3 passphrase
 git commit -m "Convert to transcrypt-v3"
 ```
 
@@ -279,7 +279,7 @@ same holds for `init` and `unprotect`. It sets aside the Bash
 pre-commit hook. It leaves the v2 configuration in place, including the v2
 password in `.git/config`.
 
-Then clone the repository afresh and check that `transcrypt-v3 unlock`
+Then clone the repository afresh and check that `transcrypt-rs unlock`
 decrypts it. After that, remove the v2 credentials with
 `git config --remove-section transcrypt` and `rm -r .git/crypt`. Earlier
 commits keep their v2 ciphertext, readable with the v2 password. v2 used
@@ -298,7 +298,7 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 - **Rollback is not detected.** Someone who controls your Git history can
   restore an older valid version of a protected file.
 - **Hooks are local.** `git push --no-verify`, a clone that never ran
-  `unlock`, or a server without `transcrypt-v3 audit` is not checked. If
+  `unlock`, or a server without `transcrypt-rs audit` is not checked. If
   `core.hooksPath` is set, Git ignores `.git/hooks`; `status` and `doctor`
   warn.
 - **Local attribute files apply.** A `filter` rule in
@@ -314,7 +314,7 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
   pre-commit hook and the audit refuse that commit. Narrow the other rule,
   or `unprotect` the file deliberately.
 - **Moving or upgrading the binary.** Git records its full path. After
-  moving it, run `transcrypt-v3 unlock` once with the new binary; it
+  moving it, run `transcrypt-rs unlock` once with the new binary; it
   rewrites the filters and hooks.
 - **Sparse checkouts and submodules.** A sparse checkout may leave out
   `.transcrypt/`; the staged config is used. Submodules have their own
@@ -332,18 +332,18 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 
 | Message | Meaning and fix |
 | --- | --- |
-| `this checkout is locked; run transcrypt-v3 unlock` | No key: `transcrypt-v3 unlock` |
-| `the stored key does not match .transcrypt/config (it was rekeyed?)` | Someone changed the passphrase: `transcrypt-v3 unlock` with the new one |
+| `this checkout is locked; run transcrypt-rs unlock` | No key: `transcrypt-rs unlock` |
+| `the stored key does not match .transcrypt/config (it was rekeyed?)` | Someone changed the passphrase: `transcrypt-rs unlock` with the new one |
 | `this record does not open at PATH` | A file you moved with `git mv`: `git add --renormalize -- PATH` (or commit). Otherwise a commit moved or altered the record (broken or hostile); do not merge it, or restore the file from a good commit |
 | `PATH holds the encrypted OTHER: a renamed or copied protected file must be committed while unlocked` | Unlock, then commit; the hook re-encrypts it |
-| `PATH is encrypted for another config (from before a rekey?)` / `other config (reencrypt)` | `transcrypt-v3 reencrypt` with that config's passphrase, then commit |
+| `PATH is encrypted for another config (from before a rekey?)` / `other config (reencrypt)` | `transcrypt-rs reencrypt` with that config's passphrase, then commit |
 | `.gitattributes already defines the transcrypt macro differently` | Remove or rename that `[attr]transcrypt` line; v3 needs the macro to set the filter |
 | `moved here without re-encryption` (audit) | A commit moved a record without the hook (`--no-verify`, or locked): redo the move while unlocked |
 | `the committed file is not v3 ciphertext` | Plaintext was committed at a protected path without the filter: rewrite that commit, and change the secret if it was pushed |
 | `refusing double encryption` | You tried to add a file that is already a v3 record; restore the plaintext instead |
 | `PATH is selected for encryption, but v3 never encrypts .gitattributes, .gitmodules or .transcrypt/` | Narrow the `.gitattributes` pattern |
 | `unsafe .git/transcrypt-v3...` | A credential or staging path is a symlink, has loose permissions or belongs to another user; remove it and unlock again |
-| `another transcrypt-v3 hydrate or lock is running` | Wait for it to finish |
+| `another transcrypt-rs hydrate or lock is running` | Wait for it to finish |
 | `protected worktree file changed after it was checked` | Something wrote the file during `lock`/`hydrate`; rerun the command |
 | `refusing to push` / `not v3 ciphertext for its configuration (plaintext?)` | A commit contains an unencrypted protected file: rewrite it out of the unpushed history (for example `git rebase -i`), and change the secret if it was ever pushed |
 

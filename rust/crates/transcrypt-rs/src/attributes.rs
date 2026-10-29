@@ -75,7 +75,7 @@ fn check_pattern(root: &Path, submodules: &[Vec<u8>], pattern: &[u8]) -> Result<
     if let Some(sub) = submodules.iter().find(|sub| pattern.strip_prefix(sub.as_slice())
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))) {
         return Err(format!("{shown} is inside the submodule {}, which does not read this repository's \
-            .gitattributes; run `transcrypt-v3 init`/`protect` inside the submodule", String::from_utf8_lossy(sub)));
+            .gitattributes; run `transcrypt-rs init`/`protect` inside the submodule", String::from_utf8_lossy(sub)));
     }
     if pattern.starts_with(b"!") {
         return Err(format!("{shown}: .gitattributes has no negative patterns; to exclude a file from a \
@@ -120,7 +120,7 @@ fn check_selects(root: &Path, patterns: &[Vec<u8>]) -> Result<(), String> {
 /// The error for a missing macro.
 pub(crate) const MACRO_MISSING: &str = "the `transcrypt` macro does not set filter=transcrypt-v3 here (the \
     top-level .gitattributes lost its `[attr]transcrypt` line, or another rule redefines or overrides it), \
-    so files marked `transcrypt` would be stored unencrypted; restore the line (`transcrypt-v3 protect` \
+    so files marked `transcrypt` would be stored unencrypted; restore the line (`transcrypt-rs protect` \
     with any of your patterns re-adds it) and remove the other definition";
 
 /// Whether an attribute line defines the `transcrypt` macro.

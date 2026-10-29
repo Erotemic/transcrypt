@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install a transcrypt-v3 release binary: Linux (x86_64, arm64), FreeBSD
+# Install a transcrypt-rs release binary: Linux (x86_64, arm64), FreeBSD
 # (x86_64) or macOS (arm64, x86_64). On Windows, use install.ps1.
 #
 #   sh install.sh [--tag v3-X.Y.Z] [--from DIR] [--prefix DIR]
@@ -60,7 +60,7 @@ x86_64 | amd64) arch=x86_64 ;;
 aarch64 | arm64) arch=aarch64 ;;
 *) fail "no release binary for $(uname -m) yet; build from source: cd rust && cargo build --release" ;;
 esac
-command -v git >/dev/null || fail "transcrypt-v3 needs Git (2.34 or later)"
+command -v git >/dev/null || fail "transcrypt-rs needs Git (2.34 or later)"
 
 if command -v sha256sum >/dev/null; then
 	sha256() { sha256sum "$1" | cut -d ' ' -f 1; }
@@ -85,7 +85,7 @@ trap 'rm -r -- "$work"' EXIT
 if [ -n "$from" ]; then
 	cp -- "$from/SHA256SUMS" "$work/SHA256SUMS"
 	archive=""
-	for candidate in "$from"/transcrypt-v3-*-"$arch-$os".tar.gz; do
+	for candidate in "$from"/transcrypt-rs-*-"$arch-$os".tar.gz; do
 		if [ -f "$candidate" ]; then archive="${candidate##*/}"; fi
 	done
 	[ -n "$archive" ] || fail "no $arch-$os archive in $from"
@@ -96,7 +96,7 @@ else
 		tag="$(sed -n 's/^ *"tag_name": *"\(v3-[^"]*\)".*/\1/p' "$work/releases.json" | head -n 1)"
 		[ -n "$tag" ] || fail "no v3 release found; pass --tag"
 	fi
-	archive="transcrypt-v3-${tag#v3-}-$arch-$os.tar.gz"
+	archive="transcrypt-rs-${tag#v3-}-$arch-$os.tar.gz"
 	base="https://github.com/$repo/releases/download/$tag"
 	fetch "$base/SHA256SUMS" "$work/SHA256SUMS"
 	fetch "$base/$archive" "$work/$archive"
@@ -108,10 +108,10 @@ expected="$(awk -v name="$archive" '$2 == name { print $1 }' "$work/SHA256SUMS")
 
 tar -xzf "$work/$archive" -C "$work"
 mkdir -p "$prefix/bin"
-cp "$work/${archive%.tar.gz}/transcrypt-v3" "$prefix/bin/transcrypt-v3.new"
-chmod 0755 "$prefix/bin/transcrypt-v3.new"
-mv -f "$prefix/bin/transcrypt-v3.new" "$prefix/bin/transcrypt-v3"
-"$prefix/bin/transcrypt-v3" --version
+cp "$work/${archive%.tar.gz}/transcrypt-rs" "$prefix/bin/transcrypt-rs.new"
+chmod 0755 "$prefix/bin/transcrypt-rs.new"
+mv -f "$prefix/bin/transcrypt-rs.new" "$prefix/bin/transcrypt-rs"
+"$prefix/bin/transcrypt-rs" --version
 case ":$PATH:" in
 *":$prefix/bin:"*) ;;
 *) echo "install: add $prefix/bin to your PATH" >&2 ;;

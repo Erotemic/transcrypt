@@ -2,7 +2,7 @@
 //! AES-SIV and Argon2id) against independent implementations: OpenSSL
 //! AES-SIV and reference Argon2id, via `tests/v3/reference/differential.py`.
 //! No Python is needed to run these Rust tests.
-use transcrypt_v3::{authenticate_config, clean_file, decrypt_file, derive_key, encrypt_file, Keyed};
+use transcrypt_rs::{authenticate_config, clean_file, decrypt_file, derive_key, encrypt_file, Keyed};
 use transcrypt_v3_core::{V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_HEADER_LEN, TAG_LEN};
 
 mod common;
@@ -91,7 +91,7 @@ fn argon2id_matches_the_reference_implementation() {
 
 #[test]
 fn size_bounds_are_exact_at_every_layer() {
-    use transcrypt_v3::{MAX_FILE, MAX_RECORD};
+    use transcrypt_rs::{MAX_FILE, MAX_RECORD};
     let case = &cases()[0];
     let config = &case.config;
     let path = b"big.secret";

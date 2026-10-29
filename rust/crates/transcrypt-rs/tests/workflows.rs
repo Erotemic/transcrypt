@@ -572,7 +572,7 @@ fn unprotect_follows_renames_and_protect_finishes_manual_rules() {
     fs::write(repo.join(".gitattributes"), attributes).unwrap();
     run(&repo, "git", &["add", ".gitattributes"], None);
     let err = run_fails(&repo, "git", &["commit", "-qm", "manual rule"], None);
-    assert!(err.contains("config.ini is not encrypted") && err.contains("transcrypt-v3 protect"), "{err}");
+    assert!(err.contains("config.ini is not encrypted") && err.contains("transcrypt-rs protect"), "{err}");
     run(&repo, bin(), &["protect", "config.ini"], None);
     run(&repo, "git", &["commit", "-qm", "manual rule"], None);
     assert!(is_record(&committed(&repo, "config.ini")));
@@ -665,7 +665,7 @@ fn work_across_a_rekey_is_kept_and_reencrypted() {
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("other config (reencrypt)"), "{status}");
     let err = run_fails(&repo, bin(), &["verify-index"], None);
-    assert!(err.contains("transcrypt-v3 reencrypt"), "{err}");
+    assert!(err.contains("transcrypt-rs reencrypt"), "{err}");
     // An explicit decision: it lists what will be trusted and needs --yes.
     let err = run_fails(&repo, bin(), &["reencrypt", "--password-stdin"], Some(PASS));
     assert!(err.contains("b.env (config") && err.contains("addb") && err.contains("not confirmed"), "{err}");
@@ -899,6 +899,7 @@ fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
     // A binary at another path installed the hooks and filters.
     let moved = scratch.root.join("old-install");
     fs::create_dir(&moved).unwrap();
+    // Under its name before the rename: its hooks are still ours.
     let old_bin = moved.join(format!("transcrypt-v3{}", std::env::consts::EXE_SUFFIX));
     fs::copy(bin(), &old_bin).unwrap();
     let repo = scratch.git_repo("moved");

@@ -33,7 +33,7 @@ impl<'a> Filters<'a> {
                 .gitmodules or .transcrypt/; narrow the .gitattributes pattern that selects it",
                 String::from_utf8_lossy(git_path)));
         }
-        transcrypt_v3::validate_protected_path(git_path)?;
+        transcrypt_rs::validate_protected_path(git_path)?;
         let config = if fs::symlink_metadata(self.root.join(".transcrypt")).is_ok() {
             load_config(self.root)?
         } else {
@@ -46,7 +46,7 @@ impl<'a> Filters<'a> {
         }
         let Filters { root, current: Some((config, current_key)), stored, .. } = self else { unreachable!() };
         let (root, key) = (*root, current_key.as_ref());
-        let id = transcrypt_v3::config_id(config);
+        let id = transcrypt_rs::config_id(config);
         let found = parse_file_header(&input).ok();
         if clean {
             // A record of another config (from before a rekey) cannot be
@@ -110,8 +110,8 @@ impl<'a> Filters<'a> {
         match smudge_action(&input, &decided, key.is_some()) {
             Ok(SmudgeAction::Keep) => {
                 if found.is_some_and(|found| found != id) && current_key.is_some() {
-                    eprintln!("transcrypt-v3: {} is encrypted under another config, without a key here; \
-                        it stays encrypted (`transcrypt-v3 status` tells whether it needs `reencrypt`)",
+                    eprintln!("transcrypt-rs: {} is encrypted under another config, without a key here; \
+                        it stays encrypted (`transcrypt-rs status` tells whether it needs `reencrypt`)",
                         String::from_utf8_lossy(git_path));
                 }
                 Ok(input)

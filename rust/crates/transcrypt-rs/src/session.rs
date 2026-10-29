@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-use transcrypt_v3::{authenticate_config, clean_file, config_array, decrypt_file, SecretKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
+use transcrypt_rs::{authenticate_config, clean_file, config_array, decrypt_file, SecretKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
     authorize_agent_request, decode_be_u32, decode_frame_header, encode_be_u32, encode_frame_header, AgentOp,
     CONFIG_LEN, FRAME_HEADER_LEN,

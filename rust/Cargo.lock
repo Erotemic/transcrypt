@@ -347,7 +347,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "transcrypt-v3"
+name = "transcrypt-rs"
 version = "0.1.0"
 dependencies = [
  "aes",
