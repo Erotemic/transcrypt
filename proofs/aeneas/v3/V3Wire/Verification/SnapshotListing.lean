@@ -67,8 +67,8 @@ theorem entryRecord_length (e : Entry) (he : e.mode.length = 6) :
   simp [entryRecord, he]; omega
 
 /-- A record's tail after the mode and its space. -/
-theorem entryRecord_drop7 (e : Entry) (he : e.mode.length = 6) (rest : List Nat) :
-    (entryRecord e ++ rest).drop 7 = e.oid ++ [32, 48, 9] ++ e.path ++ rest := by
+theorem entryRecord_drop_oidStart (e : Entry) (he : e.mode.length = modeLen) (rest : List Nat) :
+    (entryRecord e ++ rest).drop oidStart = e.oid ++ [32, 48, 9] ++ e.path ++ rest := by
   have : entryRecord e ++ rest = (e.mode ++ [32]) ++ (e.oid ++ [32, 48, 9] ++ e.path ++ rest) := by
     simp [entryRecord]
   rw [this, List.drop_left' (by simp [he])]
@@ -160,22 +160,22 @@ theorem record_is_spec (listing : Slice U8) (start end_ : Usize) (oid path : Sli
     have hpos : 0 < e.path.length := List.length_pos_iff.mpr hp
     omega
   have h9o := objectId_no_tab hoid
-  have hD : (sliceBytes listing).drop (start.val + 7) = e.oid ++ [32, 48, 9] ++ e.path ++ rest := by
-    rw [← List.drop_drop, hd, entryRecord_drop7 e hm]
+  have hD : (sliceBytes listing).drop (start.val + oidStart) = e.oid ++ [32, 48, 9] ++ e.path ++ rest := by
+    rw [← List.drop_drop, hd, entryRecord_drop_oidStart e hm]
   -- If the record names `oid`, it starts with `oid SP 0 TAB`.
   have hnames : e.oid = sliceBytes oid →
-      sliceBytes oid ++ [32, 48, 9] <+: (sliceBytes listing).drop (start.val + 7) := by
+      sliceBytes oid ++ [32, 48, 9] <+: (sliceBytes listing).drop (start.val + oidStart) := by
     intro h
     rw [hD, ← h, List.append_assoc]
     exact List.prefix_append _ _
   have hol : e.oid = sliceBytes oid → oid.length = e.oid.length := by
     intro h; rw [h, sliceBytes_length]
   have hlenv : oid.len.val = oid.length := by simp
-  have hb_of : e.oid = sliceBytes oid → start.val + 7 ≤ listing.length ∧
-      sliceBytes oid <+: (sliceBytes listing).drop (start.val + 7) := fun h =>
+  have hb_of : e.oid = sliceBytes oid → start.val + oidStart ≤ listing.length ∧
+      sliceBytes oid <+: (sliceBytes listing).drop (start.val + oidStart) := fun h =>
     ⟨by scalar_tac, (List.prefix_append _ _).trans (hnames h)⟩
-  have hb1_of : e.oid = sliceBytes oid → start.val + 7 + oid.length ≤ listing.length ∧
-      [32, 48, 9] <+: (sliceBytes listing).drop (start.val + 7 + oid.length) := by
+  have hb1_of : e.oid = sliceBytes oid → start.val + oidStart + oid.length ≤ listing.length ∧
+      [32, 48, 9] <+: (sliceBytes listing).drop (start.val + oidStart + oid.length) := by
     intro h
     have := hnames h
     rw [prefix_append_iff, List.drop_drop, sliceBytes_length] at this
@@ -191,23 +191,23 @@ theorem record_is_spec (listing : Slice U8) (start end_ : Usize) (oid path : Sli
     simp only [Bool.false_eq_true, false_iff, not_and]
     intro h _
     apply ‹¬b1 = true›
-    rw [b1_post, s_post, OID_END_bytes, at_post, i4_post, hlenv]
+    rw [b1_post, s_post, OID_END_bytes, at_post, i4_post, OID_START_val, hlenv]
     exact hb1_of h
   -- The record names `oid`: compare the path.
   have hoid' : sliceBytes oid = e.oid := by
     have h1 := (b_post.mp ‹b = true›).2
     have h2 := (b1_post.mp ‹b1 = true›).2
-    rw [s_post, OID_END_bytes, at_post, i4_post, hlenv, ← sliceBytes_length oid, ← List.drop_drop] at h2
-    rw [i4_post] at h1
+    rw [s_post, OID_END_bytes, at_post, i4_post, OID_START_val, hlenv, ← sliceBytes_length oid, ← List.drop_drop] at h2
+    rw [i4_post, OID_START_val] at h1
     have := (prefix_append_iff (sliceBytes oid) [32, 48, 9] _).mpr ⟨h1, h2⟩
     rw [hD] at this
     exact (tab_prefix_iff h9 h9o).mp (by simpa only [List.append_assoc] using this)
   have hpl : i6.val = e.path.length := by
-    rw [i6_post1, i5_post1, at_post, i4_post, ht, hrl, hlenv, ← sliceBytes_length oid, hoid']
-    omega
+    rw [i6_post1, i5_post1, at_post, i4_post, OID_START_val, ht, hrl, hlenv, ← sliceBytes_length oid, hoid']
+    unfold_v3_bytes; omega
   have hP : (sliceBytes listing).drop («at».val + 3) = e.path ++ rest := by
-    rw [at_post, i4_post, hlenv, ← sliceBytes_length oid, hoid', show start.val + 7 + e.oid.length + 3 =
-      (start.val + 7) + (e.oid.length + 3) by omega, ← List.drop_drop, hD]
+    rw [at_post, i4_post, OID_START_val, hlenv, ← sliceBytes_length oid, hoid', show start.val + oidStart + e.oid.length + 3 =
+      (start.val + oidStart) + (e.oid.length + 3) by omega, ← List.drop_drop, hD]
     simp
   split
   · rename_i hi6
@@ -300,10 +300,10 @@ theorem record_mode {L : List Nat} {s : Nat} {e : Entry} {rest : List Nat} (he :
     exact List.prefix_append _ _
 
 /-- What `listing_fields` returns for record `i`: its offsets (the object id
-    is `[start + 7, oid_end)`, the path `[path_start, end)`) and whether its
+    is `[start + oidStart, oid_end)`, the path `[path_start, end)`) and whether its
     mode is regular. -/
 def FieldsOf (es : List Entry) (i : Nat) (f : Fields) : Prop :=
-  ∃ e, es[i]? = some e ∧ f.start.val = off es i ∧ f.oid_end.val = off es i + 7 + e.oid.length ∧
+  ∃ e, es[i]? = some e ∧ f.start.val = off es i ∧ f.oid_end.val = off es i + oidStart + e.oid.length ∧
     f.path_start.val = off es i + 10 + e.oid.length ∧
     f.end.val = off es i + (entryRecord e).length ∧ (f.regular = true ↔ e.Regular)
 
@@ -368,7 +368,7 @@ theorem listing_fields_spec {listing : Slice U8} {ends : Slice Usize} {es : List
       intro regular hr
       step*
       refine ⟨hi, es[i.val], by simp, hst, ?_, ?_, by rw [hxv, hst], hr⟩
-      · rw [i4_post1, htv, hst]; omega
+      · rw [i4_post1, htv, hst]; unfold_v3_bytes; omega
       · rw [i5_post, htv, hst]; omega
     split
     · rename_i hbt
@@ -391,9 +391,9 @@ theorem listing_fields_spec {listing : Slice U8} {ends : Slice Usize} {es : List
 theorem FieldsOf.slices {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
     (hL : ListingOf listing ends es) {i : Nat} {f : Fields} (hf : FieldsOf es i f) :
     ∃ e, es[i]? = some e ∧ EntryOk e ∧
-      (sliceBytes listing).extract (f.start.val + 7) f.oid_end.val = e.oid ∧
+      (sliceBytes listing).extract (f.start.val + oidStart) f.oid_end.val = e.oid ∧
       (sliceBytes listing).extract f.path_start.val f.end.val = e.path ∧
-      f.start.val + 7 ≤ f.oid_end.val ∧ f.oid_end.val ≤ listing.length ∧
+      f.start.val + oidStart ≤ f.oid_end.val ∧ f.oid_end.val ≤ listing.length ∧
       f.path_start.val ≤ f.end.val ∧ f.end.val ≤ listing.length := by
   obtain ⟨e, he, hs, ho, hp, hend, _⟩ := hf
   have hi : i < es.length := (List.getElem?_eq_some_iff.mp he).1
@@ -404,16 +404,16 @@ theorem FieldsOf.slices {listing : Slice U8} {ends : Slice Usize} {es : List Ent
   have hrl := entryRecord_length e hm
   have hin := hL.off_le (Nat.succ_le_of_lt hi)
   rw [off_succ es _ hi, hei] at hin
-  have hD7 : (sliceBytes listing).drop (off es i + 7) = e.oid ++ [32, 48, 9] ++ e.path ++
+  have hDoid : (sliceBytes listing).drop (off es i + oidStart) = e.oid ++ [32, 48, 9] ++ e.path ++
       (0 :: listingBytes (es.drop (i + 1))) := by
-    rw [← List.drop_drop, hdrop, entryRecord_drop7 e hm]
+    rw [← List.drop_drop, hdrop, entryRecord_drop_oidStart e hm]
   have hD10 : (sliceBytes listing).drop (off es i + 10 + e.oid.length) =
       e.path ++ (0 :: listingBytes (es.drop (i + 1))) := by
-    rw [show off es i + 10 + e.oid.length = (off es i + 7) + (e.oid.length + 3) by omega,
-      ← List.drop_drop, hD7]
+    rw [show off es i + 10 + e.oid.length = (off es i + oidStart) + (e.oid.length + 3) by unfold_v3_bytes; omega,
+      ← List.drop_drop, hDoid]
     simp
-  refine ⟨e, he, hok, ?_, ?_, by omega, by omega, by omega, by omega⟩
-  · rw [List.extract_eq_take_drop, hs, ho, hD7, show off es i + 7 + e.oid.length - (off es i + 7) =
+  refine ⟨e, he, hok, ?_, ?_, by omega, by unfold_v3_bytes; omega, by omega, by omega⟩
+  · rw [List.extract_eq_take_drop, hs, ho, hDoid, show off es i + oidStart + e.oid.length - (off es i + oidStart) =
       e.oid.length by omega]
     simp
   · rw [List.extract_eq_take_drop, hp, hend, hD10, show off es i + (entryRecord e).length -

@@ -177,6 +177,12 @@ stable, but reordering loops inside a proved function renames them.
   becomes `ok (done xs.len)`; finish with `simp only [WP.spec_ok]`, not
   `step`. Dot notation on a `def` over `List.Pairwise` (e.g.
   `hO.lt_of_le` for `PathOrdered`) fails; call `PathOrdered.lt_of_le hO`.
+- A named `usize` constant (`OID_START`) translates to an irreducible
+  `def`, so `step` posts mention `OID_START.val`: rewrite it with
+  `OID_START_val` (`= oidStart`), which `scalar_tac` also uses (with
+  `oidStart` and `modeLen` as `scalar_tac_simps`) to discharge bounds. State
+  theorems with the spec's name; `unfold_v3_bytes` before `omega` where the
+  number matters (relating it to the record's `10` fixed bytes).
 
 ## Adapter invariants
 

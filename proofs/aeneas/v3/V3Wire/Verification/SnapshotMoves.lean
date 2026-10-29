@@ -105,6 +105,7 @@ theorem object_before_spec {listing : Slice U8} {ends : Slice Usize} {es : List 
     have hej : es[j.val] = e := (List.getElem?_eq_some_iff.mp he).2
     simp only
     step as ⟨ i, hi ⟩
+    rw [OID_START_val] at hi
     step with index_range_spec listing i f.oid_end (by omega) hf2 as ⟨ id, hid ⟩
     rw [hi, hoid] at hid
     step with bytes_lt_spec id oid as ⟨ b, hb ⟩
@@ -193,6 +194,7 @@ theorem object_order_ok_spec {listing : Slice U8} {ends : Slice Usize} {es : Lis
           step as ⟨ i1, hi1 ⟩
           step as ⟨ hi1l, i2, hi2 ⟩
           step as ⟨ i3, hi3 ⟩
+          rw [OID_START_val] at hi3
           step with index_range_spec listing i3 f.oid_end (by omega) hf2 as ⟨ s, hs ⟩
           rw [hi3, hoid] at hs
           step with object_before_spec hL i2 s j as ⟨ b, hb ⟩
@@ -288,6 +290,7 @@ theorem names_oid_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entr
     obtain ⟨e, he, -, hoid, -, hf1, hf2, -, -⟩ := FieldsOf.slices hL hf
     simp only
     step as ⟨ i, hi ⟩
+    rw [OID_START_val] at hi
     step with index_range_spec listing i f.oid_end (by omega) hf2 as ⟨ s, hs ⟩
     apply WP.spec_mono (bytes_eq_spec s oid)
     intro b hb
@@ -327,13 +330,13 @@ theorem move_source_at_spec {index head : Slice U8} {index_ends head_ends : Slic
   · rename_i hbt
     obtain ⟨hoe, hpe⟩ := hb.mp hbt
     have hol : oid.length = hs[j.val].oid.length := by rw [← sliceBytes_length, hoe]
-    have hD7 : (sliceBytes head).drop (st.val + 7) = hs[j.val].oid ++ [32, 48, 9] ++ hs[j.val].path ++
+    have hDoid : (sliceBytes head).drop (st.val + oidStart) = hs[j.val].oid ++ [32, 48, 9] ++ hs[j.val].path ++
         (0 :: listingBytes (hs.drop (j.val + 1))) := by
-      rw [← List.drop_drop, hst, hdrop, entryRecord_drop7 _ hm]
+      rw [← List.drop_drop, hst, hdrop, entryRecord_drop_oidStart _ hm]
     have hD10 : (sliceBytes head).drop (st.val + 10 + hs[j.val].oid.length) =
         hs[j.val].path ++ (0 :: listingBytes (hs.drop (j.val + 1))) := by
-      rw [show st.val + 10 + hs[j.val].oid.length = (st.val + 7) + (hs[j.val].oid.length + 3) by omega,
-        ← List.drop_drop, hD7]
+      rw [show st.val + 10 + hs[j.val].oid.length = (st.val + oidStart) + (hs[j.val].oid.length + 3) by unfold_v3_bytes; omega,
+        ← List.drop_drop, hDoid]
       simp
     have hsrc : (sliceBytes head).extract (st.val + 10 + oid.length) x.val = hs[j.val].path := by
       rw [List.extract_eq_take_drop, hxv, hrl, hol, hD10, show st.val + (hs[j.val].oid.length +
@@ -527,6 +530,7 @@ theorem next_move_source_spec {index head : Slice U8} {index_ends head_ends : Sl
     have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
     simp only
     step as ⟨ i1, hi1 ⟩
+    rw [OID_START_val] at hi1
     step with index_range_spec index i1 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
     step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
     rw [hi1, hoid] at hso
@@ -691,6 +695,7 @@ theorem blob_elsewhere_spec {index head parent : Slice U8} {index_ends head_ends
     have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
     simp only
     step as ⟨ i1, hi1 ⟩
+    rw [OID_START_val] at hi1
     step with index_range_spec index i1 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
     step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
     rw [hi1, hoid] at hso

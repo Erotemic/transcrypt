@@ -6,9 +6,9 @@
 
 use transcrypt_v3_core::{
     blob_elsewhere, first_unselectable, held_entries, listing_fields, next_move_source, object_order_ok,
-    parse_listing as parse_listing_ends, parse_listing_attrs,
+    parse_listing as parse_listing_ends, parse_listing_attrs, OID_START,
 };
-use crate::git::{records, MODE_LEN, OID_START};
+use crate::git::{records, MODE_LEN};
 
 /// One stage-0 record of the index or of a commit's tree. Every later read
 /// of its content goes through `oid`, so a concurrent index change cannot

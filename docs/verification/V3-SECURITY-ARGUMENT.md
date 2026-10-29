@@ -118,14 +118,16 @@ Every step is a theorem about the Aeneas translation of the production
 | The listings are in Git's order, each path once | `parse_listing` with `bytes_lt`, `listing_ordered` (`parse_listing_spec`, `bytes_lt_spec`) | `BytesLt`, `Sorted` |
 | Unchanged since `HEAD` and `HEAD^1` | `held_entries` (`held_entries_spec`; binary search, `find_entry_spec`) | `Holds`, `Settled` |
 | The keyless move check | `blob_elsewhere` (`blob_elsewhere_spec`), through object orders checked by `object_order_ok` (`object_order_ok_spec`) | `BlobElsewhere` |
+| How each protected entry is checked (authenticated, or the envelope with or without the move check) | `entry_check` (`entry_check_spec`), which `check_staged` and `hookEntry` both dispatch on | the cases of `EntryAccepted` |
 | Each protected blob authenticates at its path | `open_record` (`open_record_spec`), in the model `hookPlan` (`hookPlan_spec`) | `OpensTo` |
 | Without the key: the envelope | `record_envelope_ok` (`record_envelope_ok_spec`) | `EnvelopeOk` |
 | Object replies are for the requested id and announced size | `parse_batch_header`, `blob_read` (`parse_batch_header_spec`, `blob_read_spec`) | `BatchHeader`, `blobReadSpec` |
 
 `hookPlan` is a small Lean model of the loop in
 `transcrypt_rs::lifecycle::check_staged` (like the existing `verifyPlan`);
-it calls the generated functions. That the Rust loop matches it is part of
-A4 (reviewed, tested).
+it calls the generated functions, and takes which check each entry gets from
+the generated `entry_check`, as the Rust loop does. That the Rust loop
+matches it is part of A4 (reviewed, tested).
 
 ## Theorem 2: the hook repairs only local changes
 
@@ -185,7 +187,7 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 102 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 103 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the composition `hookPlan_spec` and the end-to-end

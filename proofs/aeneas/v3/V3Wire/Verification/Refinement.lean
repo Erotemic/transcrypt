@@ -57,6 +57,10 @@ theorem extracted_magic_disjoint :
   simp [MAX_PATH, Transcrypt.V3Policy.maxPath]
 @[simp] theorem MAX_PKT_LEN_val : MAX_PKT_LEN.val = Transcrypt.V3Policy.maxPktLen := by
   simp [MAX_PKT_LEN, Transcrypt.V3Policy.maxPktLen]
+@[simp, scalar_tac_simps] theorem OID_START_val : OID_START.val = Transcrypt.V3Policy.oidStart := by
+  simp [OID_START, Transcrypt.V3Policy.oidStart]
+-- `scalar_tac` bounds offsets past the object id start with its number.
+attribute [scalar_tac_simps] Transcrypt.V3Policy.oidStart Transcrypt.V3Policy.modeLen
 @[simp] theorem KEY_LEN_val : KEY_LEN.val = 64 := by simp [KEY_LEN]
 @[simp] theorem KEY_FILE_LEN_val : KEY_FILE_LEN.val = 119 := by simp [KEY_FILE_LEN]
 

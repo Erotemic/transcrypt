@@ -278,6 +278,7 @@ theorem held_entries_spec {index other : Slice U8} {index_ends other_ends : Slic
           have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
           simp only
           step as ⟨ i2, hi2 ⟩
+          rw [OID_START_val] at hi2
           step with index_range_spec index i2 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
           step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
           rw [hi2, hoid] at hso
