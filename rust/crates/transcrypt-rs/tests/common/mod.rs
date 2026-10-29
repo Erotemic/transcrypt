@@ -373,3 +373,16 @@ pub fn bash_v2() -> PathBuf {
         _ => PathBuf::from(path),
     }
 }
+
+/// Bash v2 needs Bash 4.4 or later (an empty array under `set -u`); macOS
+/// ships 3.2 (`brew install bash` puts a newer one first on `PATH`).
+const BASH_V2_MIN: (u32, u32) = (4, 4);
+
+/// Set `repo` up with Bash transcrypt (v2), as an existing v2 repository.
+pub fn init_bash_v2(repo: &Path) {
+    let version = String::from_utf8(run(repo, "bash", &["-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"], None)).unwrap();
+    let parts: Vec<u32> = version.split_whitespace().map(|n| n.parse().unwrap()).collect();
+    assert!((parts[0], parts[1]) >= BASH_V2_MIN, "Bash v2 needs bash {}.{} or later on PATH; found {}",
+        BASH_V2_MIN.0, BASH_V2_MIN.1, version.trim());
+    run(repo, "bash", &[bash_v2().to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+}

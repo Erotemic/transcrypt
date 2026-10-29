@@ -29,9 +29,12 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     fs::create_dir_all(repo.join("config")).unwrap();
     fs::create_dir_all(repo.join("private/deep/er")).unwrap();
     fs::create_dir_all(repo.join("nested")).unwrap();
-    // Not UTF-8, with a quote and a newline; Windows names allow neither.
-    #[cfg(unix)]
+    // Not UTF-8, with a quote and a newline; Windows names allow neither,
+    // and macOS (APFS) only UTF-8.
+    #[cfg(all(unix, not(target_os = "macos")))]
     let odd = OsString::from_vec(b"private/odd \xff'\"\nname".to_vec());
+    #[cfg(target_os = "macos")]
+    let odd = OsString::from("private/odd \u{e9}'\"\nname");
     #[cfg(windows)]
     let odd = OsString::from("private/odd \u{e9}'% name");
     let files: Vec<(PathBuf, &[u8])> = vec![
@@ -364,8 +367,7 @@ fn rekey_never_writes_through_committed_symlinks() {
 fn bash_v2_repositories_migrate_to_v3() {
     let mut scratch = Scratch::new("migrate");
     let repo = scratch.git_repo("repo");
-    let bash = bash_v2();
-    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    init_bash_v2(&repo);
     fs::create_dir_all(repo.join("private")).unwrap();
     fs::write(repo.join(".gitattributes"),
         b"*.key filter=crypt diff=crypt merge=crypt\nprivate/** filter=crypt diff=crypt merge=crypt\n").unwrap();
@@ -625,8 +627,7 @@ fn renames_during_rotation_and_rebase_stops_work() {
 fn migrate_converts_quoted_rules_and_refuses_local_ones() {
     let mut scratch = Scratch::new("migratequoted");
     let repo = scratch.git_repo("repo");
-    let bash = bash_v2();
-    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    init_bash_v2(&repo);
     fs::write(repo.join(".gitattributes"), b"\"my secret.txt\" filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("my secret.txt"), b"quoted v2 secret\n").unwrap();
     fs::write(repo.join("local.key"), b"local rule secret\n").unwrap();
@@ -955,8 +956,7 @@ fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
 fn interrupted_migration_lost_macro_and_case_sensitivity() {
     let mut scratch = Scratch::new("review5");
     let repo = scratch.git_repo("migrate");
-    let bash = bash_v2();
-    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    init_bash_v2(&repo);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
     commit_all(&repo, "v2");
@@ -1071,8 +1071,7 @@ fn interrupted_commands_converge_when_rerun() {
 
     // migrate: killed during re-encryption, then rerun.
     let repo = scratch.git_repo("migrate");
-    let bash = bash_v2();
-    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    init_bash_v2(&repo);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
     commit_all(&repo, "v2");
@@ -1085,7 +1084,7 @@ fn interrupted_commands_converge_when_rerun() {
     // migrate: a v2 file selected only case-insensitively is not left behind.
     let repo = scratch.git_repo("case");
     run(&repo, "git", &["config", "core.ignorecase", "true"], None);
-    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    init_bash_v2(&repo);
     fs::write(repo.join(".gitattributes"), b"*.env filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("a.env"), b"a\n").unwrap();
     fs::write(repo.join("PROD.ENV"), b"prod\n").unwrap();
@@ -1179,8 +1178,7 @@ fn migrate_with_shim(shim: &std::path::Path, repo: &std::path::Path, action: &st
 fn a_failed_resume_of_migrate_stays_resumable() {
     let mut scratch = Scratch::new("resume2");
     let repo = scratch.git_repo("repo");
-    let bash = bash_v2();
-    run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    init_bash_v2(&repo);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("a.key"), b"v2 secret\n").unwrap();
     commit_all(&repo, "v2");
