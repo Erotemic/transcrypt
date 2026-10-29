@@ -60,6 +60,45 @@ theorem path_at_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
     rw [hb, ← sliceBytes_inj, hs, hpath]
     exact ⟨fun h => ⟨e, he, h⟩, fun ⟨e', he', h⟩ => by rw [he] at he'; cases he'; exact h⟩
 
+/-! ## Bisection: the arithmetic shared by `find_path` and `find_object`
+
+Both searches bisect `[low, high)` over `n` slots for the first slot where a
+prefix-closed predicate `P` fails (a slot before one satisfying `P` satisfies
+it too). Each spec proof supplies only its own ordering as `P`. -/
+
+/-- The bisection invariant: `low ≤ high ≤ n`, every slot before `low`
+    satisfies `P` and none from `high` on does. -/
+def Bisects (n : Nat) (P : (k : Nat) → k < n → Prop) (low high : Nat) : Prop :=
+  low ≤ high ∧ high ≤ n ∧ (∀ k (h : k < n), k < low → P k h) ∧ (∀ k (h : k < n), high ≤ k → ¬ P k h)
+
+/-- The midpoint `low + (high - low) / 2` of a nonempty interval lies in it. -/
+theorem bisect_midpoint {low high d d2 mid : Nat} (hlh : low < high)
+    (hd : d = high - low) (hd2 : d2 = d / 2) (hmid : mid = low + d2) : low ≤ mid ∧ mid < high := by
+  omega
+
+theorem Bisects.start {n : Nat} {P : (k : Nat) → k < n → Prop} : Bisects n P 0 n :=
+  ⟨Nat.zero_le n, Nat.le_refl n, fun _ _ hk => absurd hk (Nat.not_lt_zero _), fun _ hk hnk => absurd hk (by omega)⟩
+
+/-- `P` holds at the midpoint, so the search continues above it, on a shorter interval. -/
+theorem Bisects.above {n : Nat} {P : (k : Nat) → k < n → Prop} {low high mid low1 : Nat}
+    (hI : Bisects n P low high) (hP : ∀ {k m} (hkm : k ≤ m) (hm : m < n), P m hm → P k (by omega))
+    (hm1 : low ≤ mid) (hm2 : mid < high) (hmn : mid < n) (hmid : P mid hmn) (hlow1 : low1 = mid + 1) :
+    Bisects n P low1 high ∧ high - low1 < high - low :=
+  ⟨⟨by omega, hI.2.1, fun _ _ hk => hP (by omega) hmn hmid, hI.2.2.2⟩, by omega⟩
+
+/-- `P` fails at the midpoint, so the search continues below it, on a shorter interval. -/
+theorem Bisects.below {n : Nat} {P : (k : Nat) → k < n → Prop} {low high mid : Nat}
+    (hI : Bisects n P low high) (hP : ∀ {k m} (hkm : k ≤ m) (hm : m < n), P m hm → P k (by omega))
+    (hm1 : low ≤ mid) (hm2 : mid < high) (hmn : mid < n) (hmid : ¬ P mid hmn) :
+    Bisects n P low mid ∧ mid - low < high - low :=
+  ⟨⟨hm1, by omega, hI.2.2.1, fun _ hk hkm hk' => hmid (hP hkm hk hk')⟩, by omega⟩
+
+/-- An empty interval: `low` is the first slot where `P` fails. -/
+theorem Bisects.done {n : Nat} {P : (k : Nat) → k < n → Prop} {low high : Nat}
+    (hI : Bisects n P low high) (hhl : high ≤ low) :
+    low ≤ n ∧ (∀ k (h : k < n), k < low → P k h) ∧ (∀ k (h : k < n), low ≤ k → ¬ P k h) :=
+  ⟨by have := hI.1; have := hI.2.1; omega, hI.2.2.1, fun k hk hkl => hI.2.2.2 k hk (by omega)⟩
+
 /-- `find_path` is the first record whose path is not before `P`; all
     earlier paths are before it, no later one is. -/
 theorem find_path_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
@@ -71,41 +110,31 @@ theorem find_path_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entr
   unfold find_path find_path_loop
   simp_len [bind_tc_ok]
   apply loop.spec_decr_nat (fun s : Usize × Usize => s.2.val - s.1.val)
-    (fun s : Usize × Usize => s.1.val ≤ s.2.val ∧ s.2.val ≤ es.length ∧
-      (∀ k (h : k < es.length), k < s.1.val → BytesLt es[k].path (sliceBytes path)) ∧
-      (∀ k (h : k < es.length), s.2.val ≤ k → ¬ BytesLt es[k].path (sliceBytes path)))
-  · rintro ⟨low, high⟩ ⟨h1, h2, h3, h4⟩
-    dsimp only at h1 h2 h3 h4 ⊢
+    (fun s : Usize × Usize => Bisects es.length (fun k _ => BytesLt es[k].path (sliceBytes path)) s.1.val s.2.val)
+  · rintro ⟨low, high⟩ hI
+    dsimp only at hI ⊢
     unfold find_path_loop.body
     split
-    · rename_i hlh
-      have hlh' : low.val < high.val := by scalar_tac
-      step as ⟨ d, hd ⟩
+    · step as ⟨ d, hd ⟩
       step as ⟨ d2, hd2 ⟩
       step as ⟨ mid, hmid ⟩
-      have hm1 : low.val ≤ mid.val := by scalar_tac
-      have hm2 : mid.val < high.val := by
-        have : d2.val ≤ d.val / 2 := by scalar_tac
-        have : d.val / 2 < d.val := Nat.div_lt_self (by omega) (by omega)
-        scalar_tac
+      obtain ⟨hm1, hm2⟩ := bisect_midpoint (by scalar_tac) hd (by scalar_tac) hmid
+      have hmes : mid.val < es.length := by have := hI.2.1; omega
       step with path_before_spec hL mid path as ⟨ b, hb ⟩
-      have hmes : mid.val < es.length := by omega
       split
       · rename_i hbt
         obtain ⟨e, he, hlt⟩ := hb.mp hbt
         rw [List.getElem?_eq_getElem hmes, Option.some.injEq] at he
         subst he
         step as ⟨ low1, hlow1 ⟩
-        refine ⟨by omega, h2, fun k hk hkl => PathOrdered.lt_of_le hO (by omega) hmes hlt, h4, by omega⟩
+        exact hI.above (PathOrdered.lt_of_le hO) hm1 hm2 hmes hlt hlow1
       · rename_i hbt
         simp only [WP.spec_ok]
-        refine ⟨hm1, by omega, h3, fun k hk hkm hlt => hbt (hb.mpr ⟨_, List.getElem?_eq_getElem hmes,
-          PathOrdered.lt_of_le hO hkm hk hlt⟩), by omega⟩
-    · rename_i hlh
-      simp only [WP.spec_ok]
-      have : high.val ≤ low.val := by scalar_tac
-      exact ⟨by omega, h3, fun k hk hkl => h4 k hk (by omega)⟩
-  · exact ⟨by simp, by simp [hel], fun k _ hk => absurd hk (by simp), fun k hk hk2 => by simp [hel] at hk2; omega⟩
+        exact hI.below (PathOrdered.lt_of_le hO) hm1 hm2 hmes
+          fun hlt => hbt (hb.mpr ⟨_, List.getElem?_eq_getElem hmes, hlt⟩)
+    · simp only [WP.spec_ok]
+      exact hI.done (by scalar_tac)
+  · simpa [hel] using Bisects.start
 
 /-- **Path lookup.** In a listing in path order, `find_entry` finds a record
     that names `oid` at `path` exactly when there is one. -/
