@@ -53,15 +53,19 @@ theorem pktAcc_none_mono (l : List Nat) (i : Nat) (h : pktAcc l i = none) :
       · have : i = j + 1 := by omega
         subst this; exact h
 
-theorem pkt_hex_dec {c : Nat} (h1 : 48 ≤ c) (h2 : c ≤ 57) : hexValue c = some (c - 48) := by
-  unfold hexValue; unfold_v3_bytes; rw [if_pos ⟨h1, h2⟩]
+open Transcrypt.V3Policy (digitZero digitNine lowerA lowerF hexLetterValue)
 
-theorem pkt_hex_low {c : Nat} (h1 : 97 ≤ c) (h2 : c ≤ 102) : hexValue c = some (c - 87) := by
-  unfold hexValue; unfold_v3_bytes; rw [if_neg (by omega), if_pos ⟨h1, h2⟩]
+theorem pkt_hex_dec {c : Nat} (h1 : digitZero ≤ c) (h2 : c ≤ digitNine) :
+    hexValue c = some (c - digitZero) := by
+  unfold hexValue; rw [if_pos ⟨h1, h2⟩]
 
-theorem pkt_hex_none {c : Nat} (h1 : ¬(48 ≤ c ∧ c ≤ 57)) (h2 : ¬(97 ≤ c ∧ c ≤ 102)) :
+theorem pkt_hex_low {c : Nat} (h1 : lowerA ≤ c) (h2 : c ≤ lowerF) :
+    hexValue c = some (c - (lowerA - hexLetterValue)) := by
+  unfold hexValue; rw [if_neg (by unfold_v3_bytes; omega), if_pos ⟨h1, h2⟩]
+
+theorem pkt_hex_none {c : Nat} (h1 : ¬(digitZero ≤ c ∧ c ≤ digitNine)) (h2 : ¬(lowerA ≤ c ∧ c ≤ lowerF)) :
     hexValue c = none := by
-  unfold hexValue; unfold_v3_bytes; rw [if_neg h1, if_neg h2]
+  unfold hexValue; rw [if_neg h1, if_neg h2]
 
 /-- Invariant of the digit scan: `i` stays within the header and `ok` with
     `value` record exactly the decoded value of the first `i` digits. -/
@@ -112,24 +116,26 @@ theorem pkt_digit_spec (c : U8) (value : Usize) (hv : value.val < 16 ^ 3) :
   split_ifs with h1 h2 h3 h4 h3 h4 <;> simp only [ge_iff_le, UScalar.le_equiv] at *
   · step*
     all_goals
-      rw [pkt_hex_dec (by scalar_tac) (by scalar_tac)]
+      rw [pkt_hex_dec (by unfold_v3_bytes; scalar_tac) (by unfold_v3_bytes; scalar_tac)]
       simp only [Option.map_some, if_true]
+      unfold_v3_bytes
       scalar_tac
   · step*
     all_goals
-      rw [pkt_hex_low (by scalar_tac) (by scalar_tac)]
+      rw [pkt_hex_low (by unfold_v3_bytes; scalar_tac) (by unfold_v3_bytes; scalar_tac)]
       simp only [Option.map_some, if_true, Option.some.injEq]
+      unfold_v3_bytes
       have h4' : i4.val = i3.val := by rw [i4_post]; scalar_tac
       scalar_tac
   · simp only [WP.spec_ok, Bool.false_eq_true, ↓reduceIte, Option.map_eq_none_iff]
-    exact pkt_hex_none (by scalar_tac) (by scalar_tac)
+    exact pkt_hex_none (by unfold_v3_bytes; scalar_tac) (by unfold_v3_bytes; scalar_tac)
   · simp only [WP.spec_ok, Bool.false_eq_true, ↓reduceIte, Option.map_eq_none_iff]
-    exact pkt_hex_none (by scalar_tac) (by scalar_tac)
+    exact pkt_hex_none (by unfold_v3_bytes; scalar_tac) (by unfold_v3_bytes; scalar_tac)
   · step*
   · simp only [WP.spec_ok, Bool.false_eq_true, ↓reduceIte, Option.map_eq_none_iff]
-    exact pkt_hex_none (by scalar_tac) (by scalar_tac)
+    exact pkt_hex_none (by unfold_v3_bytes; scalar_tac) (by unfold_v3_bytes; scalar_tac)
   · simp only [WP.spec_ok, Bool.false_eq_true, ↓reduceIte, Option.map_eq_none_iff]
-    exact pkt_hex_none (by scalar_tac) (by scalar_tac)
+    exact pkt_hex_none (by unfold_v3_bytes; scalar_tac) (by unfold_v3_bytes; scalar_tac)
 
 /-- The loop body preserves `PktInv` and, on exit, has decoded all four digits. -/
 theorem pkt_body_spec (header : Std.Array U8 4#usize) (value : Usize) (ok1 : Bool) (i : Usize)

@@ -107,23 +107,24 @@ theorem blob_read_spec (size : U64) (skip : Bool) :
 /-! ## `cat-file --batch` headers -/
 
 theorem decimalValue_append (l : List Nat) (c : Nat) :
-    decimalValue (l ++ [c]) = decimalValue l * 10 + (c - 48) := by
+    decimalValue (l ++ [c]) = decimalValue l * decimalRadix + (c - digitZero) := by
   simp [decimalValue, List.foldl_append]
 
-theorem decimal_foldl_lt (l : List Nat) (hl : ∀ c ∈ l, DecimalDigit c) (acc k : Nat) (h : acc < 10 ^ k) :
-    l.foldl (fun v c => v * 10 + (c - 48)) acc < 10 ^ (k + l.length) := by
+theorem decimal_foldl_lt (l : List Nat) (hl : ∀ c ∈ l, DecimalDigit c) (acc k : Nat)
+    (h : acc < decimalRadix ^ k) :
+    l.foldl (fun v c => v * decimalRadix + (c - digitZero)) acc < decimalRadix ^ (k + l.length) := by
   induction l generalizing acc k with
   | nil => simpa using h
   | cons c l ih =>
     simp only [List.foldl_cons, List.length_cons]
     have hc := hl c (by simp)
-    have : acc * 10 + (c - 48) < 10 ^ (k + 1) := by
+    have : acc * decimalRadix + (c - digitZero) < decimalRadix ^ (k + 1) := by
       rw [pow_succ]; unfold DecimalDigit at hc; unfold_v3_bytes; omega
     have := ih (fun x hx => hl x (by simp [hx])) _ _ this
     rwa [show k + 1 + l.length = k + (l.length + 1) by omega] at this
 
 theorem decimalValue_lt (l : List Nat) (hl : ∀ c ∈ l, DecimalDigit c) :
-    decimalValue l < 10 ^ l.length := by
+    decimalValue l < decimalRadix ^ l.length := by
   have := decimal_foldl_lt l hl 0 0 (by simp)
   simpa [decimalValue] using this
 
@@ -264,7 +265,6 @@ theorem batchHeader_iff (H O : List Nat) (n : Nat) :
       subst this
       simp
   · rintro ⟨hO, hB, hl, h20, hlf, hz, hdig, rfl⟩
-    unfold_v3_bytes
     refine ⟨H.extract (O.length + 6) (H.length - 1), ?_, ⟨?_, hdig, ?_⟩, ?_, rfl⟩
     · obtain ⟨t, rfl⟩ := hO
       simp only [List.drop_left] at hB
