@@ -224,6 +224,7 @@ theorem record_ok_spec (entry : Slice U8) :
   rcases r with parsed | x
   · simp only at hr ⊢
     obtain ⟨mode, oid, heq, hm, hne, h9m, h9o, hp, _⟩ := hr
+    unfold_v3_bytes
     have hol : 0 < oid.length := List.length_pos_iff.mpr hne
     generalize hP : (sliceBytes entry).drop parsed.path_start.val = P at heq hp
     have hpl := congrArg List.length heq

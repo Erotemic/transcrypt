@@ -333,6 +333,8 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
   · have hr1 := ‹r1 = core.result.Result.Ok id›
     subst hr1
     obtain ⟨hshape, hlen38, -⟩ := Transcrypt.V3Wire.record_of_shape r1_post
+    simp only [Transcrypt.V3Wire.fileHeaderLen, Transcrypt.V3Wire.fileMagicLen, Transcrypt.V3Wire.idLen,
+      Transcrypt.V3Wire.fileMinLen, Transcrypt.V3Wire.tagLen] at hshape hlen38
     rw [sliceBytes_length] at hlen38
     have hauth : ConfigAuthentic σ (wireBytes config) := by
       have := ‹r = core.result.Result.Ok _›; subst this; exact r_post.1
@@ -444,7 +446,7 @@ theorem open_record_complete (h : Realizes inst prims σ) (config : Std.Array U8
       r.1 = core.result.Result.Ok () ∧ sliceBytes r.2 = pt ⦄ := by
   obtain ⟨hcanon, hauth, hmax, hrec⟩ := hop
   have hreclen : record.length = pt.length + 38 := by
-    rw [← sliceBytes_length record, hrec, sealed_length]
+    rw [← sliceBytes_length record, hrec, sealed_length]; rfl
   have hshape := sealed_shape σ (wireBytes config) (sliceBytes path) pt
   rw [← hrec] at hshape
   apply WP.spec_mono (open_record_spec h config path record out)

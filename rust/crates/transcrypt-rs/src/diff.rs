@@ -17,6 +17,14 @@ use crate::{
     worktree::Scratch,
 };
 
+/// The output limit of `diff -u`: both inputs, each line at most once more
+/// for its marker.
+const DIFF_OUTPUT_LIMIT: usize = 4 * MAX_RECORD;
+/// `diff` exits with 0 when the inputs are the same, 1 when they differ
+/// (anything else is trouble).
+const DIFF_SAME: i32 = 0;
+const DIFF_DIFFERENT: i32 = 1;
+
 /// Print the diff of one protected file between `old` (at `old_path`) and
 /// `new` (at `new_path`), as Git's external diff interface supplies them.
 pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], new: &Path) -> Result<(), String> {
@@ -43,12 +51,11 @@ pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], ne
     let (a, b) = (scratch.write("a", &a)?, scratch.write("b", &b)?);
     let mut command = Command::new("diff");
     command.args(["-u", "-L", &a_label, "-L", &b_label]).arg(&a).arg(&b).current_dir(root);
-    // At most both inputs, each line once more for its marker.
-    let result = run_bounded_status(command, None, 4 * MAX_RECORD);
+    let result = run_bounded_status(command, None, DIFF_OUTPUT_LIMIT);
     drop(scratch);
     let (status, output, _) = result?;
     match status.code() {
-        Some(0 | 1) => io::stdout().write_all(&output).map_err(|_| "cannot write the diff".into()),
+        Some(DIFF_SAME | DIFF_DIFFERENT) => io::stdout().write_all(&output).map_err(|_| "cannot write the diff".into()),
         _ => Err("diff failed".into()),
     }
 }

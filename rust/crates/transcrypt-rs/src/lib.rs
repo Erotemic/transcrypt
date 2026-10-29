@@ -15,7 +15,13 @@ use transcrypt_v3_core::{
 };
 use zeroize::Zeroizing;
 
+/// Bytes in a kibibyte and in a mebibyte.
+pub const KIB: usize = 1024;
+pub const MIB: usize = 1024 * KIB;
+
+/// Argon2id memory: 64 MiB, in the KiB units Argon2 counts.
 pub const ARGON_MEMORY_KIB: u32 = 65_536;
+const _: () = assert!(ARGON_MEMORY_KIB as usize * KIB == 64 * MIB);
 pub const ARGON_PASSES: u32 = 3;
 pub const ARGON_LANES: u32 = 1;
 pub const KEY_SIZE: usize = 64;
@@ -116,10 +122,50 @@ impl V3Primitives for Keyed<'_> {
     }
 }
 
+/// Whether `text` states `limit` (a whole number of MiB) as `<n> MiB`, so a
+/// fixed message can be checked at compile time against the limit it names.
+pub const fn states_mib_limit(text: &str, limit: usize) -> bool {
+    if limit == 0 || !limit.is_multiple_of(MIB) { return false; }
+    const RADIX: usize = 10;
+    // Room for the digits of any `usize` and the unit.
+    const NEEDLE_CAPACITY: usize = 32;
+    // The decimal digits of the limit in MiB, then " MiB".
+    let mut needle = [0u8; NEEDLE_CAPACITY];
+    let mut digits = 0;
+    let mut n = limit / MIB;
+    while n > 0 { needle[digits] = b'0' + (n % RADIX) as u8; n /= RADIX; digits += 1; }
+    let mut i = 0;
+    while i < digits / 2 {
+        let t = needle[i];
+        needle[i] = needle[digits - 1 - i];
+        needle[digits - 1 - i] = t;
+        i += 1;
+    }
+    let unit = b" MiB";
+    let mut k = 0;
+    while k < unit.len() { needle[digits + k] = unit[k]; k += 1; }
+    let len = digits + unit.len();
+    let text = text.as_bytes();
+    let mut start = 0;
+    while start + len <= text.len() {
+        // A match must not continue a longer number.
+        let mut matched = start == 0 || !text[start - 1].is_ascii_digit();
+        let mut j = 0;
+        while matched && j < len { matched = text[start + j] == needle[j]; j += 1; }
+        if matched { return true; }
+        start += 1;
+    }
+    false
+}
+
+/// The refusal of an oversized input, which states the v3 plaintext limit.
+const SIZE_REFUSAL: &str = "input exceeds the 16 MiB v3 limit or has an invalid length";
+const _: () = assert!(states_mib_limit(SIZE_REFUSAL, MAX_FILE));
+
 fn refusal(r: Refusal) -> String {
     match r {
         Refusal::Path => "v3 requires a canonical Git-relative path that is not .gitattributes, .gitmodules or in .transcrypt/",
-        Refusal::Size => "input exceeds the 16 MiB v3 limit or has an invalid length",
+        Refusal::Size => SIZE_REFUSAL,
         Refusal::Config => "invalid public v3 configuration",
         Refusal::ConfigAuthentication => "incorrect credentials or tampered public v3 configuration",
         Refusal::Envelope => "invalid v3 ciphertext envelope",
@@ -321,16 +367,21 @@ mod tests {
         assert!(keyed.seal_config(&prefix, &mut tag));
         assert_eq!(&tag[..], &config[CONFIG_PREFIX_LEN..]);
         assert!(keyed.open_config(&prefix, &tag));
-        for bit in 0..(TAG_LEN * 8) {
+        const BITS: usize = u8::BITS as usize;
+        for bit in 0..(TAG_LEN * BITS) {
             let mut bad = tag;
-            bad[bit / 8] ^= 1 << (bit % 8);
+            bad[bit / BITS] ^= 1 << (bit % BITS);
             assert!(!keyed.open_config(&prefix, &bad));
         }
         // config_id is the keyless SHA-256 truncation.
         assert_eq!(keyed.config_id(&config), Sha256::digest(config)[..ID_LEN]);
-        let mut state = 0x9e37_79b9_7f4a_7c15u64;
-        let mut next = || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
-        for len in [0usize, 1, 15, 16, 17, 255, 1000] {
+        // Marsaglia's xorshift64 (shifts 13, 7, 17) from a fixed seed.
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+        const SHIFTS: (u32, u32, u32) = (13, 7, 17);
+        let mut state = SEED;
+        let mut next = || { state ^= state << SHIFTS.0; state ^= state >> SHIFTS.1; state ^= state << SHIFTS.2; state };
+        // Lengths around one AES block (the tag length) and a few others.
+        for len in [0usize, 1, TAG_LEN - 1, TAG_LEN, TAG_LEN + 1, 255, 1000] {
             let pt: Vec<u8> = (0..len).map(|_| next() as u8).collect();
             let path = format!("d{}/f.secret", next() % 7);
             let mut sealed = vec![0u8; len + TAG_LEN];
@@ -347,9 +398,9 @@ mod tests {
             let mut other = config;
             other[CONFIG_LEN - 1] ^= 1;
             assert!(!keyed.open_file(&other, path.as_bytes(), &sealed, &mut out));
-            let flip = (next() as usize) % (sealed.len() * 8);
+            let flip = (next() as usize) % (sealed.len() * BITS);
             let mut tampered = sealed.clone();
-            tampered[flip / 8] ^= 1 << (flip % 8);
+            tampered[flip / BITS] ^= 1 << (flip % BITS);
             assert!(!keyed.open_file(&config, path.as_bytes(), &tampered, &mut out));
             // Determinism: the same inputs seal to the same bytes.
             let mut again = vec![0u8; len + TAG_LEN];

@@ -8,6 +8,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use transcrypt_v3_core::FILTER_ATTR;
 use crate::{
     credential::Key,
     git::*,
@@ -21,6 +22,10 @@ use crate::{
 /// drivers; a checkout without them sees binary files), and never
 /// line-ending converted (`-text`: Git would convert the ciphertext).
 pub(crate) const MACRO: &[u8] = b"[attr]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text";
+/// ASCII DEL, a control character Git's quoting escapes.
+const DEL: u8 = 0x7f;
+/// Digits of a C-style octal escape (`\ooo`) of one byte.
+const OCTAL_ESCAPE_DIGITS: usize = 3;
 const MACRO_COMMENT: &[u8] = b"# transcrypt-v3: files matching a pattern marked `transcrypt` are encrypted in Git";
 /// The top-level `.gitattributes` in the worktree, if any.
 pub(crate) fn worktree_attributes(root: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -115,7 +120,7 @@ type Checked = (Key, Vec<Vec<u8>>, Vec<Line>);
 fn checked_patterns(root: &Path, patterns: &[OsString]) -> Result<Checked, String> {
     let config = load_config(root)?;
     let key = Key::require(root, &config)?;
-    let submodules: Vec<Vec<u8>> = indexed_files(root)?.into_iter().filter(|e| e.mode == "160000").map(|e| e.path).collect();
+    let submodules: Vec<Vec<u8>> = indexed_files(root)?.into_iter().filter(|e| e.mode == GITLINK_MODE).map(|e| e.path).collect();
     let patterns = patterns.iter().map(|p| check_pattern(root, &submodules, crate::os::os_bytes(p))).collect::<Result<Vec<_>, _>>()?;
     let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<_, _>>()?;
     Ok((key, patterns, lines))
@@ -201,7 +206,7 @@ fn protect_line(pattern: &[u8]) -> Result<Line, String> {
         return Err(format!("invalid pattern {:?}", String::from_utf8_lossy(pattern)));
     }
     // Git ends an unquoted pattern at the first blank.
-    let plain = !pattern.starts_with(b"\"") && pattern.iter().all(|b| *b > b' ' && *b != 0x7f);
+    let plain = !pattern.starts_with(b"\"") && pattern.iter().all(|b| *b > b' ' && *b != DEL);
     let mut line = Vec::new();
     if plain {
         line.extend_from_slice(pattern);
@@ -213,7 +218,7 @@ fn protect_line(pattern: &[u8]) -> Result<Line, String> {
                 b'\\' => line.extend_from_slice(b"\\\\"),
                 b'\n' => line.extend_from_slice(b"\\n"),
                 b'\t' => line.extend_from_slice(b"\\t"),
-                b if b < b' ' || b == 0x7f => line.extend_from_slice(format!("\\{b:03o}").as_bytes()),
+                b if b < b' ' || b == DEL => line.extend_from_slice(format!("\\{b:0OCTAL_ESCAPE_DIGITS$o}").as_bytes()),
                 b => line.push(b),
             }
         }
@@ -300,7 +305,7 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
             update.add(&staged.mode, &staged.path, plaintext);
         }
         let rules = worktree_attributes(root)?.ok_or("missing .gitattributes")?;
-        update.add("100644", b".gitattributes", &rules);
+        update.add(REGULAR_FILE_MODE, b".gitattributes", &rules);
         update.apply(root, &["--add"])?;
         Ok(released.into_iter().map(|(staged, _)| staged.path.clone()).collect::<Vec<_>>())
     })?;
@@ -332,7 +337,7 @@ fn local_attribute_files(root: &Path) -> Vec<PathBuf> {
 pub(crate) fn filter_overrides(root: &Path) -> Vec<String> {
     local_attribute_files(root).into_iter().filter(|file| fs::read(file)
         .is_ok_and(|text| split_lines(&text)
-            .any(|line| line.windows(6).any(|w| w == b"filter") || defines_macro(line))))
+            .any(|line| line.windows(FILTER_ATTR.len()).any(|w| w == FILTER_ATTR) || defines_macro(line))))
         .map(|file| file.display().to_string()).collect()
 }
 

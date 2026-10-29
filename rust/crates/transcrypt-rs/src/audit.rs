@@ -12,11 +12,20 @@ use crate::{
     attributes::split_lines,
     credential::Key,
     git::{changed_files, CONFIG_PATH, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
-        push_index_record, read_record, tree_files, Attributes, Staged},
+        push_index_record, read_record, tree_files, Attributes, Staged, REGULAR_FILE_MODE, SHORT_OUTPUT_LIMIT},
 };
 use transcrypt_v3_core::{
     is_object_id, is_reserved_path, record_envelope_ok, ID_LEN,
 };
+
+/// The longest `git rev-list --parents` line read: a commit id and its
+/// parents' ids, beyond which a line is malformed.
+const REV_LIST_LINE_LIMIT: u64 = 4096;
+
+/// A pre-push input line: `<local ref> <local oid> <remote ref> <remote oid>`.
+const PRE_PUSH_FIELDS: usize = 4;
+const PRE_PUSH_LOCAL_OID: usize = 1;
+const PRE_PUSH_REMOTE_OID: usize = 3;
 
 /// Result of `audit`.
 pub(crate) struct Audited {
@@ -53,7 +62,7 @@ pub(crate) fn audit(root: &Path, revs: &[OsString], keyed: bool, max_commits: Op
         let mut line = Vec::new();
         loop {
             line.clear();
-            (&mut lines).take(4096).read_until(b'\n', &mut line).map_err(|_| "cannot read git rev-list")?;
+            (&mut lines).take(REV_LIST_LINE_LIMIT).read_until(b'\n', &mut line).map_err(|_| "cannot read git rev-list")?;
             if line.is_empty() { return Ok(()); }
             let ids: Vec<&[u8]> = line.strip_suffix(b"\n").ok_or("malformed git rev-list output")?
                 .split(|b| *b == b' ').collect();
@@ -133,10 +142,10 @@ impl AttributeIndex {
             self.files = None;
             if !files.is_empty() {
                 let mut info = Vec::new();
-                for (path, oid) in files.iter() { push_index_record(&mut info, "100644", oid, path); }
+                for (path, oid) in files.iter() { push_index_record(&mut info, REGULAR_FILE_MODE, oid, path); }
                 let mut command = git_command(Some(root));
                 command.env("GIT_INDEX_FILE", &self.file).args(["update-index", "-z", "--index-info"]);
-                let (status, _, errors) = crate::git::run_bounded_status(command, Some(&info), 1 << 20)?;
+                let (status, _, errors) = crate::git::run_bounded_status(command, Some(&info), SHORT_OUTPUT_LIMIT)?;
                 if !status.success() {
                     return Err(format!("cannot read a commit's .gitattributes: {}", String::from_utf8_lossy(&errors)));
                 }
@@ -323,17 +332,21 @@ pub(crate) fn pre_push(root: &Path, remote: Option<&OsStr>) -> Result<(), String
     let mut revs: Vec<OsString> = Vec::new();
     for line in split_lines(&input).filter(|l| !l.is_empty()) {
         let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
-        if fields.len() != 4 || !is_object_id(fields[1]) || !is_object_id(fields[3]) {
+        if fields.len() != PRE_PUSH_FIELDS {
+            return Err("malformed pre-push input".into());
+        }
+        let (local, remote_oid) = (fields[PRE_PUSH_LOCAL_OID], fields[PRE_PUSH_REMOTE_OID]);
+        if !is_object_id(local) || !is_object_id(remote_oid) {
             return Err("malformed pre-push input".into());
         }
         let zero = |oid: &[u8]| oid.iter().all(|b| *b == b'0');
-        if zero(fields[1]) { continue; } // deleting a remote ref pushes nothing
-        revs.push(String::from_utf8_lossy(fields[1]).into_owned().into());
-        let mut known = fields[3].to_vec();
+        if zero(local) { continue; } // deleting a remote ref pushes nothing
+        revs.push(String::from_utf8_lossy(local).into_owned().into());
+        let mut known = remote_oid.to_vec();
         known.extend_from_slice(b"^{commit}");
-        if !zero(fields[3]) && git(root, &["cat-file", "-e", &String::from_utf8_lossy(&known)]).is_ok() {
+        if !zero(remote_oid) && git(root, &["cat-file", "-e", &String::from_utf8_lossy(&known)]).is_ok() {
             let mut exclude = b"^".to_vec();
-            exclude.extend_from_slice(fields[3]);
+            exclude.extend_from_slice(remote_oid);
             revs.push(String::from_utf8_lossy(&exclude).into_owned().into());
         }
     }

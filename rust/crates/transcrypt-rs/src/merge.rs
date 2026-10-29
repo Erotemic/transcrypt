@@ -14,6 +14,13 @@ use crate::{
     load_config,
 };
 
+/// The output limit of `git merge-file -p`: its three inputs at most.
+const MERGE_OUTPUT_LIMIT: usize = 3 * MAX_RECORD;
+/// `git merge-file` exits with 0 for a clean merge, or with the number of
+/// conflicts, capped at 127; a negative status (255) is an error.
+const MERGE_CLEAN: i32 = 0;
+const MERGE_MAX_CONFLICTS: i32 = 127;
+
 /// Merge one protected file. `Ok(true)` for a clean merge, `Ok(false)` when
 /// the stored result has conflict markers. On any error `ours` is left as
 /// it was, which Git records as a conflict.
@@ -38,14 +45,13 @@ pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_pa
     for (name, plaintext) in ["ours", "base", "theirs"].iter().zip(&inputs) {
         command.arg(scratch.write(name, plaintext)?);
     }
-    let result = run_bounded_status(command, None, 3 * MAX_RECORD);
+    let result = run_bounded_status(command, None, MERGE_OUTPUT_LIMIT);
     drop(scratch);
     let (status, merged, errors) = result?;
-    // `merge-file` exits with the number of conflicts (at most 127), or
-    // negative (255) on an error, whose output must never replace `ours`.
+    // An error's output must never replace `ours`.
     let conflicts = match status.code() {
-        Some(0) => false,
-        Some(1..=127) => true,
+        Some(MERGE_CLEAN) => false,
+        Some(1..=MERGE_MAX_CONFLICTS) => true,
         _ => return Err(format!("git merge-file failed: {}", String::from_utf8_lossy(&errors))),
     };
     let record = key.clean(git_path, &merged)?;

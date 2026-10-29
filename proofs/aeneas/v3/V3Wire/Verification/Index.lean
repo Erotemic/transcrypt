@@ -34,12 +34,16 @@ theorem drop_three (l : List Nat) (j : Nat) (hj : j + 2 < l.length) :
     getElem!_pos l j (by omega), getElem!_pos l (j+1) (by omega), getElem!_pos l (j+2) (by omega)]
   rfl
 
+open Transcrypt.V3Policy (tab space digitZero modeLen) in
+/-- The offsets are those of the extracted parser: the mode is `l[0..6]`,
+    the object id starts at 7, and the first TAB `t` is at least 10. -/
 theorem index_sound (l : List Nat) (t : Nat) (reg : Bool) (h10 : 10 ≤ t)
-    (hn : t + 1 < l.length) (h9 : l[t]! = 9) (hno : ∀ k < t, l[k]! ≠ 9)
-    (h6 : l[6]! = 32) (h2 : l[t-2]! = 32) (h1 : l[t-1]! = 48)
-    (hreg : reg = true ↔ l.take 6 = Transcrypt.V3Policy.regularMode ∨
-      l.take 6 = Transcrypt.V3Policy.executableMode) :
+    (hn : t + 1 < l.length) (h9 : l[t]! = tab) (hno : ∀ k < t, l[k]! ≠ tab)
+    (h6 : l[modeLen]! = space) (h2 : l[t-2]! = space) (h1 : l[t-1]! = digitZero)
+    (hreg : reg = true ↔ l.take modeLen = Transcrypt.V3Policy.regularMode ∨
+      l.take modeLen = Transcrypt.V3Policy.executableMode) :
     Transcrypt.V3Policy.IndexRecord l reg (l.drop (t+1)) := by
+  unfold_v3_bytes
   have hsplit : l = l.take 6 ++ [32] ++ (l.drop 7).take (t - 9) ++ [32, 48, 9] ++ l.drop (t+1) := by
     have e3 := drop_three l (t - 2) (by omega)
     have ht3 : t - 2 + 3 = t + 1 := by omega
@@ -68,13 +72,15 @@ theorem index_sound (l : List Nat) (t : Nat) (reg : Bool) (h10 : 10 ≤ t)
   · intro h; have := congrArg List.length h; simp at this; omega
   · exact hreg
 
+open Transcrypt.V3Policy (tab space digitZero modeLen) in
 theorem index_complete (l : List Nat) (reg : Bool) (path : List Nat)
     (h : Transcrypt.V3Policy.IndexRecord l reg path) :
-    ∃ t, 10 ≤ t ∧ t + 1 < l.length ∧ l[t]! = 9 ∧ (∀ k < t, l[k]! ≠ 9) ∧
-      l[6]! = 32 ∧ l[t-2]! = 32 ∧ l[t-1]! = 48 ∧ path = l.drop (t+1) ∧
-      (reg = true ↔ l.take 6 = Transcrypt.V3Policy.regularMode ∨
-        l.take 6 = Transcrypt.V3Policy.executableMode) := by
+    ∃ t, 10 ≤ t ∧ t + 1 < l.length ∧ l[t]! = tab ∧ (∀ k < t, l[k]! ≠ tab) ∧
+      l[modeLen]! = space ∧ l[t-2]! = space ∧ l[t-1]! = digitZero ∧ path = l.drop (t+1) ∧
+      (reg = true ↔ l.take modeLen = Transcrypt.V3Policy.regularMode ∨
+        l.take modeLen = Transcrypt.V3Policy.executableMode) := by
   obtain ⟨mode, oid, rfl, hm, ho, h9m, h9o, hp, hreg⟩ := h
+  unfold_v3_bytes
   have hol : 0 < oid.length := List.length_pos_iff.mpr ho
   have hpl : 0 < path.length := List.length_pos_iff.mpr hp
   let A := mode ++ [32] ++ oid ++ [32, 48]

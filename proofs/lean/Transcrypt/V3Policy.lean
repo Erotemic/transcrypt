@@ -28,9 +28,60 @@ def ascii (s : String) : List Nat := s.toList.map Char.toNat
 
 def maxFile : Nat := 16 * 1024 * 1024
 def maxPath : Nat := 4096
-def maxRecord : Nat := maxFile + 38
+def maxRecord : Nat := maxFile + fileMinLen
 def slash : Nat := 47
 def dot : Nat := 46
+
+/-! ASCII bytes of the Git and agent formats. They are reducible, so `decide`,
+`simp` and definitional unfolding see the numbers. -/
+
+abbrev tab : Nat := 9
+abbrev lf : Nat := 10
+abbrev space : Nat := 32
+/-- `0` and `9`, `a` and `f`: the ends of the decimal and hexadecimal digit
+    ranges; `a` is the hexadecimal digit worth `hexLetterValue`. -/
+abbrev digitZero : Nat := 48
+abbrev digitNine : Nat := 57
+abbrev lowerA : Nat := 97
+abbrev lowerF : Nat := 102
+abbrev hexLetterValue : Nat := 10
+/-- The radixes of decimal sizes and hexadecimal pkt-line lengths. -/
+abbrev decimalRadix : Nat := 10
+abbrev hexRadix : Nat := 16
+/-- The credential agent's opcodes `P`, `E`, `D` and `X`. -/
+abbrev opPing : Nat := 80
+abbrev opEncrypt : Nat := 69
+abbrev opDecrypt : Nat := 68
+abbrev opStop : Nat := 88
+/-- The derived key's length, and the stored key file: the config it was
+    unlocked for, then the key. -/
+abbrev keyLen : Nat := 64
+abbrev keyFileLen : Nat := configLen + keyLen
+/-- Git object names: SHA-1 or SHA-256, in hexadecimal digits. -/
+abbrev sha1OidLen : Nat := 40
+abbrev sha256OidLen : Nat := 64
+/-- The most decimal digits of a blob size Git's reply may have. -/
+abbrev maxSizeDigits : Nat := 19
+/-- A pkt-line header: its length in four hexadecimal digits. -/
+abbrev pktHeaderLen : Nat := 4
+/-- A Git file mode, such as `100644`. -/
+abbrev modeLen : Nat := 6
+
+/-- Unfold these bytes and lengths (and the wire lengths) to their numbers
+    everywhere, for `omega`, which treats a named constant as an unknown. -/
+macro "unfold_v3_bytes" : tactic =>
+  `(tactic| try simp only [Transcrypt.V3Wire.configMagicLen, Transcrypt.V3Wire.fileMagicLen,
+    Transcrypt.V3Wire.saltLen, Transcrypt.V3Wire.tagLen, Transcrypt.V3Wire.idLen,
+    Transcrypt.V3Wire.configLen, Transcrypt.V3Wire.fileHeaderLen, Transcrypt.V3Wire.fileMinLen,
+    Transcrypt.V3Policy.tab, Transcrypt.V3Policy.lf,
+    Transcrypt.V3Policy.space, Transcrypt.V3Policy.digitZero, Transcrypt.V3Policy.digitNine,
+    Transcrypt.V3Policy.lowerA, Transcrypt.V3Policy.lowerF, Transcrypt.V3Policy.hexLetterValue,
+    Transcrypt.V3Policy.decimalRadix, Transcrypt.V3Policy.hexRadix, Transcrypt.V3Policy.opPing,
+    Transcrypt.V3Policy.opEncrypt, Transcrypt.V3Policy.opDecrypt, Transcrypt.V3Policy.opStop,
+    Transcrypt.V3Policy.keyLen, Transcrypt.V3Policy.keyFileLen, Transcrypt.V3Policy.sha1OidLen,
+    Transcrypt.V3Policy.sha256OidLen, Transcrypt.V3Policy.maxSizeDigits,
+    Transcrypt.V3Policy.pktHeaderLen, Transcrypt.V3Policy.modeLen] at *)
+
 def configDomain : List Nat := ascii "transcrypt/v3/config"
 def fileDomain : List Nat := ascii "transcrypt/v3/file"
 /-- The Git attribute selecting protected files, and the value that does. -/
@@ -92,10 +143,10 @@ structure Suite where
   siv : List (List Nat) → List Nat → List Nat
   /-- SHA-256(x)[0:16]. -/
   digest16 : List Nat → List Nat
-  siv_length : ∀ ad pt, (siv ad pt).length = pt.length + 16
+  siv_length : ∀ ad pt, (siv ad pt).length = pt.length + tagLen
   /-- Decryption is a function of the ciphertext: SIV is injective per AD. -/
   siv_injective : ∀ ad pt pt', siv ad pt = siv ad pt' → pt = pt'
-  digest16_length : ∀ x, (digest16 x).length = 16
+  digest16_length : ∀ x, (digest16 x).length = idLen
 
 /-- The committed config authenticates under the suite's key: its tag is the
     AES-SIV encryption of the empty plaintext under `[configDomain, prefix]`. -/
@@ -127,10 +178,12 @@ theorem opensTo_unique (s : Suite) {config path record pt pt' : List Nat}
   simp only [sealedRecord, encodeFile, List.append_assoc, List.append_cancel_left_eq] at heq
   exact s.siv_injective _ _ _ heq
 
-/-- A sealed record is its plaintext plus the 38-byte overhead. -/
+/-- A sealed record is its plaintext plus the fixed overhead. -/
 theorem sealed_length (s : Suite) (config path pt : List Nat) :
-    (sealedRecord s config path pt).length = pt.length + 38 := by
-  simp [sealedRecord, encodeFile, fileMagic, s.digest16_length, s.siv_length]; omega
+    (sealedRecord s config path pt).length = pt.length + fileMinLen := by
+  simp only [sealedRecord, encodeFile, List.length_append, fileMagic_length, s.digest16_length,
+    s.siv_length, fileMinLen, fileHeaderLen]
+  omega
 
 /-- A sealed record has the file header naming its configuration's id. -/
 theorem sealed_shape (s : Suite) (config path pt : List Nat) :
@@ -191,12 +244,12 @@ open Classical in
 noncomputable def authorizeSpec (opcode : Nat) (supplied active path : List Nat) (bodyLen : Nat) :
     Option AgentOp :=
   if path.length > maxPath ∨ bodyLen > maxRecord ∨ supplied ≠ active then none
-  else if opcode = 69 ∨ opcode = 68 then
-    if CanonicalProtectedPath path then some (if opcode = 69 then .encrypt else .decrypt)
+  else if opcode = opEncrypt ∨ opcode = opDecrypt then
+    if CanonicalProtectedPath path then some (if opcode = opEncrypt then .encrypt else .decrypt)
     else none
   else if path ≠ [] ∨ bodyLen ≠ 0 then none
-  else if opcode = 80 then some .ping
-  else if opcode = 88 then some .stop
+  else if opcode = opPing then some .ping
+  else if opcode = opStop then some .stop
   else none
 
 /-! ## Git index records -/
@@ -212,8 +265,8 @@ def executableMode : List Nat := ascii "100755"
     AES-SIV associated data) is exactly what follows the first TAB; paths
     themselves may contain TAB. -/
 def IndexRecord (entry : List Nat) (regular : Bool) (path : List Nat) : Prop :=
-  ∃ mode oid, entry = mode ++ [32] ++ oid ++ [32, 48, 9] ++ path ∧
-    mode.length = 6 ∧ oid ≠ [] ∧ 9 ∉ mode ∧ 9 ∉ oid ∧ path ≠ [] ∧
+  ∃ mode oid, entry = mode ++ [space] ++ oid ++ [space, digitZero, tab] ++ path ∧
+    mode.length = modeLen ∧ oid ≠ [] ∧ tab ∉ mode ∧ tab ∉ oid ∧ path ≠ [] ∧
     (regular = true ↔ mode = regularMode ∨ mode = executableMode)
 
 /-- The adapter takes the object id of an accepted record as the bytes from
@@ -221,15 +274,16 @@ def IndexRecord (entry : List Nat) (regular : Bool) (path : List Nat) : Prop :=
     For every record of the spec's shape that is exactly its object id. -/
 theorem indexRecord_oid {entry : List Nat} {regular : Bool} {path : List Nat}
     (h : IndexRecord entry regular path) :
-    ∃ mode oid, entry = mode ++ [32] ++ oid ++ [32, 48, 9] ++ path ∧
-      ((entry.take (entry.length - path.length - 3)).drop 7) = oid := by
+    ∃ mode oid, entry = mode ++ [space] ++ oid ++ [space, digitZero, tab] ++ path ∧
+      ((entry.take (entry.length - path.length - [space, digitZero, tab].length)).drop
+        (modeLen + [space].length)) = oid := by
   obtain ⟨mode, oid, rfl, hm, _⟩ := h
   refine ⟨mode, oid, rfl, ?_⟩
-  have hlen : (mode ++ [32] ++ oid ++ [32, 48, 9] ++ path).length - path.length - 3 =
-      (mode ++ [32] ++ oid).length := by simp; omega
-  rw [hlen, show mode ++ [32] ++ oid ++ [32, 48, 9] ++ path =
-      (mode ++ [32] ++ oid) ++ ([32, 48, 9] ++ path) by simp, List.take_left]
-  rw [show mode ++ [32] ++ oid = (mode ++ [32]) ++ oid by simp]
+  have hlen : (mode ++ [space] ++ oid ++ [space, digitZero, tab] ++ path).length - path.length -
+      [space, digitZero, tab].length = (mode ++ [space] ++ oid).length := by simp; omega
+  rw [hlen, show mode ++ [space] ++ oid ++ [space, digitZero, tab] ++ path =
+      (mode ++ [space] ++ oid) ++ ([space, digitZero, tab] ++ path) by simp, List.take_left]
+  rw [show mode ++ [space] ++ oid = (mode ++ [space]) ++ oid by simp]
   exact List.drop_left' (by simp [hm])
 
 /-! ## Credential-agent framing (local IPC) -/
@@ -256,27 +310,27 @@ theorem be32_injective {m n : Nat} (hm : m < 2^32) (hn : n < 2^32) (h : be32 m =
 /-! ## Git object names and keyless record envelopes -/
 
 /-- A lowercase hexadecimal digit. -/
-def HexDigit (c : Nat) : Prop := (48 ≤ c ∧ c ≤ 57) ∨ (97 ≤ c ∧ c ≤ 102)
+def HexDigit (c : Nat) : Prop := (digitZero ≤ c ∧ c ≤ digitNine) ∨ (lowerA ≤ c ∧ c ≤ lowerF)
 
 /-- A Git object name as `ls-files --stage` and `ls-tree` print it: 40
     (SHA-1) or 64 (SHA-256) lowercase hexadecimal digits. The adapter reads
     Git content only through such names. -/
 def ObjectId (oid : List Nat) : Prop :=
-  (oid.length = 40 ∨ oid.length = 64) ∧ ∀ c ∈ oid, HexDigit c
+  (oid.length = sha1OidLen ∨ oid.length = sha256OidLen) ∧ ∀ c ∈ oid, HexDigit c
 
 /-- An object name is neither revision syntax (no `:`, `^`, `~`, `@`, `{`)
     nor an option (it does not start with `-`). -/
 theorem objectId_plain {oid : List Nat} (h : ObjectId oid) :
-    ∀ c ∈ oid, c ∉ [58, 94, 126, 64, 123, 45] := by
+    ∀ c ∈ oid, c ∉ ascii ":^~@{-" := by
   intro c hc hbad
-  rcases h.2 c hc with ⟨h1, h2⟩ | ⟨h1, h2⟩ <;> simp at hbad <;> omega
+  rcases h.2 c hc with ⟨h1, h2⟩ | ⟨h1, h2⟩ <;> simp [ascii] at hbad <;> unfold_v3_bytes <;> omega
 
-/-- An object name has no byte below `0` (48): in particular no NUL or TAB. -/
-theorem ObjectId.not_mem_of_lt {oid : List Nat} (h : ObjectId oid) {c : Nat} (hc : c < 48) :
+/-- An object name has no byte below `0`: in particular no NUL or TAB. -/
+theorem ObjectId.not_mem_of_lt {oid : List Nat} (h : ObjectId oid) {c : Nat} (hc : c < digitZero) :
     c ∉ oid := fun hm => by
-  rcases h.2 c hm with ⟨_, _⟩ | ⟨_, _⟩ <;> omega
+  rcases h.2 c hm with ⟨_, _⟩ | ⟨_, _⟩ <;> unfold_v3_bytes <;> omega
 
-theorem objectId_no_tab {oid : List Nat} (h : ObjectId oid) : 9 ∉ oid :=
+theorem objectId_no_tab {oid : List Nat} (h : ObjectId oid) : tab ∉ oid :=
   h.not_mem_of_lt (by decide)
 
 /-- The keyless check of a committed record: within the size bound, with the
@@ -353,23 +407,23 @@ theorem sealSpec_rebind_moved {o l e m : Bool} (h : sealSpec o l e m = .rebind) 
 
 /-- The value of a lowercase hexadecimal digit. -/
 def hexValue (c : Nat) : Option Nat :=
-  if 48 ≤ c ∧ c ≤ 57 then some (c - 48)
-  else if 97 ≤ c ∧ c ≤ 102 then some (c - 87)
+  if digitZero ≤ c ∧ c ≤ digitNine then some (c - digitZero)
+  else if lowerA ≤ c ∧ c ≤ lowerF then some (c - (lowerA - hexLetterValue))
   else none
 
-/-- The largest pkt-line: 4 length digits and 65516 data bytes. -/
+/-- The largest pkt-line: the header and 65516 data bytes. -/
 def maxPktLen : Nat := 65520
 
 /-- A pkt-line header: four lowercase hexadecimal digits giving the total
     packet length, big-endian. -/
 def PktLen (header : List Nat) (n : Nat) : Prop :=
   ∃ d0 d1 d2 d3, header.map hexValue = [some d0, some d1, some d2, some d3] ∧
-    n = ((d0 * 16 + d1) * 16 + d2) * 16 + d3
+    n = ((d0 * hexRadix + d1) * hexRadix + d2) * hexRadix + d3
 
 /-- The headers the filter protocol uses: a flush packet (`0000`) or a data
     packet with at least one data byte and at most `maxPktLen` in total. -/
 def PktLenAccepted (header : List Nat) (n : Nat) : Prop :=
-  PktLen header n ∧ (n = 0 ∨ (5 ≤ n ∧ n ≤ maxPktLen))
+  PktLen header n ∧ (n = 0 ∨ (pktHeaderLen < n ∧ n ≤ maxPktLen))
 
 /-! ## Git snapshots
 
@@ -384,13 +438,13 @@ structure Entry where
   path : List Nat
 
 /-- Its record, `mode SP oid SP 0 TAB path`. -/
-def entryRecord (e : Entry) : List Nat := e.mode ++ [32] ++ e.oid ++ [32, 48, 9] ++ e.path
+def entryRecord (e : Entry) : List Nat := e.mode ++ [space] ++ e.oid ++ [space, digitZero, tab] ++ e.path
 
 /-- An entry as Git prints it: a six-digit mode, an object name and a
     nonempty path. NUL ends records, so no field contains one; the mode
     contains no TAB. -/
 def EntryOk (e : Entry) : Prop :=
-  e.mode.length = 6 ∧ 9 ∉ e.mode ∧ 0 ∉ e.mode ∧ ObjectId e.oid ∧ e.path ≠ [] ∧ 0 ∉ e.path
+  e.mode.length = modeLen ∧ tab ∉ e.mode ∧ 0 ∉ e.mode ∧ ObjectId e.oid ∧ e.path ≠ [] ∧ 0 ∉ e.path
 
 /-- A regular file (non-executable or executable): the only kind of entry
     whose content Git passes through filters. -/
@@ -605,23 +659,23 @@ theorem localChange_unknown {head : List Entry} {forced envelope : Bool} {s : En
 inductive StoredKey | absent | damaged | stale | unlocked
   deriving DecidableEq
 
-/-- The stored key file of an unlocked checkout holds the 55-byte public
-    configuration it was unlocked for, then the 64-byte key. A 64-byte file
+/-- The stored key file of an unlocked checkout holds the public
+    configuration it was unlocked for, then the key. A key-sized file
     (the key alone, from an earlier version) or no file at all means no
     stored key; any other length is damaged. A key is used only for exactly
     the configuration stored with it, and only if it authenticates that
     configuration (`authentic`); otherwise it is stale. -/
 def storedKeySpec (present : Bool) (file current : List Nat) (authentic : Bool) : StoredKey :=
-  if present = false ∨ file.length = 64 then .absent
-  else if file.length ≠ 119 then .damaged
-  else if file.take 55 = current ∧ authentic = true then .unlocked
+  if present = false ∨ file.length = keyLen then .absent
+  else if file.length ≠ keyFileLen then .damaged
+  else if file.take configLen = current ∧ authentic = true then .unlocked
   else .stale
 
 /-- A stored key is used only for the configuration it was stored with,
     and only after it authenticates it. -/
 theorem storedKeySpec_unlocked {present : Bool} {file current : List Nat} {authentic : Bool}
     (h : storedKeySpec present file current authentic = .unlocked) :
-    present = true ∧ file.length = 119 ∧ file.take 55 = current ∧ authentic = true := by
+    present = true ∧ file.length = keyFileLen ∧ file.take configLen = current ∧ authentic = true := by
   unfold storedKeySpec at h
   split at h <;> (try split at h) <;> (try split at h) <;> simp_all
 
@@ -630,21 +684,21 @@ theorem storedKeySpec_unlocked {present : Bool} {file current : List Nat} {authe
 /-- The type field of a blob reply. -/
 def blobField : List Nat := ascii " blob "
 
-def DecimalDigit (c : Nat) : Prop := 48 ≤ c ∧ c ≤ 57
+def DecimalDigit (c : Nat) : Prop := digitZero ≤ c ∧ c ≤ digitNine
 
 /-- The value of decimal digits, most significant first. -/
-def decimalValue (ds : List Nat) : Nat := ds.foldl (fun v c => v * 10 + (c - 48)) 0
+def decimalValue (ds : List Nat) : Nat := ds.foldl (fun v c => v * decimalRadix + (c - digitZero)) 0
 
 /-- Canonical decimal: at least one digit, digits only, and no leading zero
     except in `0` itself. -/
 def CanonicalDecimal (ds : List Nat) : Prop :=
-  ds ≠ [] ∧ (∀ c ∈ ds, DecimalDigit c) ∧ (ds.head? = some 48 → ds = [48])
+  ds ≠ [] ∧ (∀ c ∈ ds, DecimalDigit c) ∧ (ds.head? = some digitZero → ds = [digitZero])
 
 /-- Git's reply header for the blob `oid` of `size` bytes:
     `<oid> SP blob SP <size> LF`, with the size in canonical decimal of at
-    most 19 digits (any blob smaller than 10^19 bytes). -/
+    most `maxSizeDigits` digits (any blob smaller than 10^19 bytes). -/
 def BatchHeader (header oid : List Nat) (size : Nat) : Prop :=
-  ∃ ds, header = oid ++ blobField ++ ds ++ [10] ∧ CanonicalDecimal ds ∧ ds.length ≤ 19 ∧
+  ∃ ds, header = oid ++ blobField ++ ds ++ [lf] ∧ CanonicalDecimal ds ∧ ds.length ≤ maxSizeDigits ∧
     size = decimalValue ds
 
 /-- A reply header names one size: the reply for an object id cannot be

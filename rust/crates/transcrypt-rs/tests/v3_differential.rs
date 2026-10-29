@@ -2,21 +2,39 @@
 //! AES-SIV and Argon2id) against independent implementations: OpenSSL
 //! AES-SIV and reference Argon2id, via `tests/v3/reference/differential.py`.
 //! No Python is needed to run these Rust tests.
-use transcrypt_rs::{authenticate_config, clean_file, decrypt_file, derive_key, encrypt_file, Keyed};
-use transcrypt_v3_core::{V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_HEADER_LEN, TAG_LEN};
+use transcrypt_rs::{authenticate_config, clean_file, decrypt_file, derive_key, encrypt_file, Keyed, KEY_SIZE};
+use transcrypt_v3_core::{V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_HEADER_LEN, FILE_MIN_LEN, SALT_LEN, TAG_LEN};
 
 mod common;
 use common::hex;
 
-struct Case { name: String, key: [u8; 64], config: Vec<u8>, path: Vec<u8>, plaintext: Vec<u8>, record: Vec<u8> }
+const BITS: usize = u8::BITS as usize;
+/// Records up to this long have every bit flipped.
+const SHORT_RECORD: usize = 80;
+/// The number of body bits flipped in a longer record, spread evenly.
+const BODY_FLIPS: usize = 256;
+/// The fewest differential cases the fixture must hold.
+const MIN_CASES: usize = 20;
+/// Marsaglia's xorshift64 (shifts 13, 7, 17) from a fixed seed.
+const SEED: u64 = 0x2545_f491_4f6c_dd1d;
+const SHIFTS: (u32, u32, u32) = (13, 7, 17);
+/// Mutation testing: records shorter than this, so many rounds each, of at
+/// most so many mutations.
+const MUTATED_RECORD_LIMIT: usize = 400;
+const MUTATION_ROUNDS: usize = 300;
+const MAX_MUTATIONS: u64 = 3;
+/// The most random bytes put behind a genuine header beyond a tag's worth.
+const MAX_RANDOM_EXTRA: u64 = 64;
+
+struct Case { name: String, key: [u8; KEY_SIZE], config: Vec<u8>, path: Vec<u8>, plaintext: Vec<u8>, record: Vec<u8> }
 
 fn cases() -> Vec<Case> {
     include_str!("../../../../tests/v3/reference/differential.tsv").lines().map(|line| {
         let c: Vec<&str> = line.split('\t').collect();
-        assert_eq!(c.len(), 6);
+        let [name, key, config, path, plaintext, record] = c[..] else { panic!("malformed case: {line}") };
         Case {
-            name: c[0].into(), key: hex(c[1]).try_into().unwrap(), config: hex(c[2]),
-            path: hex(c[3]), plaintext: hex(c[4]), record: hex(c[5]),
+            name: name.into(), key: hex(key).try_into().unwrap(), config: hex(config),
+            path: hex(path), plaintext: hex(plaintext), record: hex(record),
         }
     }).collect()
 }
@@ -24,16 +42,16 @@ fn cases() -> Vec<Case> {
 /// Bit positions to flip: every bit of short records, otherwise every bit
 /// of the header and tag plus a spread over the body.
 fn flips(len: usize) -> Vec<usize> {
-    if len <= 80 { return (0..len * 8).collect(); }
-    let mut bits: Vec<usize> = (0..(FILE_HEADER_LEN + TAG_LEN) * 8).collect();
-    bits.extend((0..256).map(|i| (FILE_HEADER_LEN + TAG_LEN) * 8 + i * (len - FILE_HEADER_LEN - TAG_LEN) * 8 / 256));
+    if len <= SHORT_RECORD { return (0..len * BITS).collect(); }
+    let mut bits: Vec<usize> = (0..FILE_MIN_LEN * BITS).collect();
+    bits.extend((0..BODY_FLIPS).map(|i| FILE_MIN_LEN * BITS + i * (len - FILE_MIN_LEN) * BITS / BODY_FLIPS));
     bits
 }
 
 #[test]
 fn keyed_matches_openssl_aes_siv_byte_for_byte() {
     let all = cases();
-    assert!(all.len() >= 20);
+    assert!(all.len() >= MIN_CASES);
     for (i, case) in all.iter().enumerate() {
         let n = &case.name;
         let config: [u8; CONFIG_LEN] = case.config.clone().try_into().unwrap();
@@ -55,7 +73,7 @@ fn keyed_matches_openssl_aes_siv_byte_for_byte() {
         // Every tampering fails.
         for bit in flips(case.record.len()) {
             let mut bad = case.record.clone();
-            bad[bit / 8] ^= 1 << (bit % 8);
+            bad[bit / BITS] ^= 1 << (bit % BITS);
             assert!(decrypt_file(&config, &case.key, &case.path, &bad).is_err(), "{n}: bit {bit}");
         }
         for cut in [1, TAG_LEN, case.record.len() - FILE_HEADER_LEN] {
@@ -64,7 +82,7 @@ fn keyed_matches_openssl_aes_siv_byte_for_byte() {
                 assert!(decrypt_file(&config, &case.key, &case.path, short).is_err(), "{n}: truncated by {cut}");
             }
         }
-        for extra in [&[0u8][..], &[0u8; 16], &case.record[FILE_HEADER_LEN..FILE_HEADER_LEN + TAG_LEN]] {
+        for extra in [&[0u8][..], &[0u8; TAG_LEN], &case.record[FILE_HEADER_LEN..FILE_HEADER_LEN + TAG_LEN]] {
             let long = [&case.record[..], extra].concat();
             assert!(decrypt_file(&config, &case.key, &case.path, &long).is_err(), "{n}: extended");
         }
@@ -84,8 +102,9 @@ fn keyed_matches_openssl_aes_siv_byte_for_byte() {
 fn argon2id_matches_the_reference_implementation() {
     for line in include_str!("../../../../tests/v3/reference/kdf.tsv").lines() {
         let c: Vec<&str> = line.split('\t').collect();
-        let salt: [u8; 32] = hex(c[2]).try_into().unwrap();
-        assert_eq!(&derive_key(&hex(c[1]), &salt).unwrap()[..], &hex(c[3])[..], "{}", c[0]);
+        let [name, password, salt, key] = c[..] else { panic!("malformed case: {line}") };
+        let salt: [u8; SALT_LEN] = hex(salt).try_into().unwrap();
+        assert_eq!(&derive_key(&hex(password), &salt).unwrap()[..], &hex(key)[..], "{name}");
     }
 }
 
@@ -105,7 +124,7 @@ fn size_bounds_are_exact_at_every_layer() {
     long.push(0);
     assert!(decrypt_file(config, &case.key, path, &long).is_err());
     // Every record shorter than header + tag is refused, including empty.
-    for len in 0..(FILE_HEADER_LEN + TAG_LEN) {
+    for len in 0..FILE_MIN_LEN {
         assert!(decrypt_file(config, &case.key, path, &case.record[..len.min(case.record.len())]).is_err(), "{len}");
     }
     // A header-only record with a forged all-zero tag is refused.
@@ -119,18 +138,20 @@ fn size_bounds_are_exact_at_every_layer() {
 /// accepted record, and random bodies behind a genuine header never open.
 #[test]
 fn random_mutations_never_authenticate() {
-    let mut state = 0x2545_f491_4f6c_dd1du64;
-    let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
-    for case in cases().iter().filter(|c| c.record.len() < 400) {
+    let mut state = SEED;
+    let mut next = move || { state ^= state << SHIFTS.0; state ^= state >> SHIFTS.1; state ^= state << SHIFTS.2; state };
+    // Insert, remove, flip or swap.
+    const MUTATION_KINDS: u64 = 4;
+    for case in cases().iter().filter(|c| c.record.len() < MUTATED_RECORD_LIMIT) {
         let (config, key, path) = (&case.config, &case.key, &case.path);
-        for _ in 0..300 {
+        for _ in 0..MUTATION_ROUNDS {
             let mut bad = case.record.clone();
-            for _ in 0..(1 + next() % 3) {
+            for _ in 0..(1 + next() % MAX_MUTATIONS) {
                 let at = (next() as usize) % (bad.len() + 1);
-                match next() % 4 {
+                match next() % MUTATION_KINDS {
                     0 => bad.insert(at, next() as u8),
                     1 if !bad.is_empty() => { bad.remove(at.min(bad.len() - 1)); },
-                    2 if at < bad.len() => bad[at] ^= 1 + (next() % 255) as u8,
+                    2 if at < bad.len() => bad[at] ^= 1 + (next() % u64::from(u8::MAX)) as u8,
                     _ if bad.len() > 1 => { let (n, j) = (bad.len(), next() as usize); bad.swap(at.min(n - 1), j % n); },
                     _ => {},
                 }
@@ -139,7 +160,7 @@ fn random_mutations_never_authenticate() {
                 assert!(decrypt_file(config, key, path, &bad).is_err(), "{}: accepted a mutation", case.name);
             }
             let mut random = case.record[..FILE_HEADER_LEN].to_vec();
-            random.extend((0..(TAG_LEN + (next() % 64) as usize)).map(|_| next() as u8));
+            random.extend((0..(TAG_LEN + (next() % MAX_RANDOM_EXTRA) as usize)).map(|_| next() as u8));
             assert!(decrypt_file(config, key, path, &random).is_err(), "{}: accepted random body", case.name);
         }
     }

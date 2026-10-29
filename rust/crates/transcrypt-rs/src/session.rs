@@ -33,6 +33,23 @@ const REPLY_OK: u8 = 0;
 const REPLY_ERR: u8 = 1;
 /// How long the client waits between checks of the agent's socket.
 const POLL: Duration = Duration::from_millis(25);
+/// How long `poll` waits for a change of the agent's socket.
+const SETTLE_WAIT: Duration = Duration::from_secs(1);
+/// How long a new agent has to answer its first request.
+const STARTUP_WAIT: Duration = Duration::from_secs(3);
+/// The longest either end waits on a stalled peer.
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(120);
+/// The number of `POLL` pauses in `wait`.
+const fn polls(wait: Duration) -> u128 { wait.as_millis() / POLL.as_millis() }
+/// Bytes of a big-endian length field (`encode_be_u32`) on the wire.
+const LEN_FIELD: usize = size_of::<u32>();
+/// A reply's header: its status byte, then the length of its result.
+const STATUS_LEN: usize = 1;
+const REPLY_HEADER_LEN: usize = STATUS_LEN + LEN_FIELD;
+/// The idle limit the agent receives (in seconds, big-endian) for none.
+const NO_IDLE_LIMIT: u64 = 0;
+/// The shortest idle limit sent: a sub-second limit is not "none".
+const MIN_IDLE_SECONDS: u64 = 1;
 // Every request length fits the frame's 32-bit fields (`request` checks
 // them against these bounds before sending).
 const _: () = assert!(MAX_RECORD <= u32::MAX as usize);
@@ -49,9 +66,9 @@ fn opcode(op: AgentOp) -> u8 {
     }
 }
 
-/// Whether `done` holds within about a second, checked after each pause.
+/// Whether `done` holds within about `SETTLE_WAIT`, checked after each pause.
 fn poll(mut done: impl FnMut() -> Result<bool, String>) -> Result<bool, String> {
-    for _ in 0..40 {
+    for _ in 0..polls(SETTLE_WAIT) {
         thread::sleep(POLL);
         if done()? { return Ok(true); }
     }
@@ -70,7 +87,8 @@ pub(crate) fn existing_directory(root: &Path) -> Result<Option<PathBuf>, String>
     match os::private_directory(&path) {
         Ok(None) => Ok(None),
         Ok(Some(true)) => Ok(Some(path)),
-        Ok(Some(false)) => Err("unsafe local v3 credential directory; require a real 0700 directory owned by this user".into()),
+        Ok(Some(false)) => Err(format!("unsafe local v3 credential directory; require a real {:04o} directory owned by this user",
+            crate::modes::PRIVATE_DIR)),
         Err(_) => Err("cannot examine .git/transcrypt-v3".into()),
     }
 }
@@ -121,14 +139,15 @@ fn connect(dir: &Path) -> Result<io::Result<Stream>, String> {
 fn check_socket(path: &Path) -> Result<(), String> {
     match os::is_socket(path) {
         Ok(Some(_)) if os::private_socket(path) => Ok(()),
-        Ok(Some(_)) => Err("unsafe v3 session socket; expected mode 0600 and owned by this user".into()),
+        Ok(Some(_)) => Err(format!("unsafe v3 session socket; expected mode {:04o} and owned by this user",
+            crate::modes::PRIVATE_FILE)),
         _ => Err("v3 session is locked; run unlock".into()),
     }
 }
 
 /// Bound a stalled or broken peer (either end) instead of hanging forever.
 fn set_timeouts(stream: &Stream) -> Result<(), String> {
-    os::set_timeouts(stream, Duration::from_secs(120)).map_err(|_| "cannot set the credential socket timeouts".into())
+    os::set_timeouts(stream, SOCKET_TIMEOUT).map_err(|_| "cannot set the credential socket timeouts".into())
 }
 
 fn reply(stream: &mut Stream, response: Result<Vec<u8>, String>) -> io::Result<()> {
@@ -167,9 +186,9 @@ pub(crate) fn request(root: &Path, config: &[u8], op: AgentOp, path_bytes: &[u8]
         stream.write_all(body)
     }).map_err(|_| "cannot send the request to the credential agent")?;
     // The status byte, then the result's length.
-    let mut header = [0u8; 5];
+    let mut header = [0u8; REPLY_HEADER_LEN];
     stream.read_exact(&mut header).map_err(|_| "credential agent failed before replying")?;
-    let size = decode_be_u32(header[1..5].try_into().map_err(|_| "malformed agent response")?) as usize;
+    let size = decode_be_u32(header[STATUS_LEN..].try_into().map_err(|_| "malformed agent response")?) as usize;
     if size > MAX_RECORD { return Err("credential agent response exceeds limit".into()); }
     let mut value = Zeroizing::new(vec![0u8; size]);
     stream.read_exact(&mut value).map_err(|_| "incomplete credential agent response")?;
@@ -221,7 +240,7 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
     os::detach(&mut command);
     let mut child = command.spawn().map_err(|e| format!("cannot spawn credential agent: {e}"))?;
     // The key, then the idle limit in seconds (0: none), over the pipe.
-    let idle_seconds = idle.map_or(0u64, |d| d.as_secs().max(1));
+    let idle_seconds = idle.map_or(NO_IDLE_LIMIT, |d| d.as_secs().max(MIN_IDLE_SECONDS));
     let sent = child.stdin.take().ok_or("agent key pipe missing")
         .map(|mut pipe| sigpipe_blocked(&mut pipe, |pipe| pipe.write_all(&key[..]).and_then(|_| pipe.write_all(&idle_seconds.to_be_bytes()))))?;
     if sent.is_err() {
@@ -230,7 +249,7 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
         return Err("cannot deliver key through private pipe".into());
     }
     let mut last = "agent is not ready".to_owned();
-    for _ in 0..120 {
+    for _ in 0..polls(STARTUP_WAIT) {
         match request(root, config, AgentOp::Ping, &[], &[]) {
             Ok(_) => return Ok(()),
             Err(e) => last = e,
@@ -263,7 +282,7 @@ fn transaction(stream: &mut Stream, config: &[u8; CONFIG_LEN], key: &SecretKey) 
     if path_len > MAX_PATH { return Err("oversized agent Git pathname".into()); }
     let mut path_bytes = vec![0u8; path_len];
     stream.read_exact(&mut path_bytes).map_err(|_| "incomplete agent pathname")?;
-    let mut size_bytes = [0u8; 4];
+    let mut size_bytes = [0u8; LEN_FIELD];
     stream.read_exact(&mut size_bytes).map_err(|_| "incomplete agent length")?;
     let size = decode_be_u32(&size_bytes) as usize;
     // The verified core decides, before the body is read, whether this
@@ -295,10 +314,10 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
     // the key is still never written to disk).
     os::lock_memory(key.as_ptr(), KEY_SIZE);
     io::stdin().read_exact(&mut key[..]).map_err(|_| "missing private startup key")?;
-    let mut idle = [0u8; 8];
+    let mut idle = [0u8; size_of::<u64>()];
     io::stdin().read_exact(&mut idle).map_err(|_| "missing agent idle limit")?;
     let idle = match u64::from_be_bytes(idle) {
-        0 => None,
+        NO_IDLE_LIMIT => None,
         seconds => Some(Duration::from_secs(seconds)),
     };
     authenticate_config(config, &key)?;

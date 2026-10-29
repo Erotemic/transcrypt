@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 use windows_sys::{core::BOOL, Win32::{
-    Foundation::{GetLastError, LocalFree, ERROR_ACCESS_DENIED, HANDLE, STILL_ACTIVE, WIN32_ERROR},
+    Foundation::{GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, STILL_ACTIVE, WIN32_ERROR},
     Networking::WinSock::{
         accept as accept_socket, bind, closesocket, connect, listen, recv, send, setsockopt, socket, WSAGetLastError, WSAIoctl,
         WSAPoll, WSAStartup, AF_UNIX, INVALID_SOCKET, POLLRDNORM, SIO_AF_UNIX_GETPEERPID, SOCKADDR, SOCKADDR_UN,
@@ -49,6 +49,13 @@ use windows_sys::{core::BOOL, Win32::{
     },
 }};
 
+/// The Winsock version requested: 2.2 (`MAKEWORD(2, 2)`).
+const WINSOCK_VERSION: u16 = 0x0202;
+/// The size of `SOCKADDR_UN::sun_path` (`UNIX_PATH_MAX` in afunix.h).
+const UNIX_PATH_MAX: usize = 108;
+/// The `WSAPoll` timeout that waits without limit.
+const POLL_FOREVER: i32 = -1;
+
 /// The result of a call that returns a `BOOL` and sets the last error.
 pub(crate) fn win32(ok: BOOL) -> io::Result<()> {
     if ok != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
@@ -56,7 +63,7 @@ pub(crate) fn win32(ok: BOOL) -> io::Result<()> {
 
 /// The result of a call that returns its error code.
 pub(crate) fn status(code: WIN32_ERROR) -> io::Result<()> {
-    if code == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(code as i32)) }
+    if code == ERROR_SUCCESS { Ok(()) } else { Err(io::Error::from_raw_os_error(code as i32)) }
 }
 
 /// A Git path (raw bytes) as an OS path. Git for Windows names files in
@@ -165,7 +172,7 @@ fn token_information(process: HANDLE, class: i32) -> io::Result<Vec<u64>> {
     let mut size = 0u32;
     // SAFETY: a size query with no buffer.
     unsafe { GetTokenInformation(token.as_raw_handle(), class, null_mut(), 0, &mut size) };
-    let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+    let mut buffer = vec![0u64; (size as usize).div_ceil(size_of::<u64>())];
     // SAFETY: the buffer holds `size` bytes.
     win32(unsafe { GetTokenInformation(token.as_raw_handle(), class, buffer.as_mut_ptr().cast(), size, &mut size) })?;
     Ok(buffer)
@@ -372,7 +379,7 @@ fn startup() {
         // SAFETY: plain data, for which all zeroes is a valid value.
         let mut data: WSADATA = unsafe { zeroed() };
         // SAFETY: version 2.2 and a valid out-pointer; never cleaned up.
-        unsafe { WSAStartup(0x0202, &mut data) };
+        unsafe { WSAStartup(WINSOCK_VERSION, &mut data) };
     });
 }
 
@@ -401,7 +408,7 @@ impl Socket {
 
     /// The address of `path` (relative to the current directory).
     fn address(path: &Path) -> io::Result<SOCKADDR_UN> {
-        let mut address = SOCKADDR_UN { sun_family: AF_UNIX, sun_path: [0; 108] };
+        let mut address = SOCKADDR_UN { sun_family: AF_UNIX, sun_path: [0; UNIX_PATH_MAX] };
         let bytes = path.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path is not Unicode"))?.as_bytes();
         if bytes.len() >= address.sun_path.len() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "socket path too long"));
@@ -468,9 +475,10 @@ impl Write for Stream {
 /// The process at the other end of a connection, as Windows recorded it.
 fn peer_process(stream: &Stream) -> io::Result<u32> {
     let (mut pid, mut returned) = (0u32, 0u32);
-    // SAFETY: a connected socket and a 4-byte output buffer.
+    // SAFETY: a connected socket and a `u32` output buffer.
     let rc = unsafe {
-        WSAIoctl(stream.0 .0, SIO_AF_UNIX_GETPEERPID, null(), 0, (&mut pid as *mut u32).cast(), 4, &mut returned, null_mut(), None)
+        WSAIoctl(stream.0 .0, SIO_AF_UNIX_GETPEERPID, null(), 0, (&mut pid as *mut u32).cast(), size_of::<u32>() as u32,
+            &mut returned, null_mut(), None)
     };
     Socket::check(rc).map(|_| pid)
 }
@@ -498,8 +506,8 @@ pub(crate) fn peer_is_this_user(stream: &Stream) -> bool {
 pub(crate) fn set_timeouts(stream: &Stream, limit: Duration) -> io::Result<()> {
     let ms = u32::try_from(limit.as_millis()).unwrap_or(u32::MAX);
     for option in [SO_RCVTIMEO, SO_SNDTIMEO] {
-        // SAFETY: a valid socket and a 4-byte option value.
-        Socket::check(unsafe { setsockopt(stream.0 .0, SOL_SOCKET, option, (&ms as *const u32).cast(), 4) })?;
+        // SAFETY: a valid socket and a `u32` option value.
+        Socket::check(unsafe { setsockopt(stream.0 .0, SOL_SOCKET, option, (&ms as *const u32).cast(), size_of::<u32>() as i32) })?;
     }
     Ok(())
 }
@@ -507,10 +515,10 @@ pub(crate) fn set_timeouts(stream: &Stream, limit: Duration) -> io::Result<()> {
 /// The next client, or `None` once `idle` passes without one (or the
 /// listener fails).
 pub(crate) fn accept(listener: &Listener, idle: Option<Duration>) -> Option<Stream> {
-    let idle_ms = idle.map_or(-1, |d| i32::try_from(d.as_millis()).unwrap_or(i32::MAX));
-    let mut ready = WSAPOLLFD { fd: listener.0 .0, events: POLLRDNORM, revents: 0 };
-    // SAFETY: one valid poll entry.
-    if unsafe { WSAPoll(&mut ready, 1, idle_ms) } <= 0 { return None; }
+    let idle_ms = idle.map_or(POLL_FOREVER, |d| i32::try_from(d.as_millis()).unwrap_or(i32::MAX));
+    let mut ready = [WSAPOLLFD { fd: listener.0 .0, events: POLLRDNORM, revents: 0 }];
+    // SAFETY: valid poll entries, as many as given.
+    if unsafe { WSAPoll(ready.as_mut_ptr(), ready.len() as u32, idle_ms) } <= 0 { return None; }
     // SAFETY: a listening socket; the peer address is not wanted.
     let s = unsafe { accept_socket(listener.0 .0, null_mut(), null_mut()) };
     if s == INVALID_SOCKET { None } else { Some(Stream(Socket(s))) }

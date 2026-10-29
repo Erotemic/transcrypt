@@ -271,6 +271,7 @@ theorem record_tab {L : List Nat} {s : Nat} {e : Entry} {rest : List Nat} (he : 
     s + 9 + e.oid.length < L.length ∧ L[s + 9 + e.oid.length]! = 9 ∧
       ∀ k, s ≤ k → k < s + 9 + e.oid.length → L[k]! ≠ 9 := by
   obtain ⟨hm, h9m, _, hoid, hp, _⟩ := he
+  unfold_v3_bytes
   have h9o := objectId_no_tab hoid
   have hP : 9 ∉ e.mode ++ [32] ++ e.oid := by simp [h9m, h9o]
   have hpre : e.mode ++ [32] ++ e.oid ++ [32, 48, 9] <+: L.drop s := by
@@ -324,7 +325,7 @@ theorem listing_fields_spec {listing : Slice U8} {ends : Slice Usize} {es : List
     obtain ⟨hdrop, hend, hok⟩ := hL.record hi
     obtain ⟨tl, tv, tno⟩ := record_tab hok hdrop
     have hm := hok.1
-    have hoidl : 40 ≤ es[i.val].oid.length := by rcases hok.2.2.2.1.1 with h | h <;> omega
+    have hoidl : 40 ≤ es[i.val].oid.length := by rcases hok.2.2.2.1.1 with h | h <;> unfold_v3_bytes <;> omega
     have hLl := sliceBytes_length listing
     have hin := hL.off_le (Nat.succ_le_of_lt hi)
     rw [off_succ es _ hi] at hin

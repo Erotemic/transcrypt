@@ -37,6 +37,7 @@ theorem stored_key_state_spec (present : Bool) (file current : Slice U8) (authen
       r = storedKeyResult (storedKeySpec present (sliceBytes file) (sliceBytes current) authentic) ⦄ := by
   have hfl := sliceBytes_length file
   unfold stored_key_state storedKeySpec
+  unfold_v3_bytes
   simp_len [bind_tc_ok]
   have hk := KEY_LEN_val
   have hkf := KEY_FILE_LEN_val
@@ -95,7 +96,7 @@ theorem blob_read_spec (size : U64) (skip : Bool) :
   step*
   all_goals
     have hi1 : i1.val = maxRecord := by
-      rw [i1_post, UScalar.cast_val_eq, hm]; simp [maxRecord, maxFile, UScalarTy.numBits]
+      rw [i1_post, UScalar.cast_val_eq, hm]; simp [maxRecord, maxFile, UScalarTy.numBits]; decide
   · have : size.val ≤ maxRecord := by scalar_tac
     simp [this, blobReadResult]
   · have : ¬ size.val ≤ maxRecord := by scalar_tac
@@ -106,23 +107,24 @@ theorem blob_read_spec (size : U64) (skip : Bool) :
 /-! ## `cat-file --batch` headers -/
 
 theorem decimalValue_append (l : List Nat) (c : Nat) :
-    decimalValue (l ++ [c]) = decimalValue l * 10 + (c - 48) := by
+    decimalValue (l ++ [c]) = decimalValue l * decimalRadix + (c - digitZero) := by
   simp [decimalValue, List.foldl_append]
 
-theorem decimal_foldl_lt (l : List Nat) (hl : ∀ c ∈ l, DecimalDigit c) (acc k : Nat) (h : acc < 10 ^ k) :
-    l.foldl (fun v c => v * 10 + (c - 48)) acc < 10 ^ (k + l.length) := by
+theorem decimal_foldl_lt (l : List Nat) (hl : ∀ c ∈ l, DecimalDigit c) (acc k : Nat)
+    (h : acc < decimalRadix ^ k) :
+    l.foldl (fun v c => v * decimalRadix + (c - digitZero)) acc < decimalRadix ^ (k + l.length) := by
   induction l generalizing acc k with
   | nil => simpa using h
   | cons c l ih =>
     simp only [List.foldl_cons, List.length_cons]
     have hc := hl c (by simp)
-    have : acc * 10 + (c - 48) < 10 ^ (k + 1) := by
-      rw [pow_succ]; unfold DecimalDigit at hc; omega
+    have : acc * decimalRadix + (c - digitZero) < decimalRadix ^ (k + 1) := by
+      rw [pow_succ]; unfold DecimalDigit at hc; unfold_v3_bytes; omega
     have := ih (fun x hx => hl x (by simp [hx])) _ _ this
     rwa [show k + 1 + l.length = k + (l.length + 1) by omega] at this
 
 theorem decimalValue_lt (l : List Nat) (hl : ∀ c ∈ l, DecimalDigit c) :
-    decimalValue l < 10 ^ l.length := by
+    decimalValue l < decimalRadix ^ l.length := by
   have := decimal_foldl_lt l hl 0 0 (by simp)
   simpa [decimalValue] using this
 
@@ -230,6 +232,7 @@ theorem batchHeader_iff (H O : List Nat) (n : Nat) :
       n = decimalValue (H.extract (O.length + 6) (H.length - 1)) := by
   constructor
   · rintro ⟨ds, rfl, ⟨hne, hdig, hz⟩, h19, rfl⟩
+    unfold_v3_bytes
     have hdl : 0 < ds.length := List.length_pos_iff.mpr hne
     have hlen : (O ++ blobField ++ ds ++ [10]).length = O.length + 6 + ds.length + 1 := by
       simp [blobField_length]; omega
@@ -308,7 +311,7 @@ theorem batchHeader_iff (H O : List Nat) (n : Nat) :
         simp only [List.extract_eq_take_drop, List.getElem_take, List.getElem_drop, Nat.add_zero,
           List.getElem_cons_zero]
         rw [← getElem!_pos H _ (by omega), h0]
-    · simp only [List.extract_eq_take_drop, List.length_take, List.length_drop]; omega
+    · simp only [List.extract_eq_take_drop, List.length_take, List.length_drop]; unfold_v3_bytes; omega
 
 /-- **Object reply headers.** `parse_batch_header` returns a size exactly
     when the header is Git's reply `<oid> SP blob SP <size> LF` for the
