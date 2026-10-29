@@ -254,6 +254,10 @@ assumption A25). These run the whole v3 suite:
 - Linux x86_64/arm64: release archives static (musl).
 - FreeBSD 14.5: native, and the release binary cross-built from Linux
   against FreeBSD 14.4 base libraries.
+- NetBSD 10.1: native, and the release binary cross-built against the
+  NetBSD 10.1 sets.
+- OpenBSD 7.9: native with OpenBSD's Rust package; release archives are
+  built there (one per OpenBSD release).
 - Windows Server 2025, as a non-administrator: the release binary
   cross-built with mingw-w64.
 
@@ -268,7 +272,10 @@ build and the axiom audit of all 100 ledger theorems) pass on Linux,
 Windows Server 2025 and FreeBSD 14.5. FreeBSD uses Lean's Linux build
 under its Linux ABI layer, since Lean publishes no FreeBSD build; that
 toolchain tree is byte-identical to the one elan installs. macOS runs
-them in CI.
+them in CI. Lean cannot run on NetBSD (Lean's Linux build crashes under
+NetBSD's Linux emulation) or OpenBSD (no emulation, no Lean build); there
+the binaries run the same verified core, compiled for them, and pass the
+suite.
 
 **Gates at this checkpoint.**
 - Rust: 152 tests across the workspace.

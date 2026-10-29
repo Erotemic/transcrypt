@@ -56,7 +56,7 @@ one.
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); discharged by the hook/audit of `HEAD` (REVIEWED + TESTED) |
-| A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5 and Windows Server 2025 (non-administrator); macOS in CI only; REVIEWED |
+| A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS in CI only; REVIEWED |
 
 ## Detailed register
 
@@ -680,9 +680,13 @@ one.
 
 - **Claim:** on each supported OS, the adapter's primitives behave as the
   shared code assumes:
-  - **Unix (Linux, FreeBSD, macOS; `fsat.rs`, `os_unix.rs`):** as A8.
-    Peer credentials come from `SO_PEERCRED` (Linux) or `getpeereid`
-    (FreeBSD, macOS), and the staging lock is `flock`.
+  - **Unix (Linux, the BSDs, macOS; `fsat.rs`, `os_unix.rs`):** as A8.
+    Peer credentials come from `SO_PEERCRED` (Linux) or `getpeereid` (the
+    BSDs, macOS), and the staging lock is `flock`. A write to a pipe or
+    socket whose reader left fails with EPIPE, never a SIGPIPE that ends
+    the process: SIGPIPE is blocked in the writing thread, and on NetBSD
+    (which signals the whole process) and macOS the descriptor is also
+    marked `F_SETNOSIGPIPE`.
   - **Windows (`fsat_windows.rs`, `os_windows.rs`):**
     - Resolution: `NtCreateFile` relative to a held directory handle,
       with `FILE_OPEN_REPARSE_POINT`, resolves one component without
@@ -704,7 +708,9 @@ one.
   agent).
 - **Evidence:**
   - TESTED: the whole v3 suite passes natively on Linux (Git 2.34 and
-    2.43), FreeBSD 14.5 (Git 2.56) and Windows Server 2025 (Git for
+    2.43), FreeBSD 14.5 (Git 2.56), NetBSD 10.1 (Git 2.55), OpenBSD 7.9
+    (Git 2.53; the five tests that first build a repository with Bash
+    transcrypt v2 are skipped there) and Windows Server 2025 (Git for
     Windows 2.56, an ordinary user). This includes the parent-junction
     swap race, symlinked staging directories, owner-only files checked
     independently with `icacls`, hostile agent clients, SIGKILL/crash
@@ -715,6 +721,7 @@ one.
   - Platform differences found by these runs:
     - FreeBSD's soft updates change a renamed file's ctime
       asynchronously, so stamps leave ctime out (A12).
+    - NetBSD delivers SIGPIPE to the process, not the writing thread.
     - kernel32 refuses a rename relative to a directory handle; ntdll
       does it.
     - Windows children inherit every inheritable handle, so the agent
@@ -734,10 +741,9 @@ one.
     by its writer. A same-size in-place edit through a still-open handle
     could then be missed (A12's residual).
   - macOS: not run outside CI.
-  - NetBSD and OpenBSD: not run.
-- **Next reduction:** a macOS run outside CI; a NetBSD and OpenBSD VM run.
-- **Status:** TESTED (Linux, FreeBSD, Windows) + REVIEWED; macOS TESTED in
-  CI only.
+- **Next reduction:** a macOS run outside CI.
+- **Status:** TESTED (Linux, FreeBSD, NetBSD, OpenBSD, Windows) + REVIEWED;
+  macOS TESTED in CI only.
 
 ## Ranked unresolved risks and *product* opportunities
 

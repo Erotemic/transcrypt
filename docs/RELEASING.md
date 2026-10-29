@@ -8,6 +8,8 @@ Windows). The cryptography is pure Rust (no OpenSSL).
 | --- | --- | --- | --- |
 | Linux x86_64, arm64 | `transcrypt-rs-<version>-{x86_64,aarch64}-linux.tar.gz` | static (musl) | the whole suite on both architectures (CI; locally on x86_64, Git 2.34 and current) |
 | FreeBSD 14.4 and later, x86_64 | `transcrypt-rs-<version>-x86_64-freebsd.tar.gz` | base libraries only (`libc.so.7`, `libthr`, `libgcc_s`) | the whole suite against the release binary in a FreeBSD VM (CI; locally on 14.5) |
+| NetBSD 10.1 and later, x86_64 | `transcrypt-rs-<version>-x86_64-netbsd.tar.gz` | base libraries only (`libc.so.12`, `libpthread`, `libgcc_s`) | the whole suite against the release binary in a NetBSD VM (CI; locally on 10.1) |
+| OpenBSD 7.9, x86_64 | `transcrypt-rs-<version>-x86_64-openbsd7.9.tar.gz` (one per OpenBSD release) | base libraries only | the whole suite against the release binary, built natively in an OpenBSD VM (CI; locally on 7.9) |
 | macOS arm64, x86_64 | `transcrypt-rs-<version>-{aarch64,x86_64}-macos.tar.gz` | system libraries only | the whole suite on a macOS runner (CI only: not run outside GitHub so far) |
 | Windows 10 1803+ / Server 2019+, x86_64 | `transcrypt-rs-<version>-x86_64-windows.zip` | static CRT, system DLLs only | the whole suite against the release binary on a Windows runner (CI; locally on Windows Server 2025 as a non-administrator) |
 
@@ -21,14 +23,20 @@ scripts/build-release.sh --test    # every archive this machine builds, into dis
 scripts/build-release.sh x86_64-unknown-freebsd   # one target
 ```
 
-On **Linux** the script builds the Linux, FreeBSD and Windows archives; on
-**macOS**, the two macOS archives. It needs `rustup`, Git, GNU `tar` (as
+On **Linux** the script builds the Linux, FreeBSD, NetBSD and Windows
+archives; on **macOS**, the two macOS archives; on **OpenBSD**, the OpenBSD
+archive (with OpenBSD's own Rust package: Rust ships no OpenBSD toolchain,
+so that archive is not built with the pinned toolchain, and it is for one
+OpenBSD release, whose library versions it names). It needs `rustup`, Git, GNU `tar` (as
 `tar` or `gtar`), `gzip` and `sha256sum` (or `shasum`), and per target:
 
 - Linux: nothing more. Rust's bundled `rust-lld` links musl.
 - FreeBSD: `clang`. The script downloads the base set of the pinned FreeBSD
   release (`base.txz`, checked against the SHA-256 in the script) and links
   against its libraries, so the binary runs on that release and later ones.
+- NetBSD: `clang`, likewise with the pinned NetBSD release's `base` and
+  `comp` sets (checked against their published SHA-512).
+- OpenBSD: OpenBSD's `rust` and `gtar` packages.
 - Windows: mingw-w64 (`x86_64-w64-mingw32-gcc`, `-objdump`) and `python3`
   (for a zip with stored entries, whose bytes depend on no zlib version).
 - macOS: the Xcode command-line tools.
@@ -87,11 +95,11 @@ releasing.
 
 ## Installing
 
-Linux, FreeBSD and macOS:
+Linux, FreeBSD, NetBSD, OpenBSD and macOS:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/Erotemic/transcrypt/master/scripts/install.sh
-sh install.sh                     # newest v3 release into ~/.local/bin
+sh install.sh                     # newest v3 release into ~/.local/bin (Linux, BSDs, macOS)
 sh install.sh --tag v3-0.1.0 --prefix /usr/local
 sh install.sh --from dist/        # archives built locally, no network
 ```
@@ -126,8 +134,6 @@ notarized; the installers download with `curl`, which sets no quarantine
   followed).
 - **macOS**: universal binaries (`lipo`) and notarization (Apple developer
   account) so that downloaded binaries open without a warning.
-- **NetBSD** builds (`cargo check`, clippy); **OpenBSD** has no prebuilt Rust
-  standard library: both need a VM run of the suite before release archives.
 - **FreeBSD arm64, Windows arm64, Linux riscv64 and armv7**: the code
   compiles for these; each needs its target in the script and a native (or
   emulated) test run. The Lean proofs cover 32- and 64-bit `usize`.
