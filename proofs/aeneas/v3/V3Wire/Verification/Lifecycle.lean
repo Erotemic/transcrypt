@@ -1,4 +1,3 @@
-import V3Wire.Verification.Protocol
 import V3Wire.Verification.Filters
 
 /-!

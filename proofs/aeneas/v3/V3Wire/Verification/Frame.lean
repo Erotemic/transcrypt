@@ -1,6 +1,4 @@
 import V3Wire.Verification.Codec
-import Transcrypt.V3Policy
-import Std.Tactic.BVDecide
 
 /-!
 Credential-agent request framing: the production encoder and decoder of the
@@ -89,12 +87,10 @@ theorem encode_frame_header_loop0_spec (base out : Std.Array U8 60#usize)
   have hC := CONFIG_LEN_val
   step*
   refine ⟨i3_post, by omega, ?_⟩
-  have hpos : i2.val = 1 + j.val := by rw [i2_post]
-  rw [a_post, i1_post2, i3_post]
-  have := hc.step (by simp; omega)
-  simp only [Std.Array.set, hpos]
-  rw [Nat.zero_add, getElem!_pos config.val j.val (by simp; omega)] at this
-  exact this
+  rw [a_post, i3_post]
+  apply Copied.array_step hc (by rw [i2_post])
+  · simp_all [getElem!_pos]
+  · simp; omega
 
 theorem encode_frame_header_loop1_spec (base out : Std.Array U8 60#usize)
     (len : Std.Array U8 4#usize) (k : Usize) (hk : k.val ≤ 4)
@@ -108,12 +104,10 @@ theorem encode_frame_header_loop1_spec (base out : Std.Array U8 60#usize)
   have hC := CONFIG_LEN_val
   step*
   refine ⟨k1_post, by omega, ?_⟩
-  have hpos : i2.val = 56 + j.val := by rw [i2_post, i1_post, hC]
-  rw [a_post, i_post2, k1_post]
-  have := hc.step (by simp; omega)
-  simp only [Std.Array.set, hpos]
-  rw [Nat.zero_add, getElem!_pos len.val j.val (by simp; omega)] at this
-  exact this
+  rw [a_post, k1_post]
+  apply Copied.array_step hc (by rw [i2_post, i1_post, hC])
+  · simp_all [getElem!_pos]
+  · simp; omega
 
 /-- The production encoder emits exactly the spec's request header. -/
 @[step]
@@ -138,10 +132,10 @@ theorem encode_frame_header_spec (opcode : U8) (config : Std.Array U8 55#usize) 
         rw [h1.get_out (by omega) (by omega), a_post]
         simp [Std.Array.set]
       · rw [h1.get_in (by omega) (by omega) (by omega),
-          getElem!_append_left' (by simp; omega)]
-        rw [show k = 1 + (k - 1) by omega, getElem!_append_right' (by simp) (by simp; omega)]
+          List.getElem!_append_left _ _ _ (by simp; omega)]
+        rw [show k = 1 + (k - 1) by omega, List.getElem!_append_right _ _ _ (by simp)]
         simp
-    · rw [h2.get_in hk (by omega) (by omega), getElem!_append_right' (by simp; omega) (by simp; omega)]
+    · rw [h2.get_in hk (by omega) (by omega), List.getElem!_append_right _ _ _ (by simp; omega)]
       simp
   simp only [wireBytes, hval, List.map_append, frameHeader]
   rw [← hlen]
@@ -161,10 +155,11 @@ theorem decode_frame_header_loop_spec (input : Std.Array U8 60#usize) (base cfg 
   have hj55 : j.val < 55 := by
     have := ‹j < CONFIG_LEN›; simp only [UScalar.lt_equiv, hC] at this; exact this
   refine ⟨i3_post, by omega, ?_⟩
-  rw [a_post, i2_post2, i3_post]
-  have := hc.step (by simp; omega)
-  rw [Nat.zero_add, getElem!_pos input.val (1 + j.val) (by simp; omega)] at this
-  simpa [Std.Array.set, i1_post] using this
+  rw [a_post, i3_post]
+  apply Copied.array_step hc (by simp)
+  · rw [i2_post2, getElem!_pos input.val (1 + j.val) (by simp; omega)]
+    simp only [i1_post]
+  · simp; omega
 
 /-- The production decoder reads the opcode, the 55 config bytes and the
     big-endian path length exactly as laid out by `frameHeader`. -/
@@ -191,19 +186,15 @@ theorem decode_frame_header_spec (input : Std.Array U8 60#usize) :
     · rcases Nat.eq_zero_or_pos k with hz | hpos
       · subst hz; simp
       · rw [show k = (k - 1) + 1 by omega, List.cons_append, List.getElem!_cons_succ,
-          getElem!_append_left' (by omega), hcfg.get_in (by omega) (by omega) (by omega)]
+          List.getElem!_append_left _ _ _ (by omega), hcfg.get_in (by omega) (by omega) (by omega)]
         congr 1; omega
     · rw [List.cons_append, show k = (k - 1) + 1 by omega, List.getElem!_cons_succ,
-        getElem!_append_right' (by omega) (by simp; omega), hcl]
+        List.getElem!_append_right _ _ _ (by omega), hcl]
       have : k - 1 - 55 < 4 := by omega
       rcases (show k = 56 ∨ k = 57 ∨ k = 58 ∨ k = 59 by omega) with rfl | rfl | rfl | rfl <;>
         simp [i_post, i2_post, i4_post, i6_post, getElem!_pos, hil]
   conv => rhs; rw [wireBytes, hval]
   simp [wireBytes, Std.Array.make]
-
-theorem be32_injective {m n : Nat} (hm : m < 2^32) (hn : n < 2^32) (h : be32 m = be32 n) : m = n := by
-  simp only [be32, List.cons.injEq, and_true] at h
-  rw [← be32_decode m hm, ← be32_decode n hn, h.1, h.2.1, h.2.2.1, h.2.2.2]
 
 /-- Decoding an encoded request header returns exactly its fields. -/
 theorem decode_frame_header_encode (opcode : U8) (config : Std.Array U8 55#usize) (path_len : U32) :

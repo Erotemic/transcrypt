@@ -83,35 +83,35 @@ open Transcrypt.V3Verification
 #print axioms cleanModel_idempotent
 #print axioms lockedFilterModel_spec
 #print axioms smudgeModel_spec
--- Snapshot
+-- SnapshotOrder
 #print axioms bytes_lt_spec
 #print axioms listing_ordered_spec
--- Snapshot
+-- SnapshotOrder
 #print axioms parse_listing_spec
--- Snapshot
+-- SnapshotListing
 #print axioms listing_fields_spec
 #print axioms FieldsOf.slices
--- Snapshot
+-- SnapshotLookup
 #print axioms find_entry_spec
 #print axioms find_path_spec
 #print axioms record_is_spec
--- Snapshot
+-- SnapshotLookup
 #print axioms held_entries_spec
--- Snapshot
+-- SnapshotAttrs
 #print axioms is_local_change_spec
--- Snapshot
+-- SnapshotMoves
 #print axioms object_order_ok_spec
 #print axioms ObjectOrder.surj
--- Snapshot
+-- SnapshotMoves
 #print axioms next_move_source_spec
 #print axioms find_object_spec
 #print axioms move_source_from_spec
--- Snapshot
+-- SnapshotMoves
 #print axioms blob_elsewhere_spec
 #print axioms elsewhere_in_spec
--- Snapshot
+-- SnapshotAttrs
 #print axioms parse_listing_attrs_spec
--- Snapshot
+-- SnapshotAttrs
 #print axioms first_unselectable_spec
 -- Objects
 #print axioms stored_key_state_spec

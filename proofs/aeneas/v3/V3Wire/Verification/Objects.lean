@@ -1,10 +1,4 @@
-import V3Wire.Verification.Snapshot
-import Transcrypt.V3Policy
-open CoreModels Aeneas
-open Aeneas.Std hiding namespace core alloc
-open RustM ControlFlow
-namespace Transcrypt.V3Verification
-open transcrypt_v3_core
+import V3Wire.Verification.Bytes
 
 /-!
 Functional refinement of two adapter-facing decisions about stored and
@@ -14,6 +8,14 @@ framing, `parse_batch_header` (exactly `BatchHeader`: the requested object
 id, type `blob`, a canonical decimal size) and `blob_read` (`blobReadSpec`:
 only blobs within the record bound are loaded).
 -/
+
+open CoreModels Aeneas
+open Aeneas.Std hiding namespace core alloc
+open RustM ControlFlow
+
+namespace Transcrypt.V3Verification
+
+open transcrypt_v3_core
 
 open Transcrypt.V3Policy
 
@@ -35,10 +37,10 @@ theorem stored_key_state_spec (present : Bool) (file current : Slice U8) (authen
       r = storedKeyResult (storedKeySpec present (sliceBytes file) (sliceBytes current) authentic) ⦄ := by
   have hfl := sliceBytes_length file
   unfold stored_key_state storedKeySpec
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
-  have hk : KEY_LEN.val = 64 := by unfold KEY_LEN; rfl
-  have hkf : KEY_FILE_LEN.val = 119 := by unfold KEY_FILE_LEN; rfl
-  have hc : CONFIG_LEN.val = 55 := by unfold CONFIG_LEN; rfl
+  simp_len [bind_tc_ok]
+  have hk := KEY_LEN_val
+  have hkf := KEY_FILE_LEN_val
+  have hc := CONFIG_LEN_val
   split
   · rename_i hp
     split
@@ -51,11 +53,11 @@ theorem stored_key_state_spec (present : Bool) (file current : Slice U8) (authen
       split
       · rename_i h119
         have h119' : file.length ≠ 119 := by
-          intro h; simp only [bne_iff_ne, ne_eq] at h119; apply h119; apply UScalar.eq_of_val_eq; simp [hkf, h]
+          intro h; simp_bne at h119; apply h119; apply UScalar.eq_of_val_eq; simp [hkf, h]
         simp [storedKeyResult, hfl, h64', h119', hp]
       · rename_i h119
         have h119' : file.length = 119 := by
-          simp only [bne_iff_ne, ne_eq, Decidable.not_not] at h119
+          simp_bne at h119
           have := congrArg UScalar.val h119; simpa [hkf] using this
         step with index_range_spec file 0#usize CONFIG_LEN (by simp) (by rw [hc]; omega) as ⟨ s, hs ⟩
         step with bytes_eq_spec as ⟨ b, hb ⟩
@@ -103,10 +105,6 @@ theorem blob_read_spec (size : U64) (skip : Bool) :
 
 /-! ## `cat-file --batch` headers -/
 
-theorem BLOB_FIELD_bytes : sliceBytes (Array.to_slice BLOB_FIELD) = blobField := by
-  unfold BLOB_FIELD blobField ascii sliceBytes
-  decide
-
 theorem decimalValue_append (l : List Nat) (c : Nat) :
     decimalValue (l ++ [c]) = decimalValue l * 10 + (c - 48) := by
   simp [decimalValue, List.foldl_append]
@@ -127,13 +125,6 @@ theorem decimalValue_lt (l : List Nat) (hl : ∀ c ∈ l, DecimalDigit c) :
     decimalValue l < 10 ^ l.length := by
   have := decimal_foldl_lt l hl 0 0 (by simp)
   simpa [decimalValue] using this
-
-theorem extract_snoc (L : List Nat) {a i : Nat} (hai : a ≤ i) (hi : i < L.length) :
-    L.extract a (i + 1) = L.extract a i ++ [L[i]!] := by
-  rw [List.extract_eq_take_drop, List.extract_eq_take_drop, show i + 1 - a = (i - a) + 1 by omega,
-    List.take_add_one, List.getElem?_drop, show a + (i - a) = i by omega, List.getElem?_eq_getElem hi,
-    getElem!_pos L i hi]
-  rfl
 
 /-- Loop invariant of `decimal`. -/
 def DecInv (bytes : Slice U8) (from_ to_ : Nat) (value : Nat) (ok : Bool) (i : Nat) : Prop :=
@@ -177,6 +168,9 @@ theorem decimal_spec (bytes : Slice U8) (from_ to_ : Usize) (hft : from_.val ≤
         have hcv : (sliceBytes bytes)[i.val]! = c.val := by
           rw [sliceBytes_getElem! bytes i.val hil, hc]
         have hext := extract_snoc (sliceBytes bytes) (a := from_.val) h1 (by rw [hbl']; omega)
+        -- A non-digit at `i` is a non-digit of the whole field.
+        have hmem : c.val ∈ (sliceBytes bytes).extract from_.val to_.val := by
+          rw [← hcv, extract_split _ h1 hi (by rw [hbl']; omega)]; simp
         split
         · rename_i hc48
           split
@@ -200,27 +194,11 @@ theorem decimal_spec (bytes : Slice U8) (from_ to_ : Usize) (hft : from_.val ≤
               · exact hd x hx
               · rw [List.mem_singleton.1 hx, hcv]; exact hdig
           · rename_i hc57
-            refine ⟨⟨h1, h2, fun h => absurd h (by simp), fun _ => ⟨c.val, ?_, ?_⟩⟩, by simp⟩
-            · rw [← hcv]
-              have : (sliceBytes bytes).extract from_.val to_.val = (sliceBytes bytes).extract from_.val i.val ++
-                  [(sliceBytes bytes)[i.val]!] ++ (sliceBytes bytes).extract (i.val + 1) to_.val := by
-                rw [← hext]
-                simp only [List.extract_eq_take_drop]
-                rw [show to_.val - from_.val = (i.val + 1 - from_.val) + (to_.val - (i.val + 1)) by omega,
-                  List.take_add, List.drop_drop, show from_.val + (i.val + 1 - from_.val) = i.val + 1 by omega]
-              rw [this]; simp
-            · intro hd'; exact hc57 (by have := hd'.2; scalar_tac)
+            exact ⟨⟨h1, h2, fun h => absurd h (by simp),
+              fun _ => ⟨c.val, hmem, fun hd' => hc57 (by have := hd'.2; scalar_tac)⟩⟩, by simp⟩
         · rename_i hc48
-          refine ⟨⟨h1, h2, fun h => absurd h (by simp), fun _ => ⟨c.val, ?_, ?_⟩⟩, by simp⟩
-          · rw [← hcv]
-            have : (sliceBytes bytes).extract from_.val to_.val = (sliceBytes bytes).extract from_.val i.val ++
-                [(sliceBytes bytes)[i.val]!] ++ (sliceBytes bytes).extract (i.val + 1) to_.val := by
-              rw [← hext]
-              simp only [List.extract_eq_take_drop]
-              rw [show to_.val - from_.val = (i.val + 1 - from_.val) + (to_.val - (i.val + 1)) by omega,
-                List.take_add, List.drop_drop, show from_.val + (i.val + 1 - from_.val) = i.val + 1 by omega]
-            rw [this]; simp
-          · intro hd'; exact hc48 (by have := hd'.1; scalar_tac)
+          exact ⟨⟨h1, h2, fun h => absurd h (by simp),
+            fun _ => ⟨c.val, hmem, fun hd' => hc48 (by have := hd'.1; scalar_tac)⟩⟩, by simp⟩
       · rename_i hit
         simp only [WP.spec_ok]
         have : i.val = to_.val := by scalar_tac
@@ -296,7 +274,7 @@ theorem batchHeader_iff (H O : List Nat) (n : Nat) :
       have hlast : u[u.length - 1]! = 10 := by
         rw [show O.length + 6 + u.length - 1 = (O ++ blobField).length + (u.length - 1) by
           simp [blobField_length]; omega] at hlf
-        rw [show O ++ (blobField ++ u) = (O ++ blobField) ++ u by simp, idx_getElem!_append_right] at hlf
+        rw [show O ++ (blobField ++ u) = (O ++ blobField) ++ u by simp, getElem!_append_length_add] at hlf
         exact hlf
       have hext : (O ++ (blobField ++ u)).extract (O.length + 6) (O.length + 6 + u.length - 1) =
           u.take (u.length - 1) := by
@@ -343,7 +321,7 @@ theorem parse_batch_header_spec (header oid : Slice U8) :
   have hHl := sliceBytes_length header
   have hOl := sliceBytes_length oid
   unfold parse_batch_header
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  simp_len [bind_tc_ok]
   step with matches_at_spec as ⟨ b, hb ⟩
   split
   · rename_i hbt
@@ -374,7 +352,7 @@ theorem parse_batch_header_spec (header oid : Slice U8) :
       · rename_i hx10
         intro n hB
         have h10 := ((batchHeader_iff _ _ _).mp hB).2.2.2.2.1
-        simp only [bne_iff_ne, ne_eq] at hx10
+        simp_bne at hx10
         apply hx10
         rw [i3_post2]
         apply UScalar.eq_of_val_eq
@@ -387,7 +365,7 @@ theorem parse_batch_header_spec (header oid : Slice U8) :
         have h48 : (sliceBytes header)[(sliceBytes oid).length + 6]! = 48 := by
           rw [← hd, sliceBytes_getElem! header digits.val (by scalar_tac), ← i4_post2, hx48]; rfl
         have := hz h48
-        simp only [bne_iff_ne, ne_eq] at hne2
+        simp_bne at hne2
         apply hne2
         apply UScalar.eq_of_val_eq
         simp only [i1_post1, hn, hd]
@@ -400,7 +378,7 @@ theorem parse_batch_header_spec (header oid : Slice U8) :
         have hi2v : i2.val = (sliceBytes header).length - 1 := by scalar_tac
         have hlf : (sliceBytes header)[(sliceBytes header).length - 1]! = 10 := by
           have := ‹¬(_ != 10#u8) = true›
-          simp only [bne_iff_ne, ne_eq, Decidable.not_not] at this
+          simp_bne at this
           rw [← hi2v, sliceBytes_getElem! header i2.val (by scalar_tac), ← i3_post2, this]; rfl
         apply WP.spec_mono (decimal_spec header digits i2 hd2 hi2 h19)
         rintro (_ | v) hr
@@ -415,7 +393,7 @@ theorem parse_batch_header_spec (header oid : Slice U8) :
           refine ⟨hO', hB, by scalar_tac, by scalar_tac, hlf, fun h48 => ?_, hdig, hv⟩
           first
           | (have := ‹¬(i1 != 2#usize) = true›
-             simp only [bne_iff_ne, ne_eq, Decidable.not_not] at this
+             simp_bne at this
              have := congrArg UScalar.val this
              simp only [i1_post1, hn, hd] at this
              simpa using this)

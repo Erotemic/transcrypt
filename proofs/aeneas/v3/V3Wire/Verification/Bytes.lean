@@ -1,20 +1,21 @@
-import V3Wire.Verification.Copy
-import Transcrypt.V3Policy
-open CoreModels Aeneas
-open Aeneas.Std hiding namespace core alloc
-open RustM ControlFlow
-namespace Transcrypt.V3Verification
-open transcrypt_v3_core
+import V3Wire.Verification.Refinement
 
 /-!
 Functional refinement of the production v3 byte-comparison decisions: byte
 equality, prefix matching at an offset (`matches_at`), byte search
-(`find_byte`) and the
-hydrate/lock/seal lifecycle decisions. Each theorem names the
+(`find_byte`) and the hydrate/lock/seal lifecycle decisions. Each theorem names the
 Aeneas-generated translation and relates its complete result to the
 independent specification in `Transcrypt.V3Policy`; as `WP.spec` triples
 they also exclude panics and divergence.
 -/
+
+open CoreModels Aeneas
+open Aeneas.Std hiding namespace core alloc
+open RustM ControlFlow
+
+namespace Transcrypt.V3Verification
+
+open transcrypt_v3_core
 
 theorem bytes_eq_loop_spec (a b : Slice U8) (hlen : a.length = b.length) (i : Usize)
     (hi : i.val ≤ a.length) (h : MatchesUpTo a.val b.val 0 i.val) :
@@ -23,13 +24,13 @@ theorem bytes_eq_loop_spec (a b : Slice U8) (hlen : a.length = b.length) (i : Us
   apply compare_loop _ (fun n => MatchesUpTo a.val b.val 0 n) a.length _ _ i hi h
   intro j hj hc
   unfold bytes_eq_loop.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   step*
   · refine ⟨i4_post, by omega, ?_⟩
     rw [i4_post]
     apply hc.step
     have hne := ‹¬(_ != _) = true›
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+    simp_bne at hne
     rw [Nat.zero_add, getElem!_pos a.val j.val i2, getElem!_pos b.val j.val i3, ← i2_post2, ← i3_post2, hne]
   · rename_i hge
     have hj' : a.length ≤ j.val := by scalar_tac
@@ -43,20 +44,13 @@ theorem bytes_eq_loop_spec (a b : Slice U8) (hlen : a.length = b.length) (i : Us
 theorem bytes_eq_spec (a b : Slice U8) :
     bytes_eq a b ⦃ r => r = true ↔ a.val = b.val ⦄ := by
   unfold bytes_eq
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   step*
   rename_i hne
   have hlen : a.length = b.length := by
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+    simp_bne at hne
     scalar_tac
   exact bytes_eq_loop_spec a b hlen 0#usize (by simp) (MatchesUpTo.zero _ _ _)
-
-theorem sliceBytes_inj (a b : Slice U8) : sliceBytes a = sliceBytes b ↔ a.val = b.val := by
-  constructor
-  · intro h
-    exact List.map_injective_iff.mpr (fun x y hxy => UScalar.eq_of_val_eq hxy) h
-  · intro h
-    simp [sliceBytes, h]
 
 theorem map_prefix_drop_iff (l p : List U8) (j : Nat) (hj : j ≤ l.length) :
     p.map (·.val) <+: (l.map (·.val)).drop j ↔
@@ -91,12 +85,12 @@ theorem matches_at_loop_spec (bytes expected : Slice U8) (a : Usize)
   apply compare_loop _ (fun n => MatchesUpTo bytes.val expected.val a.val n) expected.length _ _ k hk h
   intro m hm hc
   unfold matches_at_loop.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hrl : bytes.length = bytes.val.length := rfl
   have hel : expected.length = expected.val.length := rfl
   step*
   · have hne := ‹(_ != _) = true›
-    simp only [bne_iff_ne, ne_eq] at hne
+    simp_bne at hne
     simp only [Bool.false_eq_true, false_iff]
     intro hall
     apply hne
@@ -109,7 +103,7 @@ theorem matches_at_loop_spec (bytes expected : Slice U8) (a : Usize)
     rw [k1_post]
     apply hc.step
     have hne := ‹¬(_ != _) = true›
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+    simp_bne at hne
     rw [getElem!_pos bytes.val (a.val + m.val) (by omega),
       getElem!_pos expected.val m.val (by omega)]
     rw [i2_post2, i3_post2] at hne
@@ -122,7 +116,7 @@ theorem matches_at_spec (bytes : Slice U8) (a : Usize) (expected : Slice U8) :
     matches_at bytes a expected ⦃ r => r = true ↔
       (a.val ≤ bytes.length ∧ sliceBytes expected <+: (sliceBytes bytes).drop a.val) ⦄ := by
   unfold matches_at
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hrl : bytes.length = bytes.val.length := rfl
   have hel : expected.length = expected.val.length := rfl
   step*
@@ -158,14 +152,14 @@ theorem find_byte_loop_spec (bytes : Slice U8) (c : U8) (f j : Usize)
     (fun s => ByteScan (sliceBytes bytes) c.val f.val s.val)
   · intro j hj
     unfold find_byte_loop.body
-    simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+    simp_len
     have hl := sliceBytes_length bytes
     step*
     · obtain ⟨h1, _, h3⟩ := hj
       subst i1_post2
       have hb : (sliceBytes bytes)[j.val]! ≠ c.val := by
         have := ‹(_ != c) = true›
-        simp only [bne_iff_ne, ne_eq] at this
+        simp_bne at this
         rw [sliceBytes_getElem! bytes j.val i1]
         exact fun h0 => this (UScalar.eq_of_val_eq h0)
       refine ⟨⟨by omega, Or.inl (by omega), fun k hk1 hk2 => ?_⟩, by omega⟩
@@ -175,7 +169,7 @@ theorem find_byte_loop_spec (bytes : Slice U8) (c : U8) (f j : Usize)
     · refine ⟨hj, fun _ => ?_⟩
       subst i1_post2
       have := ‹¬(_ != c) = true›
-      simp only [bne_iff_ne, ne_eq, Decidable.not_not] at this
+      simp_bne at this
       rw [sliceBytes_getElem! bytes j.val i1, this]
   · exact h
 
@@ -203,14 +197,6 @@ def lockResult : Option Transcrypt.V3Policy.LockAction →
   | some .keep => .Ok .Keep
   | some .flush => .Ok .Flush
   | none => .Err .UnexpectedWorktree
-
-theorem hydrateResult_injective : Function.Injective hydrateResult := by
-  intro a b h
-  rcases a with _ | ⟨_ | _⟩ <;> rcases b with _ | ⟨_ | _⟩ <;> first | rfl | cases h
-
-theorem lockResult_injective : Function.Injective lockResult := by
-  intro a b h
-  rcases a with _ | ⟨_ | _⟩ <;> rcases b with _ | ⟨_ | _⟩ <;> first | rfl | cases h
 
 @[step]
 theorem hydrate_action_spec (w r p : Slice U8) :

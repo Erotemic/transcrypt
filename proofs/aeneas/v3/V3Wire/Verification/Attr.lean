@@ -1,10 +1,4 @@
 import V3Wire.Verification.Path
-import Transcrypt.V3Policy
-open CoreModels Aeneas
-open Aeneas.Std hiding namespace core alloc
-open RustM ControlFlow
-namespace Transcrypt.V3Verification
-open transcrypt_v3_core
 
 /-!
 Functional refinement of the production Git attribute parsers against the
@@ -17,19 +11,18 @@ exactly Git's complete answer for the NUL-terminated request and returns the
 selection of every requested path.
 -/
 
+open CoreModels Aeneas
+open Aeneas.Std hiding namespace core alloc
+open RustM ControlFlow
+
+namespace Transcrypt.V3Verification
+
+open transcrypt_v3_core
+
 /-! ## Pure facts about attribute records -/
 
 section Pure
 open Transcrypt.V3Policy
-
-theorem prefix_append_iff {α : Type} (a b l : List α) :
-    a ++ b <+: l ↔ a <+: l ∧ b <+: l.drop a.length := by
-  constructor
-  · rintro ⟨t, rfl⟩
-    exact ⟨⟨b ++ t, by simp⟩, ⟨t, by simp⟩⟩
-  · rintro ⟨⟨u, rfl⟩, ⟨t, ht⟩⟩
-    simp only [List.drop_left] at ht
-    exact ⟨t, by rw [← ht]; simp⟩
 
 theorem singleton_prefix_drop_iff (x : Nat) (l : List Nat) (k : Nat) :
     [x] <+: l.drop k ↔ l[k]? = some x := by
@@ -95,45 +88,13 @@ theorem attrResponse_append (a b : List (List Nat × List Nat)) :
 
 end Pure
 
-theorem index_range_spec (s : Slice U8) (a b : Usize) (hab : a.val ≤ b.val) (hb : b.val ≤ s.length) :
-    core.Slice.Insts.CoreOpsIndexIndex.index
-      (core.ops.range.RangeUsize.Insts.CoreSliceIndexSliceIndexSliceSlice U8)
-      s { start := a, «end» := b } ⦃ r => sliceBytes r = (sliceBytes s).extract a.val b.val ⦄ := by
-  unfold core.Slice.Insts.CoreOpsIndexIndex.index
-  simp only [core.ops.range.RangeUsize.Insts.CoreSliceIndexSliceIndexSliceSlice.get,
-    rust_primitives.slice.slice_slice, rust_primitives.slice.slice_length]
-  have h1 : a ≤ b := by scalar_tac
-  have h2 : b ≤ s.len := by scalar_tac
-  simp only [h1, h2, if_true, Slice.subslice, bind_tc_ok]
-  rw [if_pos ⟨hab, hb⟩]
-  simp [sliceBytes, List.slice, List.map_take, List.map_drop]
-
 /-! ## `parse_attr_record` -/
-
-theorem FILTER_ATTR_bytes :
-    sliceBytes (Array.to_slice FILTER_ATTR) = Transcrypt.V3Policy.filterAttr := by
-  unfold FILTER_ATTR Transcrypt.V3Policy.filterAttr Transcrypt.V3Policy.ascii sliceBytes
-  decide
-
-theorem FILTER_DRIVER_bytes :
-    sliceBytes (Array.to_slice FILTER_DRIVER) = Transcrypt.V3Policy.filterDriver := by
-  unfold FILTER_DRIVER Transcrypt.V3Policy.filterDriver Transcrypt.V3Policy.ascii sliceBytes
-  decide
 
 theorem FILTER_ATTR_slice_length (t : Slice U8) (ht : t = Array.to_slice FILTER_ATTR) :
     t.len.val = 6 := by
   have := congrArg List.length FILTER_ATTR_bytes
   rw [sliceBytes_length, filterAttr_length] at this
   subst ht; simp at this ⊢
-
-theorem getElem?_eq_some_iff' (l : List Nat) (k x : Nat) :
-    l[k]? = some x ↔ k < l.length ∧ l[k]! = x := by
-  constructor
-  · intro h
-    obtain ⟨hk, he⟩ := List.getElem?_eq_some_iff.mp h
-    exact ⟨hk, by rw [getElem!_pos l k hk, he]⟩
-  · rintro ⟨hk, he⟩
-    rw [List.getElem?_eq_getElem hk, ← getElem!_pos l k hk, he]
 
 theorem byte_zero_iff (R : Slice U8) (k : Nat) (hk : k < R.length) :
     (sliceBytes R)[k]! = 0 ↔ R.val[k] = 0#u8 := by
@@ -143,18 +104,30 @@ theorem byte_zero_iff (R : Slice U8) (k : Nat) (hk : k < R.length) :
   · intro h; rw [h]; rfl
 
 /-- Everything a record at `s` says about the bytes of the response. -/
+structure AttrFacts (R : List Nat) (s : Nat) (P v : List Nat) (n : Nat) : Prop where
+  bound : s + P.length + 8 + v.length < R.length
+  path : P <+: R.drop s
+  nul_path : R[s + P.length]! = 0
+  filter : Transcrypt.V3Policy.filterAttr <+: R.drop (s + P.length + 1)
+  nul_filter : R[s + P.length + 7]! = 0
+  value_nul_free : 0 ∉ v
+  value : v <+: R.drop (s + P.length + 8)
+  nul_value : R[s + P.length + 8 + v.length]! = 0
+  next : n = s + P.length + v.length + 9
+
 theorem attrRecordAt_facts {R P v : List Nat} {s n : Nat}
-    (h : Transcrypt.V3Policy.AttrRecordAt R s P v n) :
-    s + P.length + 8 + v.length < R.length ∧ P <+: R.drop s ∧ R[s + P.length]! = 0 ∧
-      Transcrypt.V3Policy.filterAttr <+: R.drop (s + P.length + 1) ∧
-      R[s + P.length + 7]! = 0 ∧ 0 ∉ v ∧ v <+: R.drop (s + P.length + 8) ∧
-      R[s + P.length + 8 + v.length]! = 0 ∧ n = s + P.length + v.length + 9 := by
+    (h : Transcrypt.V3Policy.AttrRecordAt R s P v n) : AttrFacts R s P v n := by
   obtain ⟨h0, hp, hn⟩ := h
   rw [attrRecord_prefix_iff, getElem?_eq_some_iff', getElem?_eq_some_iff',
     getElem?_eq_some_iff'] at hp
   rw [attrRecord_length] at hn
   exact ⟨hp.2.2.2.2.2.1, hp.1, hp.2.1.2, hp.2.2.1, hp.2.2.2.1.2, h0, hp.2.2.2.2.1,
     hp.2.2.2.2.2.2, by rw [hn]; omega⟩
+
+/-- No record lies at `s` if none of the facts of one can hold. -/
+theorem no_attrRecordAt {R P : List Nat} {s : Nat} (h : ∀ v n, AttrFacts R s P v n → False) :
+    ¬ ∃ v n, Transcrypt.V3Policy.AttrRecordAt R s P v n :=
+  fun ⟨v, n, hrec⟩ => h v n (attrRecordAt_facts hrec)
 
 /-- **The attribute parser accepts exactly the spec's records.** On success
     the record for `path` with some value lies at `start`, `next` is where it
@@ -171,52 +144,45 @@ theorem parse_attr_record_spec (response : Slice U8) (start : Usize) (path : Sli
           ¬ ∃ value next, Transcrypt.V3Policy.AttrRecordAt (sliceBytes response) start.val
             (sliceBytes path) value next ⦄ := by
   unfold parse_attr_record
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hRl := sliceBytes_length response
   have hPl := sliceBytes_length path
   have hmax := response.property
+  -- Every rejection refutes the facts of a record at `start`; most need only
+  -- its extent.
+  have hbound : ∀ v n, AttrFacts (sliceBytes response) start.val (sliceBytes path) v n →
+      start.val + path.length + 8 + v.length < response.length := fun v n F => by
+    have := F.bound; rwa [hRl, hPl] at this
   step*
   -- `start` is past the end.
-  · rintro ⟨v, n, hrec⟩
-    have F := attrRecordAt_facts hrec
-    rw [hRl, hPl] at F
-    scalar_tac
+  · exact no_attrRecordAt fun v n F => by have := hbound v n F; scalar_tac
   -- Too short for the path.
-  · rintro ⟨v, n, hrec⟩
-    have F := attrRecordAt_facts hrec
-    rw [hRl, hPl] at F
-    scalar_tac
+  · exact no_attrRecordAt fun v n F => by have := hbound v n F; scalar_tac
   -- Too short for any record.
-  · rintro ⟨v, n, hrec⟩
-    have F := attrRecordAt_facts hrec
-    rw [hRl, hPl] at F
-    have := FILTER_ATTR_slice_length s s_post
-    scalar_tac
+  · exact no_attrRecordAt fun v n F => by
+      have := hbound v n F
+      have := FILTER_ATTR_slice_length s s_post
+      scalar_tac
   -- No NUL after the path.
-  · rintro ⟨v, n, hrec⟩
-    have F := attrRecordAt_facts hrec
-    rw [hPl] at F
+  · refine no_attrRecordAt fun v n F => ?_
     subst i5_post2
     have := ‹(_ != 0#u8) = true›
-    simp only [bne_iff_ne, ne_eq] at this
+    simp_bne at this
     apply this
     rw [← byte_zero_iff response name.val i5, name_post]
-    simpa using F.2.2.1
+    simpa [hPl] using F.nul_path
   -- No NUL after `filter`.
-  · rintro ⟨v, n, hrec⟩
-    have F := attrRecordAt_facts hrec
-    rw [hPl] at F
+  · refine no_attrRecordAt fun v n F => ?_
     subst i9_post2
     have := ‹(_ != 0#u8) = true›
-    simp only [bne_iff_ne, ne_eq] at this
+    simp_bne at this
     apply this
     have h6 := FILTER_ATTR_slice_length s2 s2_post
     rw [← byte_zero_iff response i8.val i9, i8_post, i6_post, name_post, h6]
-    simpa using F.2.2.2.2.1
+    simpa [hPl] using F.nul_filter
   -- No NUL terminates the value.
-  · rintro ⟨v, n, hrec⟩
-    have F := attrRecordAt_facts hrec
-    rw [hRl, hPl] at F
+  · refine no_attrRecordAt fun v n F => ?_
+    have := hbound v n F
     have h6 := FILTER_ATTR_slice_length s3 s3_post
     have hend : «end».val = response.length := by
       have := congrArg UScalar.val ‹«end» = response.len›; simpa using this
@@ -224,7 +190,7 @@ theorem parse_attr_record_spec (response : Slice U8) (start : Usize) (path : Sli
       rw [value_post, i11_post, name_post, h6]; simp
     obtain ⟨_, _, hscan⟩ := end_post1
     apply hscan (start.val + path.length + 8 + v.length) (by omega) (by omega)
-    exact F.2.2.2.2.2.2.2.1
+    simpa [hPl] using F.nul_value
   -- Success.
   · have h6 := FILTER_ATTR_slice_length s3 s3_post
     have hval : value.val = start.val + path.length + 8 := by
@@ -256,13 +222,13 @@ theorem parse_attr_record_spec (response : Slice U8) (start : Usize) (path : Sli
       have hz1 : (sliceBytes response)[start.val + path.length]! = 0 := by
         subst i5_post2
         have := ‹¬(_ != 0#u8) = true›
-        simp only [bne_iff_ne, ne_eq, Decidable.not_not] at this
+        simp_bne at this
         have hn : name.val = start.val + path.length := by rw [name_post]; simp
         rw [← hn]; exact (byte_zero_iff response name.val i5).mpr this
       have hz7 : (sliceBytes response)[start.val + path.length + 7]! = 0 := by
         subst i9_post2
         have := ‹¬(_ != 0#u8) = true›
-        simp only [bne_iff_ne, ne_eq, Decidable.not_not] at this
+        simp_bne at this
         have h6' := FILTER_ATTR_slice_length s2 s2_post
         have : i8.val = start.val + path.length + 7 := by
           rw [i8_post, i6_post, name_post, h6']; simp
@@ -282,24 +248,17 @@ theorem parse_attr_record_spec (response : Slice U8) (start : Usize) (path : Sli
     · rw [b2_post, ← sliceBytes_inj, hs4, s5_post, FILTER_DRIVER_bytes]
       rfl
   -- `filter` does not follow.
-  · rintro ⟨v, n, hrec⟩
-    have F := attrRecordAt_facts hrec
-    rw [hRl, hPl] at F
+  · refine no_attrRecordAt fun v n F => ?_
     apply ‹¬b1 = true›
     rw [b1_post, s1_post, FILTER_ATTR_bytes, i6_post, name_post]
-    exact ⟨by scalar_tac, by simpa using F.2.2.2.1⟩
+    exact ⟨by have := hbound v n F; scalar_tac, by simpa [hPl] using F.filter⟩
   -- The path does not match.
-  · rintro ⟨v, n, hrec⟩
-    have F := attrRecordAt_facts hrec
-    rw [hRl] at F
+  · refine no_attrRecordAt fun v n F => ?_
     apply ‹¬b = true›
     rw [b_post]
-    exact ⟨by omega, F.2.1⟩
+    exact ⟨by have := hbound v n F; omega, F.path⟩
 
 /-! ## `parse_attr_response`: the whole answer, driven by the request -/
-
-instance (v : List Nat) : Decidable (Transcrypt.V3Policy.Selected v) :=
-  inferInstanceAs (Decidable (v = Transcrypt.V3Policy.filterDriver))
 
 section Response
 open Transcrypt.V3Policy
@@ -397,11 +356,6 @@ theorem hyp_final {R : List Nat} {Q : List (List Nat)} (hR : R = Q.flatMap (· +
     simp at this
     omega
 
-theorem take_set_succ {α : Type} (l : List α) (i : Nat) (b : α) (hi : i < l.length) :
-    (l.set i b).take (i + 1) = l.take i ++ [b] := by
-  rw [List.take_add_one, List.getElem?_set_self hi, List.take_set_of_le (by omega)]
-  rfl
-
 theorem attrResponse_drop_of_take {S : List Nat} {qs : List (List Nat × List Nat)}
     (hS : S = attrResponse qs) {a i : Nat} (hat : a ≤ S.length)
     (ht : S.take a = attrResponse (qs.take i)) : S.drop a = attrResponse (qs.drop i) := by
@@ -464,7 +418,7 @@ theorem resp_body_spec (request response : Slice U8) (flags : Slice Bool)
           RespInv request response flags qs fl' ok' st'.val at'.val i'.val request.length ⦄ := by
   obtain ⟨hk, hfl, hok, hhyp⟩ := hinv
   unfold parse_attr_response_loop.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   split
   · rename_i hokt
     obtain ⟨hst, hno, hi, hat, ps, vs, hpl, hvl, hp0, hv0, hR, hS, hF, hH⟩ := hok hokt
@@ -591,9 +545,7 @@ theorem resp_loop_spec (request response : Slice U8) (flags : Slice Bool)
       s.2.2.2.2.1.val s.2.2.2.2.2.val)
   · rintro ⟨fl', ok', st', at', i', k'⟩ h
     apply WP.spec_mono (resp_body_spec request response flags qs fl' ok' st' at' i' k' h)
-    rintro (⟨fl'', ok'', st'', at'', i'', k''⟩ | ⟨fl'', ok'', st'', at'', i''⟩)
-    · exact id
-    · exact id
+    rintro (⟨_, _, _, _, _, _⟩ | ⟨_, _, _, _, _⟩) <;> exact id
   · exact hinv
 
 theorem parse_attr_response_gen (request response : Slice U8) (flags : Slice Bool)
@@ -608,7 +560,7 @@ theorem parse_attr_response_gen (request response : Slice U8) (flags : Slice Boo
       (AttrHyp request response flags qs →
         r.1 = true ∧ r.2.val = qs.map (fun q => decide (Transcrypt.V3Policy.Selected q.2))) ⦄ := by
   unfold parse_attr_response
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hRl := sliceBytes_length request
   have hSl := sliceBytes_length response
   have hinit : RespInv request response flags qs flags true (0#usize).val (0#usize).val
