@@ -16,7 +16,8 @@ and [V3-ASSUMPTIONS](verification/V3-ASSUMPTIONS.md).
 | `rust/crates/transcrypt-rs/src/main.rs` | The executable: command dispatch, options, the passphrase. |
 | `lifecycle.rs` | The pre-commit hook and `verify-index`, `hydrate`, `lock`. |
 | `filter.rs`, `process.rs` | Git's clean and smudge filters, per file or as one long-running process. |
-| `git.rs` | Every Git subprocess: bounded, with listings and replies parsed by the core. |
+| `git/` | Every Git subprocess, bounded (`mod.rs`), with replies parsed by the core: object reads (`objects.rs`), index and tree listings and diffs (`listings.rs`), index updates (`index.rs`), attribute queries (`checkattr.rs`). |
+| `listing.rs` | `Listing` and `OrderedListing`: a snapshot's bytes and record ends, passed to the core only through their methods. |
 | `credential.rs`, `session.rs` | The stored key, and the private-mode agent. |
 | `worktree.rs`, `fsat*.rs`, `os_*.rs` | Writing worktree files safely (directory-relative, never following links), privacy, and the per-OS primitives (A8, A25). |
 | `setup.rs`, `attributes.rs`, `rekey.rs`, `migrate.rs`, `audit.rs`, `merge.rs`, `diff.rs` | Everything else the commands do. |

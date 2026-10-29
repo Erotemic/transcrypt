@@ -353,7 +353,7 @@ Pushes are the owner's.
    takes 0.54 s (it was 10.9 s with one `hash-object` process per file,
    which also triggered an automatic `git gc`).
 7. **Simplification passes (two, reviewer-driven) are done**: shared
-   helpers in `git.rs` (one check-attr builder, one listing parser,
+   helpers in `git/` (one check-attr builder, one listing parser,
    `push_blob_record`, `read_record`, `sigpipe_blocked`), one index
    snapshot per hook run, `filter.rs`/`attributes.rs`/`rekey.rs` split out
    of `main.rs`/`setup.rs`, shared test helpers in `tests/common`. Review
