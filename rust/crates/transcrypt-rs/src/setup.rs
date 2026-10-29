@@ -461,7 +461,7 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
             `transcrypt-rs reencrypt`");
     }
     let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    let untracked: Vec<&[u8]> = records(&untracked).collect();
+    let untracked = git_records(&untracked)?;
     let loose = protected_flags(root, &untracked, Attributes::Worktree)?.into_iter().filter(|p| *p).count();
     if loose > 0 {
         println!("note:       {loose} untracked protected file(s); `git add` encrypts them");

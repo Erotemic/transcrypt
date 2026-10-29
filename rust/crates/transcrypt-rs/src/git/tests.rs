@@ -1,4 +1,4 @@
-use super::listings::{parse_diff_tree, tree_record};
+use super::listings::{git_records, parse_diff_tree, tree_record};
 use super::objects::close_objects;
 use super::*;
 use transcrypt_v3_core::is_object_id;
@@ -97,7 +97,7 @@ fn index_updates_stage_exact_blobs() {
     let mut update = IndexUpdate::new(&root, Blobs::Records);
     for i in 0..MANY { update.add(REGULAR_FILE_MODE, format!("many/{i}").as_bytes(), i.to_string().as_bytes()).unwrap(); }
     update.apply(&["--add"]).unwrap();
-    assert_eq!(records(&git(&root, &["ls-files", "--stage", "-z"]).unwrap()).count(), MANY);
+    assert_eq!(git_records(&git(&root, &["ls-files", "--stage", "-z"]).unwrap()).unwrap().len(), MANY);
     // A path Git refuses to stage (it only warns, and succeeds) is an error.
     let mut update = IndexUpdate::new(&root, Blobs::Records);
     update.add(REGULAR_FILE_MODE, b".git/hooks/pre-commit", b"x").unwrap();
@@ -249,4 +249,21 @@ fn worktree_listings_are_parsed_exactly() {
     assert!(parse_worktrees(b"worktree /r\nHEAD 0123\n", b'\n').is_err(), "a record without its end");
     assert!(parse_worktrees(b"worktree /r\nHEAD 0123", b'\n').is_err(), "a truncated listing");
     assert_eq!(parse_worktrees(b"", b'\n').unwrap(), []);
+}
+
+/// Git's `-z` output is taken exactly: a missing final NUL or an empty
+/// record is an error, not dropped or completed before the core sees it;
+/// and a diff-tree answer is whole header and path pairs.
+#[test]
+fn git_records_are_taken_exactly() {
+    assert_eq!(git_records(b"").unwrap(), Vec::<&[u8]>::new());
+    assert_eq!(git_records(b"a\0b\0").unwrap(), [b"a".as_slice(), b"b"]);
+    for bad in [&b"a\0b"[..], b"a\0\0b\0", b"\0", b"a\0\0"] {
+        assert!(git_records(bad).is_err(), "{bad:?}");
+    }
+    let oid = "1".repeat(40);
+    let change = format!(":100644 100644 {oid} {oid} M\0x.secret\0");
+    assert!(parse_diff_tree(change.as_bytes()).is_ok());
+    assert!(parse_diff_tree(format!("{change}trailing\0").as_bytes()).is_err(), "an unpaired header");
+    assert!(parse_diff_tree(format!("{change}\0").as_bytes()).is_err(), "an empty record");
 }

@@ -81,7 +81,7 @@ impl IndexUpdate {
             .chain(["--index-info"]).collect();
         git_with_input(root, &arguments, &info)?;
         let listing = index_listing(root)?;
-        let staged: std::collections::HashSet<&[u8]> = records(&listing).collect();
+        let staged: std::collections::HashSet<&[u8]> = git_records(&listing)?.into_iter().collect();
         for ((mode, path), oid) in self.entries.iter().zip(oids) {
             let mut record = format!("{mode} {oid} 0\t").into_bytes();
             record.extend_from_slice(path);

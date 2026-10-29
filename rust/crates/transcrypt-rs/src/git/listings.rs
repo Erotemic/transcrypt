@@ -8,17 +8,20 @@ pub(crate) fn is_attributes_file(path: &[u8]) -> bool {
     path == ATTRIBUTES_NAME || path.ends_with(&ATTRIBUTES_SUFFIX)
 }
 
-/// The non-empty NUL-separated records of Git `-z` output.
-pub(crate) fn records(data: &[u8]) -> impl Iterator<Item = &[u8]> {
-    data.split(|b| *b == 0).filter(|record| !record.is_empty())
-}
-
-/// `records` of a listing that must end with its last record's NUL.
-fn complete_records(data: &[u8]) -> Result<impl Iterator<Item = &[u8]>, String> {
-    if !data.is_empty() && data.last() != Some(&0) {
-        return Err("truncated Git listing".into());
+/// The records of Git `-z` output, exactly: each ends with a NUL and none is
+/// empty (Git never prints one). Anything else is an error, never quietly
+/// dropped or completed: this output is the evidence the verified core
+/// checks, so the adapter must not reshape a malformed answer into a
+/// well-formed one first.
+pub(crate) fn git_records(data: &[u8]) -> Result<Vec<&[u8]>, String> {
+    let Some(body) = data.strip_suffix(&[0]) else {
+        return if data.is_empty() { Ok(Vec::new()) } else { Err("truncated Git listing".into()) };
+    };
+    let records: Vec<&[u8]> = body.split(|b| *b == 0).collect();
+    if records.iter().any(|record| record.is_empty()) {
+        return Err("malformed Git listing (an empty record)".into());
     }
-    Ok(records(data))
+    Ok(records)
 }
 
 /// The exact index listing (`ls-files --stage -z`), unmerged stages included.
@@ -54,7 +57,7 @@ pub(crate) fn tree_listing(root: &Path, commit: &str) -> Result<Listing, String>
 /// and checks the listing exactly like an index listing.
 fn tree_listing_bytes(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    for entry in records(&git(root, arguments)?) {
+    for entry in git_records(&git(root, arguments)?)? {
         bytes.extend_from_slice(&tree_record(entry)?);
         bytes.push(0);
     }
@@ -83,7 +86,7 @@ pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
     let listing = index_listing(root)?;
     let mut merged = Vec::new();
     let mut conflicted: Vec<Vec<u8>> = Vec::new();
-    for entry in complete_records(&listing)? {
+    for entry in git_records(&listing)? {
         let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed Git index entry")?;
         if tab >= STAGE_FIELD_LEN && entry[tab - STAGE_FIELD_LEN] == b' ' && CONFLICT_STAGES.contains(&entry[tab - 1]) {
             let path = entry[tab + 1..].to_vec();
@@ -108,9 +111,9 @@ pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
 pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> {
     let name = std::str::from_utf8(path).ok().map(str::to_owned);
     let mut oids = Vec::new();
-    let mut parse = |listing: &[u8], tree: bool| {
-        for entry in records(listing) {
-            let Some(tab) = entry.iter().position(|b| *b == b'\t') else { continue };
+    let mut parse = |listing: &[u8], tree: bool| -> Result<(), String> {
+        for entry in git_records(listing)? {
+            let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed Git listing record")?;
             if &entry[tab + 1..] != path { continue; }
             let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
             // `<mode> <oid> <stage>` (index) or `<mode> <type> <oid>` (tree).
@@ -121,10 +124,12 @@ pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> 
                 oids.push(String::from_utf8_lossy(oid).into_owned());
             }
         }
+        Ok(())
     };
     let Some(name) = name else { return Ok(oids) };
-    parse(&git(root, &["ls-files", "--stage", "-z", "--", &name])?, false);
-    if let Ok(listing) = git(root, &["ls-tree", "-z", "HEAD", "--", &name]) { parse(&listing, true); }
+    parse(&git(root, &["ls-files", "--stage", "-z", "--", &name])?, false)?;
+    // No `HEAD` (an unborn branch) has no blobs to add.
+    if let Ok(listing) = git(root, &["ls-tree", "-z", "HEAD", "--", &name]) { parse(&listing, true)?; }
     Ok(oids)
 }
 
@@ -162,16 +167,14 @@ pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> 
 /// the new side of every entry that is not deleted, and the deleted paths
 /// with their old object ids.
 pub(super) fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
-    if !data.is_empty() && data.last() != Some(&0) {
-        return Err("truncated git diff-tree output".into());
-    }
-    let mut fields = data.split(|b| *b == 0);
+    // Header and path, each NUL-terminated, for every change; nothing else.
+    let fields = git_records(data)?;
+    let (pairs, unpaired) = fields.as_chunks::<2>();
+    if !unpaired.is_empty() { return Err("malformed git diff-tree output".into()); }
     let mut entries = Vec::new();
     let mut deleted = Vec::new();
     let mut modified = Vec::new();
-    while let Some(header) = fields.next() {
-        if header.is_empty() { break; }
-        let path = fields.next().ok_or("malformed git diff-tree output")?;
+    for &[header, path] in pairs {
         let parts: Vec<&[u8]> = header.strip_prefix(b":").ok_or("malformed git diff-tree output")?
             .split(|b| *b == b' ').collect();
         let [_, mode, old, oid, status] = parts[..] else { return Err("malformed git diff-tree output".into()) };

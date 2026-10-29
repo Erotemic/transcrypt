@@ -740,7 +740,7 @@ pub(crate) fn flush(root: &Path) -> Result<(), String> {
 /// the same.
 fn untracked_protected(root: &Path) -> Result<(), String> {
     let untracked = git(root, &["ls-files", "--others", "-z"])?;
-    let paths: Vec<&[u8]> = records(&untracked).collect();
+    let paths = git_records(&untracked)?;
     let flags = protected_flags(root, &paths, Attributes::Worktree)?;
     if let Some((path, _)) = paths.iter().zip(flags).find(|(_, p)| *p) {
         return Err(format!("untracked protected file {} holds plaintext; add or remove it first",
