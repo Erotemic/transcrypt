@@ -202,7 +202,14 @@ struct GitDirs {
     common_dir: PathBuf,
 }
 
-static GIT_DIRS: std::sync::OnceLock<GitDirs> = std::sync::OnceLock::new();
+/// The Git directories of each worktree root `repo_root` found.
+static GIT_DIRS: std::sync::Mutex<Vec<(PathBuf, GitDirs)>> = std::sync::Mutex::new(Vec::new());
+
+/// The recorded directory `pick` chooses for `root`, or `root/.git`.
+fn recorded_dir(root: &Path, pick: impl Fn(&GitDirs) -> &PathBuf) -> PathBuf {
+    let dirs = GIT_DIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    dirs.iter().find(|(r, _)| r == root).map_or_else(|| root.join(".git"), |(_, d)| pick(d).clone())
+}
 
 /// This worktree's own Git directory (`.git`, or `.git/worktrees/<name>`
 /// for a linked worktree): private staging and scratch files go here.
@@ -210,13 +217,13 @@ static GIT_DIRS: std::sync::OnceLock<GitDirs> = std::sync::OnceLock::new();
 /// worktree; the `root/.git` fallback serves only code run without it (unit
 /// tests; the bare-repository `audit` finds its own).
 pub(crate) fn git_dir(root: &Path) -> PathBuf {
-    GIT_DIRS.get().map_or_else(|| root.join(".git"), |d| d.git_dir.clone())
+    recorded_dir(root, |d| &d.git_dir)
 }
 
 /// The Git directory shared by all worktrees: hooks, `info/`, and the key
 /// agent, so one `unlock` serves every worktree.
 pub(crate) fn common_dir(root: &Path) -> PathBuf {
-    GIT_DIRS.get().map_or_else(|| root.join(".git"), |d| d.common_dir.clone())
+    recorded_dir(root, |d| &d.common_dir)
 }
 
 /// The worktree root, after recording its Git directories.
@@ -232,7 +239,8 @@ pub(crate) fn repo_root() -> Result<PathBuf, String> {
     if !root.is_dir() || !git_dir.is_dir() || !common_dir.is_dir() {
         return Err("Git repository directories are missing".into());
     }
-    let _ = GIT_DIRS.set(GitDirs { git_dir, common_dir });
+    let mut dirs = GIT_DIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !dirs.iter().any(|(r, _)| *r == root) { dirs.push((root.clone(), GitDirs { git_dir, common_dir })); }
     Ok(root)
 }
 
@@ -283,6 +291,8 @@ fn with_objects<T>(root: &Path, oid: &str, read: impl FnOnce(&mut Objects) -> Re
     }
     OBJECTS.with(|cell| {
         let mut slot = cell.borrow_mut();
+        // One reader per thread, for one repository at a time.
+        if slot.as_ref().is_some_and(|objects| objects.root != root) { *slot = None; }
         let result = get_or_try_init(&mut slot, || Objects::open(root)).and_then(read);
         if result.is_err() {
             // The stream may be out of step; never reuse it.
@@ -307,6 +317,8 @@ const MALFORMED_REPLY: &str = "malformed git cat-file reply";
 /// different id, a malformed or oversized header) is an error, so bytes can
 /// never be attributed to the wrong object.
 struct Objects {
+    /// The repository it reads.
+    root: PathBuf,
     child: std::process::Child,
     input: Option<std::process::ChildStdin>,
     output: io::BufReader<std::process::ChildStdout>,
@@ -320,7 +332,7 @@ impl Objects {
             .spawn().map_err(|e| format!("cannot run git cat-file: {e}"))?;
         let input = child.stdin.take().ok_or("git cat-file input pipe missing")?;
         let output = child.stdout.take().ok_or("git cat-file output pipe missing")?;
-        Ok(Objects { child, input: Some(input), output: io::BufReader::new(output) })
+        Ok(Objects { root: root.to_path_buf(), child, input: Some(input), output: io::BufReader::new(output) })
     }
 
     /// Ask for `oid` and read the header of the reply, which the verified
@@ -987,6 +999,29 @@ mod tests {
                 Err(e) => assert!(e.contains("cannot send input"), "{e}"),
             }
         }
+    }
+
+    /// Reads of objects follow the repository they name: one thread may read
+    /// from several (each with its own `cat-file`), never one through
+    /// another's.
+    #[test]
+    fn object_reads_follow_their_repository() {
+        let base = std::env::temp_dir().join(format!("transcrypt-v3-two-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repos: Vec<(PathBuf, &[u8])> = [("a", b"in a".as_slice()), ("b", b"in b")].into_iter()
+            .map(|(name, bytes)| (base.join(name), bytes)).collect();
+        let mut oids = Vec::new();
+        for (root, bytes) in &repos {
+            std::fs::create_dir_all(root).unwrap();
+            git(root, &["init", "-q"]).unwrap();
+            oids.push(hash_object(root, bytes).unwrap());
+        }
+        for _ in 0..2 {
+            for ((root, bytes), oid) in repos.iter().zip(&oids) {
+                assert_eq!(git_blob(root, oid).unwrap(), *bytes);
+            }
+        }
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// `IndexUpdate` stages exactly the given bytes at exactly the given

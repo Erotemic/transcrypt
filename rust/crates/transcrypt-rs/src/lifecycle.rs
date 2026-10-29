@@ -150,7 +150,8 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
         match (entry_check(key.is_some(), incremental, settled), key) {
             (EntryCheck::Authenticate, Some(key)) => { key.open(&staged.path, &record).map_err(|e| format!("staged \
                 {name}: {e}; if it was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
-            (EntryCheck::Authenticate, None) => unreachable!("entry_check authenticates only with the key"),
+            // `entry_check` authenticates only with the key; refuse rather than check less.
+            (EntryCheck::Authenticate, None) => return Err("internal error: authentication without a key".into()),
             _ if !record_envelope_ok(&record, &id) =>
                 return Err(format!("staged {name} is not v3 ciphertext for this repository")),
             // A copy already in history is reported where it was made.
