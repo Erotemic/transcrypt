@@ -279,6 +279,19 @@ mod tests {
     #[cfg(unix)]
     const LOOSE_DIR: u32 = 0o755;
 
+    /// Run `edit` on `path` until the file's modification time differs from
+    /// what it was before: an edit within one tick of the file clock is
+    /// beyond any stamp (A8), and a loaded VM can miss ticks.
+    fn edit_after_clock_moves(path: &Path, edit: impl Fn()) {
+        let before = fs::metadata(path).unwrap().modified().unwrap();
+        for _ in 0..STAMP_ATTEMPTS {
+            std::thread::sleep(STAMP_TICK);
+            edit();
+            if fs::metadata(path).unwrap().modified().unwrap() != before { return; }
+        }
+        panic!("the file clock did not move");
+    }
+
     /// `staging_dir`, retried briefly: another test thread may fork a child
     /// that holds a copy of a just-released lock descriptor until it execs.
     fn staging(root: &Path) -> Staging {
@@ -395,18 +408,16 @@ mod tests {
         // A concurrent edit after the check, even one of the same size, as
         // soon as the file clock has moved (an edit within one tick of the
         // check is beyond any stamp: A8).
-        let checked = fs::metadata(&path).unwrap().modified().unwrap();
-        for _ in 0..STAMP_ATTEMPTS {
-            std::thread::sleep(STAMP_TICK);
-            fs::write(&path, b"edited contents!").unwrap();
-            if fs::metadata(&path).unwrap().modified().unwrap() != checked { break; }
-        }
+        edit_after_clock_moves(&path, || fs::write(&path, b"edited contents!").unwrap());
         assert!(target.replace(&staging, b"replacement", &stamp, false).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"edited contents!", "edit must survive");
-        // So is a file replaced by a different inode.
+        // So is a file replaced by another (which OpenBSD may give the
+        // freed inode number: the clock tells them apart).
         let (_, stamp) = target.read().unwrap();
-        fs::remove_file(&path).unwrap();
-        fs::write(&path, b"edited contents!").unwrap();
+        edit_after_clock_moves(&path, || {
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, b"edited contents!").unwrap();
+        });
         assert!(target.replace(&staging, b"replacement", &stamp, false).is_err());
         assert_eq!(fs::read_dir(tmp.join(".git/transcrypt-v3-staging")).unwrap().count(), 0);
     }
