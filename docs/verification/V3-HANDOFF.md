@@ -263,10 +263,12 @@ directory handles, reparse points refused, rename through ntdll) and
 `os_windows.rs` (owner-only DACLs, AF_UNIX agent with a token-SID peer
 check).
 
-The Lean proofs check on Linux, on FreeBSD (Lean's Linux build under
-FreeBSD's Linux ABI layer; the toolchain tree is identical to elan's),
-and in CI on macOS and Windows. FreeBSD runs both the specification and
-the full refinement build with the axiom audit.
+The Lean proofs (the specification, the full generated-code refinement
+build and the axiom audit of all 100 ledger theorems) pass on Linux,
+Windows Server 2025 and FreeBSD 14.5. FreeBSD uses Lean's Linux build
+under its Linux ABI layer, since Lean publishes no FreeBSD build; that
+toolchain tree is byte-identical to the one elan installs. macOS runs
+them in CI.
 
 **Gates at this checkpoint.**
 - Rust: 152 tests across the workspace.
