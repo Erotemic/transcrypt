@@ -50,6 +50,9 @@ jobs:
         os: [ubuntu-22.04, ubuntu-24.04, macos-14, macos-15]
     steps:
       - uses: actions/checkout@v4
+      - name: Install Bash 4.4 or later (macOS ships 3.2, which Bash v2 cannot run on)
+        if: runner.os == 'macOS'
+        run: brew install bash
       - name: Print versions
         run: |
           bash --version | head -n 1
