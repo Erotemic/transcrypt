@@ -75,8 +75,8 @@ pub(crate) fn default_sigpipe() {}
 
 /// Windows has no SIGPIPE: a write to a closed pipe already fails with an
 /// error instead of ending the process.
-pub(crate) fn sigpipe_blocked<T>(f: impl FnOnce() -> T) -> T {
-    f()
+pub(crate) fn sigpipe_blocked<W, T>(writer: &mut W, f: impl FnOnce(&mut W) -> T) -> T {
+    f(writer)
 }
 
 /// Process hardening for every v3 process: no crash dialog (and so no

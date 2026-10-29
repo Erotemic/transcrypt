@@ -10,5 +10,5 @@ transcrypt-protocol = { path = "../transcrypt-protocol" }
 transcrypt-legacy-core = { path = "../transcrypt-legacy-core" }
 
 [[bin]]
-name = "transcrypt-rs"
+name = "transcrypt-legacy"
 path = "src/main.rs"

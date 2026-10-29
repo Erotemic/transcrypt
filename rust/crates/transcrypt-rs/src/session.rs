@@ -160,7 +160,7 @@ pub(crate) fn request(root: &Path, config: &[u8], op: AgentOp, path_bytes: &[u8]
     set_timeouts(&stream)?;
     // Frame layout is defined (and proved to roundtrip) by the verified core.
     // The `as u32` casts are exact: both lengths were bounded above.
-    sigpipe_blocked(|| {
+    sigpipe_blocked(&mut stream, |stream| {
         stream.write_all(&encode_frame_header(opcode(op), config, path_bytes.len() as u32))?;
         stream.write_all(path_bytes)?;
         stream.write_all(&encode_be_u32(body.len() as u32))?;
@@ -223,7 +223,7 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
     // The key, then the idle limit in seconds (0: none), over the pipe.
     let idle_seconds = idle.map_or(0u64, |d| d.as_secs().max(1));
     let sent = child.stdin.take().ok_or("agent key pipe missing")
-        .map(|mut pipe| sigpipe_blocked(|| pipe.write_all(&key[..]).and_then(|_| pipe.write_all(&idle_seconds.to_be_bytes()))))?;
+        .map(|mut pipe| sigpipe_blocked(&mut pipe, |pipe| pipe.write_all(&key[..]).and_then(|_| pipe.write_all(&idle_seconds.to_be_bytes()))))?;
     if sent.is_err() {
         let _ = child.kill();
         let _ = child.wait();

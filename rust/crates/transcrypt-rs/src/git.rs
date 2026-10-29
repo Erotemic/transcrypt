@@ -60,7 +60,7 @@ pub(crate) fn run_bounded_status(mut command: Command, input: Option<&[u8]>, lim
     let mut stderr = child.stderr.take().ok_or("subprocess error pipe missing")?;
     let mut stdout = child.stdout.take().ok_or("subprocess output pipe missing")?;
     std::thread::scope(|scope| {
-        let writer = input.zip(stdin).map(|(bytes, mut stdin)| scope.spawn(move || sigpipe_blocked(|| stdin.write_all(bytes))));
+        let writer = input.zip(stdin).map(|(bytes, mut stdin)| scope.spawn(move || sigpipe_blocked(&mut stdin, |stdin| stdin.write_all(bytes))));
         let errors = scope.spawn(move || {
             let mut kept = Vec::new();
             let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut kept);
@@ -251,7 +251,7 @@ impl Objects {
     fn blob(&mut self, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
         use io::BufRead;
         let input = self.input.as_mut().ok_or("Git object reader closed")?;
-        sigpipe_blocked(|| input.write_all(format!("{oid}\n").as_bytes()).and_then(|_| input.flush()))
+        sigpipe_blocked(input, |input| input.write_all(format!("{oid}\n").as_bytes()).and_then(|_| input.flush()))
             .map_err(|_| "cannot query git cat-file")?;
         let mut header = Vec::new();
         (&mut self.output).take(160).read_until(b'\n', &mut header)

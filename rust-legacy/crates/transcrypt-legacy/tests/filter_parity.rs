@@ -12,14 +12,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use transcrypt_protocol::{parse_v2, V2_BASE64_PREFIX};
 
 const BASH_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../transcrypt");
-const RUST_BIN: &str = env!("CARGO_BIN_EXE_transcrypt-rs");
+const RUST_BIN: &str = env!("CARGO_BIN_EXE_transcrypt-legacy");
 
 struct Repo { dir: PathBuf }
 
 impl Repo {
     fn new() -> Self {
         let nano = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("transcrypt-rs-parity-{}-{nano}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("transcrypt-legacy-parity-{}-{nano}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         let repo = Repo { dir };
         repo.git(&["init", "-q"]);
@@ -63,7 +63,9 @@ impl Repo {
             let result = child.wait_with_output().unwrap();
             (write.join().unwrap(), result)
         });
-        write.unwrap();
+        // A command refused before it reads its input closes the pipe; its
+        // exit status, not this write, is what the test checks.
+        if let Err(e) = write { assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}"); }
         Output { success: result.status.success(), stdout: result.stdout, stderr: result.stderr }
     }
     fn bash(&self, action: &str, args: &[&str], input: &[u8]) -> Output {

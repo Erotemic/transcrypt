@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use transcrypt_legacy::{clean, load_settings, path_bytes, smudge, textconv, LegacyError};
 
 fn fail(message: &str) -> ! {
-    eprintln!("transcrypt-rs: {message}");
+    eprintln!("transcrypt-legacy: {message}");
     std::process::exit(1)
 }
 
@@ -17,10 +17,10 @@ fn run() -> Result<Vec<u8>, LegacyError> {
     if args.is_empty() { return Err(LegacyError::Unsupported("use clean, smudge, textconv, --version, or --help")); }
     let operation = args.remove(0);
     if operation.to_str() == Some("--help") || operation.to_str() == Some("-h") {
-        return Ok(b"transcrypt-rs: legacy v2 alternative Git filters\nusage: transcrypt-rs clean [context=NAME] PATH\n       transcrypt-rs smudge [context=NAME]\n       transcrypt-rs textconv [context=NAME] PATH\n       transcrypt-rs --version\nInitialization, rekey, migration and secure v3 are not yet supported.\n".to_vec());
+        return Ok(b"transcrypt-legacy: legacy v2 alternative Git filters\nusage: transcrypt-legacy clean [context=NAME] PATH\n       transcrypt-legacy smudge [context=NAME]\n       transcrypt-legacy textconv [context=NAME] PATH\n       transcrypt-legacy --version\nInitialization, rekey, migration and secure v3 are not yet supported.\n".to_vec());
     }
     if operation.to_str() == Some("--version") {
-        return Ok(b"transcrypt-rs 0.1.0 (legacy v2 compatibility)\n".to_vec());
+        return Ok(b"transcrypt-legacy 0.1.0 (legacy v2 compatibility)\n".to_vec());
     }
     let operation = operation.to_str().ok_or(LegacyError::Unsupported("non-UTF8 operation"))?;
     if !["clean", "smudge", "textconv"].contains(&operation) {

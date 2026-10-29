@@ -22,7 +22,7 @@ Crates:
 - `transcrypt-protocol`: pure v2 byte parser / canonical serializer.
 - `transcrypt-legacy-core`: `no_std` pure v2 HMAC transcript, salt selection,
   context-name grammar, and legacy discriminator — the next Aeneas target.
-- `transcrypt-legacy`: `transcrypt-rs` CLI, Git config + OpenSSL process
+- `transcrypt-legacy`: the `transcrypt-legacy` CLI, Git config + OpenSSL process
   adapters for `clean`, `smudge`, and `textconv`. Uses exact legacy bytes.
 - `transcrypt-policy`: small pure decision gates for the future secure
   protocol; **not yet attached to Git operations**.
@@ -40,7 +40,7 @@ the default-context Git clean/smudge/textconv filters as follows, after
 building it above:
 
 ```bash
-RUST_FILTER="$(cd ~/code/transcrypt/rust-legacy && pwd -P)/target/release/transcrypt-rs"
+RUST_FILTER="$(cd ~/code/transcrypt/rust-legacy && pwd -P)/target/release/transcrypt-legacy"
 
 git config --local filter.crypt.clean "'$RUST_FILTER' clean context=default %f"
 git config --local filter.crypt.smudge "'$RUST_FILTER' smudge context=default"

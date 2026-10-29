@@ -7,7 +7,7 @@ use std::{
     fs,
     io,
     os::{
-        fd::AsRawFd,
+        fd::{AsFd, AsRawFd},
         unix::{ffi::{OsStrExt, OsStringExt}, fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt}},
     },
     path::Path,
@@ -33,12 +33,19 @@ pub(crate) fn default_sigpipe() {
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
 }
 
-/// Run `f` with SIGPIPE blocked in this thread, so that a write to a pipe
-/// or socket whose reader is gone fails with EPIPE (an error that is
-/// reported, and rolled back from) instead of killing the process: `main`
-/// restores SIGPIPE's default so that `transcrypt-rs status | head` ends
-/// quietly.
-pub(crate) fn sigpipe_blocked<T>(f: impl FnOnce() -> T) -> T {
+/// Run `f` on `writer` so that a write to a pipe or socket whose reader is
+/// gone fails with EPIPE (an error that is reported, and rolled back from)
+/// instead of killing the process: `main` restores SIGPIPE's default so
+/// that `transcrypt-rs status | head` ends quietly. SIGPIPE is blocked in
+/// this thread, which suffices where the kernel signals the writing thread
+/// (Linux, FreeBSD). NetBSD signals the whole process, where another thread
+/// would die of it, so there (and on macOS) the descriptor itself is also
+/// marked not to signal.
+pub(crate) fn sigpipe_blocked<W: AsFd, T>(writer: &mut W, f: impl FnOnce(&mut W) -> T) -> T {
+    #[cfg(any(target_os = "netbsd", target_os = "macos", target_os = "ios"))]
+    // SAFETY: F_SETNOSIGPIPE takes an integer flag on a valid descriptor.
+    // If it fails, the thread mask below still applies.
+    unsafe { libc::fcntl(writer.as_fd().as_raw_fd(), libc::F_SETNOSIGPIPE, 1) };
     // SAFETY: `sigset_t` is plain data, for which all zeroes is a valid
     // value; sigemptyset then initializes `pipe` as a set, and
     // pthread_sigmask changes only this thread's mask, saving it in
@@ -50,7 +57,7 @@ pub(crate) fn sigpipe_blocked<T>(f: impl FnOnce() -> T) -> T {
         libc::pthread_sigmask(libc::SIG_BLOCK, &pipe, &mut previous);
         (pipe, previous)
     };
-    let result = f();
+    let result = f(writer);
     // Discard a SIGPIPE raised meanwhile, then restore the mask.
     // SAFETY: sigpending fills the zeroed `pending`; sigwait returns at once
     // because the signal it waits for is pending (and blocked); `previous`
