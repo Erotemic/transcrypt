@@ -4,7 +4,8 @@
 //!
 //! Privacy is an owner-only access control list where Unix uses mode 0700
 //! or 0600: a *protected* DACL (nothing inherited from the parent) whose
-//! every grant is to this user (or to LocalSystem, the OS itself).
+//! every grant is to this user (or to LocalSystem or Administrators, who can
+//! read anything anyway).
 //! Administrators can take ownership of any file, as root can read any file
 //! on Unix.
 
@@ -268,11 +269,13 @@ pub(crate) fn set_inherited(handle: HANDLE) -> io::Result<()> {
     })
 }
 
-/// LocalSystem, the account of the operating system itself. It can read
-/// any file whatever the access list says (as root can on Unix), so a grant
-/// to it takes nothing from privacy; Windows and its administrators give
-/// it one on many directories.
-const LOCAL_SYSTEM_SID: &str = "S-1-5-18";
+/// Accounts a grant to which takes nothing from privacy, because they can
+/// already read any file whatever the access list says, as root can on Unix
+/// (A8): LocalSystem, the operating system itself, and the Administrators
+/// group, whose members can take ownership of anything (and in a token
+/// that is not elevated, the group is deny-only). Windows gives both a
+/// grant on many directories, the CI runner's among them.
+const ALWAYS_PRIVILEGED_SIDS: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
 
 /// The string form (`S-1-…`) of a SID.
 fn sid_string(sid: PSID) -> io::Result<String> {
@@ -294,7 +297,7 @@ pub(crate) fn is_private(handle: HANDLE) -> io::Result<bool> {
 /// Why an open object (opened with `READ_CONTROL`) is not private to this
 /// user, if it is not: it must belong to this user, its DACL must be
 /// protected (nothing inherited), and every grant in it must be to this user
-/// (or to LocalSystem).
+/// (or to an `ALWAYS_PRIVILEGED_SIDS` account).
 pub(crate) fn privacy_problem(handle: HANDLE) -> io::Result<Option<String>> {
     let identity = Identity::current()?;
     let (mut owner, mut dacl, mut descriptor): (PSID, *mut ACL, PSECURITY_DESCRIPTOR) = (null_mut(), null_mut(), null_mut());
@@ -333,7 +336,7 @@ pub(crate) fn privacy_problem(handle: HANDLE) -> io::Result<Option<String>> {
             // SAFETY: valid SIDs.
             if unsafe { EqualSid(sid, identity.user()) } == 0 {
                 let grantee = sid_string(sid)?;
-                if grantee != LOCAL_SYSTEM_SID {
+                if !ALWAYS_PRIVILEGED_SIDS.contains(&grantee.as_str()) {
                     return Ok(Some(format!("it grants access to {grantee}")));
                 }
             }

@@ -374,6 +374,19 @@ pub fn bash_v2() -> PathBuf {
     }
 }
 
+/// The Bash that runs Bash v2: the first on `PATH`, except on Windows,
+/// where that may be another (WSL's launcher in System32) and Git for
+/// Windows' own is used: `<Git>/bin/bash.exe`, three levels above
+/// `git --exec-path` (`<Git>/<platform>/libexec/git-core`).
+pub fn bash() -> String {
+    if cfg!(not(windows)) { return "bash".into(); }
+    const EXEC_PATH_DEPTH: usize = 3;
+    let out = exec(Path::new("."), "git", &["--exec-path"], None);
+    let exec_path = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
+    let git = exec_path.ancestors().nth(EXEC_PATH_DEPTH).expect("git --exec-path is <Git>/<platform>/libexec/git-core");
+    git.join("bin").join("bash.exe").to_str().unwrap().to_owned()
+}
+
 /// Bash v2 needs Bash 4.4 or later (an empty array under `set -u`); macOS
 /// ships 3.2 (`brew install bash` puts a newer one first on `PATH`).
 const BASH_V2_MIN: (u32, u32) = (4, 4);
@@ -382,15 +395,14 @@ const BASH_V2_MIN: (u32, u32) = (4, 4);
 pub fn init_bash_v2(repo: &Path) {
     // `GNU bash, version 5.2.21(1)-release ...`: no shell quoting needed,
     // which Windows argument passing would otherwise have to survive.
-    // Git for Windows ships a current Bash (and on the CI runner `bash
-    // --version` started from here fails, though running the script works).
+    // Git for Windows ships a current Bash.
     if cfg!(unix) {
-        let banner = String::from_utf8(run(repo, "bash", &["--version"], None)).unwrap();
+        let banner = String::from_utf8(run(repo, &bash(), &["--version"], None)).unwrap();
         let version = banner.split_whitespace().skip_while(|w| *w != "version").nth(1).unwrap_or_default();
         let mut numbers = version.split(|c: char| !c.is_ascii_digit()).map(|n| n.parse::<u32>().unwrap_or(0));
         let found = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0));
         assert!(found >= BASH_V2_MIN, "Bash v2 needs bash {}.{} or later on PATH; found {version}",
             BASH_V2_MIN.0, BASH_V2_MIN.1);
     }
-    run(repo, "bash", &[bash_v2().to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
+    run(repo, &bash(), &[bash_v2().to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
 }

@@ -287,7 +287,9 @@ one.
     tick, a file replaced by another of the same size where the file system
     reuses the freed inode number (OpenBSD does).
   - Hard links to a plaintext file survive `lock`.
-  - Root; hibernation and swap of non-key buffers.
+  - Root; hibernation and swap of non-key buffers. On Windows, a private
+    directory may also grant LocalSystem and Administrators, who can read
+    any file anyway (the counterpart of root).
   - Files the user creates follow their umask until `git add` (the clean
     filter) or `hydrate` makes them private (Git itself no longer writes
     readable plaintext: A15).
