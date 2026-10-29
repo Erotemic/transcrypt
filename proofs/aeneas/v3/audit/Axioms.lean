@@ -59,6 +59,8 @@ open Transcrypt.V3Verification
 -- Envelope
 #print axioms is_object_id_spec
 #print axioms record_envelope_ok_spec
+#print axioms record_envelope_prefix_ok_spec
+#print axioms record_envelope_prefix_ok_record
 #print axioms smudge_action_spec
 -- Pkt
 #print axioms decode_pkt_len_spec

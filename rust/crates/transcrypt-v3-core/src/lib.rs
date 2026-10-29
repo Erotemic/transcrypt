@@ -727,11 +727,24 @@ pub fn is_object_id(oid: &[u8]) -> bool {
 /// deliberately formatted as a record for this configuration. This is the
 /// check run on pushed history and by server-side audits.
 pub fn record_envelope_ok(record: &[u8], id: &[u8; ID_LEN]) -> bool {
-    if record.len() > MAX_RECORD {
+    record_envelope_prefix_ok(record.len(), record, id)
+}
+
+/// How many leading bytes of a record its keyless envelope depends on: those
+/// `parse_file_header` needs (the header, and enough bytes to show the record
+/// is not truncated).
+pub const ENVELOPE_PREFIX_LEN: usize = FILE_MIN_LEN;
+
+/// `record_envelope_ok` of a record of `size` bytes, decided from its first
+/// `ENVELOPE_PREFIX_LEN` bytes `prefix` (all of it when shorter; any further
+/// bytes are ignored), so a reader need not load the rest.
+pub fn record_envelope_prefix_ok(size: usize, prefix: &[u8], id: &[u8; ID_LEN]) -> bool {
+    if size > MAX_RECORD {
         return false;
     }
-    // `parse_file_header` refuses records shorter than `FILE_MIN_LEN`.
-    match parse_file_header(record) {
+    // `parse_file_header` refuses prefixes shorter than `FILE_MIN_LEN`, and
+    // reads only the first `FILE_HEADER_LEN` bytes.
+    match parse_file_header(prefix) {
         Ok(found) => bytes_eq(&found, id),
         Err(_) => false,
     }
@@ -1734,6 +1747,29 @@ mod tests {
         record[0] ^= 1;
         assert!(!record_envelope_ok(&record, &id));
         assert!(!record_envelope_ok(b"plaintext that is long enough to pass the size bound", &id));
+    }
+
+    #[test]
+    fn envelope_prefix_decides_as_the_whole_record() {
+        let id = core::array::from_fn(|i| i as u8);
+        let mut other = id;
+        other[0] ^= 1;
+        let header = encode_file_header(&id);
+        let mut bad_magic = header;
+        bad_magic[0] ^= 1;
+        let sizes = [0, FILE_HEADER_LEN, FILE_MIN_LEN - 1, FILE_MIN_LEN, FILE_MIN_LEN + 1, MAX_RECORD, MAX_RECORD + 1];
+        for start in [&header[..], &bad_magic[..], b"plaintext"] {
+            for size in sizes {
+                let mut record = std::vec::Vec::from(&start[..start.len().min(size)]);
+                record.resize(size, 0);
+                let prefix = &record[..size.min(ENVELOPE_PREFIX_LEN)];
+                for want in [&id, &other] {
+                    let whole = record_envelope_ok(&record, want);
+                    assert_eq!(record_envelope_prefix_ok(size, prefix, want), whole, "{size} {start:?}");
+                    assert_eq!(whole, start == &header[..] && want == &id && (FILE_MIN_LEN..=MAX_RECORD).contains(&size));
+                }
+            }
+        }
     }
 
     #[test]

@@ -49,7 +49,9 @@ and [V3-ASSUMPTIONS](verification/V3-ASSUMPTIONS.md).
 With the key, a record is accepted only if it **opens**: `open_record`
 authenticates the config and the exact path. Without it (a locked checkout,
 `audit` on a server), only the **envelope** is checked
-(`record_envelope_ok`: size, header, config id). That stops plaintext, not a
+(`record_envelope_ok`: size, header, config id; `is_record` decides it
+from a blob's size and first `ENVELOPE_PREFIX_LEN` bytes without loading the
+rest). That stops plaintext, not a
 forged record (A14). Function and message names say which of the two
 happened.
 
@@ -64,6 +66,7 @@ happened.
 | Keep, seal or re-encrypt it | `seal_action` | `seal_action_spec`, `sealSpec_repairs_only_local` (Bytes) |
 | Where a renamed record came from | `next_move_source` | `next_move_source_spec` (SnapshotMoves) |
 | Encrypt, decrypt | `seal_record`, `open_record` | `seal_record_spec`, `open_record_spec` (Protocol) |
+| Keyless check of a record (`is_record` reads only its size and first bytes) | `record_envelope_ok`, `record_envelope_prefix_ok` | `record_envelope_ok_spec`, `record_envelope_prefix_ok_spec`, `record_envelope_prefix_ok_record` (Envelope) |
 | What smudge does with a blob | `smudge_action` | `smudge_action_spec` (Envelope) |
 | Read one object from `cat-file --batch` | `parse_batch_header`, `blob_read` | `parse_batch_header_spec`, `blob_read_spec` (Objects) |
 | Use the stored key | `stored_key_state` | `stored_key_state_spec` (Objects) |
