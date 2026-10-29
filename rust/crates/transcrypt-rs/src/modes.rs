@@ -22,3 +22,11 @@ pub(crate) const EXECUTE_BITS: u32 = 0o111;
 pub(crate) const NEW_FILE: u32 = 0o666;
 /// The mode for an ordinary new directory, before the umask.
 pub(crate) const NEW_DIR: u32 = 0o777;
+
+/// Whether a directory is private to this user (`os::private_directory`).
+pub(crate) enum Privacy {
+    Missing,
+    Private,
+    /// It exists but is not private, for the reason given.
+    Exposed(String),
+}

@@ -212,10 +212,11 @@ impl Dir {
         self.lstat(name).map(|st| Stamp::from_stat(&st))
     }
 
-    /// Whether only this directory's owner can enter it.
+    /// Why others than this directory's owner can enter it, if they can.
     #[allow(clippy::unnecessary_cast)] // `mode_t` is u16 on macOS.
-    pub(crate) fn is_private(&self) -> io::Result<bool> {
-        Ok(fstat(&self.0)?.st_mode as u32 & GROUP_OTHER_BITS == 0)
+    pub(crate) fn privacy_problem(&self) -> io::Result<Option<String>> {
+        let mode = fstat(&self.0)?.st_mode as u32 & crate::modes::PERMISSION_BITS;
+        Ok((mode & GROUP_OTHER_BITS != 0).then(|| format!("its mode {mode:04o} lets group or others in")))
     }
 
     /// Names of the entries of this directory (excluding `.` and `..`). A

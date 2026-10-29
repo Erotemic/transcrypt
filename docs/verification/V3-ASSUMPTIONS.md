@@ -281,6 +281,9 @@ one.
 - **Residual:**
   - A same-UID writer can win the window between the final stamp check and
     `renameat`.
+  - The stamp (device, inode, size, mtime to the nanosecond) cannot see an
+    edit of the same size within one tick of the file system's clock
+    (10 ms on OpenBSD, coarser on a VM missing ticks).
   - Hard links to a plaintext file survive `lock`.
   - Root; hibernation and swap of non-key buffers.
   - Files the user creates follow their umask until `git add` (the clean

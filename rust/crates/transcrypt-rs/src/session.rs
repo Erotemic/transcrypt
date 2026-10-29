@@ -10,6 +10,7 @@
 //!
 //! This is the OS adapter, not part of the pure Aeneas verification target.
 
+use crate::modes::Privacy;
 use std::{
     fs,
     io::{self, Read, Write},
@@ -83,10 +84,10 @@ fn directory(root: &Path) -> Result<PathBuf, String> {
 pub(crate) fn existing_directory(root: &Path) -> Result<Option<PathBuf>, String> {
     let path = credential_directory(root);
     match os::private_directory(&path) {
-        Ok(None) => Ok(None),
-        Ok(Some(true)) => Ok(Some(path)),
-        Ok(Some(false)) => Err(format!("unsafe local v3 credential directory; require a real {:04o} directory owned by this user",
-            crate::modes::PRIVATE_DIR)),
+        Ok(Privacy::Missing) => Ok(None),
+        Ok(Privacy::Private) => Ok(Some(path)),
+        Ok(Privacy::Exposed(why)) => Err(format!("unsafe local v3 credential directory .git/transcrypt-v3: {why}; \
+            require a real {:04o} directory owned by this user", crate::modes::PRIVATE_DIR)),
         Err(_) => Err("cannot examine .git/transcrypt-v3".into()),
     }
 }
@@ -326,8 +327,9 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
     // Wait for each client; past the idle limit, forget the key.
     while let Some(mut stream) = os::accept(&listener, idle) {
         // A stalled client must not hold the single-threaded agent forever.
-        set_timeouts(&stream)?;
-        if same_user(&stream).is_err() { continue; }
+        // One already gone can refuse the timeouts (macOS: EINVAL once the
+        // peer has closed); it is dropped, and the agent keeps serving.
+        if set_timeouts(&stream).is_err() || same_user(&stream).is_err() { continue; }
         match transaction(&mut stream, config, &key) {
             Ok(true) => break,
             Ok(false) => {},

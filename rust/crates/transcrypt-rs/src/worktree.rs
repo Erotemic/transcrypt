@@ -193,11 +193,11 @@ impl Staging {
 /// that only this user can enter. `what` names it in errors.
 fn private_git_dir(root: &Path, name: &str, what: &str) -> Result<fsat::Dir, String> {
     let git_dir = fsat::Dir::open(&crate::git::git_dir(root)).map_err(|_| "cannot open the Git directory")?;
-    let unsafe_dir = || format!("unsafe .git/{name}; require a real {:04o} directory", modes::PRIVATE_DIR);
+    let unsafe_dir = |why: &str| format!("unsafe .git/{name}: {why}; require a real {:04o} directory", modes::PRIVATE_DIR);
     git_dir.mkdir(OsStr::new(name), modes::PRIVATE_DIR).map_err(|e| format!("cannot create private {what} directory: {e}"))?;
-    let dir = git_dir.subdir(OsStr::new(name)).map_err(|_| unsafe_dir())?;
-    if !dir.is_private().map_err(|_| format!("cannot examine private {what} directory"))? {
-        return Err(unsafe_dir());
+    let dir = git_dir.subdir(OsStr::new(name)).map_err(|_| unsafe_dir("it is not a real directory"))?;
+    if let Some(why) = dir.privacy_problem().map_err(|_| format!("cannot examine private {what} directory"))? {
+        return Err(unsafe_dir(&why));
     }
     Ok(dir)
 }
@@ -271,6 +271,9 @@ mod tests {
     const STAGING_RETRY: Duration = Duration::from_millis(10);
     /// Longer than the coarsest file-time granularity the stamp tests rely on.
     const STAMP_TICK: Duration = Duration::from_millis(20);
+    /// How many ticks a stamp test waits for the file clock to move (a
+    /// loaded VM can miss timer ticks).
+    const STAMP_ATTEMPTS: usize = 50;
     /// Owner-writable, readable and enterable by everyone: what a
     /// permissive parent passes on.
     #[cfg(unix)]
@@ -389,9 +392,15 @@ mod tests {
         fs::write(&path, b"checked contents").unwrap();
         let target = open_protected(tmp, Path::new("item.secret")).unwrap();
         let (_, stamp) = target.read().unwrap();
-        // A concurrent edit after the check, even one of the same size.
-        std::thread::sleep(STAMP_TICK);
-        fs::write(&path, b"edited contents!").unwrap();
+        // A concurrent edit after the check, even one of the same size, as
+        // soon as the file clock has moved (an edit within one tick of the
+        // check is beyond any stamp: A8).
+        let checked = fs::metadata(&path).unwrap().modified().unwrap();
+        for _ in 0..STAMP_ATTEMPTS {
+            std::thread::sleep(STAMP_TICK);
+            fs::write(&path, b"edited contents!").unwrap();
+            if fs::metadata(&path).unwrap().modified().unwrap() != checked { break; }
+        }
         assert!(target.replace(&staging, b"replacement", &stamp, false).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"edited contents!", "edit must survive");
         // So is a file replaced by a different inode.

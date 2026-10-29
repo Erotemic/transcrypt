@@ -45,7 +45,7 @@ use windows_sys::{
         System::{IO::IO_STATUS_BLOCK, WindowsProgramming::{FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS}},
     },
 };
-use crate::os::{attribute_tag, is_private, set_inherited, set_private, win32, PrivateDescriptor};
+use crate::os::{attribute_tag, privacy_problem, set_inherited, set_private, win32, PrivateDescriptor};
 
 /// Bytes per UTF-16 code unit, the unit of NT name lengths.
 const WCHAR: usize = size_of::<u16>();
@@ -324,9 +324,10 @@ impl Dir {
         set_private(self.open_dac(name)?.as_raw_handle())
     }
 
-    /// Whether only this directory's owner, this user, can enter it.
-    pub(crate) fn is_private(&self) -> io::Result<bool> {
-        is_private(self.raw())
+    /// Why others than this user, its owner, can enter this directory, if
+    /// they can.
+    pub(crate) fn privacy_problem(&self) -> io::Result<Option<String>> {
+        privacy_problem(self.raw())
     }
 
     /// Names of the entries of this directory (excluding `.` and `..`).

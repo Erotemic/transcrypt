@@ -18,8 +18,12 @@ struct Repo { dir: PathBuf }
 
 impl Repo {
     fn new() -> Self {
+        // The clock alone does not tell parallel tests apart (macOS keeps
+        // microseconds), so each repository also takes the next number.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nano = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("transcrypt-legacy-parity-{}-{nano}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("transcrypt-legacy-parity-{}-{nano}-{n}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         let repo = Repo { dir };
         repo.git(&["init", "-q"]);

@@ -2,7 +2,7 @@
 //! Unix and Windows (`os_windows.rs` has the same items): Git path bytes,
 //! signals, process hardening, file privacy and the private agent's socket.
 
-use crate::modes::{EXECUTE_BITS, GROUP_OTHER_BITS, PRIVATE_DIR, PRIVATE_FILE};
+use crate::modes::{Privacy, EXECUTE_BITS, GROUP_OTHER_BITS, PERMISSION_BITS, PRIVATE_DIR, PRIVATE_FILE};
 use std::{
     ffi::{OsStr, OsString},
     fs,
@@ -169,14 +169,22 @@ fn euid() -> u32 {
 
 /// Whether `path` is a real directory (not a symlink) that only this user,
 /// who owns it, can enter; `None` if it does not exist.
-pub(crate) fn private_directory(path: &Path) -> io::Result<Option<bool>> {
+pub(crate) fn private_directory(path: &Path) -> io::Result<Privacy> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Privacy::Missing),
         Err(e) => return Err(e),
     };
-    Ok(Some(meta.is_dir() && !meta.file_type().is_symlink() && meta.permissions().mode() & GROUP_OTHER_BITS == 0
-        && meta.uid() == euid()))
+    let mode = meta.permissions().mode() & PERMISSION_BITS;
+    Ok(if !meta.is_dir() || meta.file_type().is_symlink() {
+        Privacy::Exposed("it is not a real directory".into())
+    } else if mode & GROUP_OTHER_BITS != 0 {
+        Privacy::Exposed(format!("its mode {mode:04o} lets group or others in"))
+    } else if meta.uid() != euid() {
+        Privacy::Exposed(format!("it is owned by uid {}, not this user (uid {})", meta.uid(), euid()))
+    } else {
+        Privacy::Private
+    })
 }
 
 /// Create a directory that only this user can enter.

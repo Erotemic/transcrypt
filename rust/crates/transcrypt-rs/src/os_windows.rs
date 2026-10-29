@@ -18,6 +18,7 @@ use std::{
     sync::Once,
     time::Duration,
 };
+use super::modes::Privacy;
 use windows_sys::{core::BOOL, Win32::{
     Foundation::{GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, STILL_ACTIVE, WIN32_ERROR},
     Networking::WinSock::{
@@ -209,14 +210,8 @@ impl Identity {
     /// Administrators group, but Git for Windows sets its children's to the
     /// user), and each must see the object as its own.
     fn private_sddl(&self) -> io::Result<Vec<u16>> {
-        let mut text: *mut u16 = null_mut();
-        // SAFETY: the SID is valid; `text` receives a LocalAlloc'd string.
-        win32(unsafe { ConvertSidToStringSidW(self.user(), &mut text) })?;
-        let _free = Local(text.cast());
-        // SAFETY: a NUL-terminated wide string.
-        let sid = unsafe { std::slice::from_raw_parts(text, (0..).take_while(|&i| *text.add(i) != 0).count()) };
-        Ok("O:".encode_utf16().chain(sid.iter().copied()).chain("D:P(A;OICI;FA;;;".encode_utf16())
-            .chain(sid.iter().copied()).chain(")\0".encode_utf16()).collect())
+        let sid = sid_string(self.user())?;
+        Ok(format!("O:{sid}D:P(A;OICI;FA;;;{sid})\0").encode_utf16().collect())
     }
 }
 
@@ -272,10 +267,27 @@ pub(crate) fn set_inherited(handle: HANDLE) -> io::Result<()> {
     })
 }
 
+/// The string form (`S-1-…`) of a SID.
+fn sid_string(sid: PSID) -> io::Result<String> {
+    let mut text: *mut u16 = null_mut();
+    // SAFETY: the SID is valid; `text` receives a LocalAlloc'd string.
+    win32(unsafe { ConvertSidToStringSidW(sid, &mut text) })?;
+    let _free = Local(text.cast());
+    // SAFETY: a NUL-terminated wide string.
+    let wide = unsafe { std::slice::from_raw_parts(text, (0..).take_while(|&i| *text.add(i) != 0).count()) };
+    Ok(String::from_utf16_lossy(wide))
+}
+
 /// Whether only this user can use an open object (opened with
-/// `READ_CONTROL`): it belongs to this user, its DACL is protected (nothing
-/// inherited), and every grant in it is to this user.
+/// `READ_CONTROL`): see `privacy_problem`.
 pub(crate) fn is_private(handle: HANDLE) -> io::Result<bool> {
+    Ok(privacy_problem(handle)?.is_none())
+}
+
+/// Why an open object (opened with `READ_CONTROL`) is not private to this
+/// user, if it is not: it must belong to this user, its DACL must be
+/// protected (nothing inherited), and every grant in it must be to this user.
+pub(crate) fn privacy_problem(handle: HANDLE) -> io::Result<Option<String>> {
     let identity = Identity::current()?;
     let (mut owner, mut dacl, mut descriptor): (PSID, *mut ACL, PSECURITY_DESCRIPTOR) = (null_mut(), null_mut(), null_mut());
     // SAFETY: a valid handle; the descriptor is LocalAlloc'd and owns `owner` and `dacl`.
@@ -289,8 +301,12 @@ pub(crate) fn is_private(handle: HANDLE) -> io::Result<bool> {
     win32(unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) })?;
     // SAFETY: valid SIDs.
     let owned = unsafe { EqualSid(owner, identity.user()) != 0 || EqualSid(owner, identity.owner()) != 0 };
+    if !owned {
+        return Ok(Some(format!("it is owned by {}, not this user ({})", sid_string(owner)?, sid_string(identity.user())?)));
+    }
+    if control & SE_DACL_PROTECTED == 0 { return Ok(Some("its access list is inherited from its parent".into())); }
     // A null DACL grants everyone everything.
-    if !owned || control & SE_DACL_PROTECTED == 0 || dacl.is_null() { return Ok(false); }
+    if dacl.is_null() { return Ok(Some("it has no access list, which lets everyone in".into())); }
     // SAFETY: plain data, for which all zeroes is a valid value.
     let mut size: ACL_SIZE_INFORMATION = unsafe { zeroed() };
     // SAFETY: a valid ACL and a buffer of the requested class.
@@ -305,14 +321,16 @@ pub(crate) fn is_private(handle: HANDLE) -> io::Result<bool> {
         // privacy; any other kind of grant is not understood here.
         let kind = unsafe { (*ace).Header.AceType } as u32;
         if kind == ACCESS_ALLOWED_ACE_TYPE {
-            if unsafe { EqualSid(std::ptr::addr_of_mut!((*ace).SidStart).cast(), identity.user()) } == 0 {
-                return Ok(false);
+            let sid: PSID = unsafe { std::ptr::addr_of_mut!((*ace).SidStart).cast() };
+            // SAFETY: valid SIDs.
+            if unsafe { EqualSid(sid, identity.user()) } == 0 {
+                return Ok(Some(format!("it grants access to {}", sid_string(sid)?)));
             }
         } else if kind != ACCESS_DENIED_ACE_TYPE {
-            return Ok(false);
+            return Ok(Some(format!("it has an access rule of a kind not understood here ({kind})")));
         }
     }
-    Ok(true)
+    Ok(None)
 }
 
 /// Open `path` itself (a symlink, junction or socket is not followed).
@@ -332,15 +350,17 @@ pub(crate) fn attribute_tag(handle: HANDLE) -> io::Result<(u32, u32)> {
 
 /// Whether `path` is a real directory (not a symlink or junction) that only
 /// this user, who owns it, can enter; `None` if it does not exist.
-pub(crate) fn private_directory(path: &Path) -> io::Result<Option<bool>> {
+pub(crate) fn private_directory(path: &Path) -> io::Result<Privacy> {
     let entry = match open_entry(path, FILE_READ_ATTRIBUTES | READ_CONTROL) {
         Ok(entry) => entry,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Privacy::Missing),
         Err(e) => return Err(e),
     };
     let (attributes, _) = attribute_tag(entry.as_raw_handle())?;
-    let directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0 && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0;
-    Ok(Some(directory && is_private(entry.as_raw_handle())?))
+    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Ok(Privacy::Exposed("it is not a real directory".into()));
+    }
+    Ok(privacy_problem(entry.as_raw_handle())?.map_or(Privacy::Private, Privacy::Exposed))
 }
 
 /// Create a directory that only this user can enter (created so, never

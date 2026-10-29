@@ -65,6 +65,14 @@ thread_local! {
     static OBJECTS: std::cell::RefCell<Option<Objects>> = const { std::cell::RefCell::new(None) };
 }
 
+/// End this thread's object reader: a test removing its repository must
+/// first stop the `cat-file` running in it (Windows refuses to delete a
+/// directory a process works in).
+#[cfg(test)]
+pub(super) fn close_objects() {
+    OBJECTS.with(|cell| *cell.borrow_mut() = None);
+}
+
 /// A `git cat-file --batch` reply that ended early.
 const TRUNCATED_REPLY: &str = "truncated git cat-file reply";
 /// A `git cat-file --batch` reply whose content is not followed by LF.

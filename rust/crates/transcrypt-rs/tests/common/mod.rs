@@ -380,9 +380,13 @@ const BASH_V2_MIN: (u32, u32) = (4, 4);
 
 /// Set `repo` up with Bash transcrypt (v2), as an existing v2 repository.
 pub fn init_bash_v2(repo: &Path) {
-    let version = String::from_utf8(run(repo, "bash", &["-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"], None)).unwrap();
-    let parts: Vec<u32> = version.split_whitespace().map(|n| n.parse().unwrap()).collect();
-    assert!((parts[0], parts[1]) >= BASH_V2_MIN, "Bash v2 needs bash {}.{} or later on PATH; found {}",
-        BASH_V2_MIN.0, BASH_V2_MIN.1, version.trim());
+    // `GNU bash, version 5.2.21(1)-release ...`: no shell quoting needed,
+    // which Windows argument passing would otherwise have to survive.
+    let banner = String::from_utf8(run(repo, "bash", &["--version"], None)).unwrap();
+    let version = banner.split_whitespace().skip_while(|w| *w != "version").nth(1).unwrap_or_default();
+    let mut numbers = version.split(|c: char| !c.is_ascii_digit()).map(|n| n.parse::<u32>().unwrap_or(0));
+    let found = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0));
+    assert!(found >= BASH_V2_MIN, "Bash v2 needs bash {}.{} or later on PATH; found {version}",
+        BASH_V2_MIN.0, BASH_V2_MIN.1);
     run(repo, "bash", &[bash_v2().to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
 }

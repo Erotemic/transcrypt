@@ -1,4 +1,5 @@
 use super::listings::{parse_diff_tree, tree_record};
+use super::objects::close_objects;
 use super::*;
 use transcrypt_v3_core::is_object_id;
 
@@ -54,6 +55,7 @@ fn object_reads_follow_their_repository() {
             assert_eq!(git_blob(root, oid).unwrap(), *bytes);
         }
     }
+    close_objects();
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -144,6 +146,7 @@ fn header_only_record_checks_agree_with_whole_blobs() {
         }
     }
     assert!(is_record(&root, &oids[4], &id).unwrap() && is_record(&root, &oids[6], &id).unwrap());
+    close_objects();
     std::fs::remove_dir_all(&root).unwrap();
 }
 
