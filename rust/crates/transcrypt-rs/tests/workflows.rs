@@ -758,24 +758,23 @@ fn private_sessions_expire_when_idle() {
     assert!(err.contains("--private"), "{err}");
     let err = run_fails(&repo, bin(), &["unlock", "--private", "--timeout=0", "--password-stdin"], Some(PASS));
     assert!(err.contains("positive duration"), "{err}");
-    // The idle limit must outlast a pause plus the `status` runs around it,
-    // which take far longer on some systems (Windows, OpenBSD): measure one.
-    const PAUSE: Duration = Duration::from_millis(1500);
-    const SHORTEST_LIMIT: Duration = Duration::from_secs(3);
-    // Uses of the session within the limit, each after a `PAUSE`; a margin
-    // of this many measured `status` runs per pause.
-    const KEEPALIVE_ROUNDS: u32 = 3;
+    // Robust against slow machines: the uses together span more than the
+    // limit, so a session still alive after them was kept alive by them,
+    // while each gap leaves ample slack for a slow `status`.
+    const LIMIT: Duration = Duration::from_secs(20);
+    const PAUSE: Duration = Duration::from_secs(8);
+    const USES: u32 = 3;
+    const EXPIRY_MARGIN: Duration = Duration::from_secs(10);
+    const _: () = assert!(PAUSE.as_secs() * USES as u64 > LIMIT.as_secs());
     let status = || String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
-    let started = Instant::now();
-    status();
-    // Rounded up to whole seconds.
-    let limit = SHORTEST_LIMIT.max(PAUSE + KEEPALIVE_ROUNDS * started.elapsed()).as_secs() + 1;
-    run(&repo, bin(), &["unlock", "--private", &format!("--timeout={limit}s"), "--password-stdin"], Some(PASS));
-    for _ in 0..KEEPALIVE_ROUNDS {
+    run(&repo, bin(), &["unlock", "--private", &format!("--timeout={}s", LIMIT.as_secs()), "--password-stdin"], Some(PASS));
+    let unlocked = Instant::now();
+    for _ in 0..USES {
         std::thread::sleep(PAUSE);
         assert!(status().contains("unlocked (private"), "use keeps the session alive");
     }
-    std::thread::sleep(Duration::from_secs(limit) + PAUSE);
+    assert!(unlocked.elapsed() > LIMIT);
+    std::thread::sleep(LIMIT + EXPIRY_MARGIN);
     assert!(status().contains("key:        locked"), "{}", status());
     assert!(!repo.join(".git/transcrypt-v3/session.sock").exists());
 }
