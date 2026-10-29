@@ -13,7 +13,7 @@ use crate::{credential::Key, git::*, load_config, worktree::{find_protected, ind
 pub(crate) struct Filters<'a> {
     root: &'a Path,
     current: Option<(Vec<u8>, Option<Key>)>,
-    stored: Option<Option<Key>>,
+    stored: StoredKey,
     /// The staged config, when a sparse checkout leaves `.transcrypt/` out
     /// of the worktree (the index does not change within a Git command).
     staged_config: Option<Vec<u8>>,
@@ -21,7 +21,7 @@ pub(crate) struct Filters<'a> {
 
 impl<'a> Filters<'a> {
     pub(crate) fn new(root: &'a Path) -> Filters<'a> {
-        Filters { root, current: None, stored: None, staged_config: None }
+        Filters { root, current: None, stored: StoredKey::NotRead, staged_config: None }
     }
 
     /// One clean or smudge conversion of the file at `git_path`.
@@ -70,7 +70,7 @@ struct File<'a> {
 }
 
 impl File<'_> {
-    fn clean(&self, stored: &mut Option<Option<Key>>, input: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>, String> {
+    fn clean(&self, stored: &mut StoredKey, input: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>, String> {
         let (root, git_path) = (self.root, self.path);
         // A record of another config (from before a rekey) cannot be
         // re-encrypted here. It passes through unchanged, so Git keeps
@@ -97,7 +97,7 @@ impl File<'_> {
         Ok(record)
     }
 
-    fn clean_without_key(&self, stored: &mut Option<Option<Key>>, input: Zeroizing<Vec<u8>>)
+    fn clean_without_key(&self, stored: &mut StoredKey, input: Zeroizing<Vec<u8>>)
         -> Result<Zeroizing<Vec<u8>>, String>
     {
         let (root, git_path) = (self.root, self.path);
@@ -107,7 +107,7 @@ impl File<'_> {
         // these bytes, is their clean form.
         // (Only plaintext needs this; a record goes on below.)
         if self.found.is_none() {
-            if let Some(stored) = stored_key(stored, root)? {
+            if let Some(stored) = stored.get(root)? {
                 for oid in blobs_at(root, git_path)? {
                     let record = git_blob(root, &oid)?;
                     if parse_file_header(&record).is_ok_and(|f| f == stored.config_id())
@@ -125,14 +125,14 @@ impl File<'_> {
         Err(Key::require(root, self.config).err().unwrap_or_default())
     }
 
-    fn smudge(&self, stored: &mut Option<Option<Key>>, input: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>, String> {
+    fn smudge(&self, stored: &mut StoredKey, input: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>, String> {
         let git_path = self.path;
         // The key for the config the record names: the worktree's, or the
         // stored key's own (Git may smudge files of a checkout before it
         // writes the new `.transcrypt/config`).
         let key = match self.found {
             Some(found) if found == self.id => self.key,
-            Some(found) => stored_key(stored, self.root)?.filter(|k| k.config_id() == found),
+            Some(found) => stored.get(self.root)?.filter(|k| k.config_id() == found),
             None => None,
         };
         let decided = key.map_or(self.id, Key::config_id);
@@ -171,8 +171,19 @@ impl File<'_> {
     }
 }
 
-/// The stored key, read at most once per process.
-fn stored_key<'k>(slot: &'k mut Option<Option<Key>>, root: &Path) -> Result<Option<&'k Key>, String> {
-    if slot.is_none() { *slot = Some(Key::stored(root)?); }
-    Ok(slot.as_ref().and_then(Option::as_ref))
+/// The stored key with the config it was unlocked for (whatever the
+/// worktree's config is), read from disk at most once per process.
+enum StoredKey {
+    NotRead,
+    Absent,
+    Present(Key),
+}
+
+impl StoredKey {
+    fn get(&mut self, root: &Path) -> Result<Option<&Key>, String> {
+        if let StoredKey::NotRead = self {
+            *self = match Key::stored(root)? { Some(key) => StoredKey::Present(key), None => StoredKey::Absent };
+        }
+        Ok(match self { StoredKey::Present(key) => Some(key), _ => None })
+    }
 }

@@ -252,7 +252,9 @@ pub fn encrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], plai
 pub fn clean_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], input: &[u8])
     -> Result<Vec<u8>, String>
 {
-    if decrypt_file(config_bytes, key, path, input).is_ok() {
+    // Only a record can open: parsing its header first spares ordinary
+    // plaintext a decryption attempt (and its output buffer).
+    if transcrypt_v3_core::parse_file_header(input).is_ok() && decrypt_file(config_bytes, key, path, input).is_ok() {
         return Ok(input.to_vec());
     }
     encrypt_file(config_bytes, key, path, input)
