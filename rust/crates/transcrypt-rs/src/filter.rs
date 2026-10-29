@@ -3,7 +3,7 @@
 
 use std::{fs, path::Path};
 use zeroize::Zeroizing;
-use transcrypt_v3_core::{parse_file_header, record_envelope_ok, smudge_action, Refusal, SmudgeAction};
+use transcrypt_v3_core::{parse_file_header, record_envelope_ok, smudge_action, Refusal, SmudgeAction, ID_LEN};
 use crate::{credential::Key, git::*, load_config, worktree::{find_protected, indexed_path}};
 
 /// The clean and smudge filters of one Git process (one file, or every file
@@ -34,90 +34,114 @@ impl<'a> Filters<'a> {
                 String::from_utf8_lossy(git_path)));
         }
         transcrypt_rs::validate_protected_path(git_path)?;
-        let config = if fs::symlink_metadata(self.root.join(".transcrypt")).is_ok() {
-            load_config(self.root)?
-        } else {
-            if self.staged_config.is_none() { self.staged_config = Some(load_config(self.root)?); }
-            self.staged_config.clone().unwrap_or_default()
+        let config = self.config()?;
+        let (config, key) = match &mut self.current {
+            Some((current, key)) if *current == config => (&*current, &*key),
+            slot => {
+                let key = Key::load(self.root, &config)?;
+                let (config, key) = slot.insert((config, key));
+                (&*config, &*key)
+            },
         };
-        if self.current.as_ref().map(|(c, _)| c) != Some(&config) {
-            let key = Key::load(self.root, &config)?;
-            self.current = Some((config, key));
+        let file = File {
+            root: self.root, path: git_path, config, key: key.as_ref(),
+            id: transcrypt_rs::config_id(config), found: parse_file_header(&input).ok(),
+        };
+        if clean { file.clean(&mut self.stored, input) } else { file.smudge(&mut self.stored, input) }
+    }
+
+    /// The worktree config, or the staged one when the worktree has none.
+    fn config(&mut self) -> Result<Vec<u8>, String> {
+        if fs::symlink_metadata(self.root.join(".transcrypt")).is_ok() { return load_config(self.root); }
+        if self.staged_config.is_none() { self.staged_config = Some(load_config(self.root)?); }
+        Ok(self.staged_config.clone().unwrap_or_default())
+    }
+}
+
+/// One file to convert under the current config `config` (whose id is
+/// `id`) and its key, if any; `found` is the config id its header names.
+struct File<'a> {
+    root: &'a Path,
+    path: &'a [u8],
+    config: &'a [u8],
+    key: Option<&'a Key>,
+    id: [u8; ID_LEN],
+    found: Option<[u8; ID_LEN]>,
+}
+
+impl File<'_> {
+    fn clean(&self, stored: &mut Option<Option<Key>>, input: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>, String> {
+        let (root, git_path) = (self.root, self.path);
+        // A record of another config (from before a rekey) cannot be
+        // re-encrypted here. It passes through unchanged, so Git keeps
+        // working, only if Git already has exactly these bytes at this
+        // path (verification then refuses to commit it); anything else
+        // starting with such a header is refused.
+        if self.found.is_some_and(|found| found != self.id) {
+            if blobs_at(root, git_path)?.contains(&blob_id(root, &input)?) { return Ok(input); }
+            return Err(format!("{} starts like a record of another config but is not the one Git has \
+                for it; refusing to store it", String::from_utf8_lossy(git_path)));
         }
-        let Filters { root, current: Some((config, current_key)), stored, .. } = self else { unreachable!() };
-        let (root, key) = (*root, current_key.as_ref());
-        let id = transcrypt_rs::config_id(config);
-        let found = parse_file_header(&input).ok();
-        if clean {
-            // A record of another config (from before a rekey) cannot be
-            // re-encrypted here. It passes through unchanged, so Git keeps
-            // working, only if Git already has exactly these bytes at this
-            // path (verification then refuses to commit it); anything else
-            // starting with such a header is refused.
-            if found.is_some_and(|found| found != id) {
-                if blobs_at(root, git_path)?.contains(&blob_id(root, &input)?) { return Ok(input); }
-                return Err(format!("{} starts like a record of another config but is not the one Git has \
-                    for it; refusing to store it", String::from_utf8_lossy(git_path)));
+        let Some(key) = self.key else { return self.clean_without_key(stored, input) };
+        // `clean` returns a record that already opens at this path
+        // unchanged and otherwise seals with the verified core's
+        // `seal_record`, which refuses any other v3 record.
+        let record = key.clean(git_path, &input)?;
+        if key.private() && *record != *input {
+            // Private mode: Git is staging plaintext of this file; if it
+            // was created readable by others, make it private now.
+            if let Some(target) = indexed_path(git_path).and_then(|p| find_protected(root, &p))? {
+                target.make_private()?;
             }
-            let Some(key) = key else {
-                // A worktree on another config than the stored key's (a branch
-                // from before a rekey) shows files the stored key decrypted:
-                // the record Git has for the path, if it opens to exactly
-                // these bytes, is their clean form.
-                // (Only plaintext needs this; a record goes on below.)
-                if let Some(stored) = if found.is_none() { stored_key(stored, root)? } else { None } {
-                    for oid in blobs_at(root, git_path)? {
-                        let record = git_blob(root, &oid)?;
-                        if parse_file_header(&record).is_ok_and(|f| f == stored.config_id())
-                            && stored.open(git_path, &record).is_ok_and(|pt| *pt == *input) {
-                            return Ok(Zeroizing::new(record));
-                        }
+        }
+        Ok(record)
+    }
+
+    fn clean_without_key(&self, stored: &mut Option<Option<Key>>, input: Zeroizing<Vec<u8>>)
+        -> Result<Zeroizing<Vec<u8>>, String>
+    {
+        let (root, git_path) = (self.root, self.path);
+        // A worktree on another config than the stored key's (a branch
+        // from before a rekey) shows files the stored key decrypted:
+        // the record Git has for the path, if it opens to exactly
+        // these bytes, is their clean form.
+        // (Only plaintext needs this; a record goes on below.)
+        if self.found.is_none() {
+            if let Some(stored) = stored_key(stored, root)? {
+                for oid in blobs_at(root, git_path)? {
+                    let record = git_blob(root, &oid)?;
+                    if parse_file_header(&record).is_ok_and(|f| f == stored.config_id())
+                        && stored.open(git_path, &record).is_ok_and(|pt| *pt == *input) {
+                        return Ok(Zeroizing::new(record));
                     }
                 }
-                // Locked: without the key nothing can be encrypted, but Git
-                // re-cleans worktree files (a locked checkout holds
-                // ciphertext), so a record of this configuration passes
-                // through unchanged. Plaintext is refused, never stored.
-                if record_envelope_ok(&input, &id) { return Ok(input); }
-                return Err(Key::require(root, config).err().unwrap_or_default());
-            };
-            // `clean` returns a record that already opens at this path
-            // unchanged and otherwise seals with the verified core's
-            // `seal_record`, which refuses any other v3 record.
-            let record = key.clean(git_path, &input)?;
-            if key.private() && *record != *input {
-                // Private mode: Git is staging plaintext of this file; if it
-                // was created readable by others, make it private now.
-                if let Some(target) = indexed_path(git_path).and_then(|p| find_protected(root, &p))? {
-                    target.make_private()?;
-                }
             }
-            return Ok(record);
         }
+        // Locked: without the key nothing can be encrypted, but Git
+        // re-cleans worktree files (a locked checkout holds
+        // ciphertext), so a record of this configuration passes
+        // through unchanged. Plaintext is refused, never stored.
+        if record_envelope_ok(&input, &self.id) { return Ok(input); }
+        Err(Key::require(root, self.config).err().unwrap_or_default())
+    }
+
+    fn smudge(&self, stored: &mut Option<Option<Key>>, input: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>, String> {
+        let git_path = self.path;
         // The key for the config the record names: the worktree's, or the
         // stored key's own (Git may smudge files of a checkout before it
         // writes the new `.transcrypt/config`).
-        let key = match found {
-            Some(found) if found == id => key,
-            Some(found) => stored_key(stored, root)?.filter(|k| k.config_id() == found),
+        let key = match self.found {
+            Some(found) if found == self.id => self.key,
+            Some(found) => stored_key(stored, self.root)?.filter(|k| k.config_id() == found),
             None => None,
         };
-        let decided = key.map_or(id, Key::config_id);
+        let decided = key.map_or(self.id, Key::config_id);
         // The verified core decides: bytes that are no v3 record are refused,
         // a record without a key here stays encrypted, and a record of the
         // key's config is opened, which authenticates it at this exact path
-        // or fails.
-        match smudge_action(&input, &decided, key.is_some()) {
-            Ok(SmudgeAction::Keep) => {
-                if found.is_some_and(|found| found != id) && current_key.is_some() {
-                    eprintln!("transcrypt-rs: {} is encrypted under another config, without a key here; \
-                        it stays encrypted (`transcrypt-rs status` tells whether it needs `reencrypt`)",
-                        String::from_utf8_lossy(git_path));
-                }
-                Ok(input)
-            },
-            Ok(SmudgeAction::Open) => {
-                let Some(key) = key else { unreachable!() };
+        // or fails. (It answers `Open` only when given a key.)
+        match (smudge_action(&input, &decided, key.is_some()), key) {
+            (Ok(SmudgeAction::Open), Some(key)) => {
                 let plaintext = key.open(git_path, &input).map_err(|_| {
                     let name = String::from_utf8_lossy(git_path);
                     format!("this record does not open at {name}: it was moved from another path or altered. \
@@ -132,9 +156,17 @@ impl<'a> Filters<'a> {
                 }
                 Ok(plaintext)
             },
-            Err(Refusal::Foreign) => Err("the committed file is not v3 ciphertext (it was stored without the \
+            (Ok(_), _) => {
+                if self.found.is_some_and(|found| found != self.id) && self.key.is_some() {
+                    eprintln!("transcrypt-rs: {} is encrypted under another config, without a key here; \
+                        it stays encrypted (`transcrypt-rs status` tells whether it needs `reencrypt`)",
+                        String::from_utf8_lossy(git_path));
+                }
+                Ok(input)
+            },
+            (Err(Refusal::Foreign), _) => Err("the committed file is not v3 ciphertext (it was stored without the \
                 filter); refusing to present it as a protected file".into()),
-            Err(_) => Err(TOO_LARGE.into()),
+            (Err(_), _) => Err(TOO_LARGE.into()),
         }
     }
 }

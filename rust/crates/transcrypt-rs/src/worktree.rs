@@ -1,24 +1,35 @@
-//! Protected worktree files resolved race-free (dirfd-relative, no
-//! symlinks) and the private, locked staging directory for replacements.
+//! Protected worktree files resolved race-free (relative to held directory
+//! descriptors or handles, never through a symlink or reparse point) and the
+//! private, locked staging directory for replacements.
 
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use zeroize::Zeroizing;
 use crate::{fsat, git::read_record};
 
+/// A Git path as a relative OS path. Only a root and `..` are refused here:
+/// a Windows prefix (`C:`) or a leading `.` is not a plain name, which
+/// `names` refuses when the path is opened.
 pub(crate) fn indexed_path(path: &[u8]) -> Result<PathBuf, String> {
     let relative = PathBuf::from(crate::os::os_string(path)?);
-    if relative.is_absolute() || relative.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir)) {
+    if relative.is_absolute() || relative.components().any(|c| matches!(c, Component::ParentDir | Component::RootDir)) {
         return Err("unsafe protected relative path".into());
     }
     Ok(relative)
 }
 
+/// The components of `relative`, parents first, if every one is a plain
+/// name (no root, prefix, `.` or `..`) to open in its parent.
+fn names(relative: &Path) -> Option<Vec<&OsStr>> {
+    relative.components().map(|c| match c { Component::Normal(name) => Some(name), _ => None }).collect()
+}
+
 /// A protected worktree file resolved race-free: its parent directory is
-/// held open, every component having been opened with `O_NOFOLLOW`.
+/// held open, no component having been opened through a symlink or
+/// reparse point.
 pub(crate) struct Protected {
     dir: fsat::Dir,
     leaf: OsString,
@@ -33,24 +44,18 @@ pub(crate) fn open_protected(root: &Path, relative: &Path) -> Result<Protected, 
 /// Like `open_protected`, but `None` when the file (or a parent directory)
 /// does not exist: a deleted or sparse-checkout file holds no plaintext.
 pub(crate) fn find_protected(root: &Path, relative: &Path) -> Result<Option<Protected>, String> {
-    let parts: Vec<_> = relative.components().collect();
-    let Some((leaf, parents)) = parts.split_last() else {
+    let names = names(relative).ok_or("unsafe protected path component")?;
+    let Some((leaf, parents)) = names.split_last() else {
         return Err("empty protected worktree path".into());
     };
     let mut dir = fsat::Dir::open(root).map_err(|_| "cannot open repository root")?;
-    for part in parents {
-        let std::path::Component::Normal(name) = part else {
-            return Err("unsafe protected path component".into());
-        };
+    for name in parents {
         dir = match dir.subdir(name) {
             Ok(dir) => dir,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err("protected worktree parent is a symlink or not a directory".into()),
         };
     }
-    let std::path::Component::Normal(leaf) = leaf else {
-        return Err("unsafe protected path component".into());
-    };
     let (regular, link) = match dir.entry_kind(leaf) {
         Ok(kind) => kind,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -62,8 +67,8 @@ pub(crate) fn find_protected(root: &Path, relative: &Path) -> Result<Option<Prot
 }
 
 impl Protected {
-    /// Remove group and other permissions (through an `O_NOFOLLOW`
-    /// descriptor, so a swapped-in symlink is never followed). Private mode.
+    /// Make the file owner-only (never following a swapped-in symlink or
+    /// reparse point). Private mode.
     pub(crate) fn make_private(&self) -> Result<(), String> {
         self.dir.make_private(&self.leaf).map_err(|_| "cannot restrict protected worktree file permissions".into())
     }
@@ -86,35 +91,39 @@ impl Protected {
         Ok((contents, stamp))
     }
 
-    /// Replace the file by `contents` through an exclusive mode-0600 file in
-    /// the private staging directory, fsync, `renameat` into the held parent
-    /// directory, then fsync that directory. The new file keeps the old one's
-    /// permissions (an executable stays executable; on Windows, the access
-    /// its directory gives), restricted to this user when `private`. The entry must still have the `expected` stamp of the
-    /// read that justified the replacement, so an edit made since then is
-    /// refused instead of being lost (a same-UID writer can still race the
-    /// final check and the rename). A cross-filesystem rename fails closed
-    /// (EXDEV) without touching the file. Not a multi-file transaction.
+    /// Replace the file by `contents` through an exclusive owner-only file
+    /// in the private staging directory, synced, then renamed into the held
+    /// parent directory, which is synced too (Windows journals the rename).
+    /// The new file keeps the old one's permissions (an executable stays
+    /// executable; on Windows, the access its directory gives), restricted
+    /// to this user when `private`. The entry must still have the `expected`
+    /// stamp of the read that justified the replacement, so an edit made
+    /// since then is refused instead of being lost (a same-UID writer can
+    /// still race the final check and the rename). A cross-filesystem
+    /// rename fails closed without touching the file. Not a multi-file
+    /// transaction.
     pub(crate) fn replace(&self, staging: &Staging, contents: &[u8], expected: &fsat::Stamp, private: bool) -> Result<(), String> {
         let mode = self.dir.replacement_mode(&self.leaf, private).map_err(|_| "cannot stat protected worktree file")?;
         let temp = staging.temporary();
         let mut file = staging.dir.create_new(&temp, 0o600)
             .map_err(|e| format!("cannot create private staged file: {e}"))?;
+        // Until the rename, a failure removes the temporary.
+        let fail = |message: String| -> Result<(), String> {
+            let _ = staging.dir.unlink(&temp);
+            Err(message)
+        };
         let result = file.write_all(contents)
             .and_then(|_| fsat::set_mode(&file, mode))
             .and_then(|_| file.sync_all());
         drop(file);
         if let Err(e) = result {
-            let _ = staging.dir.unlink(&temp);
-            return Err(format!("cannot write private staged file: {e}"));
+            return fail(format!("cannot write private staged file: {e}"));
         }
         if self.dir.stamp(&self.leaf).ok().as_ref() != Some(expected) {
-            let _ = staging.dir.unlink(&temp);
-            return Err("protected worktree file changed after it was checked; refusing to replace it".into());
+            return fail("protected worktree file changed after it was checked; refusing to replace it".into());
         }
         if let Err(e) = staging.dir.rename_to(&temp, &self.dir, &self.leaf) {
-            let _ = staging.dir.unlink(&temp);
-            return Err(format!("cannot replace protected worktree file: {e}"));
+            return fail(format!("cannot replace protected worktree file: {e}"));
         }
         self.dir.finish_replace(&self.leaf, mode).map_err(|e| format!("cannot sync protected file directory: {e}"))
     }
@@ -134,21 +143,21 @@ pub(crate) fn replace_if_holds(root: &Path, staging: &Staging, path: &[u8], expe
 
 /// Write a repository file that v3 maintains (`.gitattributes`,
 /// `.transcrypt/config`): replace it if it exists, else create it, with the
-/// same symlink-refusing resolution and staged atomic rename as protected
-/// files. A committed symlink at the path or in a parent is refused, never
-/// followed, so the write cannot land outside the repository.
+/// same symlink- and reparse-point-refusing resolution and staged atomic
+/// rename as protected files. A committed symlink at the path or in a
+/// parent is refused, never followed, so the write cannot land outside the
+/// repository.
 pub(crate) fn write_repository_file(root: &Path, staging: &Staging, relative: &Path, contents: &[u8]) -> Result<(), String> {
     if let Some(target) = find_protected(root, relative)? {
         let (_, stamp) = target.read()?;
         return target.replace(staging, contents, &stamp, false);
     }
-    let parts: Vec<_> = relative.components().collect();
-    let Some((std::path::Component::Normal(leaf), parents)) = parts.split_last() else {
+    let names = names(relative).unwrap_or_default();
+    let Some((leaf, parents)) = names.split_last() else {
         return Err("unsafe repository file path".into());
     };
     let mut dir = fsat::Dir::open(root).map_err(|_| "cannot open repository root")?;
-    for part in parents {
-        let std::path::Component::Normal(name) = part else { return Err("unsafe repository file path".into()) };
+    for name in parents {
         dir.mkdir(name, 0o777).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
         dir = dir.subdir(name).map_err(|_| format!("{} has a parent that is a symlink or not a directory", relative.display()))?;
     }
@@ -159,7 +168,8 @@ pub(crate) fn write_repository_file(root: &Path, staging: &Staging, relative: &P
 }
 
 /// Private staging directory for whole-file replacements:
-/// `.git/transcrypt-v3-staging`, a real mode-0700 directory held open by fd.
+/// `.git/transcrypt-v3-staging`, a real owner-only directory (not a symlink
+/// or reparse point), held open.
 /// Temporaries never live in the worktree, so a crash cannot leave plaintext
 /// where `git add` could commit it unencrypted, and Git never reads files
 /// under `.git`. Holding it also holds an exclusive lock, so worktree-
@@ -205,9 +215,9 @@ pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
     Ok(Staging { dir, next: std::cell::Cell::new(0) })
 }
 
-/// `.git/transcrypt-v3-scratch`: a real mode-0700 directory for plaintext
+/// `.git/transcrypt-v3-scratch`: a real owner-only directory for plaintext
 /// that another program must read as a file (the merge and diff drivers'
-/// inputs). Files are exclusive and mode 0600, named after this process, and
+/// inputs). Files are exclusive and owner-only, named after this process, and
 /// removed when the `Scratch` is dropped. Files of processes that no longer
 /// run (a crash) are removed on the next use. No secure-erasure claim.
 pub(crate) struct Scratch {
@@ -276,8 +286,8 @@ mod tests {
         #[cfg(windows)]
         {
             use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-            let file = fs::OpenOptions::new().access_mode(0x20000) // READ_CONTROL
-                .custom_flags(0x0200_0000).open(path).unwrap(); // FILE_FLAG_BACKUP_SEMANTICS
+            use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL};
+            let file = fs::OpenOptions::new().access_mode(READ_CONTROL).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path).unwrap();
             crate::os::is_private(file.as_raw_handle()).unwrap()
         }
     }
@@ -308,53 +318,66 @@ mod tests {
         if fs::remove_file(link).is_err() { fs::remove_dir(link).unwrap(); }
     }
 
+    /// A fresh temporary directory, removed when the test ends.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            let path = std::env::temp_dir().join(format!("transcrypt-v3-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir(&path).unwrap();
+            TempDir(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn replacement_is_private_and_leaves_no_worktree_temporaries() {
-        let tmp = std::env::temp_dir().join(format!(
-            "transcrypt-v3-replace-{}", std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(tmp.join(".git")).unwrap();
+        let dir = TempDir::new("replace");
+        let tmp = &dir.0;
+        fs::create_dir(tmp.join(".git")).unwrap();
         let sdir = tmp.join(".git/transcrypt-v3-staging");
-        drop(staging(&tmp));
+        drop(staging(tmp));
         assert!(owner_only(&sdir));
         // A crash-leftover temporary is purged on the next use.
         fs::write(sdir.join("stale.tmp"), b"stale plaintext").unwrap();
-        let staging = staging(&tmp);
+        let staging = staging(tmp);
         // A concurrent operation cannot enter (or purge) while it is held.
-        assert!(staging_dir(&tmp).is_err());
+        assert!(staging_dir(tmp).is_err());
         assert_eq!(fs::read_dir(&sdir).unwrap().count(), 0);
         let path = tmp.join("item.secret");
         fs::write(&path, b"ciphertext placeholder").unwrap();
-        let target = open_protected(&tmp, Path::new("item.secret")).unwrap();
+        let target = open_protected(tmp, Path::new("item.secret")).unwrap();
         let (_, stamp) = target.read().unwrap();
         target.replace(&staging, b"authenticated plaintext", &stamp, true).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"authenticated plaintext");
         assert!(owner_only(&path));
-        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 2, "only .git and the file");
+        assert_eq!(fs::read_dir(tmp).unwrap().count(), 2, "only .git and the file");
         assert_eq!(fs::read_dir(&sdir).unwrap().count(), 0);
         // A symlinked or loosely permissioned staging directory is refused.
         fs::remove_dir(&sdir).unwrap();
-        link_dir(&tmp, &sdir);
-        assert!(staging_dir(&tmp).is_err());
+        link_dir(tmp, &sdir);
+        assert!(staging_dir(tmp).is_err());
         remove_link(&sdir);
         fs::create_dir(&sdir).unwrap();
         loosen(&sdir);
-        assert!(staging_dir(&tmp).is_err());
-        fs::remove_dir_all(&tmp).unwrap();
+        assert!(staging_dir(tmp).is_err());
     }
 
     #[test]
     fn replacement_refuses_a_file_changed_since_it_was_checked() {
-        let tmp = std::env::temp_dir().join(format!(
-            "transcrypt-v3-stamp-{}", std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(tmp.join(".git")).unwrap();
-        let staging = staging(&tmp);
+        let dir = TempDir::new("stamp");
+        let tmp = &dir.0;
+        fs::create_dir(tmp.join(".git")).unwrap();
+        let staging = staging(tmp);
         let path = tmp.join("item.secret");
         fs::write(&path, b"checked contents").unwrap();
-        let target = open_protected(&tmp, Path::new("item.secret")).unwrap();
+        let target = open_protected(tmp, Path::new("item.secret")).unwrap();
         let (_, stamp) = target.read().unwrap();
         // A concurrent edit after the check, even one of the same size.
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -367,16 +390,12 @@ mod tests {
         fs::write(&path, b"edited contents!").unwrap();
         assert!(target.replace(&staging, b"replacement", &stamp, false).is_err());
         assert_eq!(fs::read_dir(tmp.join(".git/transcrypt-v3-staging")).unwrap().count(), 0);
-        fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
     fn protected_parent_symlinks_cannot_redirect_lock_or_hydrate() {
-        let tmp = std::env::temp_dir().join(format!(
-            "transcrypt-v3-parent-symlink-{}", std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir(&tmp).unwrap();
+        let dir = TempDir::new("parent-symlink");
+        let tmp = &dir.0;
         let external = tmp.join("external");
         fs::create_dir(&external).unwrap();
         fs::write(external.join("item.secret"), b"test").unwrap();
@@ -403,6 +422,5 @@ mod tests {
         target.replace(&staging, b"plaintext", &stamp, false).unwrap();
         assert_eq!(fs::read(external.join("item.secret")).unwrap(), b"test", "write escaped");
         assert_eq!(fs::read(checkout.join("moved/item.secret")).unwrap(), b"plaintext");
-        let _ = fs::remove_dir_all(tmp);
     }
 }

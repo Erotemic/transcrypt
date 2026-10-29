@@ -18,8 +18,8 @@ use std::{
     sync::Once,
     time::Duration,
 };
-use windows_sys::Win32::{
-    Foundation::{GetLastError, LocalFree, ERROR_ACCESS_DENIED, HANDLE, STILL_ACTIVE},
+use windows_sys::{core::BOOL, Win32::{
+    Foundation::{GetLastError, LocalFree, ERROR_ACCESS_DENIED, HANDLE, STILL_ACTIVE, WIN32_ERROR},
     Networking::WinSock::{
         accept as accept_socket, bind, closesocket, connect, listen, recv, send, setsockopt, socket, WSAGetLastError, WSAIoctl,
         WSAPoll, WSAStartup, AF_UNIX, INVALID_SOCKET, POLLRDNORM, SIO_AF_UNIX_GETPEERPID, SOCKADDR, SOCKADDR_UN,
@@ -44,10 +44,20 @@ use windows_sys::Win32::{
     System::{
         Diagnostics::Debug::{SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX},
         Memory::VirtualLock,
-        SystemServices::{ACCESS_ALLOWED_ACE_TYPE, IO_REPARSE_TAG_AF_UNIX},
+        SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, IO_REPARSE_TAG_AF_UNIX},
         Threading::{GetCurrentProcess, GetExitCodeProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
     },
-};
+}};
+
+/// The result of a call that returns a `BOOL` and sets the last error.
+pub(crate) fn win32(ok: BOOL) -> io::Result<()> {
+    if ok != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+/// The result of a call that returns its error code.
+pub(crate) fn status(code: WIN32_ERROR) -> io::Result<()> {
+    if code == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(code as i32)) }
+}
 
 /// A Git path (raw bytes) as an OS path. Git for Windows names files in
 /// UTF-8; other bytes cannot name a Windows file.
@@ -144,23 +154,20 @@ impl Drop for Local {
     }
 }
 
-/// `TOKEN_USER` or `TOKEN_OWNER` of this process, in an aligned buffer.
-fn token_information(class: i32) -> io::Result<Vec<u64>> {
+/// `TOKEN_USER` or `TOKEN_OWNER` of a process (a handle with
+/// `PROCESS_QUERY_LIMITED_INFORMATION`), in an aligned buffer.
+fn token_information(process: HANDLE, class: i32) -> io::Result<Vec<u64>> {
     let mut token: HANDLE = null_mut();
-    // SAFETY: the pseudo-handle needs no closing; `token` receives a handle we own.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `token` is a fresh handle we own.
+    // SAFETY: a valid process handle; `token` receives a handle we own.
+    win32(unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) })?;
+    // SAFETY: `token` is a fresh handle that nothing else owns.
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
     let mut size = 0u32;
     // SAFETY: a size query with no buffer.
     unsafe { GetTokenInformation(token.as_raw_handle(), class, null_mut(), 0, &mut size) };
     let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
     // SAFETY: the buffer holds `size` bytes.
-    if unsafe { GetTokenInformation(token.as_raw_handle(), class, buffer.as_mut_ptr().cast(), size, &mut size) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(unsafe { GetTokenInformation(token.as_raw_handle(), class, buffer.as_mut_ptr().cast(), size, &mut size) })?;
     Ok(buffer)
 }
 
@@ -173,7 +180,9 @@ struct Identity {
 
 impl Identity {
     fn current() -> io::Result<Identity> {
-        Ok(Identity { user: token_information(TokenUser)?, owner: token_information(TokenOwner)? })
+        // SAFETY: returns the pseudo-handle of this process, which needs no closing.
+        let process = unsafe { GetCurrentProcess() };
+        Ok(Identity { user: token_information(process, TokenUser)?, owner: token_information(process, TokenOwner)? })
     }
 
     fn user(&self) -> PSID {
@@ -191,9 +200,7 @@ impl Identity {
     fn private_sddl(&self) -> io::Result<Vec<u16>> {
         let mut text: *mut u16 = null_mut();
         // SAFETY: the SID is valid; `text` receives a LocalAlloc'd string.
-        if unsafe { ConvertSidToStringSidW(self.user(), &mut text) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        win32(unsafe { ConvertSidToStringSidW(self.user(), &mut text) })?;
         let _free = Local(text.cast());
         // SAFETY: a NUL-terminated wide string.
         let sid = unsafe { std::slice::from_raw_parts(text, (0..).take_while(|&i| *text.add(i) != 0).count()) };
@@ -209,9 +216,7 @@ impl PrivateDescriptor {
         let sddl = Identity::current()?.private_sddl()?;
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
         // SAFETY: a NUL-terminated SDDL string; the descriptor is LocalAlloc'd.
-        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, null_mut()) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        win32(unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, null_mut()) })?;
         Ok(PrivateDescriptor(Local(descriptor)))
     }
 
@@ -233,28 +238,26 @@ impl PrivateDescriptor {
 /// user, replacing whatever its DACL granted (like chmod 0600 or 0700).
 pub(crate) fn set_private(handle: HANDLE) -> io::Result<()> {
     let descriptor = PrivateDescriptor::new()?;
+    let dacl = descriptor.dacl()?;
     // SAFETY: a valid handle and the descriptor's DACL.
-    let error = unsafe {
+    status(unsafe {
         SetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            null_mut(), null_mut(), descriptor.dacl()?, null())
-    };
-    if error == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(error as i32)) }
+            null_mut(), null_mut(), dacl, null())
+    })
 }
 
 /// Give an open file (opened with `WRITE_DAC`) only the access its
 /// directory passes on, as a file that Git creates there has.
 pub(crate) fn set_inherited(handle: HANDLE) -> io::Result<()> {
+    // SAFETY: plain data, for which all zeroes is a valid value.
     let mut empty: ACL = unsafe { zeroed() };
     // SAFETY: `empty` is large enough for an ACL without entries.
-    if unsafe { InitializeAcl(&mut empty, size_of::<ACL>() as u32, ACL_REVISION) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(unsafe { InitializeAcl(&mut empty, size_of::<ACL>() as u32, ACL_REVISION) })?;
     // SAFETY: a valid handle and ACL.
-    let error = unsafe {
+    status(unsafe {
         SetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
             null_mut(), null_mut(), &empty, null())
-    };
-    if error == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(error as i32)) }
+    })
 }
 
 /// Whether only this user can use an open object (opened with
@@ -264,30 +267,26 @@ pub(crate) fn is_private(handle: HANDLE) -> io::Result<bool> {
     let identity = Identity::current()?;
     let (mut owner, mut dacl, mut descriptor): (PSID, *mut ACL, PSECURITY_DESCRIPTOR) = (null_mut(), null_mut(), null_mut());
     // SAFETY: a valid handle; the descriptor is LocalAlloc'd and owns `owner` and `dacl`.
-    let error = unsafe {
+    status(unsafe {
         GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &mut owner, null_mut(), &mut dacl, null_mut(), &mut descriptor)
-    };
-    if error != 0 { return Err(io::Error::from_raw_os_error(error as i32)); }
+    })?;
     let _free = Local(descriptor);
     let (mut control, mut revision) = (0u16, 0u32);
     // SAFETY: valid descriptor and out-pointers.
-    if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) })?;
     // SAFETY: valid SIDs.
     let owned = unsafe { EqualSid(owner, identity.user()) != 0 || EqualSid(owner, identity.owner()) != 0 };
     // A null DACL grants everyone everything.
     if !owned || control & SE_DACL_PROTECTED == 0 || dacl.is_null() { return Ok(false); }
+    // SAFETY: plain data, for which all zeroes is a valid value.
     let mut size: ACL_SIZE_INFORMATION = unsafe { zeroed() };
     // SAFETY: a valid ACL and a buffer of the requested class.
-    if unsafe { GetAclInformation(dacl, (&mut size as *mut ACL_SIZE_INFORMATION).cast(), size_of::<ACL_SIZE_INFORMATION>() as u32, AclSizeInformation) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(unsafe { GetAclInformation(dacl, (&mut size as *mut ACL_SIZE_INFORMATION).cast(), size_of::<ACL_SIZE_INFORMATION>() as u32, AclSizeInformation) })?;
     for index in 0..size.AceCount {
         let mut ace = null_mut();
         // SAFETY: `index` is below the ACL's entry count.
-        if unsafe { GetAce(dacl, index, &mut ace) } == 0 { return Err(io::Error::last_os_error()); }
+        win32(unsafe { GetAce(dacl, index, &mut ace) })?;
         let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
         // SAFETY: every ACE starts with its header; an access-allowed ACE
         // holds its SID at `SidStart`. Deny entries take nothing away from
@@ -297,8 +296,7 @@ pub(crate) fn is_private(handle: HANDLE) -> io::Result<bool> {
             if unsafe { EqualSid(std::ptr::addr_of_mut!((*ace).SidStart).cast(), identity.user()) } == 0 {
                 return Ok(false);
             }
-        } else if kind != 1 {
-            // 1: ACCESS_DENIED_ACE_TYPE.
+        } else if kind != ACCESS_DENIED_ACE_TYPE {
             return Ok(false);
         }
     }
@@ -313,11 +311,10 @@ fn open_entry(path: &Path, access: u32) -> io::Result<File> {
 
 /// The attributes and reparse tag of an open file.
 pub(crate) fn attribute_tag(handle: HANDLE) -> io::Result<(u32, u32)> {
+    // SAFETY: plain data, for which all zeroes is a valid value.
     let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { zeroed() };
     // SAFETY: a valid handle and a buffer of the requested class.
-    if unsafe { GetFileInformationByHandleEx(handle, FileAttributeTagInfo, (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(), size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    win32(unsafe { GetFileInformationByHandleEx(handle, FileAttributeTagInfo, (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(), size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32) })?;
     Ok((info.FileAttributes, info.ReparseTag))
 }
 
@@ -345,10 +342,7 @@ pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
     };
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     // SAFETY: a NUL-terminated path and valid security attributes.
-    if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    win32(unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) })
 }
 
 /// Whether `path` is a socket (Windows marks the file of a Unix-domain
@@ -375,6 +369,7 @@ pub(crate) fn secure_socket(path: &Path) -> io::Result<()> {
 fn startup() {
     static STARTED: Once = Once::new();
     STARTED.call_once(|| {
+        // SAFETY: plain data, for which all zeroes is a valid value.
         let mut data: WSADATA = unsafe { zeroed() };
         // SAFETY: version 2.2 and a valid out-pointer; never cleaned up.
         unsafe { WSAStartup(0x0202, &mut data) };
@@ -488,23 +483,9 @@ pub(crate) fn peer_is_this_user(stream: &Stream) -> bool {
         // SAFETY: OpenProcess returns an owned handle or null.
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if process.is_null() { return Err(io::Error::last_os_error()); }
-        // SAFETY: a fresh handle we own.
+        // SAFETY: a fresh handle that nothing else owns.
         let process = unsafe { OwnedHandle::from_raw_handle(process) };
-        let mut token: HANDLE = null_mut();
-        // SAFETY: a valid process handle; `token` receives a handle we own.
-        if unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a fresh handle we own.
-        let token = unsafe { OwnedHandle::from_raw_handle(token) };
-        let mut size = 0u32;
-        // SAFETY: a size query with no buffer.
-        unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut size) };
-        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
-        // SAFETY: the buffer holds `size` bytes.
-        if unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, buffer.as_mut_ptr().cast(), size, &mut size) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let buffer = token_information(process.as_raw_handle(), TokenUser)?;
         // SAFETY: the buffer holds a TOKEN_USER.
         let peer = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
         // SAFETY: valid SIDs.

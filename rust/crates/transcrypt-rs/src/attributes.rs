@@ -61,6 +61,25 @@ impl AttributesUndo {
             None => git(root, &["update-index", "--force-remove", "--", ".gitattributes"]),
         };
     }
+
+    /// Run `edit` with `.gitattributes` captured, putting it back if `edit` fails.
+    fn guard<T>(root: &Path, edit: impl FnOnce(&AttributesUndo) -> Result<T, String>) -> Result<T, String> {
+        let undo = AttributesUndo::capture(root)?;
+        let result = edit(&undo);
+        if result.is_err() { undo.restore(root); }
+        result
+    }
+}
+
+/// The pieces of `text` between line feeds (the last is empty after a
+/// final newline).
+pub(crate) fn split_lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    text.split(|b| *b == b'\n')
+}
+
+/// The paths of `entries`, owned (`paths_of` borrows them).
+pub(crate) fn owned_paths(entries: &[Staged]) -> Vec<Vec<u8>> {
+    entries.iter().map(|e| e.path.clone()).collect()
 }
 
 /// Patterns as the user wrote them must select what they name. Git applies
@@ -139,7 +158,7 @@ pub(crate) fn edit_attributes(root: &Path, staging: &Staging, stage: bool, edit:
     -> Result<(), String>
 {
     let existing = worktree_attributes(root)?.unwrap_or_default();
-    let mut lines: Vec<Line> = existing.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
+    let mut lines: Vec<Line> = split_lines(&existing).map(<[u8]>::to_vec).collect();
     if lines.last().is_some_and(Vec::is_empty) { lines.pop(); }
     // Another definition of the macro would silently replace ours (Git uses
     // the last one), and `PATTERN transcrypt` would select nothing.
@@ -210,8 +229,7 @@ fn protect_line(pattern: &[u8]) -> Result<Line, String> {
 /// anyway; doing it now makes `git status` and `git diff --cached` honest).
 pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
     let (key, patterns, lines) = checked_patterns(root, patterns)?;
-    let undo = AttributesUndo::capture(root)?;
-    let result = (|| -> Result<(), String> {
+    AttributesUndo::guard(root, |_| {
         let staging = staging_dir(root)?;
         edit_attributes(root, &staging, true, |existing| {
             for line in lines {
@@ -224,8 +242,7 @@ pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> 
         // Seal every selected file still staged in plaintext: newly selected
         // ones, and ones a hand-edited `.gitattributes` selected earlier.
         let protected = staged_protected(root, indexed_files(root)?)?;
-        let selected: Vec<Vec<u8>> = protected.iter().map(|e| e.path.clone()).collect();
-        let sealed = seal_staged(root, &key, &selected)?;
+        let sealed = seal_staged(root, &key, &owned_paths(&protected))?;
         match protected.len() {
             0 => eprintln!("Protected patterns added; no tracked file matches yet. `git add` encrypts matching files."),
             n => eprintln!("{n} tracked file(s) protected{}.",
@@ -236,9 +253,7 @@ pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> 
                 if the history is public, change those secrets.");
         }
         Ok(())
-    })();
-    if result.is_err() { undo.restore(root); }
-    result
+    })
 }
 
 /// `unprotect PATTERN...`: remove the `PATTERN transcrypt` lines, and stage
@@ -249,8 +264,7 @@ pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> 
 pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
     let (key, _, lines) = checked_patterns(root, patterns)?;
     let before = staged_protected(root, indexed_files(root)?)?;
-    let undo = AttributesUndo::capture(root)?;
-    let result = (|| -> Result<Vec<Vec<u8>>, String> {
+    let released = AttributesUndo::guard(root, |undo| {
         let staging = staging_dir(root)?;
         // The staged rules: an interrupted `unprotect` already removed the
         // line from the worktree file but not from the index.
@@ -259,7 +273,7 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
             for line in &lines {
                 let n = existing.len();
                 existing.retain(|l| l != line);
-                if existing.len() == n && !staged_rules.split(|b| *b == b'\n').any(|l| l.trim_ascii() == line.as_slice()) {
+                if existing.len() == n && !split_lines(&staged_rules).any(|l| l.trim_ascii() == line.as_slice()) {
                     return Err(format!("no `{}` line in .gitattributes; edit it directly to change other rules",
                         String::from_utf8_lossy(line)));
                 }
@@ -288,12 +302,8 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
         let rules = worktree_attributes(root)?.ok_or("missing .gitattributes")?;
         update.add("100644", b".gitattributes", &rules);
         update.apply(root, &["--add"])?;
-        Ok(released.into_iter().map(|(staged, _)| staged.path.clone()).collect())
-    })();
-    let released = match result {
-        Ok(released) => released,
-        Err(e) => { undo.restore(root); return Err(e); },
-    };
+        Ok(released.into_iter().map(|(staged, _)| staged.path.clone()).collect::<Vec<_>>())
+    })?;
     eprintln!("{} file(s) are no longer protected; their next commit stores them UNENCRYPTED:", released.len());
     for path in &released {
         eprintln!("  {}", String::from_utf8_lossy(path));
@@ -321,7 +331,7 @@ fn local_attribute_files(root: &Path) -> Vec<PathBuf> {
 /// `transcrypt` macro.
 pub(crate) fn filter_overrides(root: &Path) -> Vec<String> {
     local_attribute_files(root).into_iter().filter(|file| fs::read(file)
-        .is_ok_and(|text| text.split(|b| *b == b'\n')
+        .is_ok_and(|text| split_lines(&text)
             .any(|line| line.windows(6).any(|w| w == b"filter") || defines_macro(line))))
         .map(|file| file.display().to_string()).collect()
 }

@@ -305,20 +305,24 @@ fn icacls(path: &Path, args: &[&str]) {
     assert!(out.status.success(), "icacls {args:?} failed: {}", String::from_utf8_lossy(&out.stdout));
 }
 
-/// `DOMAIN\user` and the SID of this user, as `whoami` reports them.
+/// `DOMAIN\user` and the SID of this user, as `whoami` reports them (asked
+/// once per test binary).
 #[cfg(windows)]
-fn whoami() -> (String, String) {
-    let out = exec(Path::new("."), "whoami", &["/user", "/fo", "csv", "/nh"], None);
-    let text = String::from_utf8_lossy(&out.stdout).trim().replace('"', "");
-    let (name, sid) = text.split_once(',').unwrap();
-    (name.to_owned(), sid.to_owned())
+fn whoami() -> &'static (String, String) {
+    static WHO: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    WHO.get_or_init(|| {
+        let out = exec(Path::new("."), "whoami", &["/user", "/fo", "csv", "/nh"], None);
+        let text = String::from_utf8_lossy(&out.stdout).trim().replace('"', "");
+        let (name, sid) = text.split_once(',').unwrap();
+        (name.to_owned(), sid.to_owned())
+    })
 }
 
 #[cfg(windows)]
-fn user_name() -> String { whoami().0 }
+fn user_name() -> &'static str { &whoami().0 }
 
 #[cfg(windows)]
-fn user_sid() -> String { whoami().1 }
+fn user_sid() -> &'static str { &whoami().1 }
 
 /// The Bash transcrypt (v2) script of this repository, as a path Bash takes.
 /// On Windows that is Git for Windows' Bash, whose `realpath` (which the

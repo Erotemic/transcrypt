@@ -22,8 +22,7 @@ pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_pa
     let config = load_config(root)?;
     let key = Key::require(root, &config).map_err(|e| format!("{e} to merge protected files"))?;
     let decrypt = |file: &Path, required: bool| -> Result<Zeroizing<Vec<u8>>, String> {
-        let input = fs::File::open(file).map_err(|_| "cannot read a merge input")?;
-        let record = read_record(input)?;
+        let record = read_input(file, "merge")?;
         if record.is_empty() { return Ok(Zeroizing::new(Vec::new())); }
         match key.open(git_path, &record) {
             Ok(plaintext) => Ok(plaintext),
@@ -52,4 +51,10 @@ pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_pa
     let record = key.clean(git_path, &merged)?;
     fs::write(ours, &*record).map_err(|_| "cannot write the merge result")?;
     Ok(!conflicts)
+}
+
+/// The contents of the file a merge or diff driver is given (`what`).
+pub(crate) fn read_input(file: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    let input = fs::File::open(file).map_err(|_| format!("cannot read a {what} input"))?;
+    read_record(input)
 }

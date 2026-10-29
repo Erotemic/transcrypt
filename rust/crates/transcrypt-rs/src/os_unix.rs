@@ -39,24 +39,31 @@ pub(crate) fn default_sigpipe() {
 /// restores SIGPIPE's default so that `transcrypt-rs status | head` ends
 /// quietly.
 pub(crate) fn sigpipe_blocked<T>(f: impl FnOnce() -> T) -> T {
-    // SAFETY: signal-mask calls on initialized sets; `sigwait` returns at
-    // once because the signal it waits for is pending.
-    unsafe {
-        let mut pipe: libc::sigset_t = std::mem::zeroed();
+    // SAFETY: `sigset_t` is plain data, for which all zeroes is a valid
+    // value; sigemptyset then initializes `pipe` as a set, and
+    // pthread_sigmask changes only this thread's mask, saving it in
+    // `previous`.
+    let (pipe, previous) = unsafe {
+        let (mut pipe, mut previous): (libc::sigset_t, libc::sigset_t) = (std::mem::zeroed(), std::mem::zeroed());
         libc::sigemptyset(&mut pipe);
         libc::sigaddset(&mut pipe, libc::SIGPIPE);
-        let mut previous: libc::sigset_t = std::mem::zeroed();
         libc::pthread_sigmask(libc::SIG_BLOCK, &pipe, &mut previous);
-        let result = f();
-        // Discard a SIGPIPE raised meanwhile, then restore the mask.
+        (pipe, previous)
+    };
+    let result = f();
+    // Discard a SIGPIPE raised meanwhile, then restore the mask.
+    // SAFETY: sigpending fills the zeroed `pending`; sigwait returns at once
+    // because the signal it waits for is pending (and blocked); `previous`
+    // is the mask saved above.
+    unsafe {
         let mut pending: libc::sigset_t = std::mem::zeroed();
         if libc::sigpending(&mut pending) == 0 && libc::sigismember(&pending, libc::SIGPIPE) == 1 {
             let mut signal = 0;
             libc::sigwait(&pipe, &mut signal);
         }
         libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
-        result
     }
+    result
 }
 
 /// Process hardening for every v3 process (all of them handle keys or
@@ -109,9 +116,12 @@ pub(crate) fn process_running(pid: u32) -> bool {
 /// worktree files with mode `0666 & !umask`, and its filters inherit its
 /// umask, so the smudge filter sees exactly the mask Git will apply.
 pub(crate) fn checkouts_private() -> bool {
-    // SAFETY: umask cannot fail; this process is single-threaded here and
-    // restores the previous mask immediately.
+    // SAFETY: umask cannot fail and has no memory-safety preconditions. The
+    // mask is process-wide, so it is put back at once; no other thread runs
+    // at the callers (the smudge filter and `doctor`: `git.rs`'s helper
+    // threads are scoped and joined), so none creates a file meanwhile.
     let previous = unsafe { libc::umask(0o077) };
+    // SAFETY: as above.
     unsafe { libc::umask(previous) };
     previous & 0o077 == 0o077
 }
@@ -187,9 +197,10 @@ pub(crate) fn secure_socket(path: &Path) -> io::Result<()> {
 fn peer_uid(stream: &Stream) -> io::Result<u32> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        // SAFETY: `cred` and `len` describe a writable ucred buffer.
+        // SAFETY: plain data, for which all zeroes is a valid value.
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: an open socket; `cred` and `len` describe a writable ucred buffer.
         let rc = unsafe {
             libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
                 (&mut cred as *mut libc::ucred).cast(), &mut len)

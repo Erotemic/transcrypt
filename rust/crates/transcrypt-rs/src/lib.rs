@@ -15,15 +15,6 @@ use transcrypt_v3_core::{
 };
 use zeroize::Zeroizing;
 
-/// A canonical Git-relative name is part of the authenticated cryptographic
-/// context. The policy itself is `transcrypt_v3_core::is_canonical_protected_path`.
-pub fn validate_protected_path(path: &[u8]) -> Result<(), String> {
-    if transcrypt_v3_core::is_canonical_protected_path(path) {
-        Ok(())
-    } else {
-        Err(refusal(Refusal::Path))
-    }
-}
 pub const ARGON_MEMORY_KIB: u32 = 65_536;
 pub const ARGON_PASSES: u32 = 3;
 pub const ARGON_LANES: u32 = 1;
@@ -145,9 +136,24 @@ fn refusal(r: Refusal) -> String {
     .into()
 }
 
+/// The error for bytes that are no v3 configuration.
+pub fn invalid_config() -> String {
+    refusal(Refusal::Config)
+}
+
+/// A canonical Git-relative name is part of the authenticated cryptographic
+/// context. The policy itself is `transcrypt_v3_core::is_canonical_protected_path`.
+pub fn validate_protected_path(path: &[u8]) -> Result<(), String> {
+    if transcrypt_v3_core::is_canonical_protected_path(path) {
+        Ok(())
+    } else {
+        Err(refusal(Refusal::Path))
+    }
+}
+
 /// Exact fixed-length view of a public configuration.
 pub fn config_array(config_bytes: &[u8]) -> Result<&[u8; CONFIG_LEN], String> {
-    config_bytes.try_into().map_err(|_| "invalid public v3 configuration".into())
+    config_bytes.try_into().map_err(|_| invalid_config())
 }
 
 pub fn initialize_config(password: &[u8], salt: &[u8; SALT_LEN])
@@ -165,8 +171,7 @@ pub fn authenticate_config(config_bytes: &[u8], key: &[u8; KEY_SIZE]) -> Result<
 }
 
 pub fn unlock_config(password: &[u8], config_bytes: &[u8]) -> Result<SecretKey, String> {
-    let config = transcrypt_v3_core::parse_config(config_bytes)
-        .map_err(|_| "invalid public v3 configuration")?;
+    let config = transcrypt_v3_core::parse_config(config_bytes).map_err(|_| invalid_config())?;
     let key = derive_key(password, &config.salt)?;
     authenticate_config(config_bytes, &key)?;
     Ok(key)
