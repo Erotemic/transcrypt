@@ -1,11 +1,4 @@
-import V3Wire.Verification.Copy
 import V3Wire.Verification.Bytes
-import Transcrypt.V3Policy
-open CoreModels Aeneas
-open Aeneas.Std hiding namespace core alloc
-open RustM ControlFlow
-namespace Transcrypt.V3Verification
-open transcrypt_v3_core
 
 /-!
 Functional refinement of the production path policy: the suffix test
@@ -14,6 +7,15 @@ Functional refinement of the production path policy: the suffix test
 `is_canonical_protected_path`, each against `Transcrypt.V3Policy`.
 -/
 
+open CoreModels Aeneas
+open Aeneas.Std hiding namespace core alloc
+open RustM ControlFlow
+
+namespace Transcrypt.V3Verification
+
+open transcrypt_v3_core
+open Transcrypt.V3Policy (slash dot maxPath)
+
 /-! ## `ends_with` -/
 
 /-- `ends_with bytes suffix` holds iff `suffix` is a suffix of `bytes`. -/
@@ -21,7 +23,7 @@ Functional refinement of the production path policy: the suffix test
 theorem ends_with_spec (bytes suffix : Slice U8) :
     ends_with bytes suffix ⦃ r => r = true ↔ sliceBytes suffix <:+ sliceBytes bytes ⦄ := by
   unfold ends_with
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hbl := sliceBytes_length bytes
   have hsl := sliceBytes_length suffix
   step*
@@ -41,28 +43,6 @@ theorem ends_with_spec (bytes suffix : Slice U8) :
 
 /-! ## Reserved metadata paths -/
 
-theorem METADATA_DIR_bytes :
-    sliceBytes (Array.to_slice METADATA_DIR) = Transcrypt.V3Policy.metadataDir := by
-  unfold METADATA_DIR Transcrypt.V3Policy.metadataDir Transcrypt.V3Policy.ascii sliceBytes
-  decide
-
-theorem ATTRIBUTES_NAME_bytes :
-    sliceBytes (Array.to_slice ATTRIBUTES_NAME) = Transcrypt.V3Policy.attributesName := by
-  unfold ATTRIBUTES_NAME Transcrypt.V3Policy.attributesName Transcrypt.V3Policy.ascii sliceBytes
-  decide
-
-theorem ATTRIBUTES_SUFFIX_bytes :
-    sliceBytes (Array.to_slice ATTRIBUTES_SUFFIX) =
-      Transcrypt.V3Policy.slash :: Transcrypt.V3Policy.attributesName := by
-  unfold ATTRIBUTES_SUFFIX Transcrypt.V3Policy.attributesName Transcrypt.V3Policy.slash
-    Transcrypt.V3Policy.ascii sliceBytes
-  decide
-
-theorem MODULES_NAME_bytes :
-    sliceBytes (Array.to_slice MODULES_NAME) = Transcrypt.V3Policy.modulesName := by
-  unfold MODULES_NAME Transcrypt.V3Policy.modulesName Transcrypt.V3Policy.ascii sliceBytes
-  decide
-
 /-- `is_reserved_path` decides exactly the spec's `Reserved`. -/
 @[step]
 theorem is_reserved_path_spec (p : Slice U8) :
@@ -77,9 +57,9 @@ theorem is_reserved_path_spec (p : Slice U8) :
 
 theorem componentOk_iff (c : List Nat) :
     Transcrypt.V3Policy.ComponentOk c ↔
-      c.length ≠ 0 ∧ ¬ (c.length = 1 ∧ c[0]! = 46) ∧
-        ¬ (c.length = 2 ∧ c[0]! = 46 ∧ c[1]! = 46) := by
-  unfold Transcrypt.V3Policy.ComponentOk Transcrypt.V3Policy.dot
+      c.length ≠ 0 ∧ ¬ (c.length = 1 ∧ c[0]! = dot) ∧
+        ¬ (c.length = 2 ∧ c[0]! = dot ∧ c[1]! = dot) := by
+  unfold Transcrypt.V3Policy.ComponentOk
   match c with
   | [] => simp
   | [a] => simp
@@ -112,7 +92,7 @@ theorem component_ok_spec (p : Slice U8) (start end_ : Usize) (h : start.val ≤
       ((sliceBytes p).extract start.val end_.val)[1]! = (p.val[start.val + 1]'hs).val := by
     intro hs he
     rw [extract_getElem! p start.val end_.val 1 (by omega) h2, getElem!_pos p.val _ (by omega)]
-  rw [componentOk_iff, hlen]
+  rw [componentOk_iff, hlen, show dot = 46 from rfl]
   generalize ((sliceBytes p).extract start.val end_.val)[0]! = a0 at *
   generalize ((sliceBytes p).extract start.val end_.val)[1]! = a1 at *
   clear hlen
@@ -124,20 +104,20 @@ theorem component_ok_spec (p : Slice U8) (start end_ : Usize) (h : start.val ≤
 
 /-- Every `/`-separated component is acceptable and there is no NUL. -/
 def PathGood (m : List Nat) : Prop :=
-  (∀ c ∈ m.splitOn 47, Transcrypt.V3Policy.ComponentOk c) ∧ 0 ∉ m
+  (∀ c ∈ m.splitOn slash, Transcrypt.V3Policy.ComponentOk c) ∧ 0 ∉ m
 
-theorem pathGood_of_no_sep {m : List Nat} (h : 47 ∉ m) :
+theorem pathGood_of_no_sep {m : List Nat} (h : slash ∉ m) :
     PathGood m ↔ Transcrypt.V3Policy.ComponentOk m ∧ 0 ∉ m := by
   unfold PathGood
   rw [List.splitOn_eq_singleton h]
   simp
 
 theorem pathGood_sep (l : List Nat) (s i : Nat) (hs : s ≤ i) (hi : i < l.length)
-    (h47 : l[i]! = 47) (hno : 47 ∉ l.extract s i) :
+    (h47 : l[i]! = slash) (hno : slash ∉ l.extract s i) :
     PathGood (l.drop s) ↔
       (Transcrypt.V3Policy.ComponentOk (l.extract s i) ∧ 0 ∉ l.extract s i) ∧
         PathGood (l.drop (i + 1)) := by
-  have hsplit : l.drop s = l.extract s i ++ 47 :: l.drop (i + 1) := by
+  have hsplit : l.drop s = l.extract s i ++ slash :: l.drop (i + 1) := by
     rw [getElem!_pos l i hi] at h47
     rw [← h47, List.extract_eq_take_drop]
     rw [← List.drop_eq_getElem_cons hi]
@@ -155,18 +135,6 @@ theorem pathGood_sep (l : List Nat) (s i : Nat) (hs : s ≤ i) (hi : i < l.lengt
   · rintro ⟨⟨h1, h3⟩, h2, h5⟩
     exact ⟨⟨h1, h2⟩, h3, by decide, h5⟩
 
-theorem extract_succ (l : List Nat) (s i : Nat) (hs : s ≤ i) (hi : i < l.length) :
-    l.extract s (i + 1) = l.extract s i ++ [l[i]!] := by
-  rw [getElem!_pos l i hi]
-  simp only [List.extract_eq_take_drop]
-  have : i + 1 - s = (i - s) + 1 := by omega
-  rw [this, List.take_add_one]
-  congr
-  rw [List.getElem?_drop, List.getElem?_eq_getElem (by omega)]
-  simp only [Option.toList_some, List.cons.injEq, and_true]
-  congr 1
-  omega
-
 theorem extract_all (l : List Nat) (s : Nat) : l.extract s l.length = l.drop s := by
   simp
 
@@ -180,18 +148,19 @@ theorem extract_all (l : List Nat) (s : Nat) : l.extract s l.length = l.drop s :
 def ScanInv (l : List Nat) (ok : Bool) (s i : Nat) : Prop :=
   i ≤ l.length + 1 ∧
   (i ≤ l.length → s ≤ i ∧
-    (ok = true → 47 ∉ l.extract s i ∧ 0 ∉ l.extract s i ∧ (PathGood l ↔ PathGood (l.drop s))) ∧
+    (ok = true → slash ∉ l.extract s i ∧ 0 ∉ l.extract s i ∧ (PathGood l ↔ PathGood (l.drop s))) ∧
     (ok = false → ¬ PathGood l)) ∧
   (i = l.length + 1 → (ok = true ↔ PathGood l))
 
 theorem scan_body_spec (path : Slice U8) (n : Usize) (hn : n.val = path.length)
-    (hmax : n.val ≤ 4096) (ok : Bool) (s i : Usize)
+    (hmax : n.val ≤ maxPath) (ok : Bool) (s i : Usize)
     (hinv : ScanInv (sliceBytes path) ok s.val i.val) :
     is_canonical_protected_path_loop.body path n ok s i ⦃ cf => match cf with
       | .cont (ok', s', i') => ScanInv (sliceBytes path) ok' s'.val i'.val ∧
           n.val + 1 - i'.val < n.val + 1 - i.val
       | .done r => r = true ↔ PathGood (sliceBytes path) ⦄ := by
   have hl : (sliceBytes path).length = n.val := by simp [sliceBytes, hn]
+  simp only [maxPath] at hmax
   unfold ScanInv at hinv
   rw [hl] at hinv
   obtain ⟨hi, hlo, hhi⟩ := hinv
@@ -220,7 +189,7 @@ theorem scan_body_spec (path : Slice U8) (n : Usize) (hn : n.val = path.length)
     split
     · step*
       rename_i h47 ok3 _ hok3 _
-      have h47' : (sliceBytes path)[i.val]! = 47 := by
+      have h47' : (sliceBytes path)[i.val]! = slash := by
         rw [hb, h47]; rfl
       have hsep := pathGood_sep (sliceBytes path) s.val i.val hsi (by omega) h47' hno47
       rw [x_post, i1_post]
@@ -248,9 +217,9 @@ theorem scan_body_spec (path : Slice U8) (n : Usize) (hn : n.val = path.length)
         refine ⟨⟨by omega, fun _ => ⟨by omega, fun h => absurd h (by decide), fun _ => hbad⟩,
           fun h => by omega⟩, by omega⟩
       · rename_i hn47 hn0
-        have hext := extract_succ (sliceBytes path) s.val i.val hsi (by omega)
+        have hext := extract_snoc (sliceBytes path) hsi (by omega)
         rw [hb] at hext
-        have h47v : b.val ≠ 47 := fun h => hn47 (by scalar_tac)
+        have h47v : b.val ≠ slash := fun h => hn47 (by simp only [slash] at h; scalar_tac)
         have h0v : b.val ≠ 0 := fun h => hn0 (by scalar_tac)
         rw [i1_post]
         refine ⟨⟨by omega, fun _ => ⟨by omega, fun _ => ⟨?_, ?_, hiff⟩, fun h => absurd h (by decide)⟩,
@@ -264,25 +233,22 @@ theorem scanInv_init (l : List Nat) : ScanInv l true 0 0 := by
   simp
 
 theorem scan_loop_spec (path : Slice U8) (n : Usize) (hn : n.val = path.length)
-    (hmax : n.val ≤ 4096) (ok : Bool) (s i : Usize)
+    (hmax : n.val ≤ maxPath) (ok : Bool) (s i : Usize)
     (hinv : ScanInv (sliceBytes path) ok s.val i.val) :
     is_canonical_protected_path_loop path n ok s i ⦃ r =>
       r = true ↔ PathGood (sliceBytes path) ⦄ := by
   unfold is_canonical_protected_path_loop
   apply loop.spec_decr_nat (fun st => n.val + 1 - st.2.2.val)
     (fun st => ScanInv (sliceBytes path) st.1 st.2.1.val st.2.2.val)
-  · rintro ⟨ok', s', i'⟩ hinv'
-    apply WP.spec_mono (scan_body_spec path n hn hmax ok' s' i' hinv')
-    rintro (⟨ok'', s'', i''⟩ | r)
-    · exact id
-    · exact id
+  · rintro ⟨ok', s', i'⟩ h
+    apply WP.spec_mono (scan_body_spec path n hn hmax ok' s' i' h)
+    rintro (⟨_, _, _⟩ | _) <;> exact id
   · exact hinv
 
 theorem canonical_iff (l : List Nat) :
     Transcrypt.V3Policy.CanonicalProtectedPath l ↔
-      l ≠ [] ∧ l.length ≤ 4096 ∧ PathGood l ∧ ¬ Transcrypt.V3Policy.Reserved l := by
-  unfold Transcrypt.V3Policy.CanonicalProtectedPath PathGood Transcrypt.V3Policy.maxPath
-    Transcrypt.V3Policy.slash
+      l ≠ [] ∧ l.length ≤ maxPath ∧ PathGood l ∧ ¬ Transcrypt.V3Policy.Reserved l := by
+  unfold Transcrypt.V3Policy.CanonicalProtectedPath PathGood
   tauto
 
 @[step]
@@ -290,10 +256,10 @@ theorem is_canonical_protected_path_spec (p : Slice U8) :
     is_canonical_protected_path p ⦃ r =>
       r = true ↔ Transcrypt.V3Policy.CanonicalProtectedPath (sliceBytes p) ⦄ := by
   unfold is_canonical_protected_path
-  have hmp : MAX_PATH.val = 4096 := by unfold MAX_PATH; rfl
+  have hmp : MAX_PATH.val = 4096 := MAX_PATH_val
   have hlen : (sliceBytes p).length = p.length := by simp [sliceBytes]
-  rw [canonical_iff]
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  rw [canonical_iff, maxPath]
+  simp_len
   step*
   · rename_i h0
     have : p.length = 0 := by have := congrArg UScalar.val h0; simpa using this
@@ -303,8 +269,8 @@ theorem is_canonical_protected_path_spec (p : Slice U8) :
     have hn0 : p.length ≠ 0 := fun h => h0 (by scalar_tac)
     have hle : p.length ≤ 4096 := by
       have : ¬ p.len.val > MAX_PATH.val := hgt
-      simp at this ⊢; omega
-    step with scan_loop_spec p p.len (by simp) (by simpa using hle) true 0#usize 0#usize
+      simp [maxPath] at this ⊢; omega
+    step with scan_loop_spec p p.len (by simp) (by simpa [maxPath] using hle) true 0#usize 0#usize
       (scanInv_init _) as ⟨ ok1, hok1 ⟩
     have hne : sliceBytes p ≠ [] := fun h => hn0 (by rw [← hlen, h]; rfl)
     split

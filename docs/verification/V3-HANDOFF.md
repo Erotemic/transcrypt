@@ -74,7 +74,7 @@ semantics silently or import legacy CBC into the proved core.
   `Realizes`. Lifecycle theorems are about Lean models of the adapter's
   loops.
 - The pre-commit hook's inputs are verified functions of Git's exact
-  listings (`Snapshot.lean`: `parse_listing`, which also checks Git's byte
+  listings (`Snapshot*.lean`: `parse_listing`, which also checks Git's byte
   order of paths with `bytes_lt`, each path once; `listing_fields`,
   `parse_listing_attrs`, `first_unselectable`, `held_entries` (binary
   search), `is_local_change`, `object_order_ok`, `next_move_source`,
@@ -114,10 +114,13 @@ stable, but reordering loops inside a proved function renames them.
 
 ## Proof engineering notes (hard-won)
 
-- Generic whole-loop lemmas: `copy_loop` / `compare_loop` in `Copy.lean`
-  (via `loop.spec_decr_nat`), and the pointwise `Copied` invariant.
-- In loop bodies: `simp only [CoreModels.core.slice.Slice.len,
-  CoreModels.rust_primitives.slice.slice_length]`, put length/constant facts
+- Generic whole-loop lemmas: `copy_loop` / `compare_loop` in `Basic.lean`
+  (via `loop.spec_decr_nat`), the pointwise `Copied` invariant with
+  `Copied.array_step` (one iteration) and `copied_concat` (two regions).
+  Constant facts (`X_val`, `X_bytes`, `X_spec`) all live in `Refinement.lean`.
+- In loop bodies: `simp_len` (the `Basic.lean` macro for
+  `simp only [CoreModels.core.slice.Slice.len,
+  CoreModels.rust_primitives.slice.slice_length]`), put length/constant facts
   and `have := usize_max_ge` in context **before** `step*`; it then
   discharges bounds and exit cases itself. Inspect leftovers with
   `trace_state`. Goal order after `step*` can surprise you.

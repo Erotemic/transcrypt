@@ -1,7 +1,7 @@
 import Std.Tactic.BVDecide
 
-/-
-  Independent, fixed-width Base64 bit-manipulation specification.
+/-!
+  **Legacy (pre-v3).** Independent, fixed-width Base64 bit-manipulation specification.
 
   This deliberately does not import Aeneas-generated Rust functions.
   The obligations below state the mathematical laws corresponding to

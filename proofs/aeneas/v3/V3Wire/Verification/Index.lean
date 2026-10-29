@@ -1,10 +1,4 @@
 import V3Wire.Verification.Bytes
-import Transcrypt.V3Policy
-open CoreModels Aeneas
-open Aeneas.Std hiding namespace core alloc
-open RustM ControlFlow
-namespace Transcrypt.V3Verification
-open transcrypt_v3_core
 
 /-!
 Functional refinement of the production Git index-record parser
@@ -14,25 +8,22 @@ offset of the path (everything after the first TAB). The TAB is found with
 `find_byte` and the mode compared with `matches_at`, both proved in `Bytes`.
 -/
 
-theorem REGULAR_MODE_matches_spec :
-    REGULAR_MODE.val.map (·.val) = Transcrypt.V3Policy.regularMode := by
-  unfold REGULAR_MODE Transcrypt.V3Policy.regularMode Transcrypt.V3Policy.ascii
-  decide
+open CoreModels Aeneas
+open Aeneas.Std hiding namespace core alloc
+open RustM ControlFlow
 
-theorem EXECUTABLE_MODE_matches_spec :
-    EXECUTABLE_MODE.val.map (·.val) = Transcrypt.V3Policy.executableMode := by
-  unfold EXECUTABLE_MODE Transcrypt.V3Policy.executableMode Transcrypt.V3Policy.ascii
-  decide
+namespace Transcrypt.V3Verification
+
+open transcrypt_v3_core
 
 /-- `matches_at entry 0 M` for a six-byte mode `M` (the post of
     `matches_at_spec`) says exactly whether the entry starts with `M`. -/
 theorem matches_mode_iff (entry : Slice U8) (M : Std.Array U8 6#usize) (m : List Nat)
-    (hM : M.val.map (·.val) = m) :
+    (hM : sliceBytes M.to_slice = m) :
     (0 ≤ entry.length ∧ sliceBytes M.to_slice <+: (sliceBytes entry).drop 0) ↔
       (sliceBytes entry).take 6 = m := by
-  have hs : sliceBytes M.to_slice = m := by rw [← hM]; rfl
-  have hm : m.length = 6 := by rw [← hM]; simp
-  rw [hs, List.drop_zero, List.prefix_iff_eq_take, hm]
+  have hm : m.length = 6 := by rw [← hM, sliceBytes_length]; simp
+  rw [hM, List.drop_zero, List.prefix_iff_eq_take, hm]
   exact ⟨fun h => h.2.symm, fun h => ⟨Nat.zero_le _, h.symm⟩⟩
 
 theorem drop_three (l : List Nat) (j : Nat) (hj : j + 2 < l.length) :
@@ -77,14 +68,6 @@ theorem index_sound (l : List Nat) (t : Nat) (reg : Bool) (h10 : 10 ≤ t)
   · intro h; have := congrArg List.length h; simp at this; omega
   · exact hreg
 
-theorem idx_getElem!_append_right (P S : List Nat) (j : Nat) : (P ++ S)[P.length + j]! = S[j]! := by
-  simp only [getElem!_def, List.getElem?_append_right (by omega : P.length ≤ P.length + j),
-    Nat.add_sub_cancel_left]
-
-theorem idx_getElem!_append_left (P S : List Nat) (j : Nat) (h : j < P.length) :
-    (P ++ S)[j]! = P[j]! := by
-  simp only [getElem!_def, List.getElem?_append_left h]
-
 theorem index_complete (l : List Nat) (reg : Bool) (path : List Nat)
     (h : Transcrypt.V3Policy.IndexRecord l reg path) :
     ∃ t, 10 ≤ t ∧ t + 1 < l.length ∧ l[t]! = 9 ∧ (∀ k < t, l[k]! ≠ 9) ∧
@@ -99,18 +82,18 @@ theorem index_complete (l : List Nat) (reg : Bool) (path : List Nat)
   have hl : mode ++ [32] ++ oid ++ [32, 48, 9] ++ path = A ++ (9 :: path) := by simp [A]
   have h9A : 9 ∉ A := by simp [A, h9m, h9o]
   refine ⟨9 + oid.length, by omega, by simp [hm]; omega, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
-  · rw [hl, ← hA]; exact idx_getElem!_append_right A (9 :: path) 0
+  · rw [hl, ← hA]; exact getElem!_append_length_add A (9 :: path) 0
   · intro k hk h9
-    rw [hl, idx_getElem!_append_left A _ k (by omega), getElem!_pos A k (by omega)] at h9
+    rw [hl, List.getElem!_append_left A _ k (by omega), getElem!_pos A k (by omega)] at h9
     exact h9A (h9 ▸ List.getElem_mem (by omega))
   · have : mode ++ [32] ++ oid ++ [32, 48, 9] ++ path = mode ++ (32 :: (oid ++ [32, 48, 9] ++ path)) := by simp
-    rw [this, show 6 = mode.length + 0 by omega, idx_getElem!_append_right]; rfl
+    rw [this, show 6 = mode.length + 0 by omega, getElem!_append_length_add]; rfl
   · have : mode ++ [32] ++ oid ++ [32, 48, 9] ++ path = (mode ++ [32] ++ oid) ++ (32 :: 48 :: 9 :: path) := by simp
     rw [this, show 9 + oid.length - 2 = (mode ++ [32] ++ oid).length + 0 by simp [hm]; omega,
-      idx_getElem!_append_right]; rfl
+      getElem!_append_length_add]; rfl
   · have : mode ++ [32] ++ oid ++ [32, 48, 9] ++ path = (mode ++ [32] ++ oid) ++ (32 :: 48 :: 9 :: path) := by simp
     rw [this, show 9 + oid.length - 1 = (mode ++ [32] ++ oid).length + 1 by simp [hm]; omega,
-      idx_getElem!_append_right]; rfl
+      getElem!_append_length_add]; rfl
   · rw [hl, show 9 + oid.length + 1 = (A ++ [9]).length by simp [hA]]
     simp
   · rw [hreg]
@@ -125,7 +108,7 @@ theorem parse_index_entry_spec (entry : Slice U8) :
       | core.result.Result.Err _ =>
           ∀ reg path, ¬ Transcrypt.V3Policy.IndexRecord (sliceBytes entry) reg path ⦄ := by
   unfold parse_index_entry
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hl := sliceBytes_length entry
   have hmax := usize_max_ge
   have hrl : entry.length = entry.val.length := rfl
@@ -149,7 +132,7 @@ theorem parse_index_entry_spec (entry : Slice U8) :
   have hbyte : ∀ (k : Nat) (hk : k < entry.val.length) (b : U8), b = entry.val[k] →
       ∀ c : U8, ¬(b != c) = true → (sliceBytes entry)[k]! = c.val := by
     intro k hk b hb c hne
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+    simp_bne at hne
     rw [sliceBytes_getElem! entry k hk, ← hb, hne]
   step*
   have h6 : (sliceBytes entry)[6]! = 32 := hbyte 6 (by omega) _ i1_post2 32#u8 ‹_›
@@ -159,13 +142,13 @@ theorem parse_index_entry_spec (entry : Slice U8) :
     rw [← i4_post1]; exact hbyte i4.val (by omega) _ i5_post2 48#u8 ‹_›
   have hsound := index_sound (sliceBytes entry) t.val (h10 := by scalar_tac)
     (hn := by scalar_tac) (h9 := ht9 (by scalar_tac)) (hno := hno') (h6 := h6) (h2 := h2) (h1 := h1)
-  rw [s_post, matches_mode_iff entry _ _ REGULAR_MODE_matches_spec] at b_post
+  rw [s_post, matches_mode_iff entry _ _ REGULAR_MODE_bytes] at b_post
   split
   · step*
     scalar_tac
   · step as ⟨ s1, s1_post ⟩
     step with matches_at_spec as ⟨ b1, hb1 ⟩
-    rw [s1_post, matches_mode_iff entry _ _ EXECUTABLE_MODE_matches_spec] at hb1
+    rw [s1_post, matches_mode_iff entry _ _ EXECUTABLE_MODE_bytes] at hb1
     step*
     scalar_tac
 

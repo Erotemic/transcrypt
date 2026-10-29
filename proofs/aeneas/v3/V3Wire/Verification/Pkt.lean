@@ -1,10 +1,4 @@
-import V3Wire.Verification.Protocol
-import Transcrypt.V3Policy
-open CoreModels Aeneas
-open Aeneas.Std hiding namespace core alloc
-open RustM ControlFlow
-namespace Transcrypt.V3Verification
-open transcrypt_v3_core
+import V3Wire.Verification.Refinement
 
 /-!
 Functional refinement of the production pkt-line length decoder
@@ -13,6 +7,14 @@ Functional refinement of the production pkt-line length decoder
 `Err Refusal.Request` for every other header. As a `WP.spec` triple it also
 excludes panics, overflow and divergence.
 -/
+
+open CoreModels Aeneas
+open Aeneas.Std hiding namespace core alloc
+open RustM ControlFlow
+
+namespace Transcrypt.V3Verification
+
+open transcrypt_v3_core
 
 open Transcrypt.V3Policy (hexValue)
 
@@ -65,7 +67,10 @@ theorem pkt_hex_none {c : Nat} (h1 : ¬(48 ≤ c ∧ c ≤ 57)) (h2 : ¬(97 ≤ 
 def PktInv (l : List Nat) (s : Usize × Bool × Usize) : Prop :=
   s.2.2.val ≤ 4 ∧ pktAcc l s.2.2.val = if s.2.1 then some s.1.val else none
 
-/-- One digit step of `decode_pkt_len`. -/
+/-- One digit step of `decode_pkt_len`. The program is restated from the
+    body of `decode_pkt_len_loop` in `V3Wire/Extraction/Funs.lean` and must
+    match it: `pkt_body_spec` applies this lemma with `step with`, which
+    fails if the extraction changes. -/
 theorem pkt_digit_spec (c : U8) (value : Usize) (hv : value.val < 16 ^ 3) :
     (if c >= 48#u8 then
         if c <= 57#u8 then
@@ -170,9 +175,7 @@ theorem pkt_loop_spec (header : Std.Array U8 4#usize) :
   apply loop.spec_decr_nat (fun s => 4 - s.2.2.val) (PktInv (wireBytes header))
   · rintro ⟨v, o, k⟩ hinv
     apply WP.spec_mono (pkt_body_spec header v o k hinv)
-    rintro (⟨v', o', k'⟩ | r)
-    · exact id
-    · exact id
+    rintro (⟨_, _, _⟩ | _) <;> exact id
   · simp [PktInv, pktAcc]
 
 /-- The spec's `PktLen` is exactly the four-digit decoded value. -/
@@ -198,7 +201,7 @@ theorem decode_pkt_len_spec (header : Std.Array U8 4#usize) :
           ∀ n, ¬ Transcrypt.V3Policy.PktLenAccepted (wireBytes header) n ⦄ := by
   unfold decode_pkt_len Transcrypt.V3Policy.PktLenAccepted
   step with pkt_loop_spec header as ⟨ value, ok1, hr ⟩
-  have hmax : MAX_PKT_LEN.val = 65520 := by simp [MAX_PKT_LEN]
+  have hmax : MAX_PKT_LEN.val = 65520 := MAX_PKT_LEN_val
   unfold Transcrypt.V3Policy.maxPktLen
   cases ok1
   · simp only [Bool.false_eq_true, ↓reduceIte] at hr ⊢

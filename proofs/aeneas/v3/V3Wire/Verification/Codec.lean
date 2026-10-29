@@ -1,6 +1,4 @@
 import V3Wire.Verification.Bytes
-import V3Wire.Verification.Refinement
-import Transcrypt.V3WireCodec
 
 /-!
 Full functional refinement of the production v3 wire codec. Every theorem
@@ -23,19 +21,6 @@ namespace Transcrypt.V3Verification
 
 open transcrypt_v3_core
 
-/-! ## Constant facts -/
-
-@[simp] theorem FILE_MAGIC_length : FILE_MAGIC.length = 6 := by simp
-@[simp] theorem CONFIG_MAGIC_length : CONFIG_MAGIC.length = 7 := by simp
-@[simp] theorem FILE_MAGIC_slice_len : FILE_MAGIC.to_slice.len.val = 6 := by simp
-@[simp] theorem CONFIG_MAGIC_slice_len : CONFIG_MAGIC.to_slice.len.val = 7 := by simp
-@[simp] theorem ID_LEN_val : ID_LEN.val = 16 := by simp [ID_LEN]
-@[simp] theorem SALT_LEN_val : SALT_LEN.val = 32 := by simp [SALT_LEN]
-@[simp] theorem TAG_LEN_val : TAG_LEN.val = 16 := by simp [TAG_LEN]
-@[simp] theorem CONFIG_PREFIX_LEN_val : CONFIG_PREFIX_LEN.val = 39 := by simp [CONFIG_PREFIX_LEN]
-@[simp] theorem CONFIG_LEN_val : CONFIG_LEN.val = 55 := by simp [CONFIG_LEN]
-@[simp] theorem FILE_HEADER_LEN_val : FILE_HEADER_LEN.val = 22 := by simp [FILE_HEADER_LEN]
-
 /-! ## File header encoder -/
 
 theorem encode_file_header_loop0_spec (base out : Std.Array U8 22#usize) (i : Usize)
@@ -45,13 +30,14 @@ theorem encode_file_header_loop0_spec (base out : Std.Array U8 22#usize) (i : Us
   apply copy_loop (val := fun o : Std.Array U8 22#usize => o.val) (bound := 6) _ _ _ _ _ _ _ _ hi h
   intro o j hj hc
   unfold encode_file_header_loop0.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   step*
   have := FILE_MAGIC_length
   refine ⟨i3_post, by omega, ?_⟩
-  rw [a_post, i2_post2, i3_post]
-  have := hc.step (by simp; omega)
-  simpa [getElem!_pos FILE_MAGIC.val j.val (by simpa using i2)] using this
+  rw [a_post, i3_post]
+  apply Copied.array_step hc (by simp)
+  · simp_all [getElem!_pos]
+  · simp; omega
 
 theorem encode_file_header_loop1_spec (base out : Std.Array U8 22#usize) (src : Std.Array U8 16#usize)
     (j : Usize) (hj : j.val ≤ 16) (h : Copied out.val base.val src.val 6 0 j.val) :
@@ -62,34 +48,14 @@ theorem encode_file_header_loop1_spec (base out : Std.Array U8 22#usize) (src : 
   unfold encode_file_header_loop1.body
   have hsrc : src.length = 16 := by simp
   have ho : o.length = 22 := by simp
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hID := ID_LEN_val
   step*
   refine ⟨j1_post, by omega, ?_⟩
-  have hpos : i2.val = 6 + k.val := by rw [i2_post, s_post]; simp
-  rw [a_post, i_post2, j1_post]
-  have := hc.step (by simp; omega)
-  simp only [Std.Array.set, hpos]
-  rw [Nat.zero_add, getElem!_pos src.val k.val (by simp; omega)] at this
-  exact this
-
-/-- List equality from pointwise `getElem!` agreement. -/
-theorem list_eq_of_getElem! {l₁ l₂ : List U8} (hl : l₁.length = l₂.length)
-    (h : ∀ k, k < l₁.length → l₁[k]! = l₂[k]!) : l₁ = l₂ := by
-  apply List.ext_getElem hl
-  intro k h₁ h₂
-  have := h k h₁
-  rwa [getElem!_pos l₁ k h₁, getElem!_pos l₂ k h₂] at this
-
-theorem getElem!_append_left' {l₁ l₂ : List U8} {k : Nat} (hk : k < l₁.length) :
-    (l₁ ++ l₂)[k]! = l₁[k]! := by
-  rw [getElem!_pos (l₁ ++ l₂) k (by simp; omega), getElem!_pos l₁ k hk, List.getElem_append_left]
-
-theorem getElem!_append_right' {l₁ l₂ : List U8} {k : Nat} (hk : l₁.length ≤ k)
-    (hk2 : k < l₁.length + l₂.length) :
-    (l₁ ++ l₂)[k]! = l₂[k - l₁.length]! := by
-  rw [getElem!_pos (l₁ ++ l₂) k (by simp; omega), getElem!_pos l₂ (k - l₁.length) (by omega),
-    List.getElem_append_right hk]
+  rw [a_post, j1_post]
+  apply Copied.array_step hc (by rw [i2_post, s_post]; simp)
+  · simp_all [getElem!_pos]
+  · simp; omega
 
 /-- The production file-header encoder emits exactly the magic followed by
     the arbitrary 16-byte configuration identifier. -/
@@ -101,27 +67,9 @@ theorem encode_file_header_bytes (id : Std.Array U8 16#usize) :
   · exact Copied.zero _ _ _ _
   step with encode_file_header_loop1_spec o0 o0 id as ⟨ o1, h1 ⟩
   · exact Copied.zero _ _ _ _
-  apply list_eq_of_getElem! (by simp)
-  intro k hk
-  have hk22 : k < 22 := by simpa using hk
-  by_cases hlt : k < 6
-  · rw [h1.get_out hk (by omega), getElem!_append_left' (by simp; omega),
-      h0.get_in (by simp; omega) (by omega) (by omega)]
-    simp
-  · rw [h1.get_in hk (by omega) (by omega), getElem!_append_right' (by simp; omega) (by simp; omega)]
-    simp
+  exact copied_concat h0 h1 (by simp) (by simp) (by simp)
 
 /-! ## Config encoder -/
-
-/-- One iteration of a copy loop writing into an Aeneas array. -/
-theorem Copied.array_step {N : Usize} {o : Std.Array U8 N} {base src : List U8}
-    {dst srcOff k : Nat} {p : Usize} {x : U8}
-    (hc : Copied o.val base src dst srcOff k) (hp : p.val = dst + k)
-    (hx : x = src[srcOff + k]!) (hlt : dst + k < o.val.length) :
-    Copied (o.set p x).val base src dst srcOff (k + 1) := by
-  have := hc.step hlt
-  subst hx
-  simpa [Std.Array.set, hp] using this
 
 theorem encode_config_prefix_loop0_spec (base out : Std.Array U8 39#usize) (i : Usize)
     (hi : i.val ≤ 7) (h : Copied out.val base.val CONFIG_MAGIC.val 0 0 i.val) :
@@ -130,13 +78,14 @@ theorem encode_config_prefix_loop0_spec (base out : Std.Array U8 39#usize) (i : 
   apply copy_loop (val := fun o : Std.Array U8 39#usize => o.val) (bound := 7) _ _ _ _ _ _ _ _ hi h
   intro o j hj hc
   unfold encode_config_prefix_loop0.body
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   step*
   have := CONFIG_MAGIC_length
   refine ⟨i3_post, by omega, ?_⟩
-  rw [a_post, i2_post2, i3_post]
-  have := hc.step (by simp; omega)
-  simpa [getElem!_pos CONFIG_MAGIC.val j.val (by simpa using i2)] using this
+  rw [a_post, i3_post]
+  apply Copied.array_step hc (by simp)
+  · simp_all [getElem!_pos]
+  · simp; omega
 
 theorem encode_config_prefix_loop1_spec (base out : Std.Array U8 39#usize) (src : Std.Array U8 32#usize)
     (j : Usize) (hj : j.val ≤ 32) (h : Copied out.val base.val src.val 7 0 j.val) :
@@ -147,16 +96,14 @@ theorem encode_config_prefix_loop1_spec (base out : Std.Array U8 39#usize) (src 
   unfold encode_config_prefix_loop1.body
   have hsrc : src.length = 32 := by simp
   have ho : o.length = 39 := by simp
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hID := SALT_LEN_val
   step*
   refine ⟨j1_post, by omega, ?_⟩
-  have hpos : i2.val = 7 + k.val := by rw [i2_post, s_post]; simp
-  rw [a_post, i_post2, j1_post]
-  have := hc.step (by simp; omega)
-  simp only [Std.Array.set, hpos]
-  rw [Nat.zero_add, getElem!_pos src.val k.val (by simp; omega)] at this
-  exact this
+  rw [a_post, j1_post]
+  apply Copied.array_step hc (by rw [i2_post, s_post]; simp)
+  · simp_all [getElem!_pos]
+  · simp; omega
 
 theorem encode_config_loop0_spec (base out : Std.Array U8 55#usize) (src : Std.Array U8 39#usize)
     (i : Usize) (hi : i.val ≤ 39) (h : Copied out.val base.val src.val 0 0 i.val) :
@@ -202,15 +149,7 @@ theorem encode_config_prefix_bytes (salt : Std.Array U8 32#usize) :
   · exact Copied.zero _ _ _ _
   step with encode_config_prefix_loop1_spec o0 o0 salt as ⟨ o1, h1 ⟩
   · exact Copied.zero _ _ _ _
-  apply list_eq_of_getElem! (by simp)
-  intro k hk
-  have hk39 : k < 39 := by simpa using hk
-  by_cases hlt : k < 7
-  · rw [h1.get_out hk (by omega), getElem!_append_left' (by simp; omega),
-      h0.get_in (by simp; omega) (by omega) (by omega)]
-    simp
-  · rw [h1.get_in hk (by omega) (by omega), getElem!_append_right' (by simp; omega) (by simp; omega)]
-    simp
+  exact copied_concat h0 h1 (by simp) (by simp) (by simp)
 
 /-- The production config encoder emits magic, salt and verifier tag. -/
 @[step]
@@ -223,15 +162,7 @@ theorem encode_config_bytes (c : Config) :
   step with encode_config_loop1_spec o0 o0 c.tag as ⟨ o1, h1 ⟩
   · exact Copied.zero _ _ _ _
   rw [← hp]
-  apply list_eq_of_getElem! (by simp)
-  intro k hk
-  have hk55 : k < 55 := by simpa using hk
-  by_cases hlt : k < 39
-  · rw [h1.get_out hk (by omega), getElem!_append_left' (by simp; omega),
-      h0.get_in (by simp; omega) (by omega) (by omega)]
-    simp
-  · rw [h1.get_in hk (by omega) (by omega), getElem!_append_right' (by simp; omega) (by simp; omega)]
-    simp
+  exact copied_concat h0 h1 (by simp) (by simp) (by simp)
 
 /-! ## Decoders -/
 
@@ -245,7 +176,7 @@ theorem decode_file_header_exact_loop_spec (input : Std.Array U8 22#usize)
   unfold decode_file_header_exact_loop.body
   have hsrc : input.length = 22 := by simp
   have ho : o.length = 16 := by simp
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hID := ID_LEN_val
   step*
   have hs : s.len.val = 6 := by simp [s_post]
@@ -266,7 +197,7 @@ theorem decode_config_exact_loop0_spec (input : Std.Array U8 55#usize)
   unfold decode_config_exact_loop0.body
   have hsrc : input.length = 55 := by simp
   have ho : o.length = 32 := by simp
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hID := SALT_LEN_val
   step*
   have hs : s.len.val = 7 := by simp [s_post]
@@ -325,9 +256,9 @@ theorem eq_append_of_matches_copied {inp M id base : List U8}
   apply list_eq_of_getElem! (by simp [hlen])
   intro k hk
   by_cases hlt : k < M.length
-  · rw [getElem!_append_left' hlt]
+  · rw [List.getElem!_append_left _ _ _ hlt]
     simpa using hm k hlt
-  · rw [getElem!_append_right' (by omega) (by omega),
+  · rw [List.getElem!_append_right _ _ _ (by omega),
       hc.get_in (by omega) (by omega) (by omega)]
     congr 1
     omega
@@ -340,15 +271,15 @@ theorem eq_append3_of_matches_copied {inp M s t bs bt : List U8}
   apply list_eq_of_getElem! (by simp [hlen]; omega)
   intro k hk
   by_cases hlt : k < M.length + s.length
-  · rw [getElem!_append_left' (by simp; omega)]
+  · rw [List.getElem!_append_left _ _ _ (by simp; omega)]
     by_cases hlt' : k < M.length
-    · rw [getElem!_append_left' hlt']
+    · rw [List.getElem!_append_left _ _ _ hlt']
       simpa using hm k hlt'
-    · rw [getElem!_append_right' (by omega) (by omega),
+    · rw [List.getElem!_append_right _ _ _ (by omega),
         hs.get_in (by omega) (by omega) (by omega)]
       congr 1
       omega
-  · rw [getElem!_append_right' (by simp; omega) (by simp; omega),
+  · rw [List.getElem!_append_right _ _ _ (by simp; omega),
       ht.get_in (by simp; omega) (by omega) (by simp; omega)]
     congr 1
     simp
@@ -434,17 +365,6 @@ theorem parse_file_header_loop_spec (input : Slice U8) (hlen : 22 ≤ input.leng
   · rw [i1_post2, Nat.zero_add, getElem!_pos input.val k.val i1]
   · simp; omega
 
-theorem map_val_injective : Function.Injective (List.map (fun b : U8 => b.val)) :=
-  List.map_injective_iff.2 (fun a b h => (UScalar.eq_equiv a b).2 h)
-
-theorem copied_full {out base src : List U8} {n : Nat} (h : Copied out base src 0 0 n)
-    (hl : out.length = n) (hn : n ≤ src.length) : out = src.take n := by
-  apply list_eq_of_getElem! (by simp; omega)
-  intro k hk
-  rw [h.get_in hk (by omega) (by omega), getElem!_pos (src.take n) k (by simp; omega),
-    List.getElem_take, ← getElem!_pos src k (by omega)]
-  simp
-
 theorem config_shape_of_eq {l : List U8} (salt : Std.Array U8 32#usize)
     (tag : Std.Array U8 16#usize) (h : l = CONFIG_MAGIC.val ++ salt.val ++ tag.val) :
     Transcrypt.V3Wire.decodeConfigShape (l.map (fun b => b.val)) =
@@ -474,7 +394,7 @@ theorem parse_config_spec (input : Slice U8) :
           Transcrypt.V3Wire.decodeConfigShape (sliceBytes input) = none
       | core.result.Result.Err FormatError.Length => input.length ≠ 55 ⦄ := by
   unfold parse_config
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  simp_len [bind_tc_ok]
   split
   · rename_i hne
     have h1 : input.len ≠ CONFIG_LEN := by simpa using hne
@@ -533,7 +453,7 @@ theorem parse_file_header_spec (input : Slice U8) :
           Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes input) = none
       | core.result.Result.Err FormatError.Length => input.length < 38 ⦄ := by
   unfold parse_file_header FILE_MIN_LEN
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length, bind_tc_ok]
+  simp_len [bind_tc_ok]
   have h1 := FILE_HEADER_LEN_val
   have h2 := TAG_LEN_val
   step*
@@ -611,10 +531,6 @@ theorem decode_file_header_exact_encode_file_header (id : Std.Array U8 16#usize)
   · cases e
     · exact hr.elim
     · exact absurd (by rw [hout]; simp) hr
-
-theorem wireBytes_injective {n : Usize} {a b : Std.Array U8 n}
-    (h : wireBytes a = wireBytes b) : a = b :=
-  Subtype.ext (map_val_injective h)
 
 /-- Public slice-boundary roundtrip for configs: the production parser
     recovers exactly the config the production encoder serialized. -/

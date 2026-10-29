@@ -1,10 +1,4 @@
-import V3Wire.Verification.Protocol
-import Transcrypt.V3Policy
-open CoreModels Aeneas
-open Aeneas.Std hiding namespace core alloc
-open RustM ControlFlow
-namespace Transcrypt.V3Verification
-open transcrypt_v3_core
+import V3Wire.Verification.Codec
 
 /-!
 Functional refinement of two keyless production checks used by the Git
@@ -16,6 +10,14 @@ given configuration id). As `WP.spec` triples they also exclude panics and
 divergence.
 -/
 
+open CoreModels Aeneas
+open Aeneas.Std hiding namespace core alloc
+open RustM ControlFlow
+
+namespace Transcrypt.V3Verification
+
+open transcrypt_v3_core
+
 /-- The digits examined so far are all lowercase hexadecimal. -/
 def EnvHexUpTo (l : List Nat) (i : Nat) : Prop := ∀ k < i, Transcrypt.V3Policy.HexDigit l[k]!
 
@@ -24,7 +26,11 @@ def EnvHexUpTo (l : List Nat) (i : Nat) : Prop := ∀ k < i, Transcrypt.V3Policy
 def EnvOidInv (oid : Slice U8) (lenOk : Prop) (s : Bool × Usize) : Prop :=
   s.2.val ≤ oid.length ∧ (s.1 = true ↔ lenOk ∧ EnvHexUpTo (sliceBytes oid) s.2.val)
 
-/-- The per-digit test of `is_object_id` decides `HexDigit`. -/
+/-- The per-digit test of `is_object_id` decides `HexDigit`. The program is
+    restated from the body of `is_object_id_loop` in
+    `V3Wire/Extraction/Funs.lean` and must match it: `env_oid_body_spec`
+    applies this lemma with `step with`, which fails if the extraction
+    changes. -/
 theorem env_hex_spec (c : U8) :
     (if c ≥ 48#u8 then if c ≤ 57#u8 then ok true else if c ≥ 97#u8 then ok (decide (c ≤ 102#u8)) else ok false
       else if c ≥ 97#u8 then ok (decide (c ≤ 102#u8)) else ok false : RustM Bool) ⦃ b =>
@@ -74,9 +80,7 @@ theorem env_oid_loop_spec (oid : Slice U8) (n : Usize) (hn : n.val = oid.length)
   apply loop.spec_decr_nat (fun s => n.val - s.2.val) (EnvOidInv oid lenOk)
   · rintro ⟨r, k⟩ hinv
     apply WP.spec_mono (env_oid_body_spec oid n hn lenOk r k hinv)
-    rintro (⟨r', k'⟩ | r)
-    · exact id
-    · exact id
+    rintro (⟨_, _⟩ | _) <;> exact id
   · refine ⟨by simp, ?_⟩
     have h0 : (0#usize).val = 0 := by simp
     simp only [hok, h0]
@@ -97,7 +101,7 @@ theorem env_objectId_iff (l : List Nat) :
 theorem is_object_id_spec (oid : Slice U8) :
     is_object_id oid ⦃ r => r = true ↔ Transcrypt.V3Policy.ObjectId (sliceBytes oid) ⦄ := by
   unfold is_object_id
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   rw [env_objectId_iff, sliceBytes_length]
   have key := env_oid_loop_spec oid oid.len (by simp) (oid.length = 40 ∨ oid.length = 64)
   -- The length test `(n == 40) | (n == 64)` computes the admissible-length flag.
@@ -111,7 +115,7 @@ theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize)
     record_envelope_ok record id ⦃ r => r = true ↔
       Transcrypt.V3Policy.EnvelopeOk (sliceBytes record) (wireBytes id) ⦄ := by
   unfold record_envelope_ok Transcrypt.V3Policy.EnvelopeOk
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hrl : record.len.val = record.length := by simp
   have hbl := sliceBytes_length record
   have := usize_max_ge
@@ -132,9 +136,7 @@ theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize)
       step*
       rw [r_post, s_post, s1_post, hr, hbl, Option.some_inj]
       simp only [hmax, true_and, Array.to_slice]
-      constructor
-      · intro h; simp only [wireBytes]; rw [h]
-      · intro h; exact map_val_injective h
+      exact (wireBytes_inj found id).symm
     | Err e =>
       simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
       intro _
@@ -169,7 +171,7 @@ theorem smudge_action_spec (blob : Slice U8) (id : Std.Array U8 16#usize) (unloc
            e = Refusal.Foreign ∧ blob.length ≤ Transcrypt.V3Policy.maxRecord ∧
              Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes blob) = none) ⦄ := by
   unfold smudge_action Transcrypt.V3Policy.smudgeSpec
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have hrl : blob.len.val = blob.length := by simp
   have hbl := sliceBytes_length blob
   have := usize_max_ge
@@ -196,11 +198,7 @@ theorem smudge_action_spec (blob : Slice U8) (id : Std.Array U8 16#usize) (unloc
         step*
         all_goals
           have hiff : b = true ↔ wireBytes found = wireBytes id := by
-            rw [b_post, s_post, s1_post]
-            simp only [Array.to_slice]
-            constructor
-            · intro h; simp only [wireBytes]; rw [h]
-            · intro h; exact map_val_injective h
+            rw [b_post, s_post, s1_post, wireBytes_inj]; rfl
         · rename_i hb
           exact ⟨_, by rw [if_pos ⟨hu, hiff.mp hb⟩], rfl⟩
         · rename_i hb

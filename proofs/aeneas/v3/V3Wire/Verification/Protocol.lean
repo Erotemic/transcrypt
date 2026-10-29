@@ -1,7 +1,5 @@
 import V3Wire.Verification.Codec
-import V3Wire.Verification.Bytes
 import V3Wire.Verification.Path
-import Transcrypt.V3Policy
 
 /-!
 Refinement of the production v3 protocol core (`initialize_config`,
@@ -15,7 +13,11 @@ the instance is arbitrary, constrained only by `Realizes`, the explicit
 contract that it computes the abstract `Suite`'s deterministic SIV function
 with the spec's domain strings and associated-data order, and the truncated
 digest. `Realizes` is assumption A5 of `docs/verification/V3-ASSUMPTIONS.md`;
-it is tested against independent OpenSSL/argon2-cffi vectors, not proved.
+it is tested, not proved: `rust/crates/transcrypt-rs/tests/v3_differential.rs`
+checks the production `Keyed` against OpenSSL AES-SIV and `hashlib` SHA-256
+(`tests/v3/reference/differential.py`; argon2-cffi only derives the corpus
+keys, and Argon2id is not part of `Realizes`), and
+`keyed_satisfies_the_realizes_contract` tests its clauses directly.
 -/
 
 open CoreModels Aeneas
@@ -50,10 +52,6 @@ structure Realizes {P : Type} (inst : V3Primitives P) (prims : P) (s : Suite) : 
     wireBytes id = s.digest16 (wireBytes cfg))
 
 variable {P : Type} {inst : V3Primitives P} {prims : P} {σ : Suite}
-
-theorem wireBytes_append3 {a : Std.Array U8 7#usize} {b : Std.Array U8 32#usize} {c : List U8} :
-    (a.val ++ b.val ++ c).map (fun x => x.val) = wireBytes a ++ wireBytes b ++ c.map (fun x => x.val) := by
-  simp [wireBytes]
 
 /-- A freshly initialized configuration authenticates and has the exact
     55-byte layout of the spec. -/
@@ -132,21 +130,6 @@ theorem authenticate_config_spec (h : Realizes inst prims σ) (config : Std.Arra
 
 /-! ## Record sealing and opening -/
 
-@[step] theorem MAX_FILE_spec : MAX_FILE ⦃ x => x.val = maxFile ⦄ := by
-  unfold MAX_FILE; step*; simp [maxFile, *]
-
-@[step] theorem FILE_MIN_LEN_spec : FILE_MIN_LEN ⦃ x => x.val = 38 ⦄ := by
-  unfold FILE_MIN_LEN
-  step*
-  · have := usize_max_ge; simp only [FILE_HEADER_LEN_val, TAG_LEN_val]; omega
-  · simp [*]
-
-@[step] theorem MAX_RECORD_spec : MAX_RECORD ⦃ x => x.val = maxRecord ⦄ := by
-  unfold MAX_RECORD
-  step*
-  · have := usize_max_ge; simp [maxFile] at *; omega
-  · simp [maxRecord, *]
-
 theorem setSlice!_tail {l ss : List U8} {i : Nat} (h : ss.length = l.length - i) (hi : i ≤ l.length) :
     l.setSlice! i ss = l.take i ++ ss := by
   have hm : min ss.length (l.length - i) = ss.length := by omega
@@ -208,12 +191,6 @@ theorem seal_record_loop_spec (base out : Slice U8) (header : Std.Array U8 22#us
   rw [Nat.zero_add, getElem!_pos header.val j.val (by simp; omega)] at this
   exact this
 
-@[step] theorem result_is_ok_spec {T E : Type} (r : core.result.Result T E) :
-    core.result.Result.is_ok r ⦃ b => b = true ↔ ∃ x, r = core.result.Result.Ok x ⦄ :=
-  match r with
-  | .Ok _ => by simp [core.result.Result.is_ok]
-  | .Err _ => by simp [core.result.Result.is_ok]
-
 /-- The clean direction. Success means every precondition of the spec's
     `MaySeal` holds and the output is exactly the spec's `sealedRecord`;
     each refusal names a violated precondition (or a primitive failure). -/
@@ -236,7 +213,7 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
   unfold seal_record
   have hptl : plaintext.len.val = plaintext.length := by simp
   have houtl : out.len.val = out.length := by simp
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have := usize_max_ge
   step*
   · have hn := ‹¬plaintext.len > i1›
@@ -246,7 +223,7 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
     have hn := ‹¬plaintext.len > i1›
     simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, i1_post] at hn
     have hol := ‹¬(out.len != i4) = true›
-    simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hol
+    simp_bne at hol
     have holv : out.length = plaintext.length + 38 := by
       rw [← houtl, hol, i4_post, i3_post, hptl]
     have hauth : ConfigAuthentic σ (wireBytes config) := by
@@ -304,7 +281,7 @@ theorem open_record_loop_spec (base out : Slice U8) (i : Usize)
   intro o j hj hc
   unfold open_record_loop.body
   have hol : o.length = base.length := by have := hc.1; simpa using this
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   step*
   refine ⟨i2_post, by omega, ?_⟩
   rw [s_post2, i2_post]
@@ -315,23 +292,6 @@ theorem open_record_loop_spec (base out : Slice U8) (i : Usize)
   rw [getElem!_pos (List.replicate base.length 0#u8) j.val (by simpa using hj),
     List.getElem_replicate] at this
   simpa [Slice.set, Slice.setAtNat] using this
-
-theorem record_of_shape {l id : List Nat}
-    (h : Transcrypt.V3Wire.decodeFileHeaderShape l = some id) :
-    l = Transcrypt.V3Wire.fileMagic ++ id ++ l.drop 22 ∧ 38 ≤ l.length ∧ id.length = 16 := by
-  unfold Transcrypt.V3Wire.decodeFileHeaderShape at h
-  split at h
-  · split at h
-    · rename_i hlen hmag
-      cases h
-      refine ⟨?_, hlen, by simp; omega⟩
-      conv => lhs; rw [← List.take_append_drop 6 l]
-      rw [hmag, List.append_assoc]
-      congr 1
-      conv => lhs; rw [← List.take_append_drop 16 (l.drop 6)]
-      simp [List.drop_drop]
-    · cases h
-  · cases h
 
 /-- The smudge/verify direction: plaintext is released only if the record
     authentically opens to it at exactly this config and path (the spec's
@@ -362,17 +322,17 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
   unfold open_record
   have hrl : record.len.val = record.length := by simp
   have houtl : out.len.val = out.length := by simp
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have := usize_max_ge
   step*
   · have hr1 := ‹r1 = core.result.Result.Ok id›
     subst hr1
-    have := (record_of_shape r1_post).2.1
+    have := (Transcrypt.V3Wire.record_of_shape r1_post).2.1
     rw [sliceBytes_length] at this
     rw [i2_post, hrl]; exact this
   · have hr1 := ‹r1 = core.result.Result.Ok id›
     subst hr1
-    obtain ⟨hshape, hlen38, -⟩ := record_of_shape r1_post
+    obtain ⟨hshape, hlen38, -⟩ := Transcrypt.V3Wire.record_of_shape r1_post
     rw [sliceBytes_length] at hlen38
     have hauth : ConfigAuthentic σ (wireBytes config) := by
       have := ‹r = core.result.Result.Ok _›; subst this; exact r_post.1
@@ -383,7 +343,7 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
       exact hn
     have hol : out.length + 38 = record.length := by
       have hne := ‹¬(i3 != out.len) = true›
-      simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+      simp_bne at hne
       have := congrArg (fun x : Usize => x.val) hne
       simp only [i3_post1, i2_post, hrl, houtl] at this
       omega
@@ -391,10 +351,7 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
     step as ⟨ s1, hs1 ⟩
     step with bytes_eq_spec as ⟨ b1, hb1 ⟩
     have hid_iff : b1 = true ↔ wireBytes id = σ.digest16 (wireBytes config) := by
-      rw [hb1, ← hcid, s_post, hs1]
-      constructor
-      · intro heq; simp only [wireBytes]; congr 1
-      · intro heq; exact map_val_injective heq
+      rw [hb1, ← hcid, s_post, hs1, wireBytes_inj]; rfl
     split
     · rename_i hb1t
       step with index_from_spec record (by omega) as ⟨ s2, hs2 ⟩
@@ -463,40 +420,20 @@ theorem authorize_agent_request_spec (opcode : U8) (supplied active : Std.Array 
             none ⦄ := by
   unfold authorize_agent_request
   have hpl : path.len.val = path.length := by simp
-  simp only [CoreModels.core.slice.Slice.len, CoreModels.rust_primitives.slice.slice_length]
+  simp_len
   have := usize_max_ge
-  have hMP : MAX_PATH.val = maxPath := by simp [MAX_PATH, maxPath]
-  have hwb : wireBytes supplied = wireBytes active ↔ supplied.val = active.val :=
-    ⟨fun h => map_val_injective h, fun h => by simp [wireBytes, h]⟩
+  have hwb := wireBytes_inj supplied active
   have hsl : (sliceBytes path).length = path.length := sliceBytes_length path
   have hnil : sliceBytes path = [] ↔ path.length = 0 := by
     rw [← List.length_eq_zero_iff, hsl]
   step*
   all_goals
-    simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, hpl, hMP, bne_iff_ne, ne_eq,
+    simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, hpl, MAX_PATH_val, bne_iff_ne, ne_eq,
       Decidable.not_not, UScalar.eq_equiv] at *
     unfold authorizeSpec
     simp_all [agentOpSpec]
 
 /-! ## Completeness: genuine records open -/
-
-theorem spec_and {α : Type} {m : RustM α} {P Q : α → Prop}
-    (hp : WP.spec m P) (hq : WP.spec m Q) : WP.spec m (fun x => P x ∧ Q x) := by
-  obtain ⟨x, hx, hpx⟩ := WP.spec_imp_exists hp
-  obtain ⟨y, hy, hqy⟩ := WP.spec_imp_exists hq
-  rw [hx] at hy; cases hy
-  exact WP.exists_imp_spec ⟨x, hx, hpx, hqy⟩
-
-theorem sealed_shape (σ : Suite) (config path pt : List Nat) :
-    Transcrypt.V3Wire.decodeFileHeaderShape (sealedRecord σ config path pt) =
-      some (σ.digest16 config) :=
-  Transcrypt.V3Wire.decode_file_header_encode _ _ (σ.digest16_length _)
-    (by rw [σ.siv_length]; omega)
-
-theorem sealed_length (σ : Suite) (config path pt : List Nat) :
-    (sealedRecord σ config path pt).length = pt.length + 38 := by
-  simp [sealedRecord, Transcrypt.V3Wire.encodeFile, Transcrypt.V3Wire.fileMagic,
-    σ.digest16_length, σ.siv_length]; omega
 
 /-- A genuine record of the right size always opens, to exactly its plaintext. -/
 theorem open_record_complete (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)

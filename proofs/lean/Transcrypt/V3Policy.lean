@@ -1,6 +1,6 @@
 import Transcrypt.V3WireCodec
 
-/-
+/-!
 Independent specification of the v3 protocol *decisions* (path policy, Git
 attribute records, record sealing/opening, smudge, lifecycle actions, agent
 requests).
@@ -72,6 +72,9 @@ def attrRecord (path value : List Nat) : List Nat :=
 /-- A path is protected iff Git reports `filter` = `transcrypt-v3` for it. -/
 def Selected (value : List Nat) : Prop := value = filterDriver
 
+instance (value : List Nat) : Decidable (Selected value) :=
+  inferInstanceAs (Decidable (value = filterDriver))
+
 /-- `response` holds, at offset `start`, the record for `path` with the
     NUL-free value `value`; the next record starts at `next`. -/
 def AttrRecordAt (response : List Nat) (start : Nat) (path value : List Nat) (next : Nat) : Prop :=
@@ -124,15 +127,23 @@ theorem opensTo_unique (s : Suite) {config path record pt pt' : List Nat}
   simp only [sealedRecord, encodeFile, List.append_assoc, List.append_cancel_left_eq] at heq
   exact s.siv_injective _ _ _ heq
 
+/-- A sealed record is its plaintext plus the 38-byte overhead. -/
+theorem sealed_length (s : Suite) (config path pt : List Nat) :
+    (sealedRecord s config path pt).length = pt.length + 38 := by
+  simp [sealedRecord, encodeFile, fileMagic, s.digest16_length, s.siv_length]; omega
+
+/-- A sealed record has the file header naming its configuration's id. -/
+theorem sealed_shape (s : Suite) (config path pt : List Nat) :
+    decodeFileHeaderShape (sealedRecord s config path pt) = some (s.digest16 config) :=
+  decode_file_header_encode _ _ (s.digest16_length _) (by rw [s.siv_length]; omega)
+
 /-- Sealing then opening at the same config and path releases the plaintext. -/
 theorem seal_opens (s : Suite) {config path pt : List Nat}
     (h : MaySeal s config path pt) :
     OpensTo s config path (sealedRecord s config path pt) pt := by
   refine ⟨h.1, h.2.1, ?_, rfl⟩
-  have := file_length (s.digest16 config) (s.siv [fileDomain, config, path] pt)
-    (s.digest16_length _)
-  simp only [sealedRecord, this, s.siv_length]
   have := h.2.2.1
+  rw [sealed_length]
   simp only [maxRecord]
   omega
 
@@ -165,14 +176,10 @@ theorem lock_flush_recoverable (s : Suite) {config path worktree record : List N
     (hseal : MaySeal s config path worktree)
     (hflush : lockSpec worktree record (sealedRecord s config path worktree) = some .flush) :
     OpensTo s config path record worktree := by
-  unfold lockSpec at hflush
-  split at hflush
-  · cases hflush
-  · split at hflush
-    · rename_i h
-      rw [← h]
-      exact seal_opens s hseal
-    · cases hflush
+  have h : sealedRecord s config path worktree = record := by
+    unfold lockSpec at hflush
+    split at hflush <;> (try split at hflush) <;> first | assumption | cases hflush
+  exact h ▸ seal_opens s hseal
 
 /-! ## Credential agent requests -/
 
@@ -241,6 +248,11 @@ theorem be32_decode (n : Nat) (h : n < 2^32) :
     (n / 2^24 % 256) * 2^24 + (n / 2^16 % 256) * 2^16 + (n / 2^8 % 256) * 2^8 + n % 256 = n := by
   omega
 
+/-- `be32` is injective below 2^32. -/
+theorem be32_injective {m n : Nat} (hm : m < 2^32) (hn : n < 2^32) (h : be32 m = be32 n) : m = n := by
+  simp only [be32, List.cons.injEq, and_true] at h
+  rw [← be32_decode m hm, ← be32_decode n hn, h.1, h.2.1, h.2.2.1, h.2.2.2]
+
 /-! ## Git object names and keyless record envelopes -/
 
 /-- A lowercase hexadecimal digit. -/
@@ -259,6 +271,14 @@ theorem objectId_plain {oid : List Nat} (h : ObjectId oid) :
   intro c hc hbad
   rcases h.2 c hc with ⟨h1, h2⟩ | ⟨h1, h2⟩ <;> simp at hbad <;> omega
 
+/-- An object name has no byte below `0` (48): in particular no NUL or TAB. -/
+theorem ObjectId.not_mem_of_lt {oid : List Nat} (h : ObjectId oid) {c : Nat} (hc : c < 48) :
+    c ∉ oid := fun hm => by
+  rcases h.2 c hm with ⟨_, _⟩ | ⟨_, _⟩ <;> omega
+
+theorem objectId_no_tab {oid : List Nat} (h : ObjectId oid) : 9 ∉ oid :=
+  h.not_mem_of_lt (by decide)
+
 /-- The keyless check of a committed record: within the size bound, with the
     v3 file header naming configuration id `id`. It cannot establish
     authenticity, which needs the key. -/
@@ -270,8 +290,7 @@ def EnvelopeOk (record id : List Nat) : Prop :=
 theorem opensTo_envelopeOk (s : Suite) {config path record pt : List Nat}
     (h : OpensTo s config path record pt) : EnvelopeOk record (s.digest16 config) := by
   obtain ⟨_, _, hlen, rfl⟩ := h
-  refine ⟨hlen, ?_⟩
-  exact decode_file_header_encode _ _ (s.digest16_length config) (by simp [s.siv_length])
+  exact ⟨hlen, sealed_shape s _ _ _⟩
 
 /-! ## Smudge -/
 
@@ -296,12 +315,7 @@ theorem smudgeSpec_keep_envelope {blob id : List Nat} {unlocked : Bool}
     (h : smudgeSpec blob id unlocked = some .keep) :
     ∃ found, decodeFileHeaderShape blob = some found ∧ blob.length ≤ maxRecord := by
   unfold smudgeSpec at h
-  split at h
-  · cases h
-  · split at h
-    · cases h
-    · rename_i found hd
-      exact ⟨found, hd, by omega⟩
+  cases hd : decodeFileHeaderShape blob <;> simp_all
 
 /-! ## Pre-commit repair -/
 
@@ -442,6 +456,17 @@ theorem bytesLt_total : ∀ (a b : List Nat), BytesLt a b ∨ a = b ∨ BytesLt 
       · exact Or.inr (Or.inr (Or.inr ⟨rfl, h⟩))
     · exact Or.inr (Or.inr (Or.inl h))
 
+theorem bytesLt_append_left (p a b : List Nat) : BytesLt (p ++ a) (p ++ b) ↔ BytesLt a b := by
+  induction p with
+  | nil => exact Iff.rfl
+  | cons x p ih => simp only [List.cons_append, BytesLt, Nat.lt_irrefl, false_or, true_and, ih]
+
+/-- Byte strings with a common prefix compare as their rests. -/
+theorem bytesLt_drop {A B : List Nat} {j : Nat} (h : A.take j = B.take j) :
+    BytesLt A B ↔ BytesLt (A.drop j) (B.drop j) := by
+  conv => lhs; rw [← List.take_append_drop j A, ← List.take_append_drop j B, h]
+  exact bytesLt_append_left _ _ _
+
 /-- A snapshot as Git lists it (the index, or one tree): paths strictly
     increase in byte order, so each path occurs once. A tree that lists a
     path twice or out of order (`git mktree` accepts one, `git fsck` does
@@ -482,6 +507,37 @@ theorem Sorted.holds_oid {es : List Entry} (h : Sorted es) {oid path : List Nat}
   obtain ⟨x, hx, ho, hxp⟩ := hh
   rw [h.eq_of_path he hx (hp.trans hxp.symm), ho]
 
+/-- Distinct entries of a sorted snapshot have distinct paths. -/
+theorem Sorted.path_ne {es : List Entry} (hS : Sorted es) {a b : Nat} (ha : a < es.length)
+    (hb : b < es.length) (hab : a ≠ b) : es[a].path ≠ es[b].path := by
+  intro heq
+  rcases Nat.lt_or_gt_of_ne hab with h | h
+  · have := List.pairwise_iff_getElem.mp hS a b ha hb h
+    rw [heq] at this; exact bytesLt_irrefl _ this
+  · have := List.pairwise_iff_getElem.mp hS b a hb ha h
+    rw [heq] at this; exact bytesLt_irrefl _ this
+
+/-- In a listing in path order, paths before `P` come first. -/
+theorem PathOrdered.lt_of_le {es : List Entry} (hO : PathOrdered es) {P : List Nat} {k m : Nat}
+    (hkm : k ≤ m) (hm : m < es.length) (h : BytesLt es[m].path P) : BytesLt es[k].path P := by
+  rcases Nat.lt_or_ge k m with hlt | hge
+  · rcases List.pairwise_iff_getElem.mp hO k m (by omega) hm hlt with h' | h'
+    · exact bytesLt_trans h' h
+    · rw [h']; exact h
+  · have : k = m := by omega
+    subst this; exact h
+
+/-- After a path that comes after `P`, no path is `P`. -/
+theorem PathOrdered.ne_of_gt {es : List Entry} (hO : PathOrdered es) {P : List Nat} {j k : Nat}
+    (hjk : j ≤ k) (hk : k < es.length) (hj : BytesLt P es[j].path) : es[k].path ≠ P := by
+  intro hkp
+  rcases Nat.lt_or_ge j k with hlt | hge
+  · rcases List.pairwise_iff_getElem.mp hO j k (by omega) hk hlt with h' | h'
+    · rw [hkp] at h'; exact bytesLt_irrefl _ (bytesLt_trans hj h')
+    · rw [h', hkp] at hj; exact bytesLt_irrefl _ hj
+  · have : j = k := by omega
+    subst this; rw [hkp] at hj; exact bytesLt_irrefl _ hj
+
 /-- A selected entry can be protected: a regular file, not reserved
     metadata. -/
 def Selectable (e : Entry) : Prop := e.Regular ∧ ¬ Reserved e.path
@@ -518,11 +574,8 @@ def BlobElsewhere (snapshots : List (List Entry)) (s : Entry) : Prop :=
 theorem entryOk_indexRecord {e : Entry} (h : EntryOk e) :
     IndexRecord (entryRecord e) (decide e.Regular) e.path := by
   obtain ⟨hm, h9, _, hoid, hp, _⟩ := h
-  refine ⟨e.mode, e.oid, rfl, hm, ?_, h9, ?_, hp, ?_⟩
-  · intro h0; have := h0 ▸ hoid.1; simp at this
-  · intro h9o
-    rcases hoid.2 9 h9o with ⟨h1, _⟩ | ⟨h1, _⟩ <;> omega
-  · exact decide_eq_true_iff
+  refine ⟨e.mode, e.oid, rfl, hm, ?_, h9, objectId_no_tab hoid, hp, decide_eq_true_iff⟩
+  intro h0; have := h0 ▸ hoid.1; simp at this
 
 /-- Content held by `HEAD` at its path is never a local change unless
     `protect` forces sealing its plaintext. -/
@@ -570,18 +623,7 @@ theorem storedKeySpec_unlocked {present : Bool} {file current : List Nat} {authe
     (h : storedKeySpec present file current authentic = .unlocked) :
     present = true ∧ file.length = 119 ∧ file.take 55 = current ∧ authentic = true := by
   unfold storedKeySpec at h
-  by_cases h1 : present = false ∨ file.length = 64
-  · rw [if_pos h1] at h; cases h
-  · rw [if_neg h1] at h
-    by_cases h2 : file.length ≠ 119
-    · rw [if_pos h2] at h; cases h
-    · rw [if_neg h2] at h
-      by_cases h3 : file.take 55 = current ∧ authentic = true
-      · refine ⟨?_, by omega, h3.1, h3.2⟩
-        cases present
-        · exact absurd (Or.inl rfl) h1
-        · rfl
-      · rw [if_neg h3] at h; cases h
+  split at h <;> (try split at h) <;> (try split at h) <;> simp_all
 
 /-! ## Git object replies (`git cat-file --batch`) -/
 

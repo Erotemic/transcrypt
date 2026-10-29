@@ -1,10 +1,12 @@
 import Transcrypt.V3Wire
 
-/-
+/-!
 Independent executable *shape* decoder for the v3 committed wire protocol.
-It is not an Aeneas translation. Its theorems specify the behaviors that
-must subsequently be proved for Aeneas-generated Rust functions.
-Ciphertext authentication remains outside the shape decoder.
+It is not an Aeneas translation. The production slice parsers are proved to
+compute exactly `decodeConfigShape` / `decodeFileHeaderShape`
+(`parse_config_spec`, `parse_file_header_spec` in
+`proofs/aeneas/v3/V3Wire/Verification/Codec.lean`). Ciphertext
+authentication remains outside the shape decoder.
 -/
 
 namespace Transcrypt.V3Wire
@@ -76,5 +78,23 @@ theorem file_truncated (bytes : List Nat) (h : bytes.length < 38) :
 theorem file_wrong_magic (bytes : List Nat) (h : bytes.take 6 ≠ fileMagic) :
     decodeFileHeaderShape bytes = none := by
   simp [decodeFileHeaderShape, h]
+
+/-- An accepted file header is the magic and the 16-byte id it returns,
+    followed by the rest of the record (at least the 16-byte tag). -/
+theorem record_of_shape {l id : List Nat} (h : decodeFileHeaderShape l = some id) :
+    l = fileMagic ++ id ++ l.drop 22 ∧ 38 ≤ l.length ∧ id.length = 16 := by
+  unfold decodeFileHeaderShape at h
+  split at h
+  · split at h
+    · rename_i hlen hmag
+      cases h
+      refine ⟨?_, hlen, by simp; omega⟩
+      conv => lhs; rw [← List.take_append_drop 6 l]
+      rw [hmag, List.append_assoc]
+      congr 1
+      conv => lhs; rw [← List.take_append_drop 16 (l.drop 6)]
+      simp [List.drop_drop]
+    · cases h
+  · cases h
 
 end Transcrypt.V3Wire

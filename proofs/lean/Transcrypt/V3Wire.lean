@@ -1,9 +1,12 @@
 import Std
 
-/-
-Independent abstract byte-wire specification of the v3 proof-of-concept.
-This file does NOT claim that Aeneas-translated Rust functions refine it.
-The proof targets for the real Rust core are tracked in the v3 spec.
+/-!
+Independent abstract byte-wire specification of v3: the committed config
+(`encodeConfig`) and record (`encodeFile`) layouts. Written from the protocol
+spec, not from the Rust source. The refinement of the production encoders
+and decoders to these definitions is proved in
+`proofs/aeneas/v3/V3Wire/Verification/Codec.lean` (see
+`proofs/aeneas/v3/PROOF-STATUS.md`).
 -/
 
 namespace Transcrypt.V3Wire

@@ -4,12 +4,12 @@ import V3Wire.Verification.Envelope
 /-!
 Models of the Git filter decisions made by the adapter.
 
-* `cleanModel` mirrors `transcrypt_v3::clean_file`: an input that already
+* `cleanModel` mirrors `transcrypt_rs::clean_file`: an input that already
   authentically opens at its path is returned unchanged (idempotent clean);
   anything else is sealed with `seal_record`. The agent's Encrypt operation
   and the reseal step of `lock` both go through this function.
-* `smudgeModel` mirrors the smudge filter of `transcrypt_v3`: the verified
-  core decides (`smudge_action`); a record of this configuration is opened
+* `smudgeModel` mirrors the smudge filter (`transcrypt_rs`, `filter.rs`): the
+  verified core decides (`smudge_action`); a record of this configuration is opened
   with `open_record` when the key is available (and, when `keepRecord` -- the
   adapter's private mode under a permissive umask -- the authenticated record
   itself is kept), any other v3 record is kept unchanged, and bytes without
@@ -34,7 +34,7 @@ open transcrypt_v3_core
 
 variable {P : Type} {inst : V3Primitives P} {prims : P} {σ : Suite}
 
-/-- Model of `transcrypt_v3::clean_file`. `none` = refusal. -/
+/-- Model of `transcrypt_rs::clean_file`. `none` = refusal. -/
 def cleanModel (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
     (path input openBuf sealBuf : Slice U8) : RustM (Option (Slice U8)) := do
   let (r, _) ← open_record inst prims config path input openBuf

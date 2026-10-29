@@ -123,7 +123,7 @@ Every step is a theorem about the Aeneas translation of the production
 | Object replies are for the requested id and announced size | `parse_batch_header`, `blob_read` (`parse_batch_header_spec`, `blob_read_spec`) | `BatchHeader`, `blobReadSpec` |
 
 `hookPlan` is a small Lean model of the loop in
-`transcrypt_v3::lifecycle::check_staged` (like the existing `verifyPlan`);
+`transcrypt_rs::lifecycle::check_staged` (like the existing `verifyPlan`);
 it calls the generated functions. That the Rust loop matches it is part of
 A4 (reviewed, tested).
 
@@ -185,7 +185,8 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (67 headline theorems, standard axioms only:
+  (the 100 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the composition `hookPlan_spec` and the end-to-end
   theorems (with the A24 corollary), about Lean models that call the

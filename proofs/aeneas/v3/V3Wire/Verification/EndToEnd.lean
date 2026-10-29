@@ -1,10 +1,11 @@
 import V3Wire.Verification.Lifecycle
 import V3Wire.Verification.Objects
+import V3Wire.Verification.Snapshot
 
 /-!
 # End to end: selected paths enter Git as authenticated ciphertext
 
-The pre-commit hook (`transcrypt_v3::lifecycle::verify` with `seal`) is the
+The pre-commit hook (`transcrypt_rs::lifecycle::verify` with `seal`) is the
 last code that sees the index before Git records a commit. This file states,
 as one conditional theorem, what its acceptance guarantees about that commit,
 and names every assumption it rests on.
@@ -52,15 +53,6 @@ open Transcrypt.V3Policy
 namespace Transcrypt.V3Verification
 
 open transcrypt_v3_core
-
-/-- A verified function's specification applies to the result the adapter
-    observed. -/
-theorem spec_result {α : Type} {m : RustM α} {P : α → Prop} {r : α} (h : m ⦃ x => P x ⦄)
-    (hm : m = ok r) : P r := by
-  obtain ⟨y, hy, hP⟩ := WP.spec_imp_exists h
-  rw [hm] at hy
-  cases hy
-  exact hP
 
 variable {P : Type} {inst : V3Primitives P} {prims : P} {σ : Suite}
 
@@ -433,9 +425,9 @@ theorem hook_accepts_only_authenticated_ciphertext_given_history (g : GitState)
     (hhist : HeadAuthentic σ (wireBytes config) g) :
     ∀ x ∈ g.index, Selected (g.filter x.path) →
       Selectable x ∧ ∃ content, g.blob x.oid = some content ∧ ∃ pt, OpensTo σ (wireBytes config) x.path content pt := by
-  obtain ⟨-, -, h⟩ := hook_accepts_only_authenticated_ciphertext g index head parent response ends0 ends hends0
-    hends pends0 pends iorder horder porder flags0 flags all inHead0 inHead inParent0 inParent entries config id
-    true incremental hR hid hindex hhead hparent hattr hobj hcfg hrun hcheck
+  obtain ⟨-, -, h⟩ := hook_accepts_only_authenticated_ciphertext (keyed := true) (hR := hR) (hid := hid)
+    (hindex := hindex) (hhead := hhead) (hparent := hparent) (hattr := hattr) (hobj := hobj)
+    (hcfg := hcfg) (hrun := hrun) (hcheck := hcheck)
   intro x hx hsx
   obtain ⟨hsel, content, hc, hk, -⟩ := h x hx hsx
   refine ⟨hsel, content, hc, ?_⟩
