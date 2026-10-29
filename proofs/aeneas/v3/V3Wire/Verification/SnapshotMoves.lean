@@ -246,25 +246,17 @@ theorem find_object_spec {listing : Slice U8} {ends : Slice Usize} {es : List En
   unfold find_object find_object_loop
   simp_len [bind_tc_ok]
   apply loop.spec_decr_nat (fun s : Usize × Usize => s.2.val - s.1.val)
-    (fun s : Usize × Usize => s.1.val ≤ s.2.val ∧ s.2.val ≤ order.val.length ∧
-      (∀ t (h : t < order.val.length), t < s.1.val → KeyLt (keyOf es order.val[t].val) (sliceBytes oid, at_.val)) ∧
-      (∀ t (h : t < order.val.length), s.2.val ≤ t →
-        ¬ KeyLt (keyOf es order.val[t].val) (sliceBytes oid, at_.val)))
-  · rintro ⟨low, high⟩ ⟨h1, h2, h3, h4⟩
-    dsimp only at h1 h2 h3 h4 ⊢
+    (fun s : Usize × Usize => Bisects order.val.length
+      (fun t _ => KeyLt (keyOf es order.val[t].val) (sliceBytes oid, at_.val)) s.1.val s.2.val)
+  · rintro ⟨low, high⟩ hI
+    dsimp only at hI ⊢
     unfold find_object_loop.body
     split
-    · rename_i hlh
-      have hlh' : low.val < high.val := by scalar_tac
-      step as ⟨ d, hd ⟩
+    · step as ⟨ d, hd ⟩
       step as ⟨ d2, hd2 ⟩
       step as ⟨ mid, hmid ⟩
-      have hm1 : low.val ≤ mid.val := by scalar_tac
-      have hm2 : mid.val < high.val := by
-        have : d2.val ≤ d.val / 2 := by scalar_tac
-        have : d.val / 2 < d.val := Nat.div_lt_self (by omega) (by omega)
-        scalar_tac
-      have hmo : mid.val < order.val.length := by omega
+      obtain ⟨hm1, hm2⟩ := bisect_midpoint (by scalar_tac) hd (by scalar_tac) hmid
+      have hmo : mid.val < order.val.length := by have := hI.2.1; omega
       step as ⟨ hml, j, hj ⟩
       step with object_before_spec hL j oid at_ as ⟨ b, hb ⟩
       have hjv : j.val = order.val[mid.val].val := by rw [hj]
@@ -272,17 +264,14 @@ theorem find_object_spec {listing : Slice U8} {ends : Slice Usize} {es : List En
       have hjn : order.val[mid.val].val < es.length := ho.2.1 mid.val (by simpa [Slice.length] using hmo)
       split
       · rename_i hbt
-        have hlt := (hb.mp hbt).2
         step as ⟨ low1, hlow1 ⟩
-        refine ⟨by omega, h2, fun t ht htl => ho.lt_of_le (by omega) hmo hlt, h4, by omega⟩
+        exact hI.above ho.lt_of_le hm1 hm2 hmo (hb.mp hbt).2 hlow1
       · rename_i hbt
         simp only [WP.spec_ok]
-        refine ⟨hm1, by omega, h3, fun t ht htm hlt => hbt (hb.mpr ⟨hjn, ho.lt_of_le htm ht hlt⟩), by omega⟩
-    · rename_i hlh
-      simp only [WP.spec_ok]
-      have : high.val ≤ low.val := by scalar_tac
-      exact ⟨by omega, h3, fun t ht htl => h4 t ht (by omega)⟩
-  · exact ⟨by simp, by simp, fun t _ ht => absurd ht (by simp), fun t ht ht2 => by simp at ht2; omega⟩
+        exact hI.below ho.lt_of_le hm1 hm2 hmo fun hlt => hbt (hb.mpr ⟨hjn, hlt⟩)
+    · simp only [WP.spec_ok]
+      exact hI.done (by scalar_tac)
+  · simpa using Bisects.start
 
 theorem names_oid_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
     (hL : ListingOf listing ends es) (j : Usize) (oid : Slice U8) :
