@@ -6,7 +6,9 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root/proofs/aeneas/v3"
-out=$(lake env lean audit/Axioms.lean 2>&1)
+# V3_LEAN_ENV prefixes the lean command (default "lake env"; set it empty
+# where LEAN_PATH is already set, as check-v3-without-lake.sh does).
+out=$(${V3_LEAN_ENV-lake env} lean audit/Axioms.lean 2>&1)
 printf '%s\n' "$out"
 expected=$(grep -c '^#print axioms' audit/Axioms.lean)
 # Lean wraps long axiom lists over several lines; parse the whole output.

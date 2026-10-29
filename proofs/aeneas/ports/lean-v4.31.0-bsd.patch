@@ -1,0 +1,186 @@
+# Port of Lean v4.31.0 (68218e8) to NetBSD and OpenBSD: runtime and linker
+# flags only, no change to the kernel or elaborator. Apply with -p1 in both src/ and
+# stage0/src/ of the Lean checkout; see ports/README.md.
+--- a/runtime/bsd_exe_path.h
++++ b/runtime/bsd_exe_path.h
+@@ -0,0 +1,45 @@
++/*
++Locating the running executable on NetBSD and OpenBSD, which have no
++/proc/<pid>/exe by default.
++*/
++#pragma once
++#if defined(__NetBSD__) || defined(__OpenBSD__)
++#include <sys/types.h>
++#include <sys/sysctl.h>
++#include <limits.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <string>
++
++/* Writes the executable's absolute path to `out` (PATH_MAX bytes). */
++static inline bool lean_bsd_exe_path(char * out) {
++#if defined(__NetBSD__)
++    int mib[4] = {CTL_KERN, KERN_PROC_ARGS, -1, KERN_PROC_PATHNAME};
++    size_t len = PATH_MAX;
++    return sysctl(mib, 4, out, &len, nullptr, 0) == 0;
++#else
++    // OpenBSD records no executable path: resolve argv[0] the way exec did.
++    int mib[4] = {CTL_KERN, KERN_PROC_ARGS, getpid(), KERN_PROC_ARGV};
++    size_t len = 0;
++    if (sysctl(mib, 4, nullptr, &len, nullptr, 0) != 0) return false;
++    std::string buf(len, '\0');
++    if (sysctl(mib, 4, &buf[0], &len, nullptr, 0) != 0) return false;
++    char const * argv0 = reinterpret_cast<char **>(&buf[0])[0];
++    if (argv0 == nullptr) return false;
++    if (strchr(argv0, '/') != nullptr) return realpath(argv0, out) != nullptr;
++    char const * path = getenv("PATH");
++    if (path == nullptr) return false;
++    std::string dirs(path);
++    for (size_t start = 0; start <= dirs.size();) {
++        size_t end = dirs.find(':', start);
++        if (end == std::string::npos) end = dirs.size();
++        std::string dir = end == start ? std::string(".") : dirs.substr(start, end - start);
++        std::string candidate = dir + "/" + argv0;
++        if (access(candidate.c_str(), X_OK) == 0 && realpath(candidate.c_str(), out) != nullptr) return true;
++        start = end + 1;
++    }
++    return false;
++#endif
++}
++#endif
+--- a/runtime/io.cpp
++++ b/runtime/io.cpp
+@@ -22,9 +22,10 @@
+ #include <unistd.h> // NOLINT
+ #include <sys/mman.h>
+ #include <sys/file.h>
+-#ifndef LEAN_EMSCRIPTEN
++#if !defined(LEAN_EMSCRIPTEN) && !defined(__OpenBSD__)
+ #include <sys/random.h>
+ #endif
++#include "runtime/bsd_exe_path.h"
+ #endif
+ #ifndef LEAN_WINDOWS
+ #include <csignal>
+@@ -1391,6 +1392,11 @@
+     object * appPathLean = mk_string(appPath);
+     free(appPath);
+     return io_result_mk_ok(appPathLean);
++#elif defined(__NetBSD__) || defined(__OpenBSD__)
++    char exe[PATH_MAX];
++    if (!lean_bsd_exe_path(exe))
++        return io_result_mk_error("failed to locate application");
++    return io_result_mk_ok(mk_string(exe));
+ #else
+     // Linux version
+     char path[PATH_MAX];
+--- a/runtime/process.cpp
++++ b/runtime/process.cpp
+@@ -30,6 +30,12 @@
+ #ifdef __linux
+ #include <sys/syscall.h>
+ #endif
++#if defined(__NetBSD__)
++#include <lwp.h>
++#endif
++#if defined(__NetBSD__) || defined(__OpenBSD__)
++extern char ** environ;
++#endif
+ 
+ #include "runtime/object.h"
+ #include "runtime/io.h"
+@@ -343,6 +349,10 @@
+     lean_always_assert(pthread_threadid_np(NULL, &tid) == 0);
+ #elif defined(LEAN_EMSCRIPTEN)
+     tid = 0;
++#elif defined(__NetBSD__)
++    tid = _lwp_self();
++#elif defined(__OpenBSD__)
++    tid = getthrid();
+ #else
+     // since Linux 2.4.11, our glibc 2.27 requires at least 3.2
+     // glibc 2.30 would provide a wrapper
+@@ -456,6 +466,10 @@
+         if (!inherit_env) {
+ #ifdef __APPLE__
+             environ = NULL;
++#elif defined(__NetBSD__) || defined(__OpenBSD__)
++            // No clearenv; setenv copies an empty list on first use.
++            static char * empty_environ[] = {NULL};
++            environ = empty_environ;
+ #else
+             clearenv();
+ #endif
+--- a/runtime/stack_overflow.cpp
++++ b/runtime/stack_overflow.cpp
+@@ -12,6 +12,9 @@
+ #else
+ #include <csignal>
+ #include <pthread.h>
++#if defined(__OpenBSD__)
++#include <pthread_np.h>
++#endif
+ #include <unistd.h>
+ #endif
+ #include <cstdio>
+@@ -54,6 +57,10 @@
+     char * stackaddr;
+ #ifdef __APPLE__
+     stackaddr = static_cast<char *>(pthread_get_stackaddr_np(pthread_self())) - pthread_get_stacksize_np(pthread_self());
++#elif defined(__OpenBSD__)
++    stack_t ss;
++    if (pthread_stackseg_np(pthread_self(), &ss) != 0) return false;
++    stackaddr = static_cast<char *>(ss.ss_sp) - ss.ss_size;
+ #else
+     pthread_attr_t attr;
+     if (pthread_attr_init(&attr) != 0) return false;
+--- a/util/path.cpp
++++ b/util/path.cpp
+@@ -16,6 +16,7 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include "runtime/exception.h"
++#include "runtime/bsd_exe_path.h"
+ #include "runtime/sstream.h"
+ #include "runtime/optional.h"
+ 
+@@ -80,9 +81,14 @@
+     char path[PATH_MAX];
+     char dest[PATH_MAX];
+     memset(dest, 0, PATH_MAX);
++#if defined(__NetBSD__) || defined(__OpenBSD__)
++    (void)path;
++    if (!lean_bsd_exe_path(dest)) {
++#else
+     pid_t pid = getpid();
+     snprintf(path, PATH_MAX, "/proc/%d/exe", pid);
+     if (readlink(path, dest, PATH_MAX) == -1) {
++#endif
+         throw exception("failed to locate Lean executable location");
+     } else {
+         return std::string(dest);
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -537,7 +537,8 @@
+   string(APPEND LEAN_EXTRA_LINKER_FLAGS " -lm")
+ endif()
+ 
+-if(CMAKE_SYSTEM_NAME MATCHES "Linux")
++# NetBSD and OpenBSD are ELF systems linked like Linux.
++if(CMAKE_SYSTEM_NAME MATCHES "Linux|NetBSD|OpenBSD")
+   if(BSYMBOLIC)
+     string(APPEND LEANC_SHARED_LINKER_FLAGS " -Wl,-Bsymbolic")
+     string(APPEND TOOLCHAIN_SHARED_LINKER_FLAGS " -Wl,-Bsymbolic")
+@@ -550,6 +551,11 @@
+     " -Wl,--whole-archive ${CMAKE_BINARY_DIR}/lib/lean/libLake.a.export -Wl,--no-whole-archive"
+   )
+   string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,-rpath=$ORIGIN/../lib:$ORIGIN/../lib/lean")
++  if(CMAKE_SYSTEM_NAME MATCHES "OpenBSD")
++    # OpenBSD's ld.so expands $ORIGIN only in objects linked with -z origin.
++    string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,-z,origin")
++    string(APPEND TOOLCHAIN_SHARED_LINKER_FLAGS " -Wl,-z,origin")
++  endif()
+ elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+   string(APPEND CMAKE_CXX_FLAGS " -ftls-model=initial-exec")
+   string(APPEND INIT_SHARED_LINKER_FLAGS " -install_name @rpath/libInit_shared.dylib")

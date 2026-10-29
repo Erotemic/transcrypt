@@ -328,6 +328,8 @@ jobs:
           use-mathlib-cache: true
       - name: Axiom audit of headline refinement theorems
         run: bash proofs/aeneas/check-v3-axioms.sh
+      - name: Replay every declaration through this OS's kernel
+        run: bash proofs/aeneas/replay-v3-kernel.sh
 
   v3-aeneas-regeneration:
     # No synthetic model: rerun the pinned real translator, diff the exact
