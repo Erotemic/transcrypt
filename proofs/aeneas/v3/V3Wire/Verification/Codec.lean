@@ -431,7 +431,7 @@ theorem file_shape_of_take {l : List U8} (id : Std.Array U8 16#usize) (hlen : 38
   unfold Transcrypt.V3Wire.decodeFileHeaderShape
   have hM : FILE_MAGIC.val.map (fun b => b.val) = Transcrypt.V3Wire.fileMagic :=
     extracted_file_magic_matches_spec
-  rw [if_pos (by simpa using hlen), ← List.map_take, h6, hM, if_pos rfl, ← List.map_drop,
+  rw [if_pos (by rw [List.length_map]; exact hlen), ← List.map_take, h6, hM, if_pos rfl, ← List.map_drop,
     ← List.map_take, h16]
   rfl
 

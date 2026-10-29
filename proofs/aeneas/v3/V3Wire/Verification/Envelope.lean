@@ -146,7 +146,7 @@ theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize)
         rw [hr.2]; simp
       | Length =>
         simp only at hr
-        rw [Transcrypt.V3Wire.file_truncated _ (by omega)]
+        rw [Transcrypt.V3Wire.file_truncated _ (by unfold_v3_lengths; omega)]
         simp
 
 /-! ## Smudge decision -/

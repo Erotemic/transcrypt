@@ -95,7 +95,7 @@ theorem blob_read_spec (size : U64) (skip : Bool) :
   step*
   all_goals
     have hi1 : i1.val = maxRecord := by
-      rw [i1_post, UScalar.cast_val_eq, hm]; simp [maxRecord, maxFile, UScalarTy.numBits]
+      rw [i1_post, UScalar.cast_val_eq, hm]; simp [maxRecord, maxFile, UScalarTy.numBits]; decide
   · have : size.val ≤ maxRecord := by scalar_tac
     simp [this, blobReadResult]
   · have : ¬ size.val ≤ maxRecord := by scalar_tac

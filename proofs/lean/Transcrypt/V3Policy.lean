@@ -28,7 +28,7 @@ def ascii (s : String) : List Nat := s.toList.map Char.toNat
 
 def maxFile : Nat := 16 * 1024 * 1024
 def maxPath : Nat := 4096
-def maxRecord : Nat := maxFile + 38
+def maxRecord : Nat := maxFile + fileMinLen
 def slash : Nat := 47
 def dot : Nat := 46
 def configDomain : List Nat := ascii "transcrypt/v3/config"
@@ -92,10 +92,10 @@ structure Suite where
   siv : List (List Nat) → List Nat → List Nat
   /-- SHA-256(x)[0:16]. -/
   digest16 : List Nat → List Nat
-  siv_length : ∀ ad pt, (siv ad pt).length = pt.length + 16
+  siv_length : ∀ ad pt, (siv ad pt).length = pt.length + tagLen
   /-- Decryption is a function of the ciphertext: SIV is injective per AD. -/
   siv_injective : ∀ ad pt pt', siv ad pt = siv ad pt' → pt = pt'
-  digest16_length : ∀ x, (digest16 x).length = 16
+  digest16_length : ∀ x, (digest16 x).length = idLen
 
 /-- The committed config authenticates under the suite's key: its tag is the
     AES-SIV encryption of the empty plaintext under `[configDomain, prefix]`. -/
@@ -127,10 +127,12 @@ theorem opensTo_unique (s : Suite) {config path record pt pt' : List Nat}
   simp only [sealedRecord, encodeFile, List.append_assoc, List.append_cancel_left_eq] at heq
   exact s.siv_injective _ _ _ heq
 
-/-- A sealed record is its plaintext plus the 38-byte overhead. -/
+/-- A sealed record is its plaintext plus the fixed overhead. -/
 theorem sealed_length (s : Suite) (config path pt : List Nat) :
-    (sealedRecord s config path pt).length = pt.length + 38 := by
-  simp [sealedRecord, encodeFile, fileMagic, s.digest16_length, s.siv_length]; omega
+    (sealedRecord s config path pt).length = pt.length + fileMinLen := by
+  simp only [sealedRecord, encodeFile, List.length_append, fileMagic_length, s.digest16_length,
+    s.siv_length, fileMinLen, fileHeaderLen]
+  omega
 
 /-- A sealed record has the file header naming its configuration's id. -/
 theorem sealed_shape (s : Suite) (config path pt : List Nat) :

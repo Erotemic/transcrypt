@@ -73,12 +73,29 @@ theorem extracted_magic_disjoint :
   unfold MAX_RECORD
   step*
   · have := usize_max_ge; simp [Transcrypt.V3Policy.maxFile] at *; omega
-  · simp [Transcrypt.V3Policy.maxRecord, *]
+  · simp [Transcrypt.V3Policy.maxRecord, *]; rfl
+
+/-! The `_val` facts state the numbers, which `omega` and `scalar_tac`
+compute with; these name the specification's length each one is. -/
+
+theorem ID_LEN_matches_spec : ID_LEN.val = Transcrypt.V3Wire.idLen := ID_LEN_val
+theorem SALT_LEN_matches_spec : SALT_LEN.val = Transcrypt.V3Wire.saltLen := SALT_LEN_val
+theorem TAG_LEN_matches_spec : TAG_LEN.val = Transcrypt.V3Wire.tagLen := TAG_LEN_val
+theorem CONFIG_PREFIX_LEN_matches_spec :
+    CONFIG_PREFIX_LEN.val = Transcrypt.V3Wire.configMagicLen + Transcrypt.V3Wire.saltLen :=
+  CONFIG_PREFIX_LEN_val
+theorem CONFIG_LEN_matches_spec : CONFIG_LEN.val = Transcrypt.V3Wire.configLen := CONFIG_LEN_val
+theorem FILE_HEADER_LEN_matches_spec : FILE_HEADER_LEN.val = Transcrypt.V3Wire.fileHeaderLen :=
+  FILE_HEADER_LEN_val
 
 /-! ## Byte-array constants -/
 
 @[simp] theorem FILE_MAGIC_length : FILE_MAGIC.length = 6 := by simp
 @[simp] theorem CONFIG_MAGIC_length : CONFIG_MAGIC.length = 7 := by simp
+theorem FILE_MAGIC_length_matches_spec : FILE_MAGIC.length = Transcrypt.V3Wire.fileMagicLen :=
+  FILE_MAGIC_length
+theorem CONFIG_MAGIC_length_matches_spec : CONFIG_MAGIC.length = Transcrypt.V3Wire.configMagicLen :=
+  CONFIG_MAGIC_length
 
 theorem METADATA_DIR_bytes :
     sliceBytes (Array.to_slice METADATA_DIR) = Transcrypt.V3Policy.metadataDir := by
