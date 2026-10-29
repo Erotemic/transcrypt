@@ -1,6 +1,6 @@
 #!/bin/sh
-# Install a transcrypt-rs release binary: Linux (x86_64, arm64), FreeBSD
-# (x86_64) or macOS (arm64, x86_64). On Windows, use install.ps1.
+# Install a transcrypt-rs release binary: Linux (x86_64, arm64), FreeBSD or
+# NetBSD (x86_64), or macOS (arm64, x86_64). On Windows, use install.ps1.
 #
 #   sh install.sh [--tag v3-X.Y.Z] [--from DIR] [--prefix DIR]
 #
@@ -52,6 +52,7 @@ fail() {
 case "$(uname -s)" in
 Linux) os=linux ;;
 FreeBSD) os=freebsd ;;
+NetBSD) os=netbsd ;;
 Darwin) os=macos ;;
 *) fail "no release binary for $(uname -s) yet (docs/RELEASING.md); build from source: cd rust && cargo build --release" ;;
 esac

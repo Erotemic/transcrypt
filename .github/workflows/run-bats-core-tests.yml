@@ -162,6 +162,32 @@ jobs:
               (cd rust-legacy && cargo test --locked --workspace)
             '
 
+  netbsd:
+    # The v3 suite and the legacy-v2 parity on NetBSD (in a VM on a Linux
+    # runner, as its unprivileged `runner` user). NetBSD sends SIGPIPE to the
+    # whole process, which the adapter's writes must survive.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test on NetBSD 10.1
+        uses: cross-platform-actions/action@ef53f0d3fd471648f2758f3fcdc3cb2aa40c87cb # v1.7.0
+        with:
+          operating_system: netbsd
+          version: "10.1"
+          memory: 8G
+          environment_variables: RUST_TOOLCHAIN
+          run: |
+            set -e
+            sudo pkgin -y install git bash python313 curl mozilla-rootcerts-openssl
+            curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+            . "$HOME/.cargo/env"
+            git config --global user.name CI
+            git config --global user.email ci@example.test
+            git config --global init.defaultBranch main
+            (cd rust && cargo test --locked --workspace)
+            (cd rust-legacy && cargo test --locked --workspace)
+
   linux-release:
     # The release archives, built exactly as a release is (scripts/
     # build-release.sh), with the suite run against the static binary on

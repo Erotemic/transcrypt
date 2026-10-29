@@ -16,6 +16,8 @@
 #                               base libraries of the pinned FreeBSD release
 #                               below, the oldest supported, and so runs on it
 #                               and later releases),
+#                               x86_64-unknown-netbsd (the same, with the
+#                               pinned NetBSD release's base and comp sets),
 #                               x86_64-pc-windows-gnu (static; needs mingw-w64)
 #                    on macOS:  aarch64-apple-darwin, x86_64-apple-darwin
 #
@@ -36,6 +38,10 @@ toolchain="${RUST_TOOLCHAIN:-1.98.0}"
 # way ran `--version` but crashed on every Git operation.)
 freebsd_release=14.4-RELEASE
 freebsd_base_sha256=769f60a6eea2938ad6b7943cfbcc17dfaf7d1f7ba59a32b869a00349302df853
+# Likewise for NetBSD: the libraries (base set) and C start files (comp).
+netbsd_release=10.1
+netbsd_base_sha512=1c6b74cedd7fc92adfe51239808d41e63fc6eb9e9877c1101c1da515a38457278c7774e8fc3041d69cefc49821bad836cfdcc5147ad757f2f4a1f59f9e3862e5
+netbsd_comp_sha512=ea90d527d1475bd64d2b4c36d9d6ae53cb353cbc8c4feaa2b2bf006710282d2f47349a8aeeb64531f9da04268ed368ff2603c1e11a30bdfc8b2539ad73fe725f
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 out="$root/dist"
 test=0
@@ -53,7 +59,8 @@ while [ $# -gt 0 ]; do
 		sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
-	x86_64-unknown-linux-musl | aarch64-unknown-linux-musl | x86_64-unknown-freebsd | x86_64-pc-windows-gnu | \
+	x86_64-unknown-linux-musl | aarch64-unknown-linux-musl | x86_64-unknown-freebsd | x86_64-unknown-netbsd | \
+		x86_64-pc-windows-gnu | \
 		aarch64-apple-darwin | x86_64-apple-darwin) targets+=("$1") ;;
 	*)
 		echo "build-release: unsupported argument or target: $1" >&2
@@ -65,7 +72,8 @@ done
 host_os="$(uname -s)"
 if [ ${#targets[@]} -eq 0 ]; then
 	case "$host_os" in
-	Linux) targets=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-unknown-freebsd x86_64-pc-windows-gnu) ;;
+	Linux) targets=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-unknown-freebsd x86_64-unknown-netbsd
+		x86_64-pc-windows-gnu) ;;
 	Darwin) targets=(aarch64-apple-darwin x86_64-apple-darwin) ;;
 	*)
 		echo "build-release: name the targets to build on $host_os" >&2
@@ -87,9 +95,9 @@ command -v gtar >/dev/null && tar=gtar
 	echo "build-release: GNU tar is required (as tar or gtar)" >&2
 	exit 1
 }
-if command -v sha256sum >/dev/null; then sha256=(sha256sum); else
+if command -v sha256sum >/dev/null; then sha256=(sha256sum) sha512=(sha512sum); else
 	need shasum
-	sha256=(shasum -a 256)
+	sha256=(shasum -a 256) sha512=(shasum -a 512)
 fi
 
 cd "$root"
@@ -133,18 +141,53 @@ freebsd_sysroot() {
 }
 
 # The linker flags of a target.
+# The NetBSD libraries and start files, from the pinned and checksummed sets.
+netbsd_sysroot() {
+	local dir="$CARGO_TARGET_DIR/sysroot/netbsd-$netbsd_release" set sum
+	if [ ! -f "$dir/usr/lib/crt0.o" ]; then
+		need curl
+		mkdir -p "$dir"
+		for set in base comp; do
+			case "$set" in
+			base) sum="$netbsd_base_sha512" ;;
+			comp) sum="$netbsd_comp_sha512" ;;
+			esac
+			curl -fsSL -o "$dir/$set.tar.xz" \
+				"https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-$netbsd_release/amd64/binary/sets/$set.tar.xz"
+			echo "$sum  $dir/$set.tar.xz" | "${sha512[@]}" -c - >/dev/null || {
+				echo "build-release: NetBSD $set.tar.xz checksum mismatch" >&2
+				exit 1
+			}
+		done
+		"$tar" -xJf "$dir/base.tar.xz" -C "$dir" ./lib ./usr/lib 2>/dev/null
+		"$tar" -xJf "$dir/comp.tar.xz" -C "$dir" ./usr/lib 2>/dev/null
+		rm -f "$dir"/*.tar.xz
+	fi
+	echo "$dir"
+}
+
+# clang with rust-lld against a BSD sysroot: target triple, sysroot.
+bsd_link_flags() {
+	need clang "the BSD builds link with clang and rust-lld"
+	local lld host
+	host="$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')"
+	lld="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$host/bin/gcc-ld"
+	echo "-C linker=clang -C link-arg=--target=$1 -C link-arg=--sysroot=$2 -C link-arg=-fuse-ld=lld \
+-C link-arg=-B$lld -C link-arg=-Wno-unused-command-line-argument"
+}
+
 link_flags() {
 	case "$1" in
 	*-linux-musl) echo "-C linker=rust-lld -C linker-flavor=ld.lld -C target-feature=+crt-static" ;;
 	x86_64-unknown-freebsd)
-		need clang "the FreeBSD build links with clang and rust-lld"
-		local lld sysroot host
-		host="$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')"
-		lld="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$host/bin/gcc-ld"
+		local sysroot
 		sysroot="$(freebsd_sysroot)"
-		echo "-C linker=clang -C link-arg=--target=x86_64-unknown-freebsd${freebsd_release%-RELEASE} \
--C link-arg=--sysroot=$sysroot -C link-arg=-fuse-ld=lld -C link-arg=-B$lld \
--C link-arg=-Wno-unused-command-line-argument"
+		bsd_link_flags "x86_64-unknown-freebsd${freebsd_release%-RELEASE}" "$sysroot"
+		;;
+	x86_64-unknown-netbsd)
+		local sysroot
+		sysroot="$(netbsd_sysroot)"
+		bsd_link_flags "x86_64-unknown-netbsd$netbsd_release" "$sysroot"
 		;;
 	x86_64-pc-windows-gnu)
 		need x86_64-w64-mingw32-gcc "install mingw-w64"
@@ -177,6 +220,15 @@ check_self_contained() {
 		libs="$(readelf -dW "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')"
 		if grep -qv -E '^(libc\.so\.7|libthr\.so\.3|libgcc_s\.so\.1|libm\.so\.5)$' <<<"$libs"; then
 			echo "build-release: $target binary needs libraries outside FreeBSD's base system: $libs" >&2
+			exit 1
+		fi
+		;;
+	*-netbsd)
+		need readelf
+		local libs
+		libs="$(readelf -dW "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')"
+		if grep -qv -E '^(libc\.so\.12|libpthread\.so\.1|libgcc_s\.so\.1|libm\.so\.0)$' <<<"$libs"; then
+			echo "build-release: $target binary needs libraries outside NetBSD's base system: $libs" >&2
 			exit 1
 		fi
 		;;
@@ -232,6 +284,7 @@ for target in "${targets[@]}"; do
 	case "$target" in
 	*-linux-musl) os=linux exe="" ext=tar.gz ;;
 	*-freebsd) os=freebsd exe="" ext=tar.gz ;;
+	*-netbsd) os=netbsd exe="" ext=tar.gz ;;
 	*-windows-gnu) os=windows exe=.exe ext=zip ;;
 	*-apple-darwin) os=macos exe="" ext=tar.gz ;;
 	esac

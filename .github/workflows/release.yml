@@ -1,7 +1,7 @@
 name: Release
 
-# transcrypt-rs release archives: Linux (x86_64, arm64; static), FreeBSD
-# (x86_64), Windows (x86_64; static CRT) and macOS (arm64, x86_64). Every
+# transcrypt-rs release archives: Linux (x86_64, arm64; static), FreeBSD and
+# NetBSD (x86_64), Windows (x86_64; static CRT) and macOS (arm64, x86_64). Every
 # archive is built by scripts/build-release.sh, the same script used without
 # CI, and every binary is tested on its own OS (the whole suite, against the
 # archive's binary) before anything is published. The Linux archives are
@@ -144,8 +144,37 @@ jobs:
               cd rust && TRANSCRYPT_RS_TEST_BIN="$HOME/install/bin/transcrypt-rs" cargo test --locked -p transcrypt-rs
             '
 
+  test-netbsd:
+    # The suite against the NetBSD archive's binary, installed by install.sh.
+    needs: build-linux-host
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-linux-host
+          path: dist
+      - name: Test on NetBSD 10.1
+        uses: cross-platform-actions/action@ef53f0d3fd471648f2758f3fcdc3cb2aa40c87cb # v1.7.0
+        with:
+          operating_system: netbsd
+          version: "10.1"
+          memory: 8G
+          environment_variables: RUST_TOOLCHAIN
+          run: |
+            set -e
+            sudo pkgin -y install git bash curl mozilla-rootcerts-openssl
+            sh scripts/install.sh --from dist --prefix "$HOME/install"
+            curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+            . "$HOME/.cargo/env"
+            git config --global user.name CI
+            git config --global user.email ci@example.test
+            git config --global init.defaultBranch main
+            cd rust && TRANSCRYPT_RS_TEST_BIN="$HOME/install/bin/transcrypt-rs" cargo test --locked -p transcrypt-rs
+
   publish:
-    needs: [build-linux-host, rebuild-linux-arm64, build-macos, test-windows, test-freebsd]
+    needs: [build-linux-host, rebuild-linux-arm64, build-macos, test-windows, test-freebsd, test-netbsd]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -180,10 +209,10 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
             --title "transcrypt-rs ${GITHUB_REF_NAME#v3-}" --notes-file - \
             release/*.tar.gz release/*.zip release/SHA256SUMS <<'EOF'
-          transcrypt-rs for Linux (x86_64, arm64; static), FreeBSD 14.4 and later (x86_64),
+          transcrypt-rs for Linux (x86_64, arm64; static), FreeBSD 14.4+ and NetBSD 10.1+ (x86_64),
           macOS (arm64, x86_64) and Windows 10 1803 and later (x86_64). It needs only Git 2.34 or later
           (on Windows, Git for Windows). Each binary passed the full test suite on its own OS.
-          Install: `scripts/install.sh` (Linux, FreeBSD, macOS) or `scripts/install.ps1` (Windows) from
+          Install: `scripts/install.sh` (Linux, FreeBSD, NetBSD, macOS) or `scripts/install.ps1` (Windows) from
           the repository, or unpack the archive for your system and put `transcrypt-rs` on your PATH.
           Verify with `sha256sum -c SHA256SUMS` and `gh attestation verify <archive> --repo Erotemic/transcrypt`.
           Rebuild and compare: `scripts/build-release.sh` at this tag (docs/RELEASING.md).
