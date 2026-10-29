@@ -105,7 +105,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     for entry in status.split(|b| *b == 0).filter(|e| e.len() > 3) {
         let path = &entry[3..];
         let own = resuming && entry[0] != b'R'
-            && (path == b".transcrypt/config" || is_attributes_file(path) || selected.contains(&path));
+            && (path == CONFIG_PATH.as_bytes() || is_attributes_file(path) || selected.contains(&path));
         if !own {
             return Err("commit or discard your changes first; the conversion must start from a committed state".into());
         }

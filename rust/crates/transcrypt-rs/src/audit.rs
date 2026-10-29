@@ -11,7 +11,7 @@ use std::{
 use crate::{
     attributes::split_lines,
     credential::Key,
-    git::{changed_files, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
+    git::{changed_files, CONFIG_PATH, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
         push_index_record, read_record, tree_files, Attributes, Staged},
 };
 use transcrypt_v3_core::{
@@ -163,7 +163,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
 {
     let (mut entries, deleted, modified) = changed_files(root, commit, parent.as_deref())?;
     let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|(p, _)| test(p));
-    let config_changed = parent.is_none() || touched(&|p| p == b".transcrypt/config");
+    let config_changed = parent.is_none() || touched(&|p| p == CONFIG_PATH.as_bytes());
     let attributes_changed = parent.is_none() || touched(&is_attributes_file);
     if (config_changed || attributes_changed) && parent.is_some() {
         // A new config re-binds every record, and new attributes may
@@ -175,7 +175,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     // audited).
     let parent_id = parent.unwrap_or_default();
     let config_oid = if config_changed {
-        entries.iter().find(|e| e.path == b".transcrypt/config" && e.regular).map(|e| e.oid.clone())
+        entries.iter().find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular).map(|e| e.oid.clone())
     } else {
         match state.commit_configs.get(&parent_id) {
             Some(known) => known.clone(),

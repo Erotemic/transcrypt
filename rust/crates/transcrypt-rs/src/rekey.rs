@@ -53,10 +53,10 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     for (staged, plaintext) in &plaintexts {
         update.add(&staged.mode, &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?);
     }
-    update.add("100644", b".transcrypt/config", &config);
+    update.add("100644", CONFIG_PATH.as_bytes(), &config);
     update.apply(root, &[])?;
     let undo = "; run `git reset` to undo the staged rekey";
-    write_repository_file(root, &staging, Path::new(".transcrypt/config"), &config)
+    write_repository_file(root, &staging, Path::new(CONFIG_PATH), &config)
         .map_err(|e| format!("{e}{undo}"))?;
     if old_key.private() {
         session::stop(root, &old_config)?;
@@ -165,7 +165,7 @@ fn stale_files(root: &Path, id: &Id) -> Result<Vec<Stale>, String> {
 /// not a guarantee (history is a graph; a reverted rekey reappears).
 fn earlier_configs(root: &Path, current: &[u8]) -> Result<Vec<Earlier>, String> {
     let mut configs: Vec<Earlier> = Vec::new();
-    let log = git(root, &["log", "--format=%H %s", "HEAD", "--", ".transcrypt/config"])?;
+    let log = git(root, &["log", "--format=%H %s", "HEAD", "--", CONFIG_PATH])?;
     for line in String::from_utf8_lossy(&log).lines() {
         let (commit, subject) = line.split_once(' ').unwrap_or((line, ""));
         if let Some(oid) = config_blob(root, commit)? {

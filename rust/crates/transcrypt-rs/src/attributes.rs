@@ -177,7 +177,7 @@ pub(crate) fn edit_attributes(root: &Path, staging: &Staging, stage: bool, edit:
         write_repository_file(root, staging, Path::new(".gitattributes"), &text)?;
         // Repository metadata must stay readable: refuse a pattern that
         // selects it (Git would then fail to stage .gitattributes itself).
-        let reserved: [&[u8]; 3] = [b".gitattributes", b".transcrypt/config", b".gitmodules"];
+        let reserved: [&[u8]; 3] = [b".gitattributes", CONFIG_PATH.as_bytes(), b".gitmodules"];
         let selected = protected_flags(root, &reserved, Attributes::Worktree)?;
         if let Some((path, _)) = reserved.iter().zip(selected).find(|(_, p)| *p) {
             if existing.is_empty() {

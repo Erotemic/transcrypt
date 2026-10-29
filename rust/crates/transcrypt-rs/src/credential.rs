@@ -186,7 +186,7 @@ fn read_key_file(root: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
 /// exclusive 0600 temporary in the private directory, synced, then renamed
 /// over any previous key.
 pub(crate) fn store(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), String> {
-    if config.len() != CONFIG_LEN { return Err("invalid public v3 configuration".into()); }
+    if config.len() != CONFIG_LEN { return Err(transcrypt_rs::invalid_config()); }
     let dir = fsat::Dir::open(&session::prepare_directory(root)?)
         .map_err(|_| "cannot open the local v3 credential directory")?;
     let temp = format!("{KEY_FILE}.{}.tmp", std::process::id());
