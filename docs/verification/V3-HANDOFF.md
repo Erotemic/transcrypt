@@ -246,6 +246,25 @@ or `tests/git_lifecycle.rs`.
 **Supported layouts.** Ordinary checkouts, linked worktrees (one shared key;
 `lock` flushes all of them), submodules, bare repositories (audit).
 
+**Platforms** (program `transcrypt-rs`; [RELEASING](../RELEASING.md),
+assumption A25). These run the whole v3 suite:
+- Linux x86_64/arm64: release archives static (musl).
+- FreeBSD 14.5: native, and the release binary cross-built from Linux
+  against FreeBSD 14.4 base libraries.
+- Windows Server 2025, as a non-administrator: the release binary
+  cross-built with mingw-w64.
+
+macOS uses the same Unix adapter as FreeBSD; its suite runs in CI only so
+far. The Windows adapter is `fsat_windows.rs` (NtCreateFile relative to
+directory handles, reparse points refused, rename through ntdll) and
+`os_windows.rs` (owner-only DACLs, AF_UNIX agent with a token-SID peer
+check).
+
+The Lean proofs check on Linux, on FreeBSD (Lean's Linux build under
+FreeBSD's Linux ABI layer; the toolchain tree is identical to elan's),
+and in CI on macOS and Windows. FreeBSD runs both the specification and
+the full refinement build with the axiom audit.
+
 **Gates at this checkpoint.**
 - Rust: 152 tests across the workspace.
 - Bash: 218 bats tests.
@@ -253,7 +272,7 @@ or `tests/git_lifecycle.rs`.
 - Snapshot verify/compare.
 - Tracked Lean build; axiom audit (see PROOF-STATUS).
 
-The branch is unpushed: push needs the owner's credentials.
+Pushes are the owner's.
 
 ## Next tasks (resume after each checkpoint)
 

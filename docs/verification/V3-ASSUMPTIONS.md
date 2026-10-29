@@ -10,7 +10,8 @@ with attribute-based selection. A20–A23 name the Git contracts of the
 [end-to-end security argument](V3-SECURITY-ARGUMENT.md), which now that the
 hook's inputs are computed by the verified core are the remaining
 assumptions of the pre-commit path. A24 (2026-10-26) names what the
-incremental hook trusts about history. Older security-hardening priorities are
+incremental hook trusts about history. A25 (2026-10-28) names the per-platform
+OS adapters (Unix and Windows). Older security-hardening priorities are
 superseded by the charter where they conflict (for example, private worktree
 permissions are now an optional mode); the source-derived proof status and
 existing assumption meanings are not.
@@ -55,6 +56,7 @@ one.
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); discharged by the hook/audit of `HEAD` (REVIEWED + TESTED) |
+| A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5 and Windows Server 2025 (non-administrator); macOS in CI only; REVIEWED |
 
 ## Detailed register
 
@@ -199,7 +201,8 @@ one.
   holds the key only in memory, answers only framed requests for the
   authenticated config, and returns the core's results unchanged. The
   default mode has no agent (A17).
-- **Trust boundary:** our `session.rs`; Unix sockets; process isolation.
+- **Trust boundary:** our `session.rs`; Unix-domain sockets (also on
+  Windows, A25); process isolation.
 - **Consequence:** key or plaintext exposure to another process; forged
   results.
 - **Evidence:**
@@ -259,7 +262,7 @@ one.
 
 - **Claim:** `renameat` is atomic within a filesystem, fsync is durable,
   permissions are enforced, `openat(O_NOFOLLOW)` resolution is sound, and
-  core-dump/ptrace controls work.
+  core-dump/ptrace controls work. (The Windows counterparts are A25.)
 - **Consequence:** plaintext left outside protected files, lost edits, or a
   readable key.
 - **Evidence:**
@@ -467,7 +470,8 @@ one.
 - **Claim:** `unlock` stores the Argon2id-derived key, never the
   passphrase, only in `$GIT_COMMON_DIR/transcrypt-v3/key`. That is a regular
   file of the public config it unlocks followed by the key (119 bytes), mode
-  0600, in a 0700 directory owned by the user, outside `git config`. The key
+  0600, in a 0700 directory owned by the user (on Windows, an owner-only
+  DACL: A25), outside `git config`. The key
   is used for the worktree config only if that config equals the stored one
   and authenticates with it; otherwise (a pulled rekey) the worktree counts
   as locked. Smudge also opens records that name the stored config (a
@@ -671,6 +675,69 @@ one.
 - **Evidence:** TESTED (`newly_protected_files_are_authenticated_by_the_hook`,
   `trees_listing_a_path_twice_are_refused`, the H-74 suites); REVIEWED.
 - **Status:** use PROVED (model); discharge REVIEWED + TESTED.
+
+### A25 — Platform adapters (new)
+
+- **Claim:** on each supported OS, the adapter's primitives behave as the
+  shared code assumes:
+  - **Unix (Linux, FreeBSD, macOS; `fsat.rs`, `os_unix.rs`):** as A8.
+    Peer credentials come from `SO_PEERCRED` (Linux) or `getpeereid`
+    (FreeBSD, macOS), and the staging lock is `flock`.
+  - **Windows (`fsat_windows.rs`, `os_windows.rs`):**
+    - Resolution: `NtCreateFile` relative to a held directory handle,
+      with `FILE_OPEN_REPARSE_POINT`, resolves one component without
+      following a symlink or junction. Every reparse point is refused.
+    - Renames and deletions act on the file's own handle
+      (`NtSetInformationFile` rename relative to the target directory
+      handle; POSIX semantics where NTFS offers them) and are atomic.
+    - Privacy: a protected DACL that grants only this user is private
+      (as 0600/0700). It is set when the file or directory is created,
+      and checked as owner plus every grant.
+    - Staging lock: a second handle that asks for `FILE_ADD_FILE` and
+      denies that share to others is exclusive.
+    - Agent: Windows AF_UNIX sockets. The socket file sits in the private
+      directory, and the peer's process token names its user.
+    - Stamps: (volume, file index, size, last-write time) change on every
+      write.
+- **Consequence if false:** as A8 (a write outside the repository, a lost
+  edit, a readable key or plaintext) and A6 (another user reaching the
+  agent).
+- **Evidence:**
+  - TESTED: the whole v3 suite passes natively on Linux (Git 2.34 and
+    2.43), FreeBSD 14.5 (Git 2.56) and Windows Server 2025 (Git for
+    Windows 2.56, an ordinary user). This includes the parent-junction
+    swap race, symlinked staging directories, owner-only files checked
+    independently with `icacls`, hostile agent clients, SIGKILL/crash
+    recovery (Unix) and stale sockets.
+  - macOS runs the same Unix adapter as FreeBSD (`getpeereid`). Its suite
+    runs in CI only; locally it is type-checked and linted for
+    `aarch64-apple-darwin` and `x86_64-apple-darwin`.
+  - Platform differences found by these runs:
+    - FreeBSD's soft updates change a renamed file's ctime
+      asynchronously, so stamps leave ctime out (A12).
+    - kernel32 refuses a rename relative to a directory handle; ntdll
+      does it.
+    - Windows children inherit every inheritable handle, so the agent
+      drops the caller's standard handles.
+    - `git update-index` skips a path it refuses with only a warning, so
+      `IndexUpdate` reads the index back.
+- **Residual:**
+  - Windows: the peer check is by process id, read when the request is
+    served. A peer that exits after connecting while its socket lives on
+    in another process, and whose process id is reused by a process of
+    this user, would pass. Reaching the socket at all needs access to
+    the owner-only directory first.
+  - Windows: same-user processes can read the agent's memory (no
+    `PR_SET_DUMPABLE` equivalent). This is the same-user ACCEPTED RISK as
+    A6.
+  - Windows: last-write times may be updated lazily for a file kept open
+    by its writer. A same-size in-place edit through a still-open handle
+    could then be missed (A12's residual).
+  - macOS: not run outside CI.
+  - NetBSD and OpenBSD: not run.
+- **Next reduction:** a macOS run outside CI; a NetBSD and OpenBSD VM run.
+- **Status:** TESTED (Linux, FreeBSD, Windows) + REVIEWED; macOS TESTED in
+  CI only.
 
 ## Ranked unresolved risks and *product* opportunities
 
