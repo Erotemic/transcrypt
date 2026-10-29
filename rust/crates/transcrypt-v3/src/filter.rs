@@ -124,7 +124,7 @@ impl<'a> Filters<'a> {
                         If you moved it yourself (`git mv`), run `git add --renormalize -- {name}` or commit, which re-encrypts \
                         it; if it came from a commit, that commit is broken or hostile")
                 })?;
-                if key.private() && !umask_is_private() {
+                if key.private() && !crate::os::checkouts_private() {
                     // Git would create this file readable by other users:
                     // keep the (now authenticated) record; the post-checkout
                     // hook or `hydrate` publishes the plaintext with mode 0600.
@@ -144,15 +144,3 @@ fn stored_key<'k>(slot: &'k mut Option<Option<Key>>, root: &Path) -> Result<Opti
     if slot.is_none() { *slot = Some(Key::stored(root)?); }
     Ok(slot.as_ref().and_then(Option::as_ref))
 }
-
-/// Whether files Git creates now are private to this user. Git creates
-/// worktree files with mode `0666 & !umask`, and its filters inherit its
-/// umask, so the smudge filter sees exactly the mask Git will apply.
-pub(crate) fn umask_is_private() -> bool {
-    // SAFETY: umask cannot fail; this process is single-threaded here and
-    // restores the previous mask immediately.
-    let previous = unsafe { libc::umask(0o077) };
-    unsafe { libc::umask(previous) };
-    previous & 0o077 == 0o077
-}
-

@@ -19,8 +19,30 @@ sha2 = "=0.10.9"
 getrandom = "=0.3.4"
 rpassword = "=7.4.0"
 zeroize = "=1.9.1"
-# Agent hardening: disable core dumps and lock the key page in memory.
+
+[target.'cfg(unix)'.dependencies]
+# The OS adapter (`os_unix.rs`, `fsat.rs`): dirfd I/O, the agent socket's
+# peer credentials, and agent hardening (no core dumps, key page locked).
 libc = "=0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+# The OS adapter (`os_windows.rs`, `fsat_windows.rs`): handle-relative
+# NtCreateFile, owner-only DACLs and the agent's AF_UNIX socket.
+windows-sys = { version = "=0.61.2", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
 
 [[bin]]
 name = "transcrypt-v3"

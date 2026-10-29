@@ -8,7 +8,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use std::os::unix::ffi::OsStrExt;
 use crate::{
     credential::Key,
     git::*,
@@ -82,7 +81,7 @@ fn check_pattern(root: &Path, submodules: &[Vec<u8>], pattern: &[u8]) -> Result<
         return Err(format!("{shown}: .gitattributes has no negative patterns; to exclude a file from a \
             protected pattern, add `PATH -filter -diff -merge` to .gitattributes"));
     }
-    if pattern.ends_with(b"/") || root.join(std::ffi::OsStr::from_bytes(pattern)).is_dir() {
+    if pattern.ends_with(b"/") || root.join(crate::os::os_string(pattern)?).is_dir() {
         let dir = String::from_utf8_lossy(pattern.strip_suffix(b"/").unwrap_or(pattern)).into_owned();
         return Err(format!("{shown}: attribute patterns select files, not directories; use '{dir}/**' \
             for everything below it"));
@@ -98,7 +97,7 @@ fn checked_patterns(root: &Path, patterns: &[OsString]) -> Result<Checked, Strin
     let config = load_config(root)?;
     let key = Key::require(root, &config)?;
     let submodules: Vec<Vec<u8>> = indexed_files(root)?.into_iter().filter(|e| e.mode == "160000").map(|e| e.path).collect();
-    let patterns = patterns.iter().map(|p| check_pattern(root, &submodules, p.as_bytes())).collect::<Result<Vec<_>, _>>()?;
+    let patterns = patterns.iter().map(|p| check_pattern(root, &submodules, crate::os::os_bytes(p))).collect::<Result<Vec<_>, _>>()?;
     let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<_, _>>()?;
     Ok((key, patterns, lines))
 }
@@ -107,7 +106,7 @@ fn checked_patterns(root: &Path, patterns: &[OsString]) -> Result<Checked, Strin
 /// must select it (a backslash or bracket in a name is a glob character).
 fn check_selects(root: &Path, patterns: &[Vec<u8>]) -> Result<(), String> {
     let files: Vec<&[u8]> = patterns.iter().map(Vec::as_slice)
-        .filter(|p| root.join(std::ffi::OsStr::from_bytes(p)).is_file()).collect();
+        .filter(|p| crate::os::os_string(p).is_ok_and(|p| root.join(p).is_file())).collect();
     for (path, protected) in files.iter().zip(protected_flags(root, &files, Attributes::Worktree)?) {
         if !protected {
             return Err(format!("the pattern {} does not select the file of that name (Git reads `\\`, `*`, \

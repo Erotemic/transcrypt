@@ -9,7 +9,7 @@
 //! the v2 configuration (including its password) is left in place until the
 //! user has verified the result.
 
-use std::{fs, os::unix::ffi::OsStrExt, path::{Path, PathBuf}};
+use std::{fs, path::{Path, PathBuf}};
 use crate::{
     git::*,
     passphrase,
@@ -192,7 +192,7 @@ fn convert(root: &Path, attribute_files: &[PathBuf], selected: &[&[u8]], rewritt
     // files with the v3 filter. `--renormalize` (which `update-index` lacks)
     // needs `git add`; the paths are raw bytes and literal
     // (GIT_LITERAL_PATHSPECS), so no pathspec magic applies.
-    let paths: Vec<&[u8]> = rewritten.iter().map(|(p, _)| p.as_os_str().as_bytes()).chain(selected.iter().copied()).collect();
+    let paths: Vec<&[u8]> = rewritten.iter().map(|(p, _)| crate::os::os_bytes(p.as_os_str())).chain(selected.iter().copied()).collect();
     git_with_input(root, &["add", "--renormalize", "--pathspec-from-file=-", "--pathspec-file-nul"], &nul_terminated(&paths))?;
     // Every file v2 protected must now be protected by v3.
     if let Some((path, _)) = selected.iter().zip(protected_flags(root, selected, Attributes::Staged)?).find(|(_, p)| !*p) {

@@ -8,18 +8,16 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use zeroize::Zeroizing;
 use transcrypt_v3::{initialize_config, unlock_config, SecretKey};
 use transcrypt_v3_core::{parse_file_header, record_envelope_ok, SALT_LEN};
 use crate::{
     attributes::{edit_attributes, filter_overrides, protect, restore_worktree_attributes, worktree_attributes},
     credential::{self, Key, State},
-    filter::umask_is_private,
     git::*,
     hex,
     lifecycle::*,
-    load_config, passphrase, session,
+    load_config, os, passphrase, session,
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
     Options,
 };
@@ -116,7 +114,7 @@ fn ours(name: &str, command: &str, text: &str) -> bool {
     let Some(line) = text.strip_prefix("#!/bin/sh\nexec ").and_then(|t| t.strip_suffix('\n')) else { return false };
     let Some((path, rest)) = shell_unquote(line) else { return false };
     // The exact form v3 writes, for a binary named transcrypt-v3.
-    Path::new(&path).file_name().is_some_and(|n| n == "transcrypt-v3")
+    Path::new(&path).file_name().is_some_and(|n| *n == *format!("transcrypt-v3{}", std::env::consts::EXE_SUFFIX))
         && [Some(command), legacy].into_iter().flatten()
             .any(|c| rest == c && line == format!("{} {c}", shell_quote(&path)))
 }
@@ -165,8 +163,7 @@ fn install_hooks(root: &Path) -> Result<(), String> {
         let script = hook_script(command)?;
         if let Ok(text) = fs::read_to_string(&path) {
             if text == script {
-                // Git skips a hook that is not executable.
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                os::make_runnable(&path)
                     .map_err(|e| format!("cannot make the {name} hook executable: {e}"))?;
                 continue;
             }
@@ -175,9 +172,7 @@ fn install_hooks(root: &Path) -> Result<(), String> {
         } else if fs::symlink_metadata(&path).is_ok() {
             continue;
         }
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true).mode(0o700);
-        options.open(path).map_err(|e| format!("cannot install {name} hook: {e}"))?
+        os::create_hook(&path).map_err(|e| format!("cannot install {name} hook: {e}"))?
             .write_all(script.as_bytes()).map_err(|e| format!("cannot write {name} hook: {e}"))?;
     }
     if hooks_bypassed(root) {
@@ -528,7 +523,7 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
     for (name, command) in HOOKS.into_iter().filter(|(name, _)| hook_required(name)) {
         let path = hook_path(root, name);
         let installed = fs::read_to_string(&path).ok() == hook_script(command).ok()
-            && fs::metadata(&path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
+            && os::runnable(&path);
         report(installed, &format!("{name} hook installed"));
     }
     report(!hooks_bypassed(root), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
@@ -549,11 +544,7 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         _ => "none (locked)",
     });
     if matches!(state, Some(State::Unlocked { private: true })) {
-        println!("note {}", if umask_is_private() {
-            "umask is private: Git checkouts write plaintext directly (mode 0600)"
-        } else {
-            "umask is permissive: Git checkouts write ciphertext; hooks or `hydrate` decrypt with mode 0600"
-        });
+        println!("note {}", os::CHECKOUTS_PRIVATE[os::checkouts_private() as usize]);
     }
     println!("note remote enforcement cannot be checked from here: deploy contrib/v3/pre-receive or \
         `transcrypt-v3 audit` in CI on every shared remote");

@@ -360,6 +360,7 @@ dependencies = [
  "rpassword",
  "sha2",
  "transcrypt-v3-core",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

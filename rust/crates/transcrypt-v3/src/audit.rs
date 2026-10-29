@@ -8,7 +8,6 @@ use std::{
     process::Stdio,
     rc::Rc,
 };
-use std::os::unix::ffi::OsStringExt;
 use crate::{
     credential::Key,
     git::{changed_files, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
@@ -293,13 +292,13 @@ pub(crate) fn pre_push(root: &Path, remote: Option<&OsStr>) -> Result<(), String
         }
         let zero = |oid: &[u8]| oid.iter().all(|b| *b == b'0');
         if zero(fields[1]) { continue; } // deleting a remote ref pushes nothing
-        revs.push(OsString::from_vec(fields[1].to_vec()));
+        revs.push(String::from_utf8_lossy(fields[1]).into_owned().into());
         let mut known = fields[3].to_vec();
         known.extend_from_slice(b"^{commit}");
         if !zero(fields[3]) && git(root, &["cat-file", "-e", &String::from_utf8_lossy(&known)]).is_ok() {
             let mut exclude = b"^".to_vec();
             exclude.extend_from_slice(fields[3]);
-            revs.push(OsString::from_vec(exclude));
+            revs.push(String::from_utf8_lossy(&exclude).into_owned().into());
         }
     }
     if revs.is_empty() { return Ok(()); }

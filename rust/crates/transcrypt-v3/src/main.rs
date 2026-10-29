@@ -11,15 +11,16 @@
 //! - `git.rs`: every Git subprocess (bounded), object reads by verified id,
 //!   listings and attribute answers parsed by the verified core.
 //! - `worktree.rs`: race-free worktree access and private staging;
-//!   `fsat.rs`: dirfd I/O.
+//!   `fsat.rs` (`fsat_windows.rs`): directory-relative I/O.
+//! - `os_unix.rs` (`os_windows.rs`): the other OS primitives.
 //! - `setup.rs`: init, unlock, uninstall, filters and hooks, `status` and
 //!   `doctor`.
 //! - `attributes.rs`: the `transcrypt` macro, `protect` and `unprotect`.
 //! - `rekey.rs`: `rekey` and `reencrypt`; `migrate.rs`: from Bash transcrypt.
 //! - `audit.rs`: keyless history audit and the pre-push hook.
 //! - `merge.rs` and `diff.rs`: the merge and diff drivers for protected files.
-#[cfg(not(unix))]
-compile_error!("transcrypt-v3 requires Unix");
+#[cfg(not(any(unix, windows)))]
+compile_error!("transcrypt-v3 requires Unix or Windows");
 
 use std::{
     env, fs,
@@ -28,18 +29,21 @@ use std::{
     path::Path,
     process::ExitCode,
 };
-use std::os::unix::ffi::OsStrExt;
 use zeroize::Zeroizing;
 mod attributes;
 mod audit;
 mod credential;
 mod diff;
 mod filter;
+#[cfg_attr(windows, path = "fsat_windows.rs")]
 mod fsat;
 mod git;
 mod lifecycle;
 mod merge;
 mod migrate;
+#[cfg_attr(unix, path = "os_unix.rs")]
+#[cfg_attr(windows, path = "os_windows.rs")]
+mod os;
 mod process;
 mod rekey;
 mod session;
@@ -93,13 +97,10 @@ fn run() -> Result<(), String> {
         }
         return Ok(());
     }
-    session::harden_process()?;
+    os::harden_process()?;
     if action != "serve" {
-        // Die quietly when a reader such as `head` closes our output, like
-        // other command-line tools (Rust ignores SIGPIPE by default). The
-        // agent keeps ignoring it: a client may hang up mid-reply.
-        // SAFETY: setting a signal disposition to its default is always valid.
-        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        // The agent keeps ignoring SIGPIPE: a client may hang up mid-reply.
+        os::default_sigpipe();
     }
     if action == "audit" {
         // Also runs keyless in a bare repository (a server's pre-receive
@@ -182,9 +183,9 @@ fn run() -> Result<(), String> {
             // Git's external diff interface: path old-file old-hex old-mode
             // new-file new-hex new-mode [new-path rename-message].
             match &args[1..] {
-                [path, old, _, _, new, _, _] => diff::diff(&root, path.as_bytes(), &file(old), path.as_bytes(), &file(new)),
+                [path, old, _, _, new, _, _] => diff::diff(&root, os::os_bytes(path), &file(old), os::os_bytes(path), &file(new)),
                 [path, old, _, _, new, _, _, new_path, _] =>
-                    diff::diff(&root, path.as_bytes(), &file(old), new_path.as_bytes(), &file(new)),
+                    diff::diff(&root, os::os_bytes(path), &file(old), os::os_bytes(new_path), &file(new)),
                 [path] => { println!("* Unmerged path {}", path.to_string_lossy()); Ok(()) },
                 _ => Err("unexpected external diff arguments".into()),
             }
@@ -193,7 +194,7 @@ fn run() -> Result<(), String> {
             let [_, base, ours, theirs, path] = &args[..] else {
                 return Err("merge driver takes %O %A %B %P".into());
             };
-            if merge::merge(&root, &file(base), &file(ours), &file(theirs), path.as_bytes())? {
+            if merge::merge(&root, &file(base), &file(ours), &file(theirs), os::os_bytes(path))? {
                 Ok(())
             } else {
                 Err(format!("merge conflict in {}: resolve it in the decrypted file", path.to_string_lossy()))
@@ -202,7 +203,7 @@ fn run() -> Result<(), String> {
         "clean" | "smudge" => {
             if args.len() != 2 { return Err("Git filter requires exactly one %f pathname".into()); }
             let input = read_record(io::stdin())?;
-            let output = Filters::new(&root).convert(action == "clean", args[1].as_bytes(), input)?;
+            let output = Filters::new(&root).convert(action == "clean", os::os_bytes(&args[1]), input)?;
             io::stdout().write_all(&output).map_err(|_| "cannot write output".into())
         },
         "pre-push" => {

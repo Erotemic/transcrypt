@@ -6,8 +6,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use std::os::unix::ffi::OsStrExt;
 use zeroize::Zeroizing;
+pub(crate) use crate::os::sigpipe_blocked;
 use transcrypt_v3_core::{
     blob_read, is_object_id, listing_fields, object_order_ok, parse_attr_response, parse_batch_header,
     parse_index_entry, parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, MAX_RECORD,
@@ -71,32 +71,6 @@ pub(crate) fn run_bounded_status(mut command: Command, input: Option<&[u8]>, lim
         }
         Ok((status, data, errors))
     })
-}
-
-/// Run `f` with SIGPIPE blocked in this thread, so that a write to a pipe
-/// or socket whose reader is gone fails with EPIPE (an error that is
-/// reported, and rolled back from) instead of killing the process: `main`
-/// restores SIGPIPE's default so that `transcrypt-v3 status | head` ends
-/// quietly.
-pub(crate) fn sigpipe_blocked<T>(f: impl FnOnce() -> T) -> T {
-    // SAFETY: signal-mask calls on initialized sets; `sigwait` returns at
-    // once because the signal it waits for is pending.
-    unsafe {
-        let mut pipe: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut pipe);
-        libc::sigaddset(&mut pipe, libc::SIGPIPE);
-        let mut previous: libc::sigset_t = std::mem::zeroed();
-        libc::pthread_sigmask(libc::SIG_BLOCK, &pipe, &mut previous);
-        let result = f();
-        // Discard a SIGPIPE raised meanwhile, then restore the mask.
-        let mut pending: libc::sigset_t = std::mem::zeroed();
-        if libc::sigpending(&mut pending) == 0 && libc::sigismember(&pending, libc::SIGPIPE) == 1 {
-            let mut signal = 0;
-            libc::sigwait(&pipe, &mut signal);
-        }
-        libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
-        result
-    }
 }
 
 /// Read at most `limit` bytes into memory that is wiped when dropped,
@@ -506,7 +480,7 @@ pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
 /// `HEAD`'s. Used to let a filter pass bytes through unchanged only when
 /// they are one of these, never because of a header alone.
 pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> {
-    let name = std::ffi::OsStr::from_bytes(path).to_str().map(str::to_owned);
+    let name = std::str::from_utf8(path).ok().map(str::to_owned);
     let mut oids = Vec::new();
     let mut parse = |listing: &[u8], tree: bool| {
         for entry in records(listing) {
@@ -817,8 +791,7 @@ mod tests {
     /// a silent death by SIGPIPE (which `main` does not ignore).
     #[test]
     fn early_exit_of_a_subprocess_is_reported() {
-        // SAFETY: restoring a signal's default disposition is always valid.
-        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        crate::os::default_sigpipe();
         let input = vec![b'x'; 4 << 20];
         for _ in 0..20 {
             let mut command = Command::new("sh");

@@ -3,16 +3,14 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
-use std::os::unix::ffi::OsStringExt;
 use zeroize::Zeroizing;
 use crate::{fsat, git::read_record};
 
 pub(crate) fn indexed_path(path: &[u8]) -> Result<PathBuf, String> {
-    let relative = PathBuf::from(OsString::from_vec(path.to_vec()));
+    let relative = PathBuf::from(crate::os::os_string(path)?);
     if relative.is_absolute() || relative.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir)) {
         return Err("unsafe protected relative path".into());
     }
@@ -67,21 +65,13 @@ impl Protected {
     /// Remove group and other permissions (through an `O_NOFOLLOW`
     /// descriptor, so a swapped-in symlink is never followed). Private mode.
     pub(crate) fn make_private(&self) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-        let file = self.dir.open_regular(&self.leaf).map_err(|_| "cannot open protected worktree file")?;
-        let mode = file.metadata().map_err(|_| "cannot stat protected worktree file")?.permissions().mode();
-        if mode & 0o077 != 0 {
-            file.set_permissions(fs::Permissions::from_mode(mode & 0o700))
-                .map_err(|_| "cannot restrict protected worktree file permissions")?;
-        }
-        Ok(())
+        self.dir.make_private(&self.leaf).map_err(|_| "cannot restrict protected worktree file permissions".into())
     }
 
     /// Number of hard links to the file.
     pub(crate) fn links(&self) -> Result<u64, String> {
-        use std::os::unix::fs::MetadataExt;
         let file = self.dir.open_regular(&self.leaf).map_err(|_| "cannot open protected worktree file")?;
-        Ok(file.metadata().map_err(|_| "cannot stat protected worktree file")?.nlink())
+        fsat::links(&file).map_err(|_| "cannot stat protected worktree file".into())
     }
 
     /// The contents and the stamp of the file they were read from.
@@ -99,21 +89,19 @@ impl Protected {
     /// Replace the file by `contents` through an exclusive mode-0600 file in
     /// the private staging directory, fsync, `renameat` into the held parent
     /// directory, then fsync that directory. The new file keeps the old one's
-    /// permissions (an executable stays executable), restricted to this user
-    /// when `private`. The entry must still have the `expected` stamp of the
+    /// permissions (an executable stays executable; on Windows, the access
+    /// its directory gives), restricted to this user when `private`. The entry must still have the `expected` stamp of the
     /// read that justified the replacement, so an edit made since then is
     /// refused instead of being lost (a same-UID writer can still race the
     /// final check and the rename). A cross-filesystem rename fails closed
     /// (EXDEV) without touching the file. Not a multi-file transaction.
     pub(crate) fn replace(&self, staging: &Staging, contents: &[u8], expected: &fsat::Stamp, private: bool) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = self.dir.entry_mode(&self.leaf).map_err(|_| "cannot stat protected worktree file")?;
-        let mode = if private { mode & 0o700 } else { mode & 0o777 };
+        let mode = self.dir.replacement_mode(&self.leaf, private).map_err(|_| "cannot stat protected worktree file")?;
         let temp = staging.temporary();
         let mut file = staging.dir.create_new(&temp, 0o600)
             .map_err(|e| format!("cannot create private staged file: {e}"))?;
         let result = file.write_all(contents)
-            .and_then(|_| file.set_permissions(fs::Permissions::from_mode(mode)))
+            .and_then(|_| fsat::set_mode(&file, mode))
             .and_then(|_| file.sync_all());
         drop(file);
         if let Err(e) = result {
@@ -128,7 +116,7 @@ impl Protected {
             let _ = staging.dir.unlink(&temp);
             return Err(format!("cannot replace protected worktree file: {e}"));
         }
-        self.dir.sync().map_err(|e| format!("cannot sync protected file directory: {e}"))
+        self.dir.finish_replace(&self.leaf, mode).map_err(|e| format!("cannot sync protected file directory: {e}"))
     }
 }
 
@@ -198,7 +186,7 @@ fn private_git_dir(root: &Path, name: &str, what: &str) -> Result<fsat::Dir, Str
     let unsafe_dir = || format!("unsafe .git/{name}; require a real 0700 directory");
     git_dir.mkdir(OsStr::new(name), 0o700).map_err(|e| format!("cannot create private {what} directory: {e}"))?;
     let dir = git_dir.subdir(OsStr::new(name)).map_err(|_| unsafe_dir())?;
-    if dir.mode().map_err(|_| format!("cannot examine private {what} directory"))? & 0o077 != 0 {
+    if !dir.is_private().map_err(|_| format!("cannot examine private {what} directory"))? {
         return Err(unsafe_dir());
     }
     Ok(dir)
@@ -236,11 +224,8 @@ impl Scratch {
         let path = crate::git::git_dir(root).join(Self::NAME);
         let dir = private_git_dir(root, Self::NAME, "scratch")?;
         for entry in dir.entries().map_err(|_| "cannot list private scratch directory")? {
-            let owner = entry.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<i32>().ok());
-            // SAFETY: kill with signal 0 only checks whether the process exists.
-            let running = owner.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0
-                || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
-            if !running {
+            let owner = entry.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<u32>().ok());
+            if !owner.is_some_and(crate::os::process_running) {
                 let _ = dir.unlink(&entry);
             }
         }
@@ -269,6 +254,7 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// `staging_dir`, retried briefly: another test thread may fork a child
     /// that holds a copy of a just-released lock descriptor until it execs.
@@ -280,9 +266,48 @@ mod tests {
         staging_dir(root).unwrap()
     }
 
+    /// Whether only this user can open `path` (a file or a directory).
+    fn owner_only(path: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(path).unwrap().permissions().mode() & 0o077 == 0
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+            let file = fs::OpenOptions::new().access_mode(0x20000) // READ_CONTROL
+                .custom_flags(0x0200_0000).open(path).unwrap(); // FILE_FLAG_BACKUP_SEMANTICS
+            crate::os::is_private(file.as_raw_handle()).unwrap()
+        }
+    }
+
+    /// Give a directory the access its parent passes on.
+    fn loosen(dir: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        assert!(std::process::Command::new("icacls").arg(dir).arg("/inheritance:e").output().unwrap().status.success());
+    }
+
+    /// A symlink (on Windows, a junction) at `link` to the directory `target`.
+    fn link_dir(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(target)
+            .output().unwrap().status.success());
+    }
+
+    fn remove_link(link: &Path) {
+        if fs::remove_file(link).is_err() { fs::remove_dir(link).unwrap(); }
+    }
+
     #[test]
     fn replacement_is_private_and_leaves_no_worktree_temporaries() {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = std::env::temp_dir().join(format!(
             "transcrypt-v3-replace-{}", std::process::id()
         ));
@@ -290,7 +315,7 @@ mod tests {
         fs::create_dir_all(tmp.join(".git")).unwrap();
         let sdir = tmp.join(".git/transcrypt-v3-staging");
         drop(staging(&tmp));
-        assert_eq!(fs::metadata(&sdir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert!(owner_only(&sdir));
         // A crash-leftover temporary is purged on the next use.
         fs::write(sdir.join("stale.tmp"), b"stale plaintext").unwrap();
         let staging = staging(&tmp);
@@ -303,16 +328,16 @@ mod tests {
         let (_, stamp) = target.read().unwrap();
         target.replace(&staging, b"authenticated plaintext", &stamp, true).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"authenticated plaintext");
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        assert!(owner_only(&path));
         assert_eq!(fs::read_dir(&tmp).unwrap().count(), 2, "only .git and the file");
         assert_eq!(fs::read_dir(&sdir).unwrap().count(), 0);
         // A symlinked or loosely permissioned staging directory is refused.
         fs::remove_dir(&sdir).unwrap();
-        std::os::unix::fs::symlink(&tmp, &sdir).unwrap();
+        link_dir(&tmp, &sdir);
         assert!(staging_dir(&tmp).is_err());
-        fs::remove_file(&sdir).unwrap();
+        remove_link(&sdir);
         fs::create_dir(&sdir).unwrap();
-        fs::set_permissions(&sdir, fs::Permissions::from_mode(0o755)).unwrap();
+        loosen(&sdir);
         assert!(staging_dir(&tmp).is_err());
         fs::remove_dir_all(&tmp).unwrap();
     }
@@ -345,7 +370,6 @@ mod tests {
 
     #[test]
     fn protected_parent_symlinks_cannot_redirect_lock_or_hydrate() {
-        use std::os::unix::fs::symlink;
         let tmp = std::env::temp_dir().join(format!(
             "transcrypt-v3-parent-symlink-{}", std::process::id()
         ));
@@ -356,20 +380,24 @@ mod tests {
         fs::write(external.join("item.secret"), b"test").unwrap();
         let checkout = tmp.join("checkout");
         fs::create_dir_all(checkout.join(".git")).unwrap();
-        symlink(&external, checkout.join("linked")).unwrap();
+        link_dir(&external, &checkout.join("linked"));
         assert!(open_protected(&checkout, Path::new("linked/item.secret")).is_err());
-        symlink(external.join("item.secret"), checkout.join("leaf.secret")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.join("item.secret"), checkout.join("leaf.secret")).unwrap();
+        #[cfg(windows)] // Needs Developer Mode or an administrator.
+        std::os::windows::fs::symlink_file(external.join("item.secret"), checkout.join("leaf.secret")).unwrap();
         assert!(open_protected(&checkout, Path::new("leaf.secret")).is_err());
         fs::create_dir(checkout.join("regular")).unwrap();
         fs::write(checkout.join("regular/item.secret"), b"test").unwrap();
         let target = open_protected(&checkout, Path::new("regular/item.secret")).unwrap();
         let (contents, stamp) = target.read().unwrap();
         assert_eq!(*contents, b"test");
-        // Race: after resolution, the parent is swapped for a symlink to an
-        // outside directory. The held directory fd keeps the write inside.
+        // Race: after resolution, the parent is swapped for a symlink (on
+        // Windows, a junction) to an outside directory. The held directory
+        // handle keeps the write inside.
         let staging = staging(&checkout);
         fs::rename(checkout.join("regular"), checkout.join("moved")).unwrap();
-        symlink(&external, checkout.join("regular")).unwrap();
+        link_dir(&external, &checkout.join("regular"));
         target.replace(&staging, b"plaintext", &stamp, false).unwrap();
         assert_eq!(fs::read(external.join("item.secret")).unwrap(), b"test", "write escaped");
         assert_eq!(fs::read(checkout.join("moved/item.secret")).unwrap(), b"plaintext");

@@ -4,11 +4,11 @@
 //! changes and the reviewed `rekey` symlink attack.
 mod common;
 use common::*;
-use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::io::Write;
-use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::{io::Write, process::{Command, Stdio}};
 use std::{ffi::OsString, fs};
 
 const NEW: &[u8] = b"a completely different long passphrase\n";
@@ -27,7 +27,11 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     fs::create_dir_all(repo.join("config")).unwrap();
     fs::create_dir_all(repo.join("private/deep/er")).unwrap();
     fs::create_dir_all(repo.join("nested")).unwrap();
+    // Not UTF-8, with a quote and a newline; Windows names allow neither.
+    #[cfg(unix)]
     let odd = OsString::from_vec(b"private/odd \xff'\"\nname".to_vec());
+    #[cfg(windows)]
+    let odd = OsString::from("private/odd \u{e9}'% name");
     let files: Vec<(PathBuf, &[u8])> = vec![
         (".env".into(), b"API_KEY=hunter2\n"),
         ("config/production.yaml".into(), b"password: swordfish\n"),
@@ -41,6 +45,7 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     for (path, content) in &files {
         fs::write(repo.join(path), content).unwrap();
     }
+    #[cfg(unix)]
     fs::set_permissions(repo.join("private/run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
     // A nested policy, and a public file excluded from a protected directory.
     fs::write(repo.join("nested/.gitattributes"), b"local.cfg transcrypt\n").unwrap();
@@ -78,12 +83,14 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     for (path, content) in &files {
         assert_eq!(fs::read(clone.join(path)).unwrap(), *content);
     }
+    #[cfg(unix)]
     assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & 0o111, 0o111,
         "an executable protected file stays executable");
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
     // Lock restores ciphertext (keeping modes), and unlock decrypts again.
     run(&clone, bin(), &["lock"], None);
     assert!(is_record(&fs::read(clone.join("private/run.sh")).unwrap()));
+    #[cfg(unix)]
     assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & 0o111, 0o111);
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
     unlock(&clone);
@@ -101,7 +108,7 @@ fn stored_key_unlock_needs_no_agent_and_follows_the_umask() {
     fs::write(repo.join(".env"), b"one\n").unwrap();
     commit(&repo, &[".env"], "env");
     let key = repo.join(".git/transcrypt-v3/key");
-    assert_eq!(fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(owner_only(&key));
     assert!(!repo.join(".git/transcrypt-v3/session.sock").exists(), "no agent in the default mode");
     assert!(!fs::read(repo.join(".git/config")).unwrap().windows(8).any(|w| w == &PASS[..8]));
     // Every later Git command finds the key by itself.
@@ -111,8 +118,11 @@ fn stored_key_unlock_needs_no_agent_and_follows_the_umask() {
     let script = "umask 022 && exec git checkout -q -";
     run(&repo, "sh", &["-c", script], None);
     assert_eq!(fs::read(repo.join(".env")).unwrap(), b"one\n", "checkout decrypts directly");
+    #[cfg(unix)]
     assert_eq!(fs::metadata(repo.join(".env")).unwrap().permissions().mode() & 0o777, 0o644,
         "plaintext follows the umask in the default mode");
+    #[cfg(windows)]
+    assert!(!owner_only(&repo.join(".env")), "plaintext has its directory's access in the default mode");
     let diff = String::from_utf8(run(&repo, "git", &["diff", "HEAD", "side", "--", ".env"], None)).unwrap();
     assert!(diff.contains("-one") && diff.contains("+two"), "{diff}");
     run(&repo, "git", &["merge", "-q", "side"], None);
@@ -306,8 +316,8 @@ fn rekey_never_writes_through_committed_symlinks() {
     commit_all(&repo, "a");
     let sentinel = scratch.root.join("outside.txt");
     fs::write(&sentinel, b"SENTINEL\n").unwrap();
-    std::os::unix::fs::symlink(&sentinel, repo.join(".transcrypt/config.rekey")).unwrap();
-    std::os::unix::fs::symlink(&sentinel, repo.join(".transcrypt/config.tmp")).unwrap();
+    symlink(&sentinel, &repo.join(".transcrypt/config.rekey"));
+    symlink(&sentinel, &repo.join(".transcrypt/config.tmp"));
     commit(&repo, &[".transcrypt"], "hostile symlinks");
     run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
     assert_eq!(fs::read(&sentinel).unwrap(), b"SENTINEL\n", "rekey wrote outside the repository");
@@ -320,7 +330,7 @@ fn rekey_never_writes_through_committed_symlinks() {
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha\n");
     // A config that is itself a symlink is refused before anything is written.
     fs::remove_file(repo.join(".transcrypt/config")).unwrap();
-    std::os::unix::fs::symlink(&sentinel, repo.join(".transcrypt/config")).unwrap();
+    symlink(&sentinel, &repo.join(".transcrypt/config"));
     let err = run_fails(&repo, bin(), &["rekey", "--password-stdin"], Some(PASS));
     assert!(err.contains("unsafe .transcrypt/config"), "{err}");
     assert_eq!(fs::read(&sentinel).unwrap(), b"SENTINEL\n");
@@ -944,7 +954,6 @@ fn interrupted_migration_lost_macro_and_case_sensitivity() {
 /// one line.
 #[test]
 fn foreign_hooks_executable_bits_and_one_line_passphrases() {
-    use std::os::unix::fs::PermissionsExt;
     let mut scratch = Scratch::new("hooks5");
     let repo = scratch.git_repo("repo");
     let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(b"long enough passphrase\n\n"));
@@ -957,12 +966,16 @@ fn foreign_hooks_executable_bits_and_one_line_passphrases() {
     assert_eq!(fs::read_to_string(repo.join(".git/hooks/pre-commit")).unwrap(), foreign);
     fs::remove_file(repo.join(".git/hooks/pre-commit")).unwrap();
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
-    for hook in ["pre-commit", "pre-push"] {
-        fs::set_permissions(repo.join(".git/hooks").join(hook), fs::Permissions::from_mode(0o600)).unwrap();
+    // Git for Windows runs a hook whatever its permissions.
+    #[cfg(unix)]
+    {
+        for hook in ["pre-commit", "pre-push"] {
+            fs::set_permissions(repo.join(".git/hooks").join(hook), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let out = String::from_utf8(exec(&repo, bin(), &["doctor"], None).stdout).unwrap();
+        assert!(out.contains("FAIL pre-commit hook installed"), "{out}");
+        run(&repo, bin(), &["unlock"], None);
     }
-    let out = String::from_utf8(exec(&repo, bin(), &["doctor"], None).stdout).unwrap();
-    assert!(out.contains("FAIL pre-commit hook installed"), "{out}");
-    run(&repo, bin(), &["unlock"], None);
     assert!(exec(&repo, bin(), &["doctor"], None).status.success());
 }
 
@@ -1000,6 +1013,7 @@ fn hooks_and_audit_agree_on_the_macro_and_configless_branches() {
 /// `migrate` completes it; `migrate` never finishes with v2 ciphertext left
 /// over (here: a file Bash selected only case-insensitively).
 #[test]
+#[cfg(unix)] // The interruption is a shell script named `git` on PATH.
 fn interrupted_commands_converge_when_rerun() {
     let mut scratch = Scratch::new("converge");
     // init: config written but never committed (an interruption).
@@ -1112,6 +1126,7 @@ fn probe_spoofs_and_amends_are_refused() {
 /// Seventh review F3: a resumed migration that fails again stays
 /// resumable, and a third run completes it.
 #[test]
+#[cfg(unix)] // The interruption is a shell script named `git` on PATH.
 fn a_failed_resume_of_migrate_stays_resumable() {
     let mut scratch = Scratch::new("resume2");
     let repo = scratch.git_repo("repo");

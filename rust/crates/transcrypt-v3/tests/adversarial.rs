@@ -3,6 +3,7 @@
 mod common;
 use common::*;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -40,8 +41,7 @@ fn crash_leftovers_never_reach_the_worktree_and_are_purged() {
     // Simulate a hydrate that crashed after writing a private temporary.
     let staging = repo.join(".git/transcrypt-v3-staging");
     fs::create_dir_all(&staging).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).unwrap();
+    make_private_dir(&staging);
     fs::write(staging.join("12345-0.tmp"), b"alpha plaintext\n").unwrap();
     assert!(run(&repo, "git", &["status", "--porcelain", "--untracked-files=all"], None)
         .split(|b| *b == b'\n').all(|l| !l.ends_with(b".tmp")));
@@ -57,10 +57,10 @@ fn crash_leftovers_never_reach_the_worktree_and_are_purged() {
     }
     // A hostile symlink in place of the staging directory is refused.
     fs::remove_dir_all(&staging).unwrap();
-    std::os::unix::fs::symlink(repo.join("dir"), &staging).unwrap();
+    symlink(&repo.join("dir"), &staging);
     fs::write(repo.join("a.secret"), staged(&repo, "a.secret")).unwrap();
     run_fails(&repo, bin(), &["hydrate"], None);
-    fs::remove_file(&staging).unwrap();
+    remove_link(&staging);
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn symlinked_protected_files_are_never_followed() {
     let record = staged(&repo, "a.secret");
     fs::write(&outside, &record).unwrap();
     fs::remove_file(repo.join("a.secret")).unwrap();
-    std::os::unix::fs::symlink(&outside, repo.join("a.secret")).unwrap();
+    symlink(&outside, &repo.join("a.secret"));
     run_fails(&repo, bin(), &["hydrate"], None);
     assert_eq!(fs::read(&outside).unwrap(), record, "hydrate must not write through a symlink");
     // Lock first verifies the index; it must also refuse to follow the link.
@@ -230,7 +230,6 @@ fn deep_repository_paths_and_subdirectories_work() {
 
 #[test]
 fn failed_init_rolls_back_so_it_can_be_rerun() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = Scratch::new("rollback");
     let repo = scratch.root.join("repo");
     fs::create_dir(&repo).unwrap();
@@ -238,7 +237,7 @@ fn failed_init_rolls_back_so_it_can_be_rerun() {
     // A regular file squatting on the socket path makes agent startup fail.
     let dir = repo.join(".git/transcrypt-v3");
     fs::create_dir(&dir).unwrap();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    make_private_dir(&dir);
     fs::write(dir.join("session.sock"), b"squatter").unwrap();
     let err = run_fails(&repo, bin(), &["init", "--private", "--password-stdin"], Some(PASS));
     assert!(err.contains("rolled back"), "{err}");
@@ -278,7 +277,7 @@ fn unlock_hydrates_by_default_and_reports_refusals() {
     // unchanged, and unlock still succeeds and says so.
     let record = fs::read(clone.join("a.secret")).unwrap();
     fs::remove_file(clone.join("dir/b.secret")).unwrap();
-    std::os::unix::fs::symlink("../a.secret", clone.join("dir/b.secret")).unwrap();
+    symlink(Path::new("../a.secret"), &clone.join("dir/b.secret"));
     let out = exec(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("decryption changed nothing"));
@@ -491,13 +490,13 @@ fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
 /// is made private by hydrate (published files are created 0600).
 #[test]
 fn hydrate_makes_existing_plaintext_private() {
-    use std::os::unix::fs::PermissionsExt;
     let mut scratch = Scratch::new("perms");
     let repo = scratch.repo("repo");
     private(&repo);
-    fs::set_permissions(repo.join("a.secret"), fs::Permissions::from_mode(0o644)).unwrap();
+    make_public(&repo.join("a.secret"));
+    assert!(!owner_only(&repo.join("a.secret")));
     run(&repo, bin(), &["hydrate"], None);
-    assert_eq!(fs::metadata(repo.join("a.secret")).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(owner_only(&repo.join("a.secret")));
     assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
 }
 
@@ -550,6 +549,7 @@ fn oversized_hostile_blobs_are_refused() {
 /// The agent does not keep descriptors it inherited from `unlock`'s caller:
 /// a pipe held open by the agent would hang whoever waits for its EOF.
 #[test]
+#[cfg(unix)] // Windows creates every handle non-inheritable.
 fn agent_does_not_keep_inherited_descriptors() {
     use std::os::fd::AsRawFd;
     let mut scratch = Scratch::new("fds");
@@ -571,6 +571,7 @@ fn agent_does_not_keep_inherited_descriptors() {
     assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok(), "agent kept an inherited pipe open");
 }
 
+#[cfg(unix)]
 unsafe fn libc_fcntl_clear_cloexec(fd: i32) {
     extern "C" { fn fcntl(fd: i32, cmd: i32, ...) -> i32; }
     const F_SETFD: i32 = 2;
@@ -614,14 +615,11 @@ fn git_with_umask(dir: &Path, mask: &str, args: &[&str]) {
 
 /// No protected worktree file holds plaintext while readable by others.
 fn assert_no_exposed_plaintext(repo: &Path, step: &str) {
-    use std::os::unix::fs::PermissionsExt;
     for path in worktree_files(repo) {
         if !path.to_str().unwrap().ends_with(".secret") { continue; }
         let full = repo.join(&path);
         let bytes = fs::read(&full).unwrap();
-        let ciphertext = is_record(&bytes);
-        let mode = fs::metadata(&full).unwrap().permissions().mode();
-        assert!(ciphertext || mode & 0o077 == 0, "{step}: {path:?} is plaintext with mode {:o}", mode & 0o777);
+        assert!(is_record(&bytes) || owner_only(&full), "{step}: {path:?} is plaintext readable by others");
     }
 }
 
@@ -737,8 +735,7 @@ fn doctor_detects_missing_protection() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL pre-push hook installed"));
     fs::write(&hook, saved).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    make_executable(&hook);
     for (key, value) in [("core.hooksPath", "/nonexistent"), ("filter.transcrypt-v3.process", "cat"),
                          ("filter.transcrypt-v3.required", "false")] {
         let original = exec(&repo, "git", &["config", key], None).stdout;
@@ -1025,12 +1022,11 @@ fn secrets_merge_as_plaintext() {
 /// next merge.
 #[test]
 fn crashed_merge_inputs_are_purged() {
-    use std::os::unix::fs::PermissionsExt;
     let mut scratch = Scratch::new("mergecrash");
     let repo = scratch.repo("repo");
     let dir = repo.join(".git/transcrypt-v3-scratch");
     fs::create_dir(&dir).unwrap();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    make_private_dir(&dir);
     fs::write(dir.join("2147483646-ours"), b"LEFTOVER PLAINTEXT\n").unwrap();
     let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
     run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
@@ -1137,14 +1133,13 @@ fn submodules_are_independent_v3_repositories() {
 /// as soon as Git stages it (the clean filter sees its plaintext).
 #[test]
 fn staging_a_new_secret_makes_it_private() {
-    use std::os::unix::fs::PermissionsExt;
     let mut scratch = Scratch::new("addprivate");
     let repo = scratch.repo("repo");
     private(&repo);
     fs::write(repo.join("new.secret"), b"fresh secret\n").unwrap();
-    fs::set_permissions(repo.join("new.secret"), fs::Permissions::from_mode(0o644)).unwrap();
+    make_public(&repo.join("new.secret"));
     run(&repo, "git", &["add", "new.secret"], None);
-    assert_eq!(fs::metadata(repo.join("new.secret")).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(owner_only(&repo.join("new.secret")));
     run(&repo, "git", &["commit", "-qm", "new secret"], None);
 }
 

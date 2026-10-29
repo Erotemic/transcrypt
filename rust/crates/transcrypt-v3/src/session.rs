@@ -3,18 +3,16 @@
 //! The authenticated 64-byte key enters the child through a private pipe,
 //! never through argv, the environment, an on-disk key file, or the socket.
 //! Clean/smudge clients transmit their *data*, not the key. The process owns
-//! the key until a successful shutdown. Unix permissions isolate other UIDs;
-//! processes already running as this UID remain inside the threat boundary.
+//! the key until a successful shutdown. Unix permissions (on Windows, an
+//! owner-only DACL) isolate other users; processes already running as this
+//! user remain inside the threat boundary. The socket is a Unix-domain
+//! socket on both (Windows 10 1803 and later have them); `os` supplies it.
 //!
 //! This is the OS adapter, not part of the pure Aeneas verification target.
 
 use std::{
     fs,
     io::{self, Read, Write},
-    os::{
-        fd::AsRawFd,
-        unix::{fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt}, net::{UnixListener, UnixStream}},
-    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -27,7 +25,7 @@ use transcrypt_v3_core::{
     CONFIG_LEN, FRAME_HEADER_LEN,
 };
 use zeroize::Zeroizing;
-use crate::git::sigpipe_blocked;
+use crate::os::{self, sigpipe_blocked, Listener, Stream};
 
 const SOCK: &str = "session.sock";
 
@@ -45,60 +43,23 @@ fn directory(root: &Path) -> Result<PathBuf, String> {
 }
 
 /// `.git/transcrypt-v3`, shared by all worktrees, if it exists: the stored
-/// key or the agent's socket. Anything but a real 0700 directory owned by
-/// this user is refused.
+/// key or the agent's socket. Anything but a real directory that only this
+/// user, who owns it, can enter is refused.
 pub(crate) fn existing_directory(root: &Path) -> Result<Option<PathBuf>, String> {
     let path = credential_directory(root);
-    let meta = match fs::symlink_metadata(&path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err("cannot examine .git/transcrypt-v3".into()),
-    };
-    if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 || meta.uid() != euid() {
-        return Err("unsafe local v3 credential directory; require a real 0700 directory owned by this user".into());
-    }
-    Ok(Some(path))
-}
-
-fn euid() -> u32 {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() as u32 }
-}
-
-/// The effective UID of the process at the other end of a Unix socket, as
-/// recorded by the kernel when the connection was made.
-fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        // SAFETY: `cred` and `len` describe a writable ucred buffer.
-        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        let rc = unsafe {
-            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
-                (&mut cred as *mut libc::ucred).cast(), &mut len)
-        };
-        if rc != 0 { return Err(io::Error::last_os_error()); }
-        Ok(cred.uid as u32)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    {
-        let (mut uid, mut gid) = (0, 0);
-        // SAFETY: both out-pointers are valid.
-        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(uid as u32)
+    match os::private_directory(&path) {
+        Ok(None) => Ok(None),
+        Ok(Some(true)) => Ok(Some(path)),
+        Ok(Some(false)) => Err("unsafe local v3 credential directory; require a real 0700 directory owned by this user".into()),
+        Err(_) => Err("cannot examine .git/transcrypt-v3".into()),
     }
 }
 
-/// Both ends refuse a peer running as another user. The 0700 directory
-/// already denies other users; this also holds if the socket inode is ever
-/// reachable another way. Same-UID peers remain inside the trust boundary.
-fn same_user(stream: &UnixStream) -> Result<(), String> {
-    match peer_uid(stream) {
-        Ok(uid) if uid == euid() => Ok(()),
-        _ => Err("v3 credential socket peer is not this user".into()),
-    }
+/// Both ends refuse a peer running as another user. The private directory
+/// already denies other users; this also holds if the socket is ever
+/// reachable another way. Same-user peers remain inside the trust boundary.
+fn same_user(stream: &Stream) -> Result<(), String> {
+    if os::peer_is_this_user(stream) { Ok(()) } else { Err("v3 credential socket peer is not this user".into()) }
 }
 
 /// `.git/transcrypt-v3`, whether or not it exists.
@@ -111,7 +72,7 @@ pub(crate) fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
     match fs::symlink_metadata(&path) {
         Ok(_) => {},
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            fs::DirBuilder::new().mode(0o700).create(&path)
+            os::create_private_directory(&path)
                 .map_err(|e| format!("cannot create the credential directory: {e}"))?;
         },
         Err(e) => return Err(format!("cannot examine the credential directory: {e}")),
@@ -119,7 +80,7 @@ pub(crate) fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
     directory(root)
 }
 
-/// Unix socket addresses are limited to ~104 (macOS) or 108 (Linux) bytes,
+/// Socket addresses are limited to ~104 (macOS) or 108 (Linux, Windows) bytes,
 /// which a deep repository path easily exceeds. The socket is bound and
 /// connected by its bare name from inside its (checked) directory; v3
 /// processes are single-threaded while they do so. Ownership and permission
@@ -133,26 +94,24 @@ fn at_socket<T>(dir: &Path, f: impl FnOnce(&Path) -> io::Result<T>) -> Result<io
 }
 
 /// Connect to the agent's socket in `dir`.
-fn connect(dir: &Path) -> Result<io::Result<UnixStream>, String> {
-    at_socket(dir, |p| UnixStream::connect(p))
+fn connect(dir: &Path) -> Result<io::Result<Stream>, String> {
+    at_socket(dir, |p| Stream::connect(p))
 }
 
 fn check_socket(path: &Path) -> Result<(), String> {
-    let meta = fs::symlink_metadata(path).map_err(|_| "v3 session is locked; run unlock")?;
-    if !meta.file_type().is_socket() || meta.permissions().mode() & 0o077 != 0 || meta.uid() != euid() {
-        return Err("unsafe v3 session socket; expected mode 0600 and owned by this user".into());
+    match os::is_socket(path) {
+        Ok(Some(_)) if os::private_socket(path) => Ok(()),
+        Ok(Some(_)) => Err("unsafe v3 session socket; expected mode 0600 and owned by this user".into()),
+        _ => Err("v3 session is locked; run unlock".into()),
     }
-    Ok(())
 }
 
 /// Bound a stalled or broken peer (either end) instead of hanging forever.
-fn set_timeouts(stream: &UnixStream) -> Result<(), String> {
-    let limit = Some(Duration::from_secs(120));
-    stream.set_read_timeout(limit).and_then(|_| stream.set_write_timeout(limit))
-        .map_err(|_| "cannot set the credential socket timeouts".into())
+fn set_timeouts(stream: &Stream) -> Result<(), String> {
+    os::set_timeouts(stream, Duration::from_secs(120)).map_err(|_| "cannot set the credential socket timeouts".into())
 }
 
-fn reply(stream: &mut UnixStream, response: Result<Vec<u8>, String>) -> io::Result<()> {
+fn reply(stream: &mut Stream, response: Result<Vec<u8>, String>) -> io::Result<()> {
     let (status, data) = match response {
         Ok(value) => (0u8, value),
         Err(message) => (1u8, message.into_bytes()),
@@ -206,9 +165,9 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
 pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
     let dir = prepare_directory(root)?;
     let path = dir.join(SOCK);
-    match fs::symlink_metadata(&path) {
-        Ok(meta) => {
-            if !meta.file_type().is_socket() { return Err("unsafe existing session socket path".into()); }
+    match os::is_socket(&path) {
+        Ok(Some(socket)) => {
+            if !socket { return Err("unsafe existing session socket path".into()); }
             if connect(&dir)?.is_ok() {
                 // An agent whose worktree config has changed (a pulled rekey)
                 // stops when it refuses this request; give it a moment.
@@ -230,7 +189,7 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Du
                 fs::remove_file(&path).map_err(|_| "cannot remove stale agent socket")?;
             }
         },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+        Ok(None) => {},
         Err(_) => return Err("cannot examine session socket".into()),
     }
     start_agent(root, config, key, idle)
@@ -238,13 +197,10 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Du
 
 fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|_| "cannot locate executable for credential agent")?;
-    let mut child = Command::new(executable)
-        .arg("serve")
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn().map_err(|e| format!("cannot spawn credential agent: {e}"))?;
+    let mut command = Command::new(executable);
+    command.arg("serve").current_dir(root).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    os::detach(&mut command);
+    let mut child = command.spawn().map_err(|e| format!("cannot spawn credential agent: {e}"))?;
     // The key, then the idle limit in seconds (0: none), over the pipe.
     let idle_seconds = idle.map_or(0u64, |d| d.as_secs().max(1));
     let sent = child.stdin.take().ok_or("agent key pipe missing")
@@ -283,7 +239,7 @@ pub(crate) fn stop(root: &Path, config: &[u8]) -> Result<(), String> {
     Err("agent acknowledged shutdown but socket still exists".into())
 }
 
-fn transaction(stream: &mut UnixStream, config: &[u8; CONFIG_LEN], key: &SecretKey) -> Result<bool, String> {
+fn transaction(stream: &mut Stream, config: &[u8; CONFIG_LEN], key: &SecretKey) -> Result<bool, String> {
     let mut raw = [0u8; FRAME_HEADER_LEN];
     stream.read_exact(&mut raw).map_err(|_| "incomplete agent request header")?;
     let header = decode_frame_header(&raw);
@@ -314,70 +270,28 @@ fn transaction(stream: &mut UnixStream, config: &[u8; CONFIG_LEN], key: &SecretK
     Ok(false)
 }
 
-/// Process hardening for every v3 process (all of them handle keys or
-/// plaintext): no core dumps and, on Linux, not dumpable, which also stops
-/// same-UID processes from attaching with ptrace or reading /proc/PID/mem.
-/// It does not protect against root or against use of the agent socket.
-pub(crate) fn harden_process() -> Result<(), String> {
-    let none = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-    // SAFETY: setrlimit reads a valid, fully initialized rlimit struct.
-    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
-        return Err("cannot disable core dumps".into());
-    }
-    #[cfg(target_os = "linux")]
-    // SAFETY: PR_SET_DUMPABLE takes integer arguments only.
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
-        return Err("cannot mark process non-dumpable".into());
-    }
-    Ok(())
-}
-
-/// Close every descriptor inherited beyond stdio, so the long-lived agent
-/// never keeps a caller's pipes, files or locks open.
-fn close_inherited_fds() {
-    let fds: Vec<i32> = fs::read_dir("/dev/fd")
-        .map(|dir| dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok()).collect())
-        .unwrap_or_default();
-    for fd in fds.into_iter().filter(|fd| *fd > 2) {
-        // SAFETY: nothing in this process uses these descriptors yet; closing
-        // an already closed one (the directory listing's own) is harmless.
-        unsafe { libc::close(fd) };
-    }
-}
-
 /// Internal child entrypoint. Runs until explicit lock or a process shutdown.
 pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
-    close_inherited_fds();
+    os::close_inherited();
     let config = config_array(config)?;
     let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
-    // Keep the key page out of swap where the OS allows it (best effort:
-    // RLIMIT_MEMLOCK may forbid it; the key is still never written to disk).
-    // SAFETY: the pointer and length describe `key`, which outlives the lock.
-    let _ = unsafe { libc::mlock(key.as_ptr().cast(), KEY_SIZE) };
+    // Keep the key page out of swap where the OS allows it (best effort;
+    // the key is still never written to disk).
+    os::lock_memory(key.as_ptr(), KEY_SIZE);
     io::stdin().read_exact(&mut key[..]).map_err(|_| "missing private startup key")?;
     let mut idle = [0u8; 8];
     io::stdin().read_exact(&mut idle).map_err(|_| "missing agent idle limit")?;
-    let idle_ms: i32 = match u64::from_be_bytes(idle) {
-        0 => -1,
-        seconds => i32::try_from(seconds.saturating_mul(1000)).unwrap_or(i32::MAX),
+    let idle = match u64::from_be_bytes(idle) {
+        0 => None,
+        seconds => Some(Duration::from_secs(seconds)),
     };
     authenticate_config(config, &key)?;
     let dir = directory(root)?;
     let path = dir.join(SOCK);
-    let listener = at_socket(&dir, |p| UnixListener::bind(p))?.map_err(|e| format!("cannot bind private credential socket: {e}"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-        .map_err(|_| "cannot secure session socket")?;
-    loop {
-        // Wait for a client; past the idle limit, forget the key.
-        let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        // SAFETY: one valid pollfd for the listener's open descriptor.
-        match unsafe { libc::poll(&mut ready, 1, idle_ms) } {
-            0 => break,
-            n if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
-            n if n < 0 => break,
-            _ => {},
-        }
-        let mut stream = match listener.accept() { Ok((s, _)) => s, Err(_) => break };
+    let listener = at_socket(&dir, |p| Listener::bind(p))?.map_err(|e| format!("cannot bind private credential socket: {e}"))?;
+    os::secure_socket(&path).map_err(|_| "cannot secure session socket")?;
+    // Wait for each client; past the idle limit, forget the key.
+    while let Some(mut stream) = os::accept(&listener, idle) {
         // A stalled client must not hold the single-threaded agent forever.
         set_timeouts(&stream)?;
         if same_user(&stream).is_err() { continue; }

@@ -14,7 +14,7 @@ use std::{
     io,
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::ffi::{OsStrExt, OsStringExt},
+        unix::{ffi::{OsStrExt, OsStringExt}, fs::{MetadataExt, PermissionsExt}},
     },
     path::Path,
 };
@@ -53,6 +53,21 @@ impl Stamp {
         check(unsafe { libc::fstat(file.as_raw_fd(), &mut st) })?;
         Ok(Stamp::from_stat(&st))
     }
+}
+
+/// Permissions for a replacement file (`Dir::replacement_mode`).
+#[derive(Clone, Copy)]
+pub(crate) struct Mode(u32);
+
+/// Give a (new, still private) replacement file its permissions.
+pub(crate) fn set_mode(file: &File, mode: Mode) -> io::Result<()> {
+    file.set_permissions(std::fs::Permissions::from_mode(mode.0))
+}
+
+/// The number of hard links to an open file.
+pub(crate) fn links(file: &File) -> io::Result<u64> {
+    #[allow(clippy::useless_conversion)] // `nlink` is u64 on most, not all, platforms.
+    Ok(u64::from(file.metadata()?.nlink()))
 }
 
 /// An open directory.
@@ -138,10 +153,30 @@ impl Dir {
         Ok((kind == libc::S_IFREG, kind == libc::S_IFLNK))
     }
 
-    /// Permission bits of an entry, without following a symlink.
+    /// The permissions for a file replacing the entry `name` (not followed
+    /// if a symlink): its own, restricted to this user when `private`.
     #[allow(clippy::unnecessary_cast)] // `mode_t` is u16 on macOS.
-    pub(crate) fn entry_mode(&self, name: &OsStr) -> io::Result<u32> {
-        self.lstat(name).map(|st| st.st_mode as u32 & 0o7777)
+    pub(crate) fn replacement_mode(&self, name: &OsStr, private: bool) -> io::Result<Mode> {
+        let mode = self.lstat(name)?.st_mode as u32;
+        Ok(Mode(if private { mode & 0o700 } else { mode & 0o777 }))
+    }
+
+    /// After `name` was renamed into this directory with the permissions
+    /// `set_mode` gave it: make the rename durable.
+    pub(crate) fn finish_replace(&self, _name: &OsStr, _mode: Mode) -> io::Result<()> {
+        self.sync()
+    }
+
+    /// Remove group and other permissions from the regular file `name`
+    /// (through an `O_NOFOLLOW` descriptor, so a swapped-in symlink is
+    /// never followed).
+    pub(crate) fn make_private(&self, name: &OsStr) -> io::Result<()> {
+        let file = self.open_regular(name)?;
+        let mode = file.metadata()?.permissions().mode();
+        if mode & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o700))?;
+        }
+        Ok(())
     }
 
     /// The stamp of an entry, without following a symlink.
@@ -149,12 +184,12 @@ impl Dir {
         self.lstat(name).map(|st| Stamp::from_stat(&st))
     }
 
-    /// Permission bits of this directory.
-    pub(crate) fn mode(&self) -> io::Result<u32> {
+    /// Whether only this directory's owner can enter it.
+    pub(crate) fn is_private(&self) -> io::Result<bool> {
         // SAFETY: `st` is fully written by a successful fstat.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         check(unsafe { libc::fstat(self.0.as_raw_fd(), &mut st) })?;
-        Ok(st.st_mode as u32 & 0o7777)
+        Ok(st.st_mode & 0o077 == 0)
     }
 
     /// Names of the entries of this directory (excluding `.` and `..`).

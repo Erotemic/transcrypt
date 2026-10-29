@@ -2,6 +2,7 @@
 //! scratch repositories that are locked and removed when a test ends.
 #![allow(dead_code)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -106,10 +107,23 @@ pub fn unlocked(repo: &Path) -> bool {
     repo.join(".git/transcrypt-v3/key").exists() || socket(repo).exists()
 }
 
+/// The agent's socket client and listener on Windows, which std lacks:
+/// the adapter's own (only the transport; privacy is checked with icacls).
+#[cfg(windows)]
+#[allow(dead_code, unused_imports)]
+#[path = "../../src/os_windows.rs"]
+pub mod os;
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use os::{Listener as UnixListener, Stream as UnixStream};
+
 /// Speak the agent's framing directly, as a hostile same-UID client could.
 pub fn agent_request(repo: &Path, op: u8, config: &[u8], path: &[u8], body: &[u8]) -> Result<Vec<u8>, String> {
     let mut stream = UnixStream::connect(socket(repo)).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
     stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    #[cfg(windows)]
+    os::set_timeouts(&stream, Duration::from_secs(30)).unwrap();
     let mut frame = vec![op];
     frame.extend_from_slice(config);
     frame.extend_from_slice(&(path.len() as u32).to_be_bytes());
@@ -199,3 +213,105 @@ impl Drop for Scratch {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
+
+/// Make a directory private to this user, as v3 makes its own.
+pub fn make_private_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    icacls(path, &["/inheritance:r", "/grant:r", &format!("*{}:(OI)(CI)F", user_sid())]);
+}
+
+/// Make a file readable by other users.
+pub fn make_public(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    #[cfg(windows)]
+    icacls(path, &["/grant", "*S-1-1-0:(R)"]);
+}
+
+/// Make a file executable (Git for Windows runs any hook file).
+pub fn make_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    let _ = path;
+}
+
+/// Whether only this user can open the file or directory: no group or other
+/// permission on Unix; on Windows, as `icacls` lists it: nothing inherited,
+/// and only this user granted access.
+pub fn owner_only(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o077 == 0
+    }
+    #[cfg(windows)]
+    {
+        let out = exec(path.parent().unwrap(), "icacls", &[path.to_str().unwrap()], None);
+        assert!(out.status.success(), "icacls failed");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let me = user_name().to_lowercase();
+        let entries: Vec<String> = text.lines().filter_map(|line| {
+            let line = line.strip_prefix(path.to_str().unwrap()).unwrap_or(line).trim();
+            line.contains(":(").then(|| line.to_lowercase())
+        }).collect();
+        !entries.is_empty() && entries.iter().all(|e| e.starts_with(&format!("{me}:(")) && !e.contains("(i)"))
+    }
+}
+
+/// A symlink at `link` to `target` (on Windows, a junction for a directory,
+/// which needs no privilege).
+pub fn symlink(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let resolved = link.parent().unwrap().join(target);
+        if resolved.is_dir() {
+            let out = exec(link.parent().unwrap(), "cmd", &["/c", "mklink", "/J", link.to_str().unwrap(),
+                resolved.to_str().unwrap()], None);
+            assert!(out.status.success(), "mklink /J failed: {}", String::from_utf8_lossy(&out.stderr));
+        } else {
+            std::os::windows::fs::symlink_file(target, link).unwrap();
+        }
+    }
+}
+
+/// Remove a symlink or junction (a junction is a directory on Windows).
+pub fn remove_link(link: &Path) {
+    if fs::remove_file(link).is_err() { fs::remove_dir(link).unwrap(); }
+}
+
+#[cfg(windows)]
+fn icacls(path: &Path, args: &[&str]) {
+    let mut all = vec![path.to_str().unwrap()];
+    all.extend_from_slice(args);
+    let out = exec(path.parent().unwrap(), "icacls", &all, None);
+    assert!(out.status.success(), "icacls {args:?} failed: {}", String::from_utf8_lossy(&out.stdout));
+}
+
+/// `DOMAIN\user` and the SID of this user, as `whoami` reports them.
+#[cfg(windows)]
+fn whoami() -> (String, String) {
+    let out = exec(Path::new("."), "whoami", &["/user", "/fo", "csv", "/nh"], None);
+    let text = String::from_utf8_lossy(&out.stdout).trim().replace('"', "");
+    let (name, sid) = text.split_once(',').unwrap();
+    (name.to_owned(), sid.to_owned())
+}
+
+#[cfg(windows)]
+fn user_name() -> String { whoami().0 }
+
+#[cfg(windows)]
+fn user_sid() -> String { whoami().1 }

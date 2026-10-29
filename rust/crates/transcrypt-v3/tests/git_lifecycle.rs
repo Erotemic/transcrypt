@@ -6,15 +6,14 @@ use std::{fs, path::Path};
 /// Unlocked means exactly one private key file in a private directory, and
 /// no agent; locked means no key file.
 fn assert_unlocked(root: &Path, expected: bool) {
-    use std::os::unix::fs::PermissionsExt;
     let dir = root.join(".git/transcrypt-v3");
     let key = dir.join("key");
     if expected {
         let meta = fs::symlink_metadata(&key).expect("unlocked checkout must store its key");
         assert!(meta.file_type().is_file() && meta.len() == 55 + 64,
             "the key file holds the public config it unlocks and the 64-byte derived key");
-        assert_eq!(meta.permissions().mode() & 0o077, 0, "key file must be private");
-        assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o077, 0);
+        assert!(owner_only(&key), "key file must be private");
+        assert!(owner_only(&dir));
         let items: Vec<_> = fs::read_dir(&dir).unwrap().map(|f| f.unwrap().file_name()).collect();
         assert_eq!(items, [std::ffi::OsString::from("key")], "nothing else in the credential directory");
     } else {
@@ -175,6 +174,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
 }
 
 #[test]
+#[cfg(unix)] // No Windows file name is invalid UTF-16, so none is invalid UTF-8.
 fn git_non_utf8_path_survives_filter_agent_commit_clone_and_hydration() {
     use std::os::unix::ffi::OsStringExt;
     let mut scratch = Scratch::new("raw-path");
