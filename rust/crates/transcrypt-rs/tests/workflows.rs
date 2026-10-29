@@ -9,7 +9,7 @@ use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::{io::Write, process::{Command, Stdio}};
-use std::{ffi::OsString, fs};
+use std::{ffi::OsString, fs, time::{Duration, Instant}};
 
 const NEW: &[u8] = b"a completely different long passphrase\n";
 
@@ -350,6 +350,7 @@ fn rekey_never_writes_through_committed_symlinks() {
 /// decrypted worktree with v3 and leaves the v2 credentials for the user to
 /// remove after checking a fresh clone.
 #[test]
+#[cfg_attr(target_os = "openbsd", ignore = "Bash transcrypt (v2) needs `head -c`, which OpenBSD lacks")]
 fn bash_v2_repositories_migrate_to_v3() {
     let mut scratch = Scratch::new("migrate");
     let repo = scratch.git_repo("repo");
@@ -608,6 +609,7 @@ fn renames_during_rotation_and_rebase_stops_work() {
 /// Review F4: quoted v2 patterns are converted, and v2 rules in
 /// `.git/info/attributes` are refused instead of silently dropped.
 #[test]
+#[cfg_attr(target_os = "openbsd", ignore = "Bash transcrypt (v2) needs `head -c`, which OpenBSD lacks")]
 fn migrate_converts_quoted_rules_and_refuses_local_ones() {
     let mut scratch = Scratch::new("migratequoted");
     let repo = scratch.git_repo("repo");
@@ -744,15 +746,20 @@ fn private_sessions_expire_when_idle() {
     assert!(err.contains("--private"), "{err}");
     let err = run_fails(&repo, bin(), &["unlock", "--private", "--timeout=0", "--password-stdin"], Some(PASS));
     assert!(err.contains("positive duration"), "{err}");
-    // Starting processes is slower on Windows: a longer limit, the same pauses.
-    let limit = if cfg!(windows) { 8 } else { 3 };
-    run(&repo, bin(), &["unlock", "--private", &format!("--timeout={limit}s"), "--password-stdin"], Some(PASS));
+    // The idle limit must outlast a pause plus the `status` runs around it,
+    // which take far longer on some systems (Windows, OpenBSD): measure one.
+    const PAUSE: Duration = Duration::from_millis(1500);
+    const SHORTEST_LIMIT: Duration = Duration::from_secs(3);
     let status = || String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    let started = Instant::now();
+    status();
+    let limit = SHORTEST_LIMIT.max(PAUSE + 3 * started.elapsed()).as_secs() + 1;
+    run(&repo, bin(), &["unlock", "--private", &format!("--timeout={limit}s"), "--password-stdin"], Some(PASS));
     for _ in 0..3 {
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::thread::sleep(PAUSE);
         assert!(status().contains("unlocked (private"), "use keeps the session alive");
     }
-    std::thread::sleep(std::time::Duration::from_millis(limit * 1000 + 1500));
+    std::thread::sleep(Duration::from_secs(limit) + PAUSE);
     assert!(status().contains("key:        locked"), "{}", status());
     assert!(!repo.join(".git/transcrypt-v3/session.sock").exists());
 }
@@ -929,6 +936,7 @@ fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
 /// is refused by the hook and the audit; selection is case-sensitive on
 /// every clone, so a pattern matching only case-insensitively fails closed.
 #[test]
+#[cfg_attr(target_os = "openbsd", ignore = "Bash transcrypt (v2) needs `head -c`, which OpenBSD lacks")]
 fn interrupted_migration_lost_macro_and_case_sensitivity() {
     let mut scratch = Scratch::new("review5");
     let repo = scratch.git_repo("migrate");
@@ -1028,6 +1036,7 @@ fn hooks_and_audit_agree_on_the_macro_and_configless_branches() {
 /// over (here: a file Bash selected only case-insensitively).
 #[test]
 #[cfg(unix)] // The interruption is a shell script named `git` on PATH.
+#[cfg_attr(target_os = "openbsd", ignore = "Bash transcrypt (v2) needs `head -c`, which OpenBSD lacks")]
 fn interrupted_commands_converge_when_rerun() {
     let mut scratch = Scratch::new("converge");
     // init: config written but never committed (an interruption).
@@ -1151,6 +1160,7 @@ fn migrate_with_shim(shim: &std::path::Path, repo: &std::path::Path, action: &st
 /// resumable, and a third run completes it.
 #[test]
 #[cfg(unix)] // The interruption is a shell script named `git` on PATH.
+#[cfg_attr(target_os = "openbsd", ignore = "Bash transcrypt (v2) needs `head -c`, which OpenBSD lacks")]
 fn a_failed_resume_of_migrate_stays_resumable() {
     let mut scratch = Scratch::new("resume2");
     let repo = scratch.git_repo("repo");
