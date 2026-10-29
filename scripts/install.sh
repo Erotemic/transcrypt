@@ -1,6 +1,7 @@
 #!/bin/sh
-# Install a transcrypt-rs release binary: Linux (x86_64, arm64), FreeBSD or
-# NetBSD (x86_64), or macOS (arm64, x86_64). On Windows, use install.ps1.
+# Install a transcrypt-rs release binary: Linux (x86_64, arm64), FreeBSD,
+# NetBSD or OpenBSD (x86_64), or macOS (arm64, x86_64). On Windows, use
+# install.ps1.
 #
 #   sh install.sh [--tag v3-X.Y.Z] [--from DIR] [--prefix DIR]
 #
@@ -33,7 +34,7 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	-h | --help)
-		sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -53,6 +54,8 @@ case "$(uname -s)" in
 Linux) os=linux ;;
 FreeBSD) os=freebsd ;;
 NetBSD) os=netbsd ;;
+# OpenBSD archives are per release: library versions change with each.
+OpenBSD) os="openbsd$(uname -r)" ;;
 Darwin) os=macos ;;
 *) fail "no release binary for $(uname -s) yet (docs/RELEASING.md); build from source: cd rust && cargo build --release" ;;
 esac
@@ -67,6 +70,8 @@ if command -v sha256sum >/dev/null; then
 	sha256() { sha256sum "$1" | cut -d ' ' -f 1; }
 elif command -v shasum >/dev/null; then
 	sha256() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
+elif command -v sha256 >/dev/null; then
+	sha256() { command sha256 -q "$1"; } # OpenBSD
 else
 	fail "missing sha256sum"
 fi

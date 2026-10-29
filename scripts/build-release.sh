@@ -20,6 +20,11 @@
 #                               pinned NetBSD release's base and comp sets),
 #                               x86_64-pc-windows-gnu (static; needs mingw-w64)
 #                    on macOS:  aarch64-apple-darwin, x86_64-apple-darwin
+#                    on OpenBSD: x86_64-unknown-openbsd, with OpenBSD's own Rust
+#                               package (Rust ships no OpenBSD toolchain, so
+#                               RUST_TOOLCHAIN does not apply); the archive is
+#                               for this OpenBSD release only, as its library
+#                               versions change with every release
 #
 # Needs rustup, Git, GNU tar, gzip and sha256sum (or shasum); python3 for
 # the Windows zip. The Rust toolchain is pinned (RUST_TOOLCHAIN, default
@@ -56,12 +61,12 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	-h | --help)
-		sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	x86_64-unknown-linux-musl | aarch64-unknown-linux-musl | x86_64-unknown-freebsd | x86_64-unknown-netbsd | \
 		x86_64-pc-windows-gnu | \
-		aarch64-apple-darwin | x86_64-apple-darwin) targets+=("$1") ;;
+		aarch64-apple-darwin | x86_64-apple-darwin | x86_64-unknown-openbsd) targets+=("$1") ;;
 	*)
 		echo "build-release: unsupported argument or target: $1" >&2
 		exit 2
@@ -75,6 +80,7 @@ if [ ${#targets[@]} -eq 0 ]; then
 	Linux) targets=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-unknown-freebsd x86_64-unknown-netbsd
 		x86_64-pc-windows-gnu) ;;
 	Darwin) targets=(aarch64-apple-darwin x86_64-apple-darwin) ;;
+	OpenBSD) targets=(x86_64-unknown-openbsd) ;;
 	*)
 		echo "build-release: name the targets to build on $host_os" >&2
 		exit 2
@@ -88,16 +94,25 @@ need() {
 		exit 1
 	}
 }
-for tool in rustup git gzip; do need "$tool"; done
+# OpenBSD builds with the system's Rust: there is no rustup toolchain for it.
+if [ "$host_os" = OpenBSD ]; then need cargo; else need rustup; fi
+for tool in git gzip; do need "$tool"; done
 tar=tar
 command -v gtar >/dev/null && tar=gtar
 "$tar" --version 2>/dev/null | grep -q 'GNU tar' || {
 	echo "build-release: GNU tar is required (as tar or gtar)" >&2
 	exit 1
 }
-if command -v sha256sum >/dev/null; then sha256=(sha256sum) sha512=(sha512sum); else
-	need shasum
+# Checksums in sha256sum's format, with whichever tool this system has
+# (OpenBSD's `sha256 -r` separates with one space).
+if command -v sha256sum >/dev/null; then
+	sha256=(sha256sum) sha512=(sha512sum)
+elif command -v shasum >/dev/null; then
 	sha256=(shasum -a 256) sha512=(shasum -a 512)
+else
+	need sha256 "sha256sum, shasum or sha256"
+	sha256_listing() { sha256 -r "$@" | sed 's/ /  /'; }
+	sha256=(sha256_listing)
 fi
 
 cd "$root"
@@ -112,9 +127,13 @@ version="$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/crates/transcrypt-rs/Cargo.
 SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
 export SOURCE_DATE_EPOCH
 
-rustup toolchain install --profile minimal --no-self-update "$toolchain" >/dev/null
-rustup target add --toolchain "$toolchain" "${targets[@]}" >/dev/null
-cargo=(rustup run "$toolchain" cargo)
+if [ "$host_os" = OpenBSD ]; then
+	cargo=(cargo)
+else
+	rustup toolchain install --profile minimal --no-self-update "$toolchain" >/dev/null
+	rustup target add --toolchain "$toolchain" "${targets[@]}" >/dev/null
+	cargo=(rustup run "$toolchain" cargo)
+fi
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 export CARGO_PROFILE_RELEASE_LTO=true
 export CARGO_TARGET_DIR="$root/rust/target/release-dist"
@@ -194,6 +213,13 @@ link_flags() {
 		need x86_64-w64-mingw32-objdump "install mingw-w64"
 		echo "-C linker=x86_64-w64-mingw32-gcc -C target-feature=+crt-static"
 		;;
+	*-openbsd)
+		[ "$host_os" = OpenBSD ] || {
+			echo "build-release: $1 is built on OpenBSD" >&2
+			exit 1
+		}
+		echo ""
+		;;
 	*-apple-darwin)
 		[ "$host_os" = Darwin ] || {
 			echo "build-release: $1 is built on macOS" >&2
@@ -229,6 +255,15 @@ check_self_contained() {
 		libs="$(readelf -dW "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')"
 		if grep -qv -E '^(libc\.so\.12|libpthread\.so\.1|libgcc_s\.so\.1|libm\.so\.0)$' <<<"$libs"; then
 			echo "build-release: $target binary needs libraries outside NetBSD's base system: $libs" >&2
+			exit 1
+		fi
+		;;
+	*-openbsd)
+		need readelf
+		local libs
+		libs="$(readelf -dW "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')"
+		if grep -qv -E '^lib(c|pthread|c\+\+abi|m)\.so\.[0-9.]+$' <<<"$libs"; then
+			echo "build-release: $target binary needs libraries outside OpenBSD's base system: $libs" >&2
 			exit 1
 		fi
 		;;
@@ -285,6 +320,7 @@ for target in "${targets[@]}"; do
 	*-linux-musl) os=linux exe="" ext=tar.gz ;;
 	*-freebsd) os=freebsd exe="" ext=tar.gz ;;
 	*-netbsd) os=netbsd exe="" ext=tar.gz ;;
+	*-openbsd) os="openbsd$(uname -r)" exe="" ext=tar.gz ;;
 	*-windows-gnu) os=windows exe=.exe ext=zip ;;
 	*-apple-darwin) os=macos exe="" ext=tar.gz ;;
 	esac

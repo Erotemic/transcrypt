@@ -188,6 +188,28 @@ jobs:
             (cd rust && cargo test --locked --workspace)
             (cd rust-legacy && cargo test --locked --workspace)
 
+  openbsd:
+    # The v3 suite on OpenBSD (in a VM), with OpenBSD's own Rust package:
+    # Rust has no rustup toolchain for OpenBSD. The tests that first build a
+    # repository with Bash transcrypt (v2) are skipped there (no `head -c`).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test on OpenBSD 7.9
+        uses: cross-platform-actions/action@ef53f0d3fd471648f2758f3fcdc3cb2aa40c87cb # v1.7.0
+        with:
+          operating_system: openbsd
+          version: "7.9"
+          memory: 8G
+          run: |
+            set -e
+            sudo pkg_add -I rust git bash
+            git config --global user.name CI
+            git config --global user.email ci@example.test
+            git config --global init.defaultBranch main
+            cd rust && cargo test --locked -p transcrypt-rs -p transcrypt-v3-core
+
   linux-release:
     # The release archives, built exactly as a release is (scripts/
     # build-release.sh), with the suite run against the static binary on
