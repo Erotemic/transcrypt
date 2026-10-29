@@ -9,7 +9,7 @@ use transcrypt_v3_core::MAX_RECORD;
 use zeroize::Zeroizing;
 use crate::{
     credential::Key,
-    git::{git_command, read_record, run_bounded_status},
+    git::{git_command, read_record, run_bounded_status, Finished},
     worktree::Scratch,
     load_config,
 };
@@ -47,7 +47,7 @@ pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_pa
     }
     let result = run_bounded_status(command, None, MERGE_OUTPUT_LIMIT);
     drop(scratch);
-    let (status, merged, errors) = result?;
+    let Finished { status, output: merged, errors } = result?;
     // An error's output must never replace `ours`.
     let conflicts = match status.code() {
         Some(MERGE_CLEAN) => false,

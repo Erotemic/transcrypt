@@ -39,6 +39,7 @@ mod filter;
 mod fsat;
 mod git;
 mod lifecycle;
+mod listing;
 mod merge;
 mod migrate;
 mod modes;

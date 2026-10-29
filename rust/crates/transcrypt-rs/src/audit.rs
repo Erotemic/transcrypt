@@ -11,11 +11,11 @@ use std::{
 use crate::{
     attributes::split_lines,
     credential::Key,
-    git::{changed_files, CONFIG_PATH, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
+    git::{changed_files, Changes, PathBlob, CONFIG_PATH, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
         push_index_record, read_record, tree_files, Attributes, Staged, REGULAR_FILE_MODE, SHORT_OUTPUT_LIMIT},
 };
 use transcrypt_v3_core::{
-    is_object_id, is_reserved_path, record_envelope_ok, ID_LEN,
+    is_object_id, is_reserved_path, record_envelope_ok, ATTRIBUTES_NAME, ID_LEN,
 };
 
 /// The longest `git rev-list --parents` line read: a commit id and its
@@ -90,15 +90,15 @@ struct AuditState {
     commits: usize,
     records: usize,
     authenticated: bool,
-    /// Per committed config blob: its bytes, id and the key, if this
-    /// checkout is unlocked for it.
-    configs: HashMap<String, Committed>,
+    /// Per committed config blob.
+    configs: HashMap<String, CommittedConfig>,
     /// The config blob of every commit audited so far (`None`: no config).
     commit_configs: HashMap<String, Option<String>>,
     /// The `.gitattributes` files of every commit audited so far.
     commit_attributes: HashMap<String, Rc<AttributeFiles>>,
     policy: AttributeIndex,
-    checked: HashSet<(String, String, Vec<u8>)>,
+    /// The records already checked (each blob once per config and path).
+    checked: HashSet<CheckedRecord>,
 }
 
 impl AuditState {
@@ -117,14 +117,27 @@ impl AuditState {
     }
 }
 
-/// A committed config: its bytes, id and the key, if unlocked for it.
-type Committed = (Vec<u8>, [u8; ID_LEN], Option<Key>);
+/// A committed config: its id and the key, if this checkout is unlocked
+/// for it.
+struct CommittedConfig {
+    id: [u8; ID_LEN],
+    key: Option<Key>,
+}
 
-/// The `.gitattributes` blobs of a tree: (path, object id), in tree order.
-type AttributeFiles = Vec<(Vec<u8>, String)>;
+/// A record checked once: its blob, the config blob and the path.
+#[derive(PartialEq, Eq, Hash)]
+struct CheckedRecord {
+    oid: String,
+    config_oid: String,
+    path: Vec<u8>,
+}
+
+/// The `.gitattributes` blobs of a tree, in tree order.
+type AttributeFiles = Vec<PathBlob>;
 
 fn attribute_files(entries: &[Staged]) -> AttributeFiles {
-    entries.iter().filter(|e| e.regular && is_attributes_file(&e.path)).map(|e| (e.path.clone(), e.oid.clone())).collect()
+    entries.iter().filter(|e| e.regular && is_attributes_file(&e.path))
+        .map(|e| PathBlob { path: e.path.clone(), oid: e.oid.clone() }).collect()
 }
 
 /// A temporary index holding exactly one commit's `.gitattributes` files,
@@ -142,12 +155,12 @@ impl AttributeIndex {
             self.files = None;
             if !files.is_empty() {
                 let mut info = Vec::new();
-                for (path, oid) in files.iter() { push_index_record(&mut info, REGULAR_FILE_MODE, oid, path); }
+                for file in files.iter() { push_index_record(&mut info, REGULAR_FILE_MODE, &file.oid, &file.path); }
                 let mut command = git_command(Some(root));
                 command.env("GIT_INDEX_FILE", &self.file).args(["update-index", "-z", "--index-info"]);
-                let (status, _, errors) = crate::git::run_bounded_status(command, Some(&info), SHORT_OUTPUT_LIMIT)?;
-                if !status.success() {
-                    return Err(format!("cannot read a commit's .gitattributes: {}", String::from_utf8_lossy(&errors)));
+                let finished = crate::git::run_bounded_status(command, Some(&info), SHORT_OUTPUT_LIMIT)?;
+                if !finished.status.success() {
+                    return Err(format!("cannot read a commit's .gitattributes: {}", String::from_utf8_lossy(&finished.errors)));
                 }
             }
             self.files = Some(files.clone());
@@ -170,8 +183,8 @@ fn at(commit: &str, path: &[u8]) -> String {
 fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, parent: Option<String>)
     -> Result<(), String>
 {
-    let (mut entries, deleted, modified) = changed_files(root, commit, parent.as_deref())?;
-    let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|(p, _)| test(p));
+    let Changes { mut entries, deleted, modified } = changed_files(root, commit, parent.as_deref())?;
+    let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|d| test(&d.path));
     let config_changed = parent.is_none() || touched(&|p| p == CONFIG_PATH.as_bytes());
     let attributes_changed = parent.is_none() || touched(&is_attributes_file);
     if (config_changed || attributes_changed) && parent.is_some() {
@@ -212,8 +225,8 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     // The first deleted path of each removed blob, and the old blob of each
     // modified path.
     let mut moved: HashMap<&str, &[u8]> = HashMap::new();
-    for (path, oid) in &deleted { moved.entry(oid.as_str()).or_insert(path.as_slice()); }
-    let old: HashMap<&[u8], &str> = modified.iter().map(|(p, oid)| (p.as_slice(), oid.as_str())).collect();
+    for d in &deleted { moved.entry(d.oid.as_str()).or_insert(d.path.as_slice()); }
+    let old: HashMap<&[u8], &str> = modified.iter().map(|m| (m.path.as_slice(), m.oid.as_str())).collect();
     // A record this commit moved from a deleted path to an unprotected one is
     // never decrypted there (`git mv x.env x.bak`, committed by any route).
     let moved_away: Vec<(&Staged, &[u8])> = unprotected.iter()
@@ -244,7 +257,7 @@ fn check_policy(root: &Path, policy: &AttributeIndex, commit: &str, attributes: 
     -> Result<(), String>
 {
     if changed {
-        let top = attributes.iter().find(|(p, _)| p == b".gitattributes").map(|(_, oid)| oid.as_str());
+        let top = attributes.iter().find(|a| a.path == ATTRIBUTES_NAME).map(|a| a.oid.as_str());
         let dir = policy.file.parent().map(Path::to_path_buf).unwrap_or_default();
         if !crate::git::macro_resolves(root, &dir, top)? {
             return Err(format!("commit {commit}: {}", crate::attributes::MACRO_MISSING));
@@ -295,16 +308,17 @@ fn check_records(root: &Path, keyed: bool, state: &mut AuditState, commit: &str,
             .map_err(|_| format!("commit {commit}: invalid v3 configuration"))?;
         let id = transcrypt_rs::config_id(&bytes);
         let key = if keyed { Key::load(root, &bytes)? } else { None };
-        state.configs.insert(config_oid.clone(), (bytes, id, key));
+        state.configs.insert(config_oid.clone(), CommittedConfig { id, key });
     }
-    let (_, id, key) = &state.configs[&config_oid];
+    let CommittedConfig { id, key } = &state.configs[&config_oid];
     // A blob this commit removed from one path and added at another is a
     // record moved without re-encryption: it does not open at its new path.
     for entry in protected {
         if !entry.regular {
             return Err(format!("{}: protected path is not a regular file", at(commit, &entry.path)));
         }
-        if !state.checked.insert((entry.oid.clone(), config_oid.clone(), entry.path.clone())) { continue; }
+        let checked = CheckedRecord { oid: entry.oid.clone(), config_oid: config_oid.clone(), path: entry.path.clone() };
+        if !state.checked.insert(checked) { continue; }
         let record = git_blob(root, &entry.oid).map_err(|e| format!("{}: {e}", at(commit, &entry.path)))?;
         if !record_envelope_ok(&record, id) {
             return Err(format!("{}: not v3 ciphertext for its configuration (plaintext?)", at(commit, &entry.path)));

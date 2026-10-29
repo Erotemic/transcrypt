@@ -53,9 +53,9 @@ pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], ne
     command.args(["-u", "-L", &a_label, "-L", &b_label]).arg(&a).arg(&b).current_dir(root);
     let result = run_bounded_status(command, None, DIFF_OUTPUT_LIMIT);
     drop(scratch);
-    let (status, output, _) = result?;
-    match status.code() {
-        Some(DIFF_SAME | DIFF_DIFFERENT) => io::stdout().write_all(&output).map_err(|_| "cannot write the diff".into()),
+    let finished = result?;
+    match finished.status.code() {
+        Some(DIFF_SAME | DIFF_DIFFERENT) => io::stdout().write_all(&finished.output).map_err(|_| "cannot write the diff".into()),
         _ => Err("diff failed".into()),
     }
 }

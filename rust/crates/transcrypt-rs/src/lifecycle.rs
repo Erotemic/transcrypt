@@ -5,8 +5,8 @@
 use std::{collections::{HashMap, HashSet}, env, fs, io, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    blob_elsewhere, first_unselectable, held_entries, hydrate_action, is_local_change, is_object_id,
-    is_reserved_path, lock_action, next_move_source, parse_file_header, record_envelope_ok, seal_action,
+    hydrate_action, is_local_change, is_object_id, is_reserved_path, lock_action, parse_file_header,
+    record_envelope_ok, seal_action,
     HydrateAction, LockAction, SealAction, ATTRIBUTES_NAME,
 };
 use crate::{
@@ -43,30 +43,20 @@ impl Snapshot {
     }
 
     fn entries(&self) -> &[Staged] {
-        &self.listing.entries
+        self.listing.entries()
     }
 
     /// The positions of the protected entries, each `Selectable` (the
     /// verified `first_unselectable` decides; `selectable` only words the
     /// refusal).
     fn protected(&self) -> Result<Vec<usize>, String> {
-        let first = first_unselectable(&self.listing.bytes, &self.listing.ends, &self.flags);
-        if let Some(entry) = self.listing.entries.get(first) {
+        let first = self.listing.first_unselectable(&self.flags);
+        if let Some(entry) = self.entries().get(first) {
             selectable(entry)?;
             return Err(format!("{} is selected for encryption but cannot be protected", entry.name()));
         }
         Ok((0..self.flags.len()).filter(|i| self.flags[*i]).collect())
     }
-}
-
-/// For each entry of `index` that is `wanted`, whether `other` holds its blob
-/// at its path (the verified `held_entries`).
-fn held(index: &Listing, wanted: &[bool], other: &Listing) -> Result<Vec<bool>, String> {
-    let mut out = vec![false; index.entries.len()];
-    if !held_entries(&index.bytes, &index.ends, wanted, &other.bytes, &other.ends, &mut out) {
-        return Err("internal error: snapshot sizes differ".into());
-    }
-    Ok(out)
 }
 
 /// A protected entry must be a file Git filters, and not repository metadata.
@@ -136,14 +126,14 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
     let parent = commit_listing(root, "HEAD^1")?;
     // Whether `HEAD` holds each entry's blob at its path, and (protected
     // entries) `HEAD^1` too: the verified `held_entries`.
-    let in_head = held(&snapshot.listing, &vec![true; entries.len()], head)?;
-    let in_parent = held(&snapshot.listing, flags, &parent)?;
+    let in_head = snapshot.listing.held_in(&vec![true; entries.len()], head)?;
+    let in_parent = snapshot.listing.held_in(flags, &parent)?;
     let protected = snapshot.protected()?;
     let id = transcrypt_rs::config_id(config);
     check_unprotected(root, &id, &snapshot, &in_head, head, &parent)?;
     let same_policy = policy_unchanged(entries, head, &parent);
     // The keyless move check looks blobs up by object id (`blob_elsewhere`).
-    let mut orders: Option<[Vec<usize>; 3]> = None;
+    let mut ordered: Option<[OrderedListing; 3]> = None;
     for i in protected {
         let staged = &entries[i];
         // Unchanged since `HEAD` and `HEAD^1`: already in history.
@@ -165,15 +155,13 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
             // A copy already in history is reported where it was made.
             None if settled => {},
             None => {
-                let [index_order, head_order, parent_order] = get_or_try_init(&mut orders, || -> Result<_, String> {
-                    Ok([snapshot.listing.object_order()?, head.object_order()?, parent.object_order()?])
+                let [index_ordered, head_ordered, parent_ordered] = get_or_try_init(&mut ordered, || -> Result<_, String> {
+                    Ok([snapshot.listing.ordered()?, head.ordered()?, parent.ordered()?])
                 })?;
-                let elsewhere = blob_elsewhere(&snapshot.listing.bytes, &snapshot.listing.ends, index_order, i,
-                    &head.bytes, &head.ends, head_order, &parent.bytes, &parent.ends, parent_order);
-                if !elsewhere {
+                if !index_ordered.blob_elsewhere(i, head_ordered, parent_ordered) {
                     continue;
                 }
-                let other = head.entries.iter().chain(&parent.entries).chain(entries)
+                let other = head.entries().iter().chain(parent.entries()).chain(entries)
                     .find(|e| e.oid == staged.oid && e.path != staged.path).map(Staged::name).unwrap_or_default();
                 return Err(format!("staged {name} holds the encrypted {other}: a renamed or copied protected \
                     file must be committed while unlocked, which re-encrypts it for its new name"));
@@ -181,8 +169,9 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
         }
     }
     let Snapshot { listing, flags } = snapshot;
-    let protected = listing.entries.into_iter().zip(flags).filter(|(_, p)| *p).map(|(e, _)| e).collect();
-    Ok(Verified { listing: listing.bytes, protected })
+    let (listing, entries) = listing.into_bytes_and_entries();
+    let protected = entries.into_iter().zip(flags).filter(|(_, p)| *p).map(|(e, _)| e).collect();
+    Ok(Verified { listing, protected })
 }
 
 /// The checks of `check_staged` on the unprotected regular entries staged
@@ -192,7 +181,7 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
 fn check_unprotected(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], snapshot: &Snapshot, in_head: &[bool],
     head: &Listing, parent: &Listing) -> Result<(), String>
 {
-    let (head_oid, parent_oid) = (oids_by_path(&head.entries), oids_by_path(&parent.entries));
+    let (head_oid, parent_oid) = (oids_by_path(head.entries()), oids_by_path(parent.entries()));
     let staged_unprotected = snapshot.entries().iter().zip(&snapshot.flags).zip(in_head)
         .filter(|((e, p), unchanged)| !**p && e.regular && !**unchanged).map(|((e, _), _)| e);
     let mut drifted: Vec<&[u8]> = Vec::new();
@@ -236,7 +225,7 @@ fn policy_unchanged(entries: &[Staged], head: &Listing, parent: &Listing) -> boo
             .map(|e| (e.path.clone(), e.oid.clone())).collect()
     };
     let staged = policy(entries);
-    staged == policy(&head.entries) && staged == policy(&parent.entries)
+    staged == policy(head.entries()) && staged == policy(parent.entries())
 }
 
 /// Each entry's object id, by path.
@@ -247,7 +236,7 @@ fn oids_by_path(entries: &[Staged]) -> HashMap<&[u8], &str> {
 /// The files of commit `rev`; none when there is no such commit (`HEAD`
 /// before the first commit, `HEAD^1` of a root commit).
 pub(crate) fn commit_files(root: &Path, rev: &str) -> Result<Vec<Staged>, String> {
-    Ok(commit_listing(root, rev)?.entries)
+    Ok(commit_listing(root, rev)?.into_entries())
 }
 
 /// `commit_files`, as a `Listing`. `rev` is resolved once, and the tree of
@@ -381,18 +370,18 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
     // whether `HEAD` and the incoming commits hold each protected entry
     // (`held_entries`), local changes (`is_local_change`) and move sources
     // (`next_move_source`).
-    let in_head = held(&snapshot.listing, &snapshot.flags, head)?;
+    let in_head = snapshot.listing.held_in(&snapshot.flags, head)?;
     // Only a changed entry can be a local change: skip looking for commits
     // being brought in (three Git commands) on most commits.
     let incoming = if protected.iter().any(|i| !in_head[*i]) { incoming(root)? } else { None };
     let in_incoming = match &incoming {
-        Some(files) => held(&snapshot.listing, &snapshot.flags, files)?,
+        Some(files) => snapshot.listing.held_in(&snapshot.flags, files)?,
         None => vec![false; snapshot.flags.len()],
     };
     let force: HashSet<&[u8]> = force.iter().map(Vec::as_slice).collect();
     let mut update = IndexUpdate::default();
     // `HEAD` by object id, for move sources; only when a record moved.
-    let mut head_order: Option<Vec<usize>> = None;
+    let mut head_ordered: Option<OrderedListing> = None;
     for i in protected {
         let staged = &snapshot.entries()[i];
         let mut evidence = RepairEvidence {
@@ -411,8 +400,8 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
         evidence.envelope = parse_file_header(&record).is_ok();
         let (envelope, local) = (evidence.envelope, evidence.local_change());
         let moved = if opens || !envelope { None } else {
-            let order = get_or_try_init(&mut head_order, || head.object_order())?;
-            open_moved(key, &snapshot.listing, i, head, order, &record)
+            let head = get_or_try_init(&mut head_ordered, || head.ordered())?;
+            open_moved(key, &snapshot.listing, i, head, &record)
         };
         let name = staged.name().into_owned();
         // The verified core decides.
@@ -455,21 +444,13 @@ impl RepairEvidence {
 }
 
 /// The first `HEAD` path that entry `i` of `index` may have been moved from
-/// (the verified `next_move_source`: the same blob at another path, whose
-/// own entry has left the index, in `HEAD` order) and at which `record`
-/// opens, with its plaintext. `head_order` is `HEAD`'s object order.
-fn open_moved<'a>(key: &Key, index: &Listing, i: usize, head: &'a Listing, head_order: &[usize], record: &[u8])
+/// (`OrderedListing::move_sources`) at which `record` opens, with its
+/// plaintext.
+fn open_moved<'a>(key: &Key, index: &Listing, i: usize, head: &OrderedListing<'a>, record: &[u8])
     -> Option<(&'a [u8], Zeroizing<Vec<u8>>)>
 {
-    let next = |from| next_move_source(&index.bytes, &index.ends, i, &head.bytes, &head.ends, head_order, from);
-    let mut j = next(0);
-    while let Some(source) = head.entries.get(j) {
-        if let Ok(plaintext) = key.open(&source.path, record) {
-            return Some((&source.path, plaintext));
-        }
-        j = next(j + 1);
-    }
-    None
+    head.move_sources(index, i)
+        .find_map(|source| key.open(&source.path, record).ok().map(|plaintext| (source.path.as_slice(), plaintext)))
 }
 
 /// The plaintext of a staged protected record: opened at its own path, or,
@@ -483,9 +464,9 @@ pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zer
     };
     let index = Listing::parse(index_listing(root)?)?;
     let head = commit_listing(root, "HEAD")?;
-    let head_order = head.object_order()?;
-    index.entries.iter().position(|e| e.path == staged.path && e.oid == staged.oid)
-        .and_then(|i| open_moved(key, &index, i, &head, &head_order, &record)).map(|(_, plaintext)| plaintext)
+    let head = head.ordered()?;
+    index.entries().iter().position(|e| e.path == staged.path && e.oid == staged.oid)
+        .and_then(|i| open_moved(key, &index, i, &head, &record)).map(|(_, plaintext)| plaintext)
         .ok_or_else(|| format!("{}: {error}", staged.name()))
 }
 
@@ -638,11 +619,11 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
         return Ok(());
     };
     for other in other_worktrees(root)? {
-        let (flushed, _) = run_in(&other, "flush")
-            .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?;
+        let flushed = run_in(&other, "flush")
+            .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?.status.success();
         // A worktree on another config cannot be flushed with this key; it
         // is fine if it holds no plaintext.
-        if !flushed && !run_in(&other, "check-encrypted").is_ok_and(|(encrypted, _)| encrypted) {
+        if !flushed && !run_in(&other, "check-encrypted").is_ok_and(|f| f.status.success()) {
             return Err(format!("worktree {} could not be locked (uncommitted changes, or plaintext under \
                 another config); the key is kept", other.display()));
         }
@@ -662,9 +643,9 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
 /// its own process, with its own config).
 pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
     for other in other_worktrees(root)? {
-        let (encrypted, errors) = run_in(&other, "check-encrypted")
+        let Finished { status, errors, .. } = run_in(&other, "check-encrypted")
             .map_err(|e| format!("cannot check worktree {}: {e}", other.display()))?;
-        if !encrypted {
+        if !status.success() {
             return Err(format!("worktree {} still holds plaintext ({}); lock it there first",
                 other.display(), String::from_utf8_lossy(&errors).trim().trim_start_matches("transcrypt-rs: ")));
         }
@@ -672,13 +653,11 @@ pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Run this executable's `command` in the worktree `dir`, bounded: whether
-/// it succeeded, and its error output.
-fn run_in(dir: &Path, command: &str) -> Result<(bool, Vec<u8>), String> {
+/// Run this executable's `command` in the worktree `dir`, bounded.
+fn run_in(dir: &Path, command: &str) -> Result<Finished, String> {
     let mut child = std::process::Command::new(env::current_exe().map_err(|_| "cannot locate executable")?);
     child.arg(command).current_dir(dir);
-    let (status, _, errors) = run_bounded_status(child, None, SHORT_OUTPUT_LIMIT)?;
-    Ok((status.success(), errors))
+    run_bounded_status(child, None, SHORT_OUTPUT_LIMIT)
 }
 
 /// The other worktrees of this repository (from `git worktree list`), that

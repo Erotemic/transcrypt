@@ -8,9 +8,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 pub(crate) use crate::os::sigpipe_blocked;
+pub(crate) use crate::listing::{paths_of, Listing, OrderedListing, Staged};
 use transcrypt_v3_core::{
-    blob_read, is_object_id, listing_fields, object_order_ok, parse_attr_response, parse_batch_header,
-    parse_index_entry, parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, ATTRIBUTES_NAME,
+    blob_read, is_object_id, parse_attr_response, parse_batch_header, parse_index_entry, BlobRead, ATTRIBUTES_NAME,
     ATTRIBUTES_SUFFIX, FILTER_DRIVER, MAX_FILE, MAX_RECORD, REGULAR_MODE,
 };
 use transcrypt_rs::{states_mib_limit, KIB, MIB};
@@ -24,9 +24,9 @@ pub(crate) const REGULAR_FILE_MODE: &str = match std::str::from_utf8(&REGULAR_MO
 pub(crate) const GITLINK_MODE: &str = "160000";
 
 /// Bytes in the mode field that starts every index record.
-const MODE_LEN: usize = REGULAR_MODE.len();
+pub(crate) const MODE_LEN: usize = REGULAR_MODE.len();
 /// Where the object id starts in an index record: after the mode and a SP.
-const OID_START: usize = MODE_LEN + 1;
+pub(crate) const OID_START: usize = MODE_LEN + 1;
 /// The stage-0 field between an index record's object id and its path.
 const STAGE_ZERO_FIELD: &[u8] = b" 0\t";
 /// An unmerged index record's ` <stage>` field, just before its TAB.
@@ -71,16 +71,21 @@ fn output(command: Command) -> Result<Vec<u8>, String> {
 /// 64 KiB of its error output kept (the rest is drained so it never blocks).
 fn run_bounded(command: Command, input: Option<&[u8]>, limit: usize) -> Result<Vec<u8>, String> {
     let desc = format!("{:?}", command);
-    let (status, mut data, errors) = run_bounded_status(command, input, limit)?;
+    let Finished { status, mut output, errors } = run_bounded_status(command, input, limit)?;
     if !status.success() {
         return Err(format!("Git command failed ({desc}): {}", String::from_utf8_lossy(&errors)));
     }
-    Ok(std::mem::take(&mut *data))
+    Ok(std::mem::take(&mut *output))
 }
 
-/// A finished subprocess: exit status, output (wiped when dropped) and the
-/// kept part of its error output.
-pub(crate) type Finished = (std::process::ExitStatus, Zeroizing<Vec<u8>>, Vec<u8>);
+/// A finished subprocess.
+pub(crate) struct Finished {
+    pub(crate) status: std::process::ExitStatus,
+    /// Its output, wiped when dropped (it may be plaintext).
+    pub(crate) output: Zeroizing<Vec<u8>>,
+    /// The kept part of its error output.
+    pub(crate) errors: Vec<u8>,
+}
 
 /// `run_bounded`, returning the exit status (and output, which may be
 /// plaintext, kept in wiped memory) instead of failing on a non-zero exit.
@@ -114,7 +119,7 @@ pub(crate) fn run_bounded_status(mut command: Command, input: Option<&[u8]>, lim
         if matches!(written, Some(Err(()))) {
             return Err(format!("cannot send input to {desc}: {}", String::from_utf8_lossy(&errors)));
         }
-        Ok((status, data, errors))
+        Ok(Finished { status, output: data, errors })
     })
 }
 
@@ -173,7 +178,7 @@ const NO_SUCH_REVISION: i32 = 1;
 pub(crate) fn resolve_commit(root: &Path, rev: &str) -> Result<Option<String>, String> {
     let mut command = git_command(Some(root));
     command.args(["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]);
-    let (status, output, errors) = run_bounded_status(command, None, GIT_OUTPUT_LIMIT)?;
+    let Finished { status, output, errors } = run_bounded_status(command, None, GIT_OUTPUT_LIMIT)?;
     match status.code() {
         Some(0) => {
             let id = String::from_utf8_lossy(&output).trim_end().to_owned();
@@ -349,107 +354,9 @@ impl Drop for Objects {
     }
 }
 
-/// One stage-0 record of the index or of a commit's tree. Every later read
-/// of its content goes through `oid`, so a concurrent index change cannot
-/// substitute other bytes for the ones that were verified.
-pub(crate) struct Staged {
-    /// The mode is 100644 or 100755 (`mode`): a file Git filters.
-    pub(crate) regular: bool,
-    pub(crate) mode: String,
-    pub(crate) oid: String,
-    pub(crate) path: Vec<u8>,
-}
-
-impl Staged {
-    /// The entry of the fields of a record the verified core delimited.
-    fn new(regular: bool, mode: &[u8], oid: &[u8], path: &[u8]) -> Result<Staged, String> {
-        Ok(Staged {
-            regular,
-            mode: String::from_utf8_lossy(mode).into_owned(),
-            oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
-            path: path.to_vec(),
-        })
-    }
-
-    /// The path, for messages.
-    pub(crate) fn name(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(&self.path)
-    }
-}
-
-/// The paths of `entries`, for `protected_flags` and `attr_values`.
-pub(crate) fn paths_of(entries: &[Staged]) -> Vec<&[u8]> {
-    entries.iter().map(|e| e.path.as_slice()).collect()
-}
-
 /// Whether `path` is a `.gitattributes` file (at the top or nested).
 pub(crate) fn is_attributes_file(path: &[u8]) -> bool {
     path == ATTRIBUTES_NAME || path.ends_with(&ATTRIBUTES_SUFFIX)
-}
-
-/// One snapshot of the index or of a commit's tree: the exact listing (Git's
-/// `ls-files --stage -z`, or `ls-tree -r -z` rewritten to the same records),
-/// where each record ends, and its entries. The verified core checks the
-/// whole listing (`parse_listing`: NUL-terminated stage-0 records with object
-/// ids, in Git's byte order of paths, each path once, nothing else) and
-/// delimits each entry's fields (`listing_fields`); the pre-commit decisions
-/// are verified functions of `bytes` and `ends`.
-pub(crate) struct Listing {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) ends: Vec<usize>,
-    pub(crate) entries: Vec<Staged>,
-}
-
-impl Listing {
-    /// Git's listing of the index or of one tree: each path once.
-    pub(crate) fn parse(bytes: Vec<u8>) -> Result<Listing, String> {
-        Listing::parse_ordered(bytes, true)
-    }
-
-    /// The records of several trees merged in path order (a path may repeat).
-    pub(crate) fn merge(listings: Vec<Listing>) -> Result<Listing, String> {
-        let mut records: Vec<&[u8]> = listings.iter().flat_map(|l| records(&l.bytes)).collect();
-        // Stable, by the path (after the first TAB) in byte order.
-        fn path(record: &[u8]) -> &[u8] {
-            record.iter().position(|b| *b == b'\t').map_or(&record[..0], |tab| &record[tab + 1..])
-        }
-        records.sort_by(|a, b| path(a).cmp(path(b)));
-        Listing::parse_ordered(records.iter().flat_map(|r| r.iter().chain(&[0])).copied().collect(), false)
-    }
-
-    fn parse_ordered(bytes: Vec<u8>, unique: bool) -> Result<Listing, String> {
-        // One slot per NUL; the core refuses unless that is exactly the
-        // number of records.
-        let mut ends = vec![0; bytes.iter().filter(|b| **b == 0).count()];
-        if !parse_listing_ends(&bytes, &mut ends, unique) {
-            if unique && parse_listing_ends(&bytes, &mut ends, false) {
-                return Err("a Git tree lists a path twice or out of Git's order (a crafted tree?); \
-                    `git fsck` reports it".into());
-            }
-            return Err("malformed or unmerged Git index entry; resolve conflicts first".into());
-        }
-        let entries = (0..ends.len()).map(|i| {
-            let f = listing_fields(&bytes, &ends, i).ok_or("malformed Git listing")?;
-            Staged::new(f.regular, &bytes[f.start..f.start + MODE_LEN], &bytes[f.start + OID_START..f.oid_end], &bytes[f.path_start..f.end])
-        }).collect::<Result<_, String>>()?;
-        Ok(Listing { bytes, ends, entries })
-    }
-
-    /// The listing of no entries.
-    pub(crate) fn empty() -> Listing {
-        Listing { bytes: Vec::new(), ends: Vec::new(), entries: Vec::new() }
-    }
-
-    /// The object order of the listing: its positions sorted by object id,
-    /// then position, which the verified `object_order_ok` checks.
-    pub(crate) fn object_order(&self) -> Result<Vec<usize>, String> {
-        let mut order: Vec<usize> = (0..self.entries.len()).collect();
-        order.sort_unstable_by(|a, b| self.entries[*a].oid.cmp(&self.entries[*b].oid).then(a.cmp(b)));
-        if !object_order_ok(&self.bytes, &self.ends, &order) {
-            return Err("internal error: object order of a Git listing".into());
-        }
-        Ok(order)
-    }
 }
 
 /// The non-empty NUL-separated records of Git `-z` output.
@@ -483,7 +390,7 @@ fn parse_entry(entry: &[u8]) -> Result<Staged, String> {
 
 /// The blobs of a commit's tree.
 pub(crate) fn tree_files(root: &Path, commit: &str) -> Result<Vec<Staged>, String> {
-    Ok(tree_listing(root, commit)?.entries)
+    Ok(tree_listing(root, commit)?.into_entries())
 }
 
 /// `tree_files`, as a `Listing`.
@@ -541,7 +448,7 @@ pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
 
 /// The stage-0 entries of the index (`Listing::parse`).
 pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
-    Ok(Listing::parse(index_listing(root)?)?.entries)
+    Ok(Listing::parse(index_listing(root)?)?.into_entries())
 }
 
 /// The blobs Git already has for exactly `path`: every index stage, and
@@ -666,9 +573,8 @@ pub(crate) enum Attributes<'a> {
 /// `git check-attr -z --stdin <attributes>` for `paths`, sent as raw bytes
 /// (any valid Unix name works), from the attribute files `from` selects.
 /// Patterns match case-sensitively (`core.ignorecase=false`) so that every
-/// clone, on every file system, selects the same files. Returns the request
-/// and Git's answer.
-fn check_attr(root: &Path, paths: &[&[u8]], from: Attributes, attributes: &[&str]) -> Result<(Vec<u8>, Vec<u8>), String> {
+/// clone, on every file system, selects the same files.
+fn check_attr(root: &Path, paths: &[&[u8]], from: Attributes, attributes: &[&str]) -> Result<AttrAnswer, String> {
     if paths.iter().any(|path| path.is_empty() || path.contains(&0)) {
         return Err("invalid Git path".into());
     }
@@ -682,7 +588,13 @@ fn check_attr(root: &Path, paths: &[&[u8]], from: Attributes, attributes: &[&str
     }
     command.args(["-z", "--stdin"]).args(attributes);
     let response = run_bounded(command, Some(&request), GIT_OUTPUT_LIMIT)?;
-    Ok((request, response))
+    Ok(AttrAnswer { request, response })
+}
+
+/// What `check_attr` sent Git (`nul_terminated` paths) and Git's answer.
+struct AttrAnswer {
+    request: Vec<u8>,
+    response: Vec<u8>,
 }
 
 /// Each path joined into one buffer, each followed by NUL.
@@ -697,9 +609,9 @@ pub(crate) fn nul_terminated<P: AsRef<[u8]>>(paths: &[P]) -> Vec<u8> {
 /// requested path, in order, and nothing else.
 pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) -> Result<Vec<bool>, String> {
     if paths.is_empty() { return Ok(Vec::new()); }
-    let (request, response) = check_attr(root, paths, from, &["filter"])?;
+    let answer = check_attr(root, paths, from, &["filter"])?;
     let mut flags = vec![false; paths.len()];
-    if !parse_attr_response(&request, &response, &mut flags) {
+    if !parse_attr_response(&answer.request, &answer.response, &mut flags) {
         return Err("unexpected git check-attr output".into());
     }
     Ok(flags)
@@ -710,13 +622,9 @@ pub(crate) fn protected_flags(root: &Path, paths: &[&[u8]], from: Attributes) ->
 /// the listing's own paths (`parse_listing_attrs_spec`): one record per
 /// entry, in order, naming exactly that entry's path, and nothing else.
 pub(crate) fn listing_flags(root: &Path, listing: &Listing, from: Attributes) -> Result<Vec<bool>, String> {
-    if listing.entries.is_empty() { return Ok(Vec::new()); }
-    let (_, response) = check_attr(root, &paths_of(&listing.entries), from, &["filter"])?;
-    let mut flags = vec![false; listing.entries.len()];
-    if !parse_listing_attrs(&listing.bytes, &listing.ends, &response, &mut flags) {
-        return Err("unexpected git check-attr output".into());
-    }
-    Ok(flags)
+    if listing.entries().is_empty() { return Ok(Vec::new()); }
+    let answer = check_attr(root, &paths_of(listing.entries()), from, &["filter"])?;
+    listing.attribute_flags(&answer.response).ok_or_else(|| "unexpected git check-attr output".into())
 }
 
 /// For each path, its value of each of `attributes` (`unspecified`, `unset`,
@@ -726,7 +634,7 @@ pub(crate) fn attr_values(root: &Path, paths: &[&[u8]], from: Attributes, attrib
     -> Result<Vec<Vec<Vec<u8>>>, String>
 {
     if paths.is_empty() { return Ok(Vec::new()); }
-    let (_, response) = check_attr(root, paths, from, attributes)?;
+    let response = check_attr(root, paths, from, attributes)?.response;
     let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
     let width = CHECK_ATTR_FIELDS * attributes.len();
     if fields.len() != width * paths.len() + 1 || fields.last() != Some(&&b""[..]) {
@@ -800,19 +708,31 @@ pub(crate) fn protected_entries(root: &Path, entries: Vec<Staged>, from: Attribu
     Ok(entries.into_iter().zip(flags).filter(|(_, protected)| *protected).map(|(e, _)| e).collect())
 }
 
-/// Paths with their old object ids: what a commit deletes, or changes.
-pub(crate) type Deleted = Vec<(Vec<u8>, String)>;
+/// A path and the blob it holds (or held).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PathBlob {
+    pub(crate) path: Vec<u8>,
+    pub(crate) oid: String,
+}
 
-/// What a commit changes: the new entries, the deleted paths and the old
-/// object ids of modified paths.
-pub(crate) type Changes = (Vec<Staged>, Deleted, Deleted);
+/// What a commit changes relative to its parent.
+pub(crate) struct Changes {
+    /// The entries it adds or changes, as they are in the commit.
+    pub(crate) entries: Vec<Staged>,
+    /// The paths it deletes, with their old blobs.
+    pub(crate) deleted: Vec<PathBlob>,
+    /// The paths it modifies, with their old blobs.
+    pub(crate) modified: Vec<PathBlob>,
+}
 
 /// The entries a commit adds or changes relative to `parent` (all of its
 /// entries for a root commit), from `diff-tree -r -z --raw` between the two
 /// trees, rewritten to the index-record shape and parsed by the verified
 /// core, and the paths it deletes with their old object ids.
 pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Changes, String> {
-    let Some(parent) = parent else { return Ok((tree_files(root, commit)?, Vec::new(), Vec::new())) };
+    let Some(parent) = parent else {
+        return Ok(Changes { entries: tree_files(root, commit)?, deleted: Vec::new(), modified: Vec::new() });
+    };
     let data = git(root, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
     parse_diff_tree(&data)
 }
@@ -837,7 +757,7 @@ fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
         let [_, mode, old, oid, status] = parts[..] else { return Err("malformed git diff-tree output".into()) };
         let old = || -> Result<_, String> {
             if !is_object_id(old) { return Err("malformed git diff-tree output".into()); }
-            Ok((path.to_vec(), String::from_utf8_lossy(old).into_owned()))
+            Ok(PathBlob { path: path.to_vec(), oid: String::from_utf8_lossy(old).into_owned() })
         };
         match status {
             b"D" => { deleted.push(old()?); continue },
@@ -847,13 +767,13 @@ fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
         }
         entries.push(parse_entry(&[mode, b" ", oid, b" 0\t", path].concat())?);
     }
-    Ok((entries, deleted, modified))
+    Ok(Changes { entries, deleted, modified })
 }
 
 /// The `.transcrypt/config` blob of a commit, if it has one.
 pub(crate) fn config_blob(root: &Path, commit: &str) -> Result<Option<String>, String> {
     let listing = tree_listing_bytes(root, &["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])?;
-    Ok(Listing::parse(listing)?.entries.into_iter()
+    Ok(Listing::parse(listing)?.into_entries().into_iter()
         .find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular).map(|e| e.oid))
 }
 
@@ -899,7 +819,7 @@ mod tests {
             let mut command = Command::new("sh");
             command.args(["-c", &format!("exit {EARLY_EXIT}")]);
             match run_bounded_status(command, Some(&input), SHORT_OUTPUT_LIMIT) {
-                Ok((status, _, _)) => assert_eq!(status.code(), Some(EARLY_EXIT)),
+                Ok(finished) => assert_eq!(finished.status.code(), Some(EARLY_EXIT)),
                 Err(e) => assert!(e.contains("cannot send input"), "{e}"),
             }
         }
@@ -970,13 +890,13 @@ mod tests {
             }
             if let Ok(record) = tree_record(&input) {
                 if let Ok(parsed) = Listing::parse([record.as_slice(), b"\0"].concat()) {
-                    for e in parsed.entries {
+                    for e in parsed.into_entries() {
                         assert!(is_object_id(e.oid.as_bytes()));
                         assert!(input.ends_with(&e.path) && input.starts_with(&input[..MODE_LEN]));
                     }
                 }
             }
-            if let Ok((entries, _, _)) = parse_diff_tree(&input) {
+            if let Ok(Changes { entries, .. }) = parse_diff_tree(&input) {
                 for e in entries {
                     assert!(is_object_id(e.oid.as_bytes()));
                     let mut needle = e.path.clone();
@@ -990,17 +910,18 @@ mod tests {
             }
         }
         // The valid records parse to exactly their fields.
-        let tree = Listing::parse([tree_record(&valid_tree).unwrap().as_slice(), b"\0"].concat()).unwrap().entries;
+        let tree = Listing::parse([tree_record(&valid_tree).unwrap().as_slice(), b"\0"].concat()).unwrap().into_entries();
         assert_eq!((tree[0].regular, tree[0].oid.as_str(), tree[0].path.as_slice()), (true, oid, &b"dir/a b.secret"[..]));
-        let (diff, _, _) = parse_diff_tree(&valid_diff).unwrap();
+        let diff = parse_diff_tree(&valid_diff).unwrap().entries;
         assert_eq!((diff[0].regular, diff[0].oid.as_str(), diff[0].path.as_slice()), (true, oid, &b"dir/a\tb.secret"[..]));
         assert_eq!(parse_batch_header(format!("{oid} blob 12\n").as_bytes(), oid.as_bytes()), Some(12));
         for bad in ["blob 12\n", " blob 012\n", " blob +12\n", " blob 12", " tree 12\n", " missing\n"] {
             let header = if bad.starts_with(' ') { format!("{oid}{bad}") } else { bad.to_owned() };
             assert_eq!(parse_batch_header(header.as_bytes(), oid.as_bytes()), None, "{bad:?}");
         }
-        let (kept, deleted, _) = parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap();
-        assert!(kept.is_empty() && deleted == [(b"gone.secret".to_vec(), oid.to_owned())]);
+        let changes = parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap();
+        assert!(changes.entries.is_empty()
+            && changes.deleted == [PathBlob { path: b"gone.secret".to_vec(), oid: oid.to_owned() }]);
     }
 
     #[test]
