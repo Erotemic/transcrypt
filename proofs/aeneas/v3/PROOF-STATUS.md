@@ -3,10 +3,11 @@
 **Reconciled 2026-10-26.** Every theorem below is about the Charon/Aeneas
 translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 (pinned by `SNAPSHOT.json`), stated against the independent specification in
-`proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All are `WP.spec`
-triples, so they also exclude panics (index, overflow) and divergence. The
+`proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All but the
+program equality `record_envelope_prefix_ok_record` are `WP.spec` triples,
+so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;
-`bash proofs/aeneas/check-v3-axioms.sh` confirms that all 100 theorems named in
+`bash proofs/aeneas/check-v3-axioms.sh` confirms that all 102 theorems named in
 the table below (listed in `audit/Axioms.lean`) use only `propext`,
 `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
 `axiom`, `native_decide` or `bv_decide` occurs in any verification module
@@ -41,7 +42,7 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
 | `Index` | `parse_index_entry` (over `find_byte`, `matches_at`) | `parse_index_entry_spec` | Accepts exactly the spec's `IndexRecord` (stage 0, path after the first TAB, `regular` flag ⇔ mode `100644` or `100755`) and returns that path |
 | `Frame` | `encode_be_u32`, `decode_be_u32`, `encode_frame_header`, `decode_frame_header` | `encode_be_u32_spec`, `decode_be_u32_spec`, `encode_frame_header_spec`, `decode_frame_header_spec`, `decode_frame_header_encode` | Agent request header is exactly the spec's `frameHeader`; decoding inverts encoding |
 | `Bytes` (repair) | `seal_action` | `seal_action_spec`, `sealSpec_repairs_only_local`, `sealSpec_seal_plain`, `sealSpec_rebind_moved` | The pre-commit repair decision is exactly `sealSpec`: only a local change that does not already open is repaired (no laundering of committed content), only plaintext is sealed, only a moved record is re-sealed |
-| `Envelope` | `is_object_id`, `record_envelope_ok`, `smudge_action` | `is_object_id_spec`, `record_envelope_ok_spec`, `smudge_action_spec` | Object ids passed to Git are exactly the spec's `ObjectId` (40/64 lowercase hex: never revision syntax or an option, `objectId_plain`); the keyless check is exactly `EnvelopeOk` (size bound, magic, config id), which every genuine record satisfies (`opensTo_envelopeOk`); the smudge decision is exactly `smudgeSpec` (`Ok Open`/`Ok Keep` ⇔ `some .open_`/`some .keep`; `Err Size`/`Err Foreign` ⇔ `none`, classified) |
+| `Envelope` | `is_object_id`, `record_envelope_ok`, `record_envelope_prefix_ok`, `smudge_action` | `is_object_id_spec`, `record_envelope_ok_spec`, `record_envelope_prefix_ok_spec`, `record_envelope_prefix_ok_record`, `smudge_action_spec` | Object ids passed to Git are exactly the spec's `ObjectId` (40/64 lowercase hex: never revision syntax or an option, `objectId_plain`); the keyless check is exactly `EnvelopeOk` (size bound, magic, config id), which every genuine record satisfies (`opensTo_envelopeOk`), and is decided by the record's size and its first `FILE_MIN_LEN` bytes alone: `record_envelope_prefix_ok` on those is the very program `record_envelope_ok` on the whole record; the smudge decision is exactly `smudgeSpec` (`Ok Open`/`Ok Keep` ⇔ `some .open_`/`some .keep`; `Err Size`/`Err Foreign` ⇔ `none`, classified) |
 | `Pkt` | `decode_pkt_len` | `decode_pkt_len_spec` | Git filter-protocol packet headers: `Ok n` exactly when the header is four lowercase hex digits for a flush (0) or a 5..65520-byte packet (`PktLenAccepted`); otherwise `Err Request` |
 | `Protocol` | `initialize_config` | `initialize_config_spec` | Output is the spec layout and authenticates |
 | `Protocol` | `authenticate_config` | `authenticate_config_spec` | `Ok` iff `ConfigAuthentic`; refusals classified |

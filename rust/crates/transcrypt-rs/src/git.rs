@@ -10,8 +10,8 @@ use zeroize::Zeroizing;
 pub(crate) use crate::os::sigpipe_blocked;
 use transcrypt_v3_core::{
     blob_read, is_object_id, listing_fields, object_order_ok, parse_attr_response, parse_batch_header,
-    parse_index_entry, parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, ATTRIBUTES_NAME,
-    ATTRIBUTES_SUFFIX, FILTER_DRIVER, MAX_FILE, MAX_RECORD, REGULAR_MODE,
+    parse_index_entry, parse_listing as parse_listing_ends, parse_listing_attrs, record_envelope_prefix_ok, BlobRead,
+    ATTRIBUTES_NAME, ATTRIBUTES_SUFFIX, ENVELOPE_PREFIX_LEN, FILTER_DRIVER, MAX_FILE, MAX_RECORD, REGULAR_MODE,
 };
 use transcrypt_rs::{states_mib_limit, KIB, MIB};
 
@@ -259,19 +259,27 @@ pub(crate) fn git_blob_if_record_sized(root: &Path, oid: &str) -> Result<Option<
     read_blob(root, oid, true)
 }
 
-/// Whether blob `oid` has the v3 record envelope of the config `id` (a blob
-/// too large for any record has not, and is skipped unread).
+/// Whether blob `oid` has the v3 record envelope of the config `id`. Only
+/// its size and first `ENVELOPE_PREFIX_LEN` bytes are read, which decide the
+/// envelope exactly as the whole blob would (`record_envelope_prefix_ok`);
+/// the rest is skipped unread.
 pub(crate) fn is_record(root: &Path, oid: &str, id: &[u8; transcrypt_v3_core::ID_LEN]) -> Result<bool, String> {
-    Ok(git_blob_if_record_sized(root, oid)?.is_some_and(|blob| transcrypt_v3_core::record_envelope_ok(&blob, id)))
+    let prefix = with_objects(root, oid, |objects| objects.blob_prefix(oid))?;
+    Ok(prefix.is_some_and(|(size, prefix)| record_envelope_prefix_ok(size, &prefix, id)))
 }
 
 fn read_blob(root: &Path, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
+    with_objects(root, oid, |objects| objects.blob(oid, skip_large))
+}
+
+/// Run `read` on this thread's object reader for the verified id `oid`.
+fn with_objects<T>(root: &Path, oid: &str, read: impl FnOnce(&mut Objects) -> Result<T, String>) -> Result<T, String> {
     if !is_object_id(oid.as_bytes()) {
         return Err("invalid Git object id".into());
     }
     OBJECTS.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let result = get_or_try_init(&mut slot, || Objects::open(root))?.blob(oid, skip_large);
+        let result = get_or_try_init(&mut slot, || Objects::open(root)).and_then(read);
         if result.is_err() {
             // The stream may be out of step; never reuse it.
             *slot = None;
@@ -283,6 +291,11 @@ fn read_blob(root: &Path, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>
 thread_local! {
     static OBJECTS: std::cell::RefCell<Option<Objects>> = const { std::cell::RefCell::new(None) };
 }
+
+/// A `git cat-file --batch` reply that ended early.
+const TRUNCATED_REPLY: &str = "truncated git cat-file reply";
+/// A `git cat-file --batch` reply whose content is not followed by LF.
+const MALFORMED_REPLY: &str = "malformed git cat-file reply";
 
 /// One `git cat-file --batch` process. Each reply must be exactly
 /// `<oid> blob <size> LF`, with `<size>` in canonical decimal, followed by
@@ -306,7 +319,9 @@ impl Objects {
         Ok(Objects { child, input: Some(input), output: io::BufReader::new(output) })
     }
 
-    fn blob(&mut self, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
+    /// Ask for `oid` and read the header of the reply, which the verified
+    /// core checks: the blob's size.
+    fn request(&mut self, oid: &str) -> Result<u64, String> {
         use io::BufRead;
         let input = self.input.as_mut().ok_or("Git object reader closed")?;
         sigpipe_blocked(input, |input| input.write_all(format!("{oid}\n").as_bytes()).and_then(|_| input.flush()))
@@ -314,30 +329,64 @@ impl Objects {
         let mut header = Vec::new();
         (&mut self.output).take(BATCH_HEADER_LIMIT).read_until(b'\n', &mut header)
             .map_err(|_| "cannot read git cat-file reply")?;
+        parse_batch_header(&header, oid.as_bytes()).ok_or_else(|| format!("Git object {oid} is missing or not a blob"))
+    }
+
+    /// Discard the next `count` content bytes without keeping them, then
+    /// the reply's trailing LF.
+    fn skip(&mut self, count: u64) -> Result<(), String> {
+        let skipped = io::copy(&mut (&mut self.output).take(count), &mut io::sink()).map_err(|_| TRUNCATED_REPLY)?;
+        if skipped != count {
+            return Err(TRUNCATED_REPLY.into());
+        }
+        let mut end = [0u8; 1];
+        self.output.read_exact(&mut end).map_err(|_| TRUNCATED_REPLY)?;
+        if end != *b"\n" {
+            return Err(MALFORMED_REPLY.into());
+        }
+        Ok(())
+    }
+
+    fn blob(&mut self, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
         // The verified core checks the header and decides what to read.
-        let size = parse_batch_header(&header, oid.as_bytes())
-            .ok_or_else(|| format!("Git object {oid} is missing or not a blob"))?;
+        let size = self.request(oid)?;
         match blob_read(size, skip_large) {
             BlobRead::Read => {},
             BlobRead::TooLarge => return Err(TOO_LARGE.into()),
             BlobRead::Skip => {
-                // Skip the content (and its LF) without keeping it.
-                let skipped = io::copy(&mut (&mut self.output).take(size.saturating_add(1)), &mut io::sink())
-                    .map_err(|_| "truncated git cat-file reply")?;
-                if skipped != size.saturating_add(1) {
-                    return Err("truncated git cat-file reply".into());
-                }
+                self.skip(size)?;
                 return Ok(None);
             },
         }
         // `blob_read` decided `Read`, so `size` is at most `MAX_RECORD`.
         let size = usize::try_from(size).map_err(|_| TOO_LARGE)?;
         let mut data = vec![0u8; size + 1];
-        self.output.read_exact(&mut data).map_err(|_| "truncated git cat-file reply")?;
+        self.output.read_exact(&mut data).map_err(|_| TRUNCATED_REPLY)?;
         if data.pop() != Some(b'\n') {
-            return Err("malformed git cat-file reply".into());
+            return Err(MALFORMED_REPLY.into());
         }
         Ok(Some(data))
+    }
+
+    /// The size of blob `oid` and its first `ENVELOPE_PREFIX_LEN` bytes (all
+    /// of a shorter blob): what the keyless envelope check needs. The rest is
+    /// skipped unread, and so is a blob larger than any record (`None`).
+    fn blob_prefix(&mut self, oid: &str) -> Result<Option<(usize, Vec<u8>)>, String> {
+        let announced = self.request(oid)?;
+        match blob_read(announced, true) {
+            BlobRead::Read => {},
+            BlobRead::TooLarge => return Err(TOO_LARGE.into()),
+            BlobRead::Skip => {
+                self.skip(announced)?;
+                return Ok(None);
+            },
+        }
+        // `blob_read` decided `Read`, so the size is at most `MAX_RECORD`.
+        let size = usize::try_from(announced).map_err(|_| TOO_LARGE)?;
+        let mut prefix = vec![0u8; size.min(ENVELOPE_PREFIX_LEN)];
+        self.output.read_exact(&mut prefix).map_err(|_| TRUNCATED_REPLY)?;
+        self.skip(announced - prefix.len() as u64)?;
+        Ok(Some((size, prefix)))
     }
 }
 
@@ -938,6 +987,49 @@ mod tests {
         update.add(REGULAR_FILE_MODE, b".git/hooks/pre-commit", b"x");
         let err = update.apply(&root, &["--add"]).unwrap_err();
         assert!(err.contains("did not stage .git/hooks/pre-commit"), "{err}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `is_record`, which reads only a blob's size and first bytes, decides
+    /// as the keyless check of the whole blob does, and leaves the shared
+    /// `cat-file --batch` stream in step for the reads after it.
+    #[test]
+    fn header_only_record_checks_agree_with_whole_blobs() {
+        use transcrypt_v3_core::{encode_file_header, record_envelope_ok, FILE_HEADER_LEN, FILE_MIN_LEN, ID_LEN};
+        let root = std::env::temp_dir().join(format!("transcrypt-v3-is-record-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]).unwrap();
+        let id = [7u8; ID_LEN];
+        let mut other = id;
+        other[0] ^= 1;
+        let record = |size: usize| {
+            let mut bytes = encode_file_header(&id).to_vec();
+            bytes.resize(size, b'\n');
+            bytes
+        };
+        let blobs = [
+            Vec::new(),
+            b"plaintext".to_vec(),
+            record(FILE_HEADER_LEN),
+            record(FILE_MIN_LEN - 1),
+            record(FILE_MIN_LEN),
+            record(FILE_MIN_LEN + 1),
+            record(MAX_RECORD),
+            record(MAX_RECORD + 1),
+            vec![b'\n'; MAX_RECORD],
+        ];
+        let oids: Vec<String> = blobs.iter().map(|bytes| hash_object(&root, bytes).unwrap()).collect();
+        for (bytes, oid) in blobs.iter().zip(&oids) {
+            for want in [&id, &other] {
+                assert_eq!(is_record(&root, oid, want).unwrap(), record_envelope_ok(bytes, want), "{} bytes", bytes.len());
+            }
+            // The next full read on the same stream gets exactly its blob.
+            if bytes.len() <= MAX_RECORD {
+                assert_eq!(&git_blob(&root, oid).unwrap(), bytes);
+            }
+        }
+        assert!(is_record(&root, &oids[4], &id).unwrap() && is_record(&root, &oids[6], &id).unwrap());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

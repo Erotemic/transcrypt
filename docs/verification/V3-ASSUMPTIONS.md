@@ -396,7 +396,8 @@ one.
   unaffected: it always requires full authentication (A1).
 - **Evidence:** PROVED that the check accepts every genuine record
   (`opensTo_envelopeOk`) and is exactly the spec predicate
-  (`record_envelope_ok_spec`). It rejects every accidental plaintext, since
+  (`record_envelope_ok_spec`), decided by the size and first `FILE_MIN_LEN`
+  bytes alone (`record_envelope_prefix_ok_record`). It rejects every accidental plaintext, since
   that would need the 6-byte magic plus 16 bytes of the config's SHA-256.
 - **Status:** ACCEPTED RISK (forgery detection deferred to unlocked checks).
 
@@ -620,8 +621,10 @@ one.
 - **Evidence:** the header must be exactly `BatchHeader` for the requested
   id with a canonical decimal size (`parse_batch_header_spec`; the size is
   unique, `batchHeader_unique`); only sizes within the record bound are
-  read (`blob_read_spec`); the trailing LF is checked and a failed read
-  discards the reader. TESTED (`git_output_parsers_never_panic_and_accept_only_exact_records`,
+  read (`blob_read_spec`); the trailing LF is checked, also after content
+  that is skipped (an oversized blob, or the rest of a blob after the first
+  `ENVELOPE_PREFIX_LEN` bytes `is_record` reads), and a failed read discards
+  the reader. TESTED (`git_output_parsers_never_panic_and_accept_only_exact_records`,
   all lifecycle suites).
 - **Residual:** the read of exactly `size` bytes (adapter I/O).
 - **Status:** header PROVED; content read TESTED.
@@ -805,7 +808,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Index record parsing | `parse_index_entry_spec` |
 | Git filter-protocol packet lengths | `decode_pkt_len_spec` |
 | Object ids passed to Git are plain hex names, taken from the right bytes | `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` |
-| Keyless envelope check | `record_envelope_ok_spec`, `opensTo_envelopeOk` |
+| Keyless envelope check | `record_envelope_ok_spec`, `opensTo_envelopeOk`, `record_envelope_prefix_ok_record` |
 | Clean and locked-filter behavior (models of adapter compositions) | `cleanModel_spec`, `cleanModel_genuine`, `cleanModel_idempotent`, `lockedFilterModel_spec` |
 | Hydrate/lock never lose data; verify-index soundness | `hydrate_action_spec`, `lock_action_spec`, `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` |
 

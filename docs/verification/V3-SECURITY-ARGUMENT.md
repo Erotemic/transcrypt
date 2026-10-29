@@ -185,7 +185,7 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 100 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 102 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the composition `hookPlan_spec` and the end-to-end

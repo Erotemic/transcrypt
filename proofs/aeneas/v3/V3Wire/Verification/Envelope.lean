@@ -7,7 +7,8 @@ adapter: `is_object_id` accepts exactly the Git object names of
 `record_envelope_ok` accepts exactly the records satisfying
 `Transcrypt.V3Policy.EnvelopeOk` (size bound plus a v3 file header naming the
 given configuration id). As `WP.spec` triples they also exclude panics and
-divergence.
+divergence. `record_envelope_prefix_ok_record` shows the envelope needs only
+the record's size and its first `FILE_MIN_LEN` bytes.
 -/
 
 open CoreModels Aeneas
@@ -108,33 +109,33 @@ theorem is_object_id_spec (oid : Slice U8) :
   apply key
   simp [UScalar.eq_equiv]
 
-/-- `record_envelope_ok` accepts exactly the records whose keyless envelope
-    is valid for configuration id `id`. -/
+/-- `record_envelope_prefix_ok` decides the keyless envelope from a declared
+    size and leading bytes: the size is within the record bound and `prefix`
+    has the v3 file header naming configuration id `id`. -/
 @[step]
-theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize) :
-    record_envelope_ok record id ⦃ r => r = true ↔
-      Transcrypt.V3Policy.EnvelopeOk (sliceBytes record) (wireBytes id) ⦄ := by
-  unfold record_envelope_ok Transcrypt.V3Policy.EnvelopeOk
-  simp_len
-  have hrl : record.len.val = record.length := by simp
-  have hbl := sliceBytes_length record
+theorem record_envelope_prefix_ok_spec (size : Usize) («prefix» : Slice U8) (id : Std.Array U8 16#usize) :
+    record_envelope_prefix_ok size «prefix» id ⦃ r => r = true ↔
+      size.val ≤ Transcrypt.V3Policy.maxRecord ∧
+        Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes «prefix») = some (wireBytes id) ⦄ := by
+  unfold record_envelope_prefix_ok
+  have hbl := sliceBytes_length «prefix»
   have := usize_max_ge
   step with MAX_RECORD_spec as ⟨ i1, i1_post ⟩
   split
   · rename_i hgt
-    simp only [gt_iff_lt, UScalar.lt_equiv, i1_post, hrl] at hgt
-    simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and, hbl]
+    simp only [gt_iff_lt, UScalar.lt_equiv, i1_post] at hgt
+    simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
     intro h; omega
   · rename_i hgt
-    have hmax : record.length ≤ Transcrypt.V3Policy.maxRecord := by
-      simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, i1_post, hrl] at hgt
+    have hmax : size.val ≤ Transcrypt.V3Policy.maxRecord := by
+      simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, i1_post] at hgt
       exact hgt
     step with parse_file_header_spec as ⟨ r, hr ⟩
     cases r with
     | Ok found =>
       simp only at hr ⊢
       step*
-      rw [r_post, s_post, s1_post, hr, hbl, Option.some_inj]
+      rw [r_post, s_post, s1_post, hr, Option.some_inj]
       simp only [hmax, true_and, Array.to_slice]
       exact (wireBytes_inj found id).symm
     | Err e =>
@@ -146,8 +147,60 @@ theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize)
         rw [hr.2]; simp
       | Length =>
         simp only at hr
-        rw [Transcrypt.V3Wire.file_truncated _ (by unfold_v3_lengths; omega)]
+        rw [Transcrypt.V3Wire.file_truncated _ (by rw [hbl]; exact hr)]
         simp
+
+/-- `record_envelope_ok` accepts exactly the records whose keyless envelope
+    is valid for configuration id `id`. -/
+@[step]
+theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize) :
+    record_envelope_ok record id ⦃ r => r = true ↔
+      Transcrypt.V3Policy.EnvelopeOk (sliceBytes record) (wireBytes id) ⦄ := by
+  unfold record_envelope_ok Transcrypt.V3Policy.EnvelopeOk
+  simp_len
+  simp only [bind_tc_ok]
+  have hrl : record.len.val = record.length := by simp
+  apply WP.spec_mono (record_envelope_prefix_ok_spec record.len record id)
+  intro r hr
+  rw [hr, hrl, sliceBytes_length]
+
+/-- The file header decision reads only the first `fileMinLen` bytes. -/
+theorem decodeFileHeaderShape_take (l : List Nat) :
+    Transcrypt.V3Wire.decodeFileHeaderShape (l.take Transcrypt.V3Wire.fileMinLen) =
+      Transcrypt.V3Wire.decodeFileHeaderShape l := by
+  unfold Transcrypt.V3Wire.decodeFileHeaderShape
+  by_cases h : Transcrypt.V3Wire.fileMinLen ≤ l.length
+  · have ht : Transcrypt.V3Wire.fileMinLen ≤ (l.take Transcrypt.V3Wire.fileMinLen).length := by
+      rw [List.length_take]; omega
+    rw [if_pos ht, if_pos h, List.take_take, List.drop_take, List.take_take]
+    rfl
+  · have ht : ¬ Transcrypt.V3Wire.fileMinLen ≤ (l.take Transcrypt.V3Wire.fileMinLen).length := by
+      rw [List.length_take]; omega
+    rw [if_neg ht, if_neg h]
+
+/-- Two never-failing Boolean programs deciding the same proposition are
+    the same program. -/
+theorem bool_spec_unique {m m' : RustM Bool} {Q : Prop}
+    (h : m ⦃ r => r = true ↔ Q ⦄) (h' : m' ⦃ r => r = true ↔ Q ⦄) : m = m' := by
+  cases m <;> cases m' <;> simp only [WP.spec_ok, WP.spec_fail, WP.spec_div] at h h' ⊢
+  rename_i r r'
+  cases r <;> cases r' <;> simp_all
+
+/-- The keyless envelope of a record is decided by its size and its first
+    `ENVELOPE_PREFIX_LEN` (`FILE_MIN_LEN`) bytes: given only those, as a
+    reader that skips the rest of the blob has them,
+    `record_envelope_prefix_ok` is the very program `record_envelope_ok`
+    of the whole record. -/
+theorem record_envelope_prefix_ok_record (record «prefix» : Slice U8) (id : Std.Array U8 16#usize)
+    (hprefix : sliceBytes «prefix» = (sliceBytes record).take Transcrypt.V3Wire.fileMinLen) :
+    record_envelope_prefix_ok record.len «prefix» id = record_envelope_ok record id := by
+  apply bool_spec_unique _ (record_envelope_ok_spec record id)
+  apply WP.spec_mono (record_envelope_prefix_ok_spec record.len «prefix» id)
+  intro r hr
+  rw [hr, hprefix, decodeFileHeaderShape_take]
+  unfold Transcrypt.V3Policy.EnvelopeOk
+  have hrl : record.len.val = record.length := by simp
+  rw [hrl, sliceBytes_length]
 
 /-! ## Smudge decision -/
 

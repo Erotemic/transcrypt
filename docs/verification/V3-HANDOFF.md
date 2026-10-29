@@ -185,7 +185,9 @@ or `tests/git_lifecycle.rs`.
 
 - Read Git objects only by object id, from one parsed snapshot, through
   `git_blob` (one shared `cat-file --batch` with exact reply framing,
-  bounded). Never use `:<path>` revision syntax.
+  bounded; the keyless `is_record` reads only a blob's size and first
+  `ENVELOPE_PREFIX_LEN` bytes, `record_envelope_prefix_ok_record`). Never
+  use `:<path>` revision syntax.
 - Create Git subprocesses only with `git_command` (literal pathspecs, no
   replace refs). Never `git add -- <path>` with repository-derived paths;
   re-index with `update-index -z --stdin`.
@@ -268,7 +270,7 @@ directory handles, reparse points refused, rename through ntdll) and
 check).
 
 The Lean proofs (the specification, the full generated-code refinement
-build and the axiom audit of all 100 ledger theorems) pass on Linux,
+build and the axiom audit of all 102 ledger theorems) pass on Linux,
 Windows Server 2025, FreeBSD 14.5, NetBSD 10.1 and OpenBSD 7.9, and on each
 `replay-v3-kernel.sh` re-checks every declaration they depend on, Mathlib,
 Aeneas and Lean's library included, through that system's own kernel
