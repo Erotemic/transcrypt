@@ -128,6 +128,28 @@ pub(crate) fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
     output(command)
 }
 
+/// `rev-parse -q --verify` exits with this status, printing nothing, exactly
+/// when the name resolves to no object of the requested type.
+const NO_SUCH_REVISION: i32 = 1;
+
+/// The commit `rev` names: `None` if it names none (an unborn branch, an
+/// absent pseudo-ref); an error if Git fails in any other way, never a
+/// silent `None`.
+pub(crate) fn resolve_commit(root: &Path, rev: &str) -> Result<Option<String>, String> {
+    let mut command = git_command(Some(root));
+    command.args(["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]);
+    let (status, output, errors) = run_bounded_status(command, None, GIT_OUTPUT_LIMIT)?;
+    match status.code() {
+        Some(0) => {
+            let id = String::from_utf8_lossy(&output).trim_end().to_owned();
+            if !is_object_id(id.as_bytes()) { return Err("malformed git rev-parse output".into()); }
+            Ok(Some(id))
+        },
+        Some(NO_SUCH_REVISION) if errors.is_empty() => Ok(None),
+        _ => Err(format!("cannot resolve {rev}: {}", String::from_utf8_lossy(&errors).trim())),
+    }
+}
+
 pub(crate) fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
     let mut command = git_command(Some(root));
     command.args(arguments);

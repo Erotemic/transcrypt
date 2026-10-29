@@ -1030,6 +1030,33 @@ fn secrets_merge_as_plaintext() {
     run(&repo, bin(), &["audit"], None);
 }
 
+/// Plaintext staged around the filter is encrypted by the hook only when it
+/// is known to be the user's own change. Sequencing state that is present
+/// but unreadable or malformed leaves the incoming commits unknown, so the
+/// hook refuses instead of repairing (an earlier version took a malformed
+/// MERGE_HEAD for "nothing is being merged" and repaired).
+#[test]
+fn unknown_incoming_commits_are_never_taken_for_none() {
+    let mut scratch = Scratch::new("incoming");
+    let repo = scratch.repo("repo");
+    let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(b"staged plaintext\n"))).unwrap();
+    let stage = || run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "new.secret"], None);
+    let head = || run(&repo, "git", &["rev-parse", "HEAD"], None);
+    for (name, contents) in [("MERGE_HEAD", &b"not an object id\n"[..]), ("CHERRY_PICK_HEAD", b"0000\n")] {
+        stage();
+        fs::write(repo.join(".git").join(name), contents).unwrap();
+        let err = run_fails(&repo, bin(), &["pre-commit"], None);
+        assert!(err.contains("new.secret"), "{name}: {err}");
+        assert!(!is_record(&staged(&repo, "new.secret")), "{name}: repaired with unknown incoming commits");
+        fs::remove_file(repo.join(".git").join(name)).unwrap();
+    }
+    // Without them, the same staged plaintext is the user's change: sealed.
+    let before = head();
+    run(&repo, bin(), &["pre-commit"], None);
+    assert!(is_record(&staged(&repo, "new.secret")));
+    assert_eq!(head(), before);
+}
+
 /// A merge `git merge-file` cannot do (binary secrets; it exits with 255,
 /// not a conflict count) fails, and our side stays exactly as it was.
 #[test]

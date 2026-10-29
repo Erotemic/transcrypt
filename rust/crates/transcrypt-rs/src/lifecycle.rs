@@ -2,7 +2,7 @@
 //! hook, `hydrate`, and `lock` (`flush` per worktree). Every decision to
 //! publish, keep or replace bytes is made by the verified core.
 
-use std::{collections::HashMap, env, fs, path::{Path, PathBuf}};
+use std::{collections::{HashMap, HashSet}, env, fs, io, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
     blob_elsewhere, first_unselectable, held_entries, hydrate_action, is_local_change, is_object_id,
@@ -254,30 +254,44 @@ pub(crate) fn commit_files(root: &Path, rev: &str) -> Result<Vec<Staged>, String
 /// exactly that commit is listed: a concurrent commit cannot make the
 /// listing another commit's than the one found.
 pub(crate) fn commit_listing(root: &Path, rev: &str) -> Result<Listing, String> {
-    let Ok(id) = git(root, &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]) else {
-        return Ok(Listing::empty());
-    };
-    let id = String::from_utf8_lossy(&id).trim_end().to_owned();
-    if !is_object_id(id.as_bytes()) {
-        return Err("malformed git rev-parse output".into());
+    match resolve_commit(root, rev)? {
+        Some(id) => tree_listing(root, &id),
+        None => Ok(Listing::empty()),
     }
-    tree_listing(root, &id)
 }
+
+/// The pseudo-refs naming the commit a cherry-pick, revert or rebase step
+/// is bringing in.
+const SEQUENCER_HEADS: [&str; 3] = ["CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD"];
+/// The directories of a rebase or `git am` in progress.
+const REBASE_DIRS: [&str; 2] = ["rebase-merge", "rebase-apply"];
 
 /// Every (path, blob) of the commits a merge, cherry-pick, revert or rebase
 /// is bringing in, as one listing: index content equal to one of them came
-/// from a commit and is checked, never repaired. `None` when a rebase or
-/// `git am` is in progress without a known commit: then nothing is repaired.
+/// from a commit and is checked, never repaired. `None` when they are not
+/// known, and then nothing is repaired: a rebase or `git am` without a
+/// known commit, or sequencing state that is present but unreadable or
+/// malformed (never taken for "no commit is coming in").
 fn incoming(root: &Path) -> Result<Option<Listing>, String> {
-    let mut commits: Vec<String> = fs::read_to_string(git_dir(root).join("MERGE_HEAD")).unwrap_or_default()
-        .lines().map(str::to_owned).collect();
-    for name in ["CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD"] {
-        if let Ok(id) = git(root, &["rev-parse", "-q", "--verify", &format!("{name}^{{commit}}")]) {
-            commits.push(String::from_utf8_lossy(&id).trim().to_owned());
+    let git_dir = git_dir(root);
+    let mut commits = Vec::new();
+    match fs::read(git_dir.join("MERGE_HEAD")) {
+        Ok(text) => for line in text.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+            if !is_object_id(line) { return Ok(None); }
+            commits.push(String::from_utf8_lossy(line).into_owned());
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+        Err(_) => return Ok(None),
+    }
+    for name in SEQUENCER_HEADS {
+        match resolve_commit(root, name)? {
+            Some(id) => commits.push(id),
+            // Present, yet naming no commit.
+            None if fs::symlink_metadata(git_dir.join(name)).is_ok() => return Ok(None),
+            None => {},
         }
     }
-    commits.retain(|c| is_object_id(c.as_bytes()));
-    if commits.is_empty() && ["rebase-merge", "rebase-apply"].iter().any(|dir| git_dir(root).join(dir).exists()) {
+    if commits.is_empty() && REBASE_DIRS.iter().any(|dir| git_dir.join(dir).exists()) {
         return Ok(None);
     }
     let trees = commits.iter().map(|commit| tree_listing(root, commit)).collect::<Result<Vec<_>, _>>()?;
@@ -375,22 +389,27 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
         Some(files) => held(&snapshot.listing, &snapshot.flags, files)?,
         None => vec![false; snapshot.flags.len()],
     };
+    let force: HashSet<&[u8]> = force.iter().map(Vec::as_slice).collect();
     let mut update = IndexUpdate::default();
     // `HEAD` by object id, for move sources; only when a record moved.
     let mut head_order: Option<Vec<usize>> = None;
     for i in protected {
         let staged = &snapshot.entries()[i];
-        // Changed since `HEAD`, and not by a commit being brought in.
-        let local_change = is_local_change(in_head[i], incoming.is_some(), in_incoming[i], false, true);
-        let forced = force.contains(&staged.path);
+        let mut evidence = RepairEvidence {
+            in_head: in_head[i],
+            incoming_known: incoming.is_some(),
+            in_incoming: in_incoming[i],
+            forced: force.contains(staged.path.as_slice()),
+            // Until the blob is read: assume a record, which forcing never repairs.
+            envelope: true,
+        };
         // `seal_action` never repairs a non-local entry; skip decrypting it
         // here (`check_index` verifies it right after).
-        if !local_change && !forced { continue; }
+        if !evidence.local_change() && !evidence.forced { continue; }
         let record = git_blob(root, &staged.oid).map_err(|e| format!("{}: {e}", staged.name()))?;
         let opens = key.open(&staged.path, &record).is_ok();
-        let envelope = parse_file_header(&record).is_ok();
-        // `protect` may force sealing plaintext, never re-encrypting a record.
-        let local = is_local_change(in_head[i], incoming.is_some(), in_incoming[i], forced, envelope);
+        evidence.envelope = parse_file_header(&record).is_ok();
+        let (envelope, local) = (evidence.envelope, evidence.local_change());
         let moved = if opens || !envelope { None } else {
             let order = get_or_try_init(&mut head_order, || head.object_order())?;
             open_moved(key, &snapshot.listing, i, head, order, &record)
@@ -415,6 +434,24 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
     let count = update.len();
     update.apply(root, &[])?;
     Ok(count)
+}
+
+/// What the pre-commit hook knows about one staged protected entry, for the
+/// verified `is_local_change`: a change the user made (not in `HEAD` at its
+/// path, the commits being brought in known and not holding it either), or
+/// plaintext (no `envelope`) that `protect` `forced`.
+struct RepairEvidence {
+    in_head: bool,
+    incoming_known: bool,
+    in_incoming: bool,
+    forced: bool,
+    envelope: bool,
+}
+
+impl RepairEvidence {
+    fn local_change(&self) -> bool {
+        is_local_change(self.in_head, self.incoming_known, self.in_incoming, self.forced, self.envelope)
+    }
 }
 
 /// The first `HEAD` path that entry `i` of `index` may have been moved from
