@@ -103,24 +103,7 @@ fn run() -> Result<(), String> {
         os::default_sigpipe();
     }
     if action == "audit" {
-        // Also runs keyless in a bare repository (a server's pre-receive
-        // hook), where there is no worktree and no key.
-        let (root, keyed) = match repo_root() {
-            Ok(root) => (root, true),
-            Err(_) => (env::current_dir().map_err(|_| "cannot read working directory")?, false),
-        };
-        env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
-        let mut revs = &args[1..];
-        let mut max_commits = None;
-        if let Some(limit) = revs.first().and_then(|a| a.to_str()).and_then(|a| a.strip_prefix("--max-commits=")) {
-            max_commits = Some(limit.parse::<usize>().map_err(|_| "--max-commits takes a number")?);
-            revs = &revs[1..];
-        }
-        let audited = audit(&root, revs, keyed, max_commits)?;
-        println!("audit: {} protected record(s) checked{}", audited.records,
-            if audited.authenticated { ", all authenticated with the key" }
-            else { " (envelopes only: unlock to authenticate them)" });
-        return Ok(());
+        return run_audit(&args[1..]);
     }
     let root = repo_root()?;
     // File arguments (the merge driver's) are relative to where Git ran us.
@@ -148,25 +131,7 @@ fn run() -> Result<(), String> {
             _ => Err("hydrate takes no arguments".into()),
         },
         "init" | "unlock" | "rekey" | "migrate" | "reencrypt" => {
-            let mut options = Options { password_stdin: false, private: false, hydrate: true, timeout: None, yes: false,
-                patterns: Vec::new() };
-            for arg in &args[1..] {
-                match (arg.to_str(), action) {
-                    (Some("--password-stdin"), _) => options.password_stdin = true,
-                    (Some("--private"), "init" | "unlock" | "migrate") => options.private = true,
-                    (Some("--no-hydrate"), "unlock") => options.hydrate = false,
-                    (Some("--yes"), "reencrypt") => options.yes = true,
-                    (Some(flag), "init" | "unlock") if flag.starts_with("--timeout=") => {
-                        options.timeout = Some(parse_duration(&flag["--timeout=".len()..])?);
-                    },
-                    (Some(flag), _) if flag.starts_with('-') => return Err(format!("{action}: unknown option {flag}")),
-                    (_, "init") => options.patterns.push(arg.clone()),
-                    _ => return Err(format!("{action}: unexpected argument {}", arg.to_string_lossy())),
-                }
-            }
-            if options.timeout.is_some() && !options.private {
-                return Err("--timeout applies to the private mode: use it with --private".into());
-            }
+            let options = parse_options(action, &args[1..])?;
             match action {
                 "init" => init(&root, &options),
                 "rekey" => rekey(&root, &options),
@@ -214,7 +179,56 @@ fn run() -> Result<(), String> {
     }
 }
 
-const USAGE: &str = "usage: transcrypt-rs init|protect|unprotect|unlock|status|doctor|lock|rekey|hydrate|\
+/// `audit [--max-commits=N] [<rev-list args>]`. Also runs keyless in a bare
+/// repository (a server's pre-receive hook), where there is no worktree and
+/// no key.
+fn run_audit(args: &[OsString]) -> Result<(), String> {
+    let (root, keyed) = match repo_root() {
+        Ok(root) => (root, true),
+        Err(_) => (env::current_dir().map_err(|_| "cannot read working directory")?, false),
+    };
+    env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
+    let mut revs = args;
+    let mut max_commits = None;
+    if let Some(limit) = revs.first().and_then(|a| a.to_str()).and_then(|a| a.strip_prefix("--max-commits=")) {
+        max_commits = Some(limit.parse::<usize>().map_err(|_| "--max-commits takes a number")?);
+        revs = &revs[1..];
+    }
+    let audited = audit(&root, revs, keyed, max_commits)?;
+    println!("audit: {} protected record(s) checked{}", audited.records,
+        if audited.authenticated { ", all authenticated with the key" }
+        else { " (envelopes only: unlock to authenticate them)" });
+    Ok(())
+}
+
+/// The `Options` of `action` (`init`, `unlock`, `rekey`, `migrate` or
+/// `reencrypt`) from its arguments.
+fn parse_options(action: &str, args: &[OsString]) -> Result<Options, String> {
+    let mut options = Options { password_stdin: false, private: false, hydrate: true, timeout: None, yes: false,
+        patterns: Vec::new() };
+    for arg in args {
+        let flag = arg.to_str();
+        if let (Some(duration), "init" | "unlock") = (flag.and_then(|f| f.strip_prefix("--timeout=")), action) {
+            options.timeout = Some(parse_duration(duration)?);
+            continue;
+        }
+        match (flag, action) {
+            (Some("--password-stdin"), _) => options.password_stdin = true,
+            (Some("--private"), "init" | "unlock" | "migrate") => options.private = true,
+            (Some("--no-hydrate"), "unlock") => options.hydrate = false,
+            (Some("--yes"), "reencrypt") => options.yes = true,
+            (Some(flag), _) if flag.starts_with('-') => return Err(format!("{action}: unknown option {flag}")),
+            (_, "init") => options.patterns.push(arg.clone()),
+            _ => return Err(format!("{action}: unexpected argument {}", arg.to_string_lossy())),
+        }
+    }
+    if options.timeout.is_some() && !options.private {
+        return Err("--timeout applies to the private mode: use it with --private".into());
+    }
+    Ok(options)
+}
+
+const USAGE: &str ="usage: transcrypt-rs init|protect|unprotect|unlock|status|doctor|lock|rekey|hydrate|\
     verify-index|audit|migrate|uninstall|help|version (clean, smudge, filter-process, diff, merge, pre-commit and \
     pre-push are invoked by Git)";
 
@@ -293,12 +307,12 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// leaves `.transcrypt/` out of the worktree.
 pub(crate) fn load_config(root: &Path) -> Result<Vec<u8>, String> {
     let unsafe_config = |_| "unsafe .transcrypt/config (a symlink or not a regular file)".to_owned();
-    let bytes = match find_protected(root, Path::new(".transcrypt/config")).map_err(unsafe_config)? {
+    let bytes = match find_protected(root, Path::new(CONFIG_PATH)).map_err(unsafe_config)? {
         Some(file) => file.read()?.0.to_vec(),
         None if fs::symlink_metadata(root.join(".transcrypt")).is_ok() => {
             return Err("missing committed .transcrypt/config".into());
         },
-        None => match indexed_files(root)?.into_iter().find(|e| e.path == b".transcrypt/config" && e.regular) {
+        None => match indexed_files(root)?.into_iter().find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular) {
             Some(staged) => git_blob(root, &staged.oid)?,
             None => return Err("missing .transcrypt directory: run init or clone a v3 repository".into()),
         },
@@ -307,6 +321,10 @@ pub(crate) fn load_config(root: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// The shortest passphrase v3 accepts, and the longest read from stdin.
+const MIN_PASSPHRASE: usize = 16;
+const MAX_PASSPHRASE: usize = 4096;
+
 /// Read the passphrase. A new one (`init`, `rekey`) typed on a terminal is
 /// asked for twice: a typo would otherwise encrypt everything under a
 /// passphrase nobody knows.
@@ -314,9 +332,10 @@ pub(crate) fn passphrase(from_stdin: bool, new: bool) -> Result<Zeroizing<Vec<u8
     // Preallocated and wrapped before reading, so the buffer never grows
     // (leaving unwiped copies) and every exit path wipes it.
     let bytes = if from_stdin {
-        let mut value = Zeroizing::new(Vec::with_capacity(4098));
-        io::stdin().take(4097).read_to_end(&mut value).map_err(|_| "cannot read passphrase from stdin")?;
-        if value.len() > 4096 {
+        let mut value = Zeroizing::new(Vec::with_capacity(MAX_PASSPHRASE + 2));
+        io::stdin().take(MAX_PASSPHRASE as u64 + 1).read_to_end(&mut value)
+            .map_err(|_| "cannot read passphrase from stdin")?;
+        if value.len() > MAX_PASSPHRASE {
             return Err("passphrase too long".into());
         }
         if value.last() == Some(&b'\n') { value.pop(); }
@@ -327,12 +346,16 @@ pub(crate) fn passphrase(from_stdin: bool, new: bool) -> Result<Zeroizing<Vec<u8
             .map(|p| Zeroizing::new(p.into_bytes()))
             .map_err(|e| format!("cannot read terminal passphrase: {e}"));
         let value = prompt(if new { "New transcrypt v3 passphrase: " } else { "Transcrypt v3 passphrase: " })?;
-        if new && value.len() >= 16 && *prompt("Repeat the passphrase: ")? != *value {
+        // A passphrase too short to accept is refused below without asking
+        // for it again.
+        if new && value.len() >= MIN_PASSPHRASE && *prompt("Repeat the passphrase: ")? != *value {
             return Err("the passphrases differ".into());
         }
         value
     };
-    if bytes.len() < 16 { return Err("v3 requires a passphrase of at least 16 bytes".into()); }
+    if bytes.len() < MIN_PASSPHRASE {
+        return Err(format!("v3 requires a passphrase of at least {MIN_PASSPHRASE} bytes"));
+    }
     if new && bytes.iter().any(|b| *b == b'\n' || *b == b'\r') {
         return Err("a new passphrase must be one line (give it once on stdin)".into());
     }

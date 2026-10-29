@@ -22,8 +22,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 use transcrypt_rs::{authenticate_config, clean_file, decrypt_file, SecretKey, KEY_SIZE};
-use transcrypt_v3_core::{stored_key_state, StoredKey, CONFIG_LEN, ID_LEN, KEY_FILE_LEN};
-use crate::{fsat, session::{self, Operation}};
+use transcrypt_v3_core::{stored_key_state, AgentOp, StoredKey, CONFIG_LEN, ID_LEN, KEY_FILE_LEN};
+use crate::{fsat, session};
 
 const KEY_FILE: &str = "key";
 const DAMAGED: &str = "damaged .git/transcrypt-v3/key; run `transcrypt-rs unlock` again";
@@ -37,10 +37,10 @@ pub(crate) struct Key {
     stored: Option<SecretKey>,
 }
 
-/// What `Key::state` found.
-pub(crate) enum State {
+/// How this checkout is unlocked for a configuration (`lookup`).
+pub(crate) enum Unlock {
     /// A stored key or a running agent for this configuration.
-    Unlocked { private: bool },
+    Unlocked(Key),
     /// No credential.
     Locked,
     /// A stored key that does not authenticate this configuration: the
@@ -48,19 +48,26 @@ pub(crate) enum State {
     Stale,
 }
 
+impl Unlock {
+    /// The key, when unlocked.
+    pub(crate) fn key(&self) -> Option<&Key> {
+        match self { Unlock::Unlocked(key) => Some(key), _ => None }
+    }
+}
+
 impl Key {
     /// The key for `config`, if this checkout is unlocked for it.
     pub(crate) fn load(root: &Path, config: &[u8]) -> Result<Option<Key>, String> {
-        Ok(lookup(root, config)?.1)
+        Ok(match lookup(root, config)? { Unlock::Unlocked(key) => Some(key), _ => None })
     }
 
     /// Like `load`, but required: the error says how to unlock.
     pub(crate) fn require(root: &Path, config: &[u8]) -> Result<Key, String> {
         match lookup(root, config)? {
-            (_, Some(key)) => Ok(key),
-            (State::Stale, None) => Err("the stored key does not match .transcrypt/config (it was rekeyed?); \
+            Unlock::Unlocked(key) => Ok(key),
+            Unlock::Stale => Err("the stored key does not match .transcrypt/config (it was rekeyed?); \
                 run `transcrypt-rs unlock` with the current passphrase".into()),
-            _ => Err("this checkout is locked; run `transcrypt-rs unlock`".into()),
+            Unlock::Locked => Err("this checkout is locked; run `transcrypt-rs unlock`".into()),
         }
     }
 
@@ -93,7 +100,7 @@ impl Key {
     pub(crate) fn clean(&self, path: &[u8], input: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
         match &self.stored {
             Some(key) => clean_file(&self.config, key, path, input).map(Zeroizing::new),
-            None => session::request(&self.root, &self.config, Operation::Encrypt, path, input),
+            None => session::request(&self.root, &self.config, AgentOp::Encrypt, path, input),
         }
     }
 
@@ -101,40 +108,41 @@ impl Key {
     pub(crate) fn open(&self, path: &[u8], record: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
         match &self.stored {
             Some(key) => decrypt_file(&self.config, key, path, record),
-            None => session::request(&self.root, &self.config, Operation::Decrypt, path, record),
+            None => session::request(&self.root, &self.config, AgentOp::Decrypt, path, record),
         }
     }
 }
 
-/// How this checkout is unlocked for `config`.
-pub(crate) fn state(root: &Path, config: &[u8]) -> Result<State, String> {
-    Ok(lookup(root, config)?.0)
-}
-
-/// `state`, for `unlock`: a damaged stored key counts as locked, since
+/// `lookup`, for `unlock`: a damaged stored key counts as locked, since
 /// unlocking replaces it. Every other command refuses it.
-pub(crate) fn state_to_unlock(root: &Path, config: &[u8]) -> Result<State, String> {
+pub(crate) fn state_to_unlock(root: &Path, config: &[u8]) -> Result<Unlock, String> {
     let file = read_key_file(root)?;
-    if matches!(stored_lookup(file.as_ref().map(|f| f.as_slice()), config), Err(StoredKey::Damaged)) {
-        return Ok(State::Locked);
+    match stored_lookup(file.as_ref().map(|f| f.as_slice()), config) {
+        Err(StoredKey::Damaged) => Ok(Unlock::Locked),
+        stored => unlock_state(root, config, stored),
     }
-    state(root, config)
 }
 
 /// How this checkout is unlocked for `config`, with the key when it is.
-pub(crate) fn lookup(root: &Path, config: &[u8]) -> Result<(State, Option<Key>), String> {
-    let key = |stored| Some(Key { root: root.to_owned(), config: config.to_vec(), stored });
+pub(crate) fn lookup(root: &Path, config: &[u8]) -> Result<Unlock, String> {
     let file = read_key_file(root)?;
-    match stored_lookup(file.as_ref().map(|f| f.as_slice()), config) {
-        Ok(Some(secret)) => return Ok((State::Unlocked { private: false }, key(Some(secret)))),
-        Err(StoredKey::Stale) => return Ok((State::Stale, None)),
+    unlock_state(root, config, stored_lookup(file.as_ref().map(|f| f.as_slice()), config))
+}
+
+/// `lookup` given what the stored key file holds: without a stored key, the
+/// private agent is asked.
+fn unlock_state(root: &Path, config: &[u8], stored: Result<Option<SecretKey>, StoredKey>) -> Result<Unlock, String> {
+    let key = |stored| Key { root: root.to_owned(), config: config.to_vec(), stored };
+    match stored {
+        Ok(Some(secret)) => return Ok(Unlock::Unlocked(key(Some(secret)))),
+        Err(StoredKey::Stale) => return Ok(Unlock::Stale),
         Err(_) => return Err(DAMAGED.into()),
         Ok(None) => {},
     }
-    Ok(if session::request(root, config, Operation::Ping, &[], &[]).is_ok() {
-        (State::Unlocked { private: true }, key(None))
+    Ok(if session::request(root, config, AgentOp::Ping, &[], &[]).is_ok() {
+        Unlock::Unlocked(key(None))
     } else {
-        (State::Locked, None)
+        Unlock::Locked
     })
 }
 
