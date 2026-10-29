@@ -6,7 +6,10 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 version=$(sed 's/.*://' "$here/../v3/lean-toolchain")
 port=$here/lean-$version-bsd.patch
-[ -f "$port" ] || { echo "build-lean: no port for Lean $version" >&2; exit 2; }
+[ -f "$port" ] || {
+	echo "build-lean: no port for Lean $version" >&2
+	exit 2
+}
 case $(uname) in
 NetBSD)
 	# The base system's C++ library predates C++20's atomic::wait.
@@ -15,7 +18,10 @@ NetBSD)
 	export LDFLAGS="-Wl,-R/usr/pkg/gcc14/lib -Wl,-R/usr/pkg/lib"
 	;;
 OpenBSD) prefix=/usr/local ;;
-*) echo "build-lean: for NetBSD and OpenBSD only" >&2; exit 2 ;;
+*)
+	echo "build-lean: for NetBSD and OpenBSD only" >&2
+	exit 2
+	;;
 esac
 mkdir -p "$1"
 work=$(cd "$1" && pwd)
@@ -28,7 +34,7 @@ cd "$work"
 cd lean4
 git checkout -q -- src stage0
 git clean -qfd src stage0
-for tree in src stage0/src; do patch -s -p1 -d "$tree" < "$port"; done
+for tree in src stage0/src; do patch -s -p1 -d "$tree" <"$port"; done
 find src stage0/src -name '*.orig' -delete
 rm -rf build/release
 mkdir -p build/release

@@ -177,6 +177,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
 
 #[test]
 #[cfg(unix)] // No Windows file name is invalid UTF-16, so none is invalid UTF-8.
+#[cfg_attr(target_os = "macos", ignore = "APFS refuses file names that are not UTF-8")]
 fn git_non_utf8_path_survives_filter_agent_commit_clone_and_hydration() {
     use std::os::unix::ffi::OsStringExt;
     let mut scratch = Scratch::new("raw-path");

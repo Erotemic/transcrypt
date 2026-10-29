@@ -116,10 +116,12 @@ jobs:
         # Bash transcrypt (v2) never supported Windows.
         if: runner.os != 'Windows'
         working-directory: rust-legacy
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --no-fail-fast
       - name: Test the v3 end-to-end Git lifecycle
+        # Even if the legacy parity above failed.
+        if: ${{ !cancelled() }}
         working-directory: rust
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --no-fail-fast
       - name: Clippy (warnings are errors)
         if: matrix.os == 'ubuntu-24.04'
         run: |
@@ -158,8 +160,8 @@ jobs:
               git config --global user.name CI
               git config --global user.email ci@example.test
               git config --global init.defaultBranch main
-              (cd rust && cargo test --locked --workspace)
-              (cd rust-legacy && cargo test --locked --workspace)
+              (cd rust && cargo test --locked --workspace --no-fail-fast)
+              (cd rust-legacy && cargo test --locked --workspace --no-fail-fast)
             '
 
   netbsd:
@@ -185,8 +187,8 @@ jobs:
             git config --global user.name CI
             git config --global user.email ci@example.test
             git config --global init.defaultBranch main
-            (cd rust && cargo test --locked --workspace)
-            (cd rust-legacy && cargo test --locked --workspace)
+            (cd rust && cargo test --locked --workspace --no-fail-fast)
+            (cd rust-legacy && cargo test --locked --workspace --no-fail-fast)
 
   openbsd:
     # The v3 suite on OpenBSD (in a VM), with OpenBSD's own Rust package:
@@ -208,7 +210,7 @@ jobs:
             git config --global user.name CI
             git config --global user.email ci@example.test
             git config --global init.defaultBranch main
-            cd rust && cargo test --locked -p transcrypt-rs -p transcrypt-v3-core
+            cd rust && cargo test --locked --no-fail-fast -p transcrypt-rs -p transcrypt-v3-core
 
   linux-release:
     # The release archives, built exactly as a release is (scripts/
@@ -229,7 +231,7 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
       - name: Build both archives and test the native one
-        run: scripts/build-release.sh --test --out dist
+        run: scripts/build-release.sh --test --out dist x86_64-unknown-linux-musl aarch64-unknown-linux-musl
       - name: Install from the archives
         run: |
           sh scripts/install.sh --from dist --prefix "$RUNNER_TEMP/install"
@@ -329,7 +331,10 @@ jobs:
       - name: Axiom audit of headline refinement theorems
         run: bash proofs/aeneas/check-v3-axioms.sh
       - name: Replay every declaration through this OS's kernel
-        run: bash proofs/aeneas/replay-v3-kernel.sh
+        run: |
+          # lean-action builds only the default target (V3Wire).
+          (cd proofs/aeneas/v3 && lake build Transcrypt)
+          bash proofs/aeneas/replay-v3-kernel.sh
 
   v3-aeneas-regeneration:
     # No synthetic model: rerun the pinned real translator, diff the exact

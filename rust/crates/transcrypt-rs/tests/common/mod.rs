@@ -253,8 +253,14 @@ pub fn make_private_dir(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(modes::PRIVATE_DIR)).unwrap();
     }
+    // Owned by this user explicitly, as v3 creates it: an elevated
+    // administrator's default owner is the Administrators group, which the
+    // processes Git for Windows starts do not see as theirs.
     #[cfg(windows)]
-    icacls(path, &["/inheritance:r", "/grant:r", &format!("*{}:(OI)(CI)F", user_sid())]);
+    {
+        icacls(path, &["/setowner", &format!("*{}", user_sid())]);
+        icacls(path, &["/inheritance:r", "/grant:r", &format!("*{}:(OI)(CI)F", user_sid())]);
+    }
 }
 
 /// Make a file readable by other users.

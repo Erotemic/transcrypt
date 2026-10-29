@@ -10,7 +10,7 @@ out=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 cd "$root/proofs/aeneas/v3"
 kit=$(mktemp -d)
 trap 'rm -rf "$kit"' EXIT
-cat > "$kit/closure.lean" <<'LEAN'
+cat >"$kit/closure.lean" <<'LEAN'
 import Lean
 open Lean
 def main : IO Unit := do
@@ -18,8 +18,8 @@ def main : IO Unit := do
   let env ← importModules #[{module := `V3Wire}, {module := `Transcrypt}] {}
   for m in env.header.moduleNames do IO.println m
 LEAN
-lake env lean --run "$kit/closure.lean" > "$kit/closure.txt"
-find .lake/packages -path '*/.lake/build/lib/lean' -type d > "$kit/roots.txt"
+lake env lean --run "$kit/closure.lean" >"$kit/closure.txt"
+find .lake/packages -path '*/.lake/build/lib/lean' -type d >"$kit/roots.txt"
 "${PYTHON:-python3}" - "$kit" <<'PY'
 import os, sys
 kit = sys.argv[1]

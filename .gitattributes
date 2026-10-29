@@ -1,1 +1,5 @@
 sensitive_file  filter=crypt diff=crypt merge=crypt
+# The proofs hash these sources (proofs/aeneas/v3/SNAPSHOT.json): check them
+# out byte-identical on every OS, whatever core.autocrlf says.
+rust/** text eol=lf
+proofs/** text eol=lf

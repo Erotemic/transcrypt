@@ -195,6 +195,7 @@ fn invalid_context_and_unimplemented_operations_fail() {
 
 #[cfg(unix)]
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "APFS refuses file names that are not UTF-8")]
 fn non_utf8_git_path_has_same_legacy_salt() {
     use std::os::unix::ffi::OsStringExt;
     let repo = Repo::new();

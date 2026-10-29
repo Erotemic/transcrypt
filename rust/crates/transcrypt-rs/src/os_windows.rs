@@ -39,7 +39,7 @@ use windows_sys::{core::BOOL, Win32::{
     Storage::FileSystem::{
         CreateDirectoryW, GetFileInformationByHandleEx, FileAttributeTagInfo, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL, WRITE_DAC,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     },
     System::{
         Diagnostics::Debug::{SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX},
@@ -202,8 +202,12 @@ impl Identity {
         unsafe { (*self.owner.as_ptr().cast::<TOKEN_OWNER>()).Owner }
     }
 
-    /// The SDDL of a protected DACL that grants this user, and nobody
-    /// else, full access to the object and (inherited) its children.
+    /// The SDDL of an object this user owns, with a protected DACL that
+    /// grants this user, and nobody else, full access to it and (inherited)
+    /// its children. The owner is explicit: the default owner differs between
+    /// processes of one user (an elevated administrator's is the
+    /// Administrators group, but Git for Windows sets its children's to the
+    /// user), and each must see the object as its own.
     fn private_sddl(&self) -> io::Result<Vec<u16>> {
         let mut text: *mut u16 = null_mut();
         // SAFETY: the SID is valid; `text` receives a LocalAlloc'd string.
@@ -211,7 +215,8 @@ impl Identity {
         let _free = Local(text.cast());
         // SAFETY: a NUL-terminated wide string.
         let sid = unsafe { std::slice::from_raw_parts(text, (0..).take_while(|&i| *text.add(i) != 0).count()) };
-        Ok("D:P(A;OICI;FA;;;".encode_utf16().chain(sid.iter().copied()).chain(")\0".encode_utf16()).collect())
+        Ok("O:".encode_utf16().chain(sid.iter().copied()).chain("D:P(A;OICI;FA;;;".encode_utf16())
+            .chain(sid.iter().copied()).chain(")\0".encode_utf16()).collect())
     }
 }
 
@@ -368,9 +373,19 @@ pub(crate) fn private_socket(path: &Path) -> bool {
         && open_entry(path, FILE_READ_ATTRIBUTES | READ_CONTROL).is_ok_and(|e| is_private(e.as_raw_handle()).unwrap_or(false))
 }
 
-/// Restrict a just-bound socket to this user.
+/// Restrict a just-bound socket to this user, and make it this user's
+/// (`bind` gives it the default owner; see `Identity::private_sddl`).
 pub(crate) fn secure_socket(path: &Path) -> io::Result<()> {
-    set_private(open_entry(path, WRITE_DAC | READ_CONTROL)?.as_raw_handle())
+    let socket = open_entry(path, WRITE_DAC | WRITE_OWNER | READ_CONTROL)?;
+    let identity = Identity::current()?;
+    let descriptor = PrivateDescriptor::new()?;
+    let dacl = descriptor.dacl()?;
+    // SAFETY: a valid handle, this user's SID and the descriptor's DACL.
+    status(unsafe {
+        SetSecurityInfo(socket.as_raw_handle(), SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            identity.user(), null_mut(), dacl, null())
+    })
 }
 
 fn startup() {
