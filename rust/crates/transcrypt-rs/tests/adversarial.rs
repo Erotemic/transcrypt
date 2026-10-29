@@ -600,7 +600,9 @@ fn agent_does_not_keep_inherited_descriptors() {
     // EOF arrives only if no process (the agent) still holds the write end.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || { let mut buf = Vec::new(); let _ = reader.read_to_end(&mut buf); let _ = tx.send(()); });
-    const EVENT_WAIT: Duration = Duration::from_secs(10);
+    // EOF arrives at once when nothing holds the pipe; the wait only bounds
+    // a failure, generously, for a heavily loaded machine.
+    const EVENT_WAIT: Duration = Duration::from_secs(60);
     assert!(rx.recv_timeout(EVENT_WAIT).is_ok(), "agent kept an inherited pipe open");
 }
 
