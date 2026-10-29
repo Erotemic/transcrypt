@@ -42,9 +42,11 @@ pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_pa
     let result = run_bounded_status(command, None, 3 * MAX_RECORD);
     drop(scratch);
     let (status, merged, errors) = result?;
+    // `merge-file` exits with the number of conflicts (at most 127), or
+    // negative (255) on an error, whose output must never replace `ours`.
     let conflicts = match status.code() {
         Some(0) => false,
-        Some(n) if n > 0 => true,
+        Some(1..=127) => true,
         _ => return Err(format!("git merge-file failed: {}", String::from_utf8_lossy(&errors))),
     };
     let record = key.clean(git_path, &merged)?;

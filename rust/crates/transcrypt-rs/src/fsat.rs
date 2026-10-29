@@ -23,6 +23,19 @@ fn cstr(name: &OsStr) -> io::Result<CString> {
     CString::new(name.as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
 }
 
+/// Set this thread's errno.
+fn set_errno(value: libc::c_int) {
+    // SAFETY: each returns a pointer to the calling thread's errno.
+    unsafe {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        { *libc::__errno_location() = value; }
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "dragonfly"))]
+        { *libc::__error() = value; }
+        #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
+        { *libc::__errno() = value; }
+    }
+}
+
 fn check(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(rc) }
 }
@@ -192,29 +205,44 @@ impl Dir {
         Ok(st.st_mode & 0o077 == 0)
     }
 
-    /// Names of the entries of this directory (excluding `.` and `..`).
+    /// Names of the entries of this directory (excluding `.` and `..`). A
+    /// read error is an error, never a shorter listing (callers purge what
+    /// they list).
     pub(crate) fn entries(&self) -> io::Result<Vec<OsString>> {
         // SAFETY: dup returns a new descriptor that fdopendir takes ownership of.
         let dup = check(unsafe { libc::fcntl(self.0.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) })?;
+        // SAFETY: `dup` is a fresh directory descriptor; on failure we still own it.
         let stream = unsafe { libc::fdopendir(dup) };
         if stream.is_null() {
             let err = io::Error::last_os_error();
+            // SAFETY: closing the descriptor fdopendir did not take.
             unsafe { libc::close(dup) };
             return Err(err);
         }
+        // SAFETY: a valid DIR*. The duplicate shares its read position with
+        // this directory's descriptor, so start from the beginning.
+        unsafe { libc::rewinddir(stream) };
         let mut names = Vec::new();
-        loop {
-            // SAFETY: `stream` is a valid DIR*; entries are copied before the next call.
+        let result = loop {
+            // readdir returns null both at the end and on an error; only
+            // errno tells them apart.
+            set_errno(0);
+            // SAFETY: `stream` is a valid DIR*.
             let entry = unsafe { libc::readdir(stream) };
-            if entry.is_null() { break; }
+            if entry.is_null() {
+                let err = io::Error::last_os_error();
+                break if err.raw_os_error() == Some(0) { Ok(names) } else { Err(err) };
+            }
+            // SAFETY: `d_name` is NUL-terminated and valid until the next
+            // readdir; it is copied before then.
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
             if name != b"." && name != b".." {
                 names.push(OsString::from_vec(name.to_vec()));
             }
-        }
+        };
         // SAFETY: closes the stream and the duplicated descriptor.
         unsafe { libc::closedir(stream) };
-        Ok(names)
+        result
     }
 
     /// Take an exclusive advisory lock on this directory without waiting;

@@ -1030,6 +1030,28 @@ fn secrets_merge_as_plaintext() {
     run(&repo, bin(), &["audit"], None);
 }
 
+/// A merge `git merge-file` cannot do (binary secrets; it exits with 255,
+/// not a conflict count) fails, and our side stays exactly as it was.
+#[test]
+fn a_failed_merge_never_replaces_our_side() {
+    let mut scratch = Scratch::new("mergefail");
+    let repo = scratch.repo("repo");
+    let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
+    fs::write(repo.join("a.secret"), b"base\0binary\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "binary base"], None);
+    run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
+    fs::write(repo.join("a.secret"), b"side\0binary\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "side"], None);
+    run(&repo, "git", &["checkout", "-q", main.trim()], None);
+    fs::write(repo.join("a.secret"), b"ours\0binary\n").unwrap();
+    run(&repo, "git", &["commit", "-qam", "ours"], None);
+    let out = exec(&repo, "git", &["merge", "-q", "--no-edit", "side"], None);
+    assert!(!out.status.success(), "a binary conflict cannot merge");
+    run(&repo, bin(), &["hydrate"], None);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"ours\0binary\n");
+    run(&repo, "git", &["merge", "--abort"], None);
+}
+
 /// Plaintext inputs left by a merge driver that crashed are removed by the
 /// next merge.
 #[test]
