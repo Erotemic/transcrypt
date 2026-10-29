@@ -379,7 +379,7 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
         None => vec![false; snapshot.flags.len()],
     };
     let force: HashSet<&[u8]> = force.iter().map(Vec::as_slice).collect();
-    let mut update = IndexUpdate::default();
+    let mut update = IndexUpdate::new(root, Blobs::Records);
     // `HEAD` by object id, for move sources; only when a record moved.
     let mut head_ordered: Option<OrderedListing> = None;
     for i in protected {
@@ -418,10 +418,10 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
                 plaintext
             },
         };
-        update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?);
+        update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
     }
     let count = update.len();
-    update.apply(root, &[])?;
+    update.apply(&[])?;
     Ok(count)
 }
 

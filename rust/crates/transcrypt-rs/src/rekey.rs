@@ -49,12 +49,12 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     }
     let (config, key) = new_config(&password)?;
     // The new records, written as Git objects, and one index update.
-    let mut update = IndexUpdate::default();
+    let mut update = IndexUpdate::new(root, Blobs::Records);
     for (staged, plaintext) in &plaintexts {
-        update.add(&staged.mode, &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?);
+        update.add(&staged.mode, &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?)?;
     }
-    update.add(REGULAR_FILE_MODE, CONFIG_PATH.as_bytes(), &config);
-    update.apply(root, &[])?;
+    update.add(REGULAR_FILE_MODE, CONFIG_PATH.as_bytes(), &config)?;
+    update.apply(&[])?;
     let undo = "; run `git reset` to undo the staged rekey";
     write_repository_file(root, &staging, Path::new(CONFIG_PATH), &config)
         .map_err(|e| format!("{e}{undo}"))?;
@@ -133,17 +133,17 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         let password = passphrase(options.password_stdin, false)?;
         keys.push((old, unlock_config(&password, &old.bytes)?));
     }
-    let mut update = IndexUpdate::default();
+    let mut update = IndexUpdate::new(root, Blobs::Records);
     let staging = staging_dir(root)?;
     for (old, old_key) in &keys {
         for Stale { staged, record, .. } in stale.iter().filter(|f| f.config == old.id) {
             let plaintext = transcrypt_rs::decrypt_file(&old.bytes, old_key, &staged.path, record)
                 .map_err(|e| format!("{}: {e}", staged.name()))?;
-            update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?);
+            update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
             replace_if_holds(root, &staging, &staged.path, record, &plaintext, key.private())?;
         }
     }
-    update.apply(root, &[])?;
+    update.apply(&[])?;
     eprintln!("Re-encrypted {} file(s) under the current config; they are staged. Commit them.", stale.len());
     Ok(())
 }

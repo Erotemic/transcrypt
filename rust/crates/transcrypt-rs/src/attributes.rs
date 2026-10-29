@@ -305,13 +305,13 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
         for (staged, plaintext) in &released {
             replace_if_holds(root, &staging, &staged.path, &git_blob(root, &staged.oid)?, plaintext, key.private())?;
         }
-        let mut update = IndexUpdate::default();
+        let mut update = IndexUpdate::new(root, Blobs::Plaintext);
         for (staged, plaintext) in &released {
-            update.add(&staged.mode, &staged.path, plaintext);
+            update.add(&staged.mode, &staged.path, plaintext)?;
         }
         let rules = worktree_attributes(root)?.ok_or("missing .gitattributes")?;
-        update.add(REGULAR_FILE_MODE, b".gitattributes", &rules);
-        update.apply(root, &["--add"])?;
+        update.add(REGULAR_FILE_MODE, b".gitattributes", &rules)?;
+        update.apply(&["--add"])?;
         Ok(released.into_iter().map(|(staged, _)| staged.path.clone()).collect::<Vec<_>>())
     })?;
     eprintln!("{} file(s) are no longer protected; their next commit stores them UNENCRYPTED:", released.len());
