@@ -113,8 +113,13 @@ fn ours(name: &str, command: &str, text: &str) -> bool {
     let legacy = if name == "pre-commit" { Some("verify-index") } else { None };
     let Some(line) = text.strip_prefix("#!/bin/sh\nexec ").and_then(|t| t.strip_suffix('\n')) else { return false };
     let Some((path, rest)) = shell_unquote(line) else { return false };
-    // The exact form v3 writes, for a binary named transcrypt-v3.
-    Path::new(&path).file_name().is_some_and(|n| *n == *format!("transcrypt-v3{}", std::env::consts::EXE_SUFFIX))
+    // The exact form v3 writes, for a binary named transcrypt-v3 (on
+    // Windows, `transcrypt-v3.exe` or `transcrypt-v3`, in any case).
+    Path::new(&path).file_name().and_then(|n| n.to_str()).is_some_and(|name| if cfg!(windows) {
+        name.eq_ignore_ascii_case("transcrypt-v3.exe") || name.eq_ignore_ascii_case("transcrypt-v3")
+    } else {
+        name == "transcrypt-v3"
+    })
         && [Some(command), legacy].into_iter().flatten()
             .any(|c| rest == c && line == format!("{} {c}", shell_quote(&path)))
 }

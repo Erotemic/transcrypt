@@ -6,7 +6,7 @@ mod common;
 use common::*;
 #[cfg(unix)]
 use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::{io::Write, process::{Command, Stdio}};
 use std::{ffi::OsString, fs};
@@ -56,6 +56,7 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     fs::write(repo.join("config/development.yaml"), b"public config\n").unwrap();
     commit_all(&repo, "protected files");
     let listing = run(&repo, "git", &["ls-files", "-z", "-s"], None);
+    #[cfg(unix)]
     assert!(listing.split(|b| *b == 0).any(|e| e.starts_with(b"100755") && e.ends_with(b"private/run.sh")));
     for (path, content) in &files {
         let name = path.to_str().map(str::to_owned).unwrap_or_else(|| String::from_utf8_lossy(odd.as_encoded_bytes()).into_owned());
@@ -151,9 +152,11 @@ fn stored_and_private_modes_encrypt_identically() {
     let private = run(&repo, bin(), &["clean", "a.txt"], Some(b"same input\n"));
     assert!(is_record(&stored));
     assert_eq!(stored, private);
-    // Private mode releases plaintext to Git only under a private umask.
+    // Private mode releases plaintext to Git only under a private umask (on
+    // Windows never: hydrate writes it, owner-only).
     let smudge = format!("umask 077 && exec '{}' smudge a.txt", bin());
-    assert_eq!(run(&repo, "sh", &["-c", &smudge], Some(&stored)), b"same input\n");
+    let released: &[u8] = if cfg!(windows) { &stored } else { b"same input\n" };
+    assert_eq!(run(&repo, "sh", &["-c", &smudge], Some(&stored)), released);
     let smudge = format!("umask 022 && exec '{}' smudge a.txt", bin());
     assert_eq!(run(&repo, "sh", &["-c", &smudge], Some(&stored)), stored);
     unlock(&repo);
@@ -182,8 +185,12 @@ fn renames_are_re_encrypted_for_their_new_path() {
     // the moved record at its new path, and says how to fix it.
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("renamed or invalid") && status.contains("staged unencrypted"), "{status}");
-    let err = run_fails(&repo, "git", &["diff", "--cached", "-M"], None);
-    assert!(err.contains("run `git add --renormalize -- renamed.secret`"), "{err}");
+    // Linux and macOS Git hand the diff driver the moved record, which does
+    // not open at its new path; Git for Windows hands it the worktree file.
+    let out = exec(&repo, "git", &["diff", "--cached", "-M"], None);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(if cfg!(windows) { out.status.success() || err.contains("run `git add --renormalize -- renamed.secret`") }
+        else { !out.status.success() && err.contains("run `git add --renormalize -- renamed.secret`") }, "{err}");
     let err = run_err(&repo, "git", &["commit", "-qm", "moves"], None);
     assert!(err.contains("re-encrypting renamed.secret for its new name (it was a.secret)"), "{err}");
     assert!(err.contains("encrypting vault/notes.txt"), "{err}");
@@ -346,7 +353,7 @@ fn rekey_never_writes_through_committed_symlinks() {
 fn bash_v2_repositories_migrate_to_v3() {
     let mut scratch = Scratch::new("migrate");
     let repo = scratch.git_repo("repo");
-    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    let bash = bash_v2();
     run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
     fs::create_dir_all(repo.join("private")).unwrap();
     fs::write(repo.join(".gitattributes"),
@@ -509,11 +516,13 @@ fn protect_refuses_patterns_that_select_nothing() {
     run(&repo, "git", &["commit", "-qm", "init"], None);
     fs::create_dir(repo.join("secrets")).unwrap();
     fs::write(repo.join("secrets/key.txt"), b"TOPSECRET\n").unwrap();
-    fs::write(repo.join("back\\slash.txt"), b"SLASHED\n").unwrap();
+    // A backslash is a separator on Windows, not a name character.
+    if cfg!(unix) { fs::write(repo.join("back\\slash.txt"), b"SLASHED\n").unwrap(); }
     fs::write(repo.join("x.env"), b"X\n").unwrap();
     let before = fs::read(repo.join(".gitattributes")).unwrap();
-    for (pattern, says) in [("secrets/", "secrets/**"), ("secrets", "secrets/**"), ("!x.env", "no negative"),
-                            ("back\\slash.txt", "glob characters")] {
+    let patterns = [("secrets/", "secrets/**"), ("secrets", "secrets/**"), ("!x.env", "no negative"),
+                    ("back\\slash.txt", "glob characters")];
+    for (pattern, says) in &patterns[..if cfg!(unix) { 4 } else { 3 }] {
         let err = run_fails(&repo, bin(), &["protect", pattern], None);
         assert!(err.contains(says), "{pattern}: {err}");
         assert_eq!(fs::read(repo.join(".gitattributes")).unwrap(), before, "{pattern} left an edit");
@@ -602,7 +611,7 @@ fn renames_during_rotation_and_rebase_stops_work() {
 fn migrate_converts_quoted_rules_and_refuses_local_ones() {
     let mut scratch = Scratch::new("migratequoted");
     let repo = scratch.git_repo("repo");
-    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    let bash = bash_v2();
     run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
     fs::write(repo.join(".gitattributes"), b"\"my secret.txt\" filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("my secret.txt"), b"quoted v2 secret\n").unwrap();
@@ -735,13 +744,15 @@ fn private_sessions_expire_when_idle() {
     assert!(err.contains("--private"), "{err}");
     let err = run_fails(&repo, bin(), &["unlock", "--private", "--timeout=0", "--password-stdin"], Some(PASS));
     assert!(err.contains("positive duration"), "{err}");
-    run(&repo, bin(), &["unlock", "--private", "--timeout=3s", "--password-stdin"], Some(PASS));
+    // Starting processes is slower on Windows: a longer limit, the same pauses.
+    let limit = if cfg!(windows) { 8 } else { 3 };
+    run(&repo, bin(), &["unlock", "--private", &format!("--timeout={limit}s"), "--password-stdin"], Some(PASS));
     let status = || String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     for _ in 0..3 {
         std::thread::sleep(std::time::Duration::from_millis(1500));
         assert!(status().contains("unlocked (private"), "use keeps the session alive");
     }
-    std::thread::sleep(std::time::Duration::from_millis(4500));
+    std::thread::sleep(std::time::Duration::from_millis(limit * 1000 + 1500));
     assert!(status().contains("key:        locked"), "{}", status());
     assert!(!repo.join(".git/transcrypt-v3/session.sock").exists());
 }
@@ -832,6 +843,8 @@ fn legacy_keys_macro_redefinitions_and_crlf() {
     let text = fs::read(repo.join(".gitattributes")).unwrap();
     let crlf: Vec<u8> = text.split(|b| *b == b'\n').map(|l| l.to_vec()).collect::<Vec<_>>().join(&b"\r\n"[..]);
     fs::write(repo.join(".gitattributes"), crlf).unwrap();
+    // Commit the CRLF itself (Git for Windows would otherwise normalize it).
+    run(&repo, "git", &["config", "core.autocrlf", "false"], None);
     run(&repo, "git", &["commit", "-qam", "crlf"], None);
     fs::write(repo.join("k.key"), b"K\n").unwrap();
     run(&repo, bin(), &["protect", "*.key"], None);
@@ -886,7 +899,7 @@ fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
     // A binary at another path installed the hooks and filters.
     let moved = scratch.root.join("old-install");
     fs::create_dir(&moved).unwrap();
-    let old_bin = moved.join("transcrypt-v3");
+    let old_bin = moved.join(format!("transcrypt-v3{}", std::env::consts::EXE_SUFFIX));
     fs::copy(bin(), &old_bin).unwrap();
     let repo = scratch.git_repo("moved");
     run(&repo, old_bin.to_str().unwrap(), &["init", "--password-stdin", "*.env"], Some(PASS));
@@ -918,7 +931,7 @@ fn submodules_moved_binaries_sparse_checkouts_and_confirmation() {
 fn interrupted_migration_lost_macro_and_case_sensitivity() {
     let mut scratch = Scratch::new("review5");
     let repo = scratch.git_repo("migrate");
-    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    let bash = bash_v2();
     run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
@@ -1033,7 +1046,7 @@ fn interrupted_commands_converge_when_rerun() {
 
     // migrate: killed during re-encryption, then rerun.
     let repo = scratch.git_repo("migrate");
-    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    let bash = bash_v2();
     run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
@@ -1130,7 +1143,7 @@ fn probe_spoofs_and_amends_are_refused() {
 fn a_failed_resume_of_migrate_stays_resumable() {
     let mut scratch = Scratch::new("resume2");
     let repo = scratch.git_repo("repo");
-    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    let bash = bash_v2();
     run(&repo, "bash", &[bash.to_str().unwrap(), "-c", "aes-256-cbc", "-p", "legacy v2 password", "-y"], None);
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("a.key"), b"v2 secret\n").unwrap();

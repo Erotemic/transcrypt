@@ -297,8 +297,10 @@ mod tests {
     fn link_dir(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
+        // `mklink` takes backslashes only.
         #[cfg(windows)]
-        assert!(std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(target)
+        assert!(std::process::Command::new("cmd").args(["/c", "mklink", "/J"])
+            .arg(link.to_str().unwrap().replace('/', "\\")).arg(target.to_str().unwrap().replace('/', "\\"))
             .output().unwrap().status.success());
     }
 

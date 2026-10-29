@@ -1,5 +1,6 @@
 #!/bin/sh
-# Install a transcrypt-v3 release binary (Linux x86_64 or arm64).
+# Install a transcrypt-v3 release binary: Linux (x86_64, arm64), FreeBSD
+# (x86_64) or macOS (arm64, x86_64). On Windows, use install.ps1.
 #
 #   sh install.sh [--tag v3-X.Y.Z] [--from DIR] [--prefix DIR]
 #
@@ -32,7 +33,7 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	-h | --help)
-		sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -48,7 +49,12 @@ fail() {
 	exit 1
 }
 
-[ "$(uname -s)" = Linux ] || fail "release binaries exist for Linux only so far (see docs/RELEASING.md for other systems)"
+case "$(uname -s)" in
+Linux) os=linux ;;
+FreeBSD) os=freebsd ;;
+Darwin) os=macos ;;
+*) fail "no release binary for $(uname -s) yet (docs/RELEASING.md); build from source: cd rust && cargo build --release" ;;
+esac
 case "$(uname -m)" in
 x86_64 | amd64) arch=x86_64 ;;
 aarch64 | arm64) arch=aarch64 ;;
@@ -79,10 +85,10 @@ trap 'rm -r -- "$work"' EXIT
 if [ -n "$from" ]; then
 	cp -- "$from/SHA256SUMS" "$work/SHA256SUMS"
 	archive=""
-	for candidate in "$from"/transcrypt-v3-*-"$arch"-linux.tar.gz; do
+	for candidate in "$from"/transcrypt-v3-*-"$arch-$os".tar.gz; do
 		if [ -f "$candidate" ]; then archive="${candidate##*/}"; fi
 	done
-	[ -n "$archive" ] || fail "no $arch archive in $from"
+	[ -n "$archive" ] || fail "no $arch-$os archive in $from"
 	cp -- "$from/$archive" "$work/$archive"
 else
 	if [ -z "$tag" ]; then
@@ -90,7 +96,7 @@ else
 		tag="$(sed -n 's/^ *"tag_name": *"\(v3-[^"]*\)".*/\1/p' "$work/releases.json" | head -n 1)"
 		[ -n "$tag" ] || fail "no v3 release found; pass --tag"
 	fi
-	archive="transcrypt-v3-${tag#v3-}-$arch-linux.tar.gz"
+	archive="transcrypt-v3-${tag#v3-}-$arch-$os.tar.gz"
 	base="https://github.com/$repo/releases/download/$tag"
 	fetch "$base/SHA256SUMS" "$work/SHA256SUMS"
 	fetch "$base/$archive" "$work/$archive"
@@ -102,7 +108,9 @@ expected="$(awk -v name="$archive" '$2 == name { print $1 }' "$work/SHA256SUMS")
 
 tar -xzf "$work/$archive" -C "$work"
 mkdir -p "$prefix/bin"
-install -m 0755 "$work/${archive%.tar.gz}/transcrypt-v3" "$prefix/bin/transcrypt-v3"
+cp "$work/${archive%.tar.gz}/transcrypt-v3" "$prefix/bin/transcrypt-v3.new"
+chmod 0755 "$prefix/bin/transcrypt-v3.new"
+mv -f "$prefix/bin/transcrypt-v3.new" "$prefix/bin/transcrypt-v3"
 "$prefix/bin/transcrypt-v3" --version
 case ":$PATH:" in
 *":$prefix/bin:"*) ;;

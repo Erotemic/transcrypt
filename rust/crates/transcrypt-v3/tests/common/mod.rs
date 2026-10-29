@@ -10,8 +10,11 @@ use std::{fs, time::Duration};
 
 pub const PASS: &[u8] = b"long correct horse battery staple test passphrase\n";
 
+/// The binary under test: the one Cargo built, or `TRANSCRYPT_V3_TEST_BIN`
+/// (a release binary, tested on the machine it was built for).
 pub fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_transcrypt-v3")
+    static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| std::env::var("TRANSCRYPT_V3_TEST_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_transcrypt-v3").into()))
 }
 
 pub fn exec(dir: &Path, name: &str, args: &[&str], input: Option<&[u8]>) -> Output {
@@ -279,8 +282,9 @@ pub fn symlink(target: &Path, link: &Path) {
     {
         let resolved = link.parent().unwrap().join(target);
         if resolved.is_dir() {
-            let out = exec(link.parent().unwrap(), "cmd", &["/c", "mklink", "/J", link.to_str().unwrap(),
-                resolved.to_str().unwrap()], None);
+            // `mklink` takes backslashes only.
+            let (link, resolved) = (link.to_str().unwrap().replace('/', "\\"), resolved.to_str().unwrap().replace('/', "\\"));
+            let out = exec(Path::new("."), "cmd", &["/c", "mklink", "/J", &link, &resolved], None);
             assert!(out.status.success(), "mklink /J failed: {}", String::from_utf8_lossy(&out.stderr));
         } else {
             std::os::windows::fs::symlink_file(target, link).unwrap();
@@ -315,3 +319,15 @@ fn user_name() -> String { whoami().0 }
 
 #[cfg(windows)]
 fn user_sid() -> String { whoami().1 }
+
+/// The Bash transcrypt (v2) script of this repository, as a path Bash takes.
+/// On Windows that is Git for Windows' Bash, whose `realpath` (which the
+/// script runs on itself) needs the MSYS form `/c/...` of `C:\...`.
+pub fn bash_v2() -> PathBuf {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
+    let path = path.to_str().unwrap().replace('\\', "/");
+    match path.as_bytes() {
+        [drive, b':', b'/', ..] if cfg!(windows) => PathBuf::from(format!("/{}{}", (*drive as char).to_ascii_lowercase(), &path[2..])),
+        _ => PathBuf::from(path),
+    }
+}

@@ -25,7 +25,7 @@ use windows_sys::{
     Wdk::{
         Foundation::OBJECT_ATTRIBUTES,
         Storage::FileSystem::{
-            NtCreateFile, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+            FileRenameInformation, FileRenameInformationEx, NtCreateFile, NtSetInformationFile, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
             FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
         },
     },
@@ -39,8 +39,8 @@ use windows_sys::{
             FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO,
             FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileDispositionInfo,
-            FileDispositionInfoEx, FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileRenameInfo,
-            FileRenameInfoEx, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+            FileDispositionInfoEx, FileFullDirectoryInfo, FileFullDirectoryRestartInfo, READ_CONTROL, SYNCHRONIZE,
+            WRITE_DAC,
         },
         System::{IO::IO_STATUS_BLOCK, WindowsProgramming::{FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS}},
     },
@@ -220,7 +220,9 @@ impl Dir {
 
     /// Atomically rename `from` in this directory to `to` in `to_dir`,
     /// replacing what is there (with POSIX semantics where the file system
-    /// has them: also when another program has the old file open).
+    /// has them: also when another program has the old file open). Through
+    /// ntdll: kernel32's `SetFileInformationByHandle` refuses a rename
+    /// relative to a directory handle.
     pub(crate) fn rename_to(&self, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
         let source = self.entry(from, DELETE, FILE_OPEN, 0, null())?;
         let target = component(to)?;
@@ -228,20 +230,22 @@ impl Dir {
         let size = offset + target.len() * 2;
         let mut buffer = vec![0u64; (size + 2).div_ceil(8)];
         let mut rename = |class, flags: u32| {
+            // FILE_RENAME_INFORMATION has FILE_RENAME_INFO's layout.
             let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+            let mut status: IO_STATUS_BLOCK = unsafe { zeroed() };
             // SAFETY: the buffer is aligned and holds the header and the name.
             unsafe {
                 (*info).Anonymous.Flags = flags;
                 (*info).RootDirectory = to_dir.raw();
                 (*info).FileNameLength = (target.len() * 2) as u32;
                 std::ptr::copy_nonoverlapping(target.as_ptr(), buffer.as_mut_ptr().cast::<u8>().add(offset).cast(), target.len());
-                win32(SetFileInformationByHandle(source.as_raw_handle(), class, buffer.as_ptr().cast(), size as u32))
+                nt(NtSetInformationFile(source.as_raw_handle(), &mut status, buffer.as_ptr().cast(), size as u32, class))
             }
         };
-        rename(FileRenameInfoEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS)
+        rename(FileRenameInformationEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS)
             // `ReplaceIfExists` (a BOOLEAN in the same place) where the
             // extended rename is unsupported (older Windows, FAT).
-            .or_else(|_| rename(FileRenameInfo, 1))
+            .or_else(|_| rename(FileRenameInformation, 1))
     }
 
     pub(crate) fn unlink(&self, name: &OsStr) -> io::Result<()> {

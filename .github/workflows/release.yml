@@ -1,10 +1,13 @@
 name: Release
 
-# Static Linux binaries of transcrypt-v3 for x86_64 and arm64. Each runner
-# builds both archives with scripts/build-release.sh (the same script used
-# without CI) and tests its native one; the two runners' builds should be
-# byte-identical (a difference is reported). A `v3-*` tag publishes a draft
-# release of the x86_64 runner's archives; a manual run only builds and tests.
+# transcrypt-v3 release archives: Linux (x86_64, arm64; static), FreeBSD
+# (x86_64), Windows (x86_64; static CRT) and macOS (arm64, x86_64). Every
+# archive is built by scripts/build-release.sh, the same script used without
+# CI, and every binary is tested on its own OS (the whole suite, against the
+# archive's binary) before anything is published. The Linux archives are
+# built on an x86_64 and an arm64 host; they should be byte-identical (a
+# difference is reported). A `v3-*` tag publishes a draft release; a manual
+# run only builds and tests.
 on:
   push:
     tags: ["v3-*"]
@@ -13,12 +16,36 @@ on:
 permissions:
   contents: read
 
+env:
+  RUST_TOOLCHAIN: "1.98.0"
+
 jobs:
-  build:
-    strategy:
-      matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
+  build-linux-host:
+    # The Linux, FreeBSD and Windows archives (cross-built: rust-lld, clang
+    # with the pinned FreeBSD base libraries, mingw-w64).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the cross linkers
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+      - name: Install rustup if missing
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Build the archives and test the native one
+        run: scripts/build-release.sh --test --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-host
+          path: dist/
+
+  rebuild-linux-arm64:
+    # The Linux archives again, on an arm64 host, to compare.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install rustup if missing
@@ -27,15 +54,98 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
-      - name: Build both archives and test the native one
+      - name: Build the Linux archives and test the native one
+        run: scripts/build-release.sh --test --out dist x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-arm64
+          path: dist/
+
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GNU tar and rustup if missing
+        run: |
+          command -v gtar >/dev/null || brew install gnu-tar
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Configure Git
+        run: |
+          git config --global user.name CI
+          git config --global user.email ci@example.test
+      - name: Build the archives and test the native one
         run: scripts/build-release.sh --test --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.runner }}
+          name: dist-macos
           path: dist/
 
+  test-windows:
+    # The suite against the Windows archive's binary, installed by install.ps1.
+    needs: build-linux-host
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-linux-host
+          path: dist
+      - name: Install the archive
+        shell: pwsh
+        run: ./scripts/install.ps1 -From dist -Prefix "$env:RUNNER_TEMP\install"
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
+      - name: Test the installed binary
+        working-directory: rust
+        run: |
+          git config --global user.name CI
+          git config --global user.email ci@example.test
+          TRANSCRYPT_V3_TEST_BIN="$RUNNER_TEMP\\install\\bin\\transcrypt-v3.exe" cargo test --locked -p transcrypt-v3
+
+  test-freebsd:
+    # The suite against the FreeBSD archive's binary, installed by install.sh.
+    needs: build-linux-host
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-linux-host
+          path: dist
+      - name: Test on FreeBSD 14
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "14.4"
+          mem: 8192
+          envs: RUST_TOOLCHAIN
+          prepare: |
+            pkg install -y git bash python3 curl ca_root_nss
+            pw useradd ci -m -s /bin/sh
+          run: |
+            set -e
+            chown -R ci .
+            su ci -c '
+              set -e
+              sh scripts/install.sh --from dist --prefix "$HOME/install"
+              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+              . "$HOME/.cargo/env"
+              git config --global user.name CI
+              git config --global user.email ci@example.test
+              git config --global init.defaultBranch main
+              cd rust && TRANSCRYPT_V3_TEST_BIN="$HOME/install/bin/transcrypt-v3" cargo test --locked -p transcrypt-v3
+            '
+
   publish:
-    needs: build
+    needs: [build-linux-host, rebuild-linux-arm64, build-macos, test-windows, test-freebsd]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -43,17 +153,25 @@ jobs:
       attestations: write
     steps:
       - uses: actions/download-artifact@v4
-      - name: Compare the builds of the two runners
+      - name: Check, compare and collect the archives
         run: |
-          (cd dist-ubuntu-24.04 && sha256sum -c SHA256SUMS)
-          if ! cmp -s dist-ubuntu-24.04/SHA256SUMS dist-ubuntu-24.04-arm/SHA256SUMS; then
-            echo "::warning::the x86_64 and arm64 runners built different archives (not reproducible across hosts)"
-            diff dist-ubuntu-24.04/SHA256SUMS dist-ubuntu-24.04-arm/SHA256SUMS || true
+          (cd dist-linux-host && sha256sum -c SHA256SUMS)
+          (cd dist-linux-arm64 && sha256sum -c SHA256SUMS)
+          (cd dist-macos && shasum -a 256 -c SHA256SUMS)
+          if ! grep linux dist-linux-host/SHA256SUMS | cmp -s - dist-linux-arm64/SHA256SUMS; then
+            echo "::warning::the x86_64 and arm64 hosts built different Linux archives (not reproducible across hosts)"
+            diff <(grep linux dist-linux-host/SHA256SUMS) dist-linux-arm64/SHA256SUMS || true
           fi
+          mkdir release
+          cp dist-linux-host/*.tar.gz dist-linux-host/*.zip dist-macos/*.tar.gz release/
+          cat dist-linux-host/SHA256SUMS dist-macos/SHA256SUMS | sort -k 2 > release/SHA256SUMS
+          (cd release && sha256sum -c SHA256SUMS)
       - uses: actions/attest-build-provenance@v2
         if: startsWith(github.ref, 'refs/tags/v3-')
         with:
-          subject-path: dist-ubuntu-24.04/*.tar.gz
+          subject-path: |
+            release/*.tar.gz
+            release/*.zip
       - name: Draft the release
         if: startsWith(github.ref, 'refs/tags/v3-')
         env:
@@ -61,10 +179,12 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
             --title "transcrypt-v3 ${GITHUB_REF_NAME#v3-}" --notes-file - \
-            dist-ubuntu-24.04/*.tar.gz dist-ubuntu-24.04/SHA256SUMS <<'EOF'
-          Static Linux binaries (x86_64, arm64) of transcrypt-v3; they need only Git 2.34 or later.
-          Install: download `install.sh` from the repository's `scripts/` and run it, or unpack the archive for
-          your architecture and put `transcrypt-v3` on your PATH. Verify with `sha256sum -c SHA256SUMS` and
-          `gh attestation verify <archive> --repo Erotemic/transcrypt`. Rebuild and compare:
-          `scripts/build-release.sh` at this tag.
+            release/*.tar.gz release/*.zip release/SHA256SUMS <<'EOF'
+          transcrypt-v3 for Linux (x86_64, arm64; static), FreeBSD 14.4 and later (x86_64),
+          macOS (arm64, x86_64) and Windows 10 1803 and later (x86_64). It needs only Git 2.34 or later
+          (on Windows, Git for Windows). Each binary passed the full test suite on its own OS.
+          Install: `scripts/install.sh` (Linux, FreeBSD, macOS) or `scripts/install.ps1` (Windows) from
+          the repository, or unpack the archive for your system and put `transcrypt-v3` on your PATH.
+          Verify with `sha256sum -c SHA256SUMS` and `gh attestation verify <archive> --repo Erotemic/transcrypt`.
+          Rebuild and compare: `scripts/build-release.sh` at this tag (docs/RELEASING.md).
           EOF

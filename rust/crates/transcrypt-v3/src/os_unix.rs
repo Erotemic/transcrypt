@@ -183,6 +183,7 @@ pub(crate) fn secure_socket(path: &Path) -> io::Result<()> {
 
 /// The effective UID of the process at the other end of a Unix socket, as
 /// recorded by the kernel when the connection was made.
+#[allow(clippy::unnecessary_cast)] // `uid_t` is not u32 everywhere.
 fn peer_uid(stream: &Stream) -> io::Result<u32> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {

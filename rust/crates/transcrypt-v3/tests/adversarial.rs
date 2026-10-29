@@ -297,16 +297,20 @@ fn hydration_never_stages_untracked_files_through_pathspec_magic() {
     fs::create_dir(repo.join("sub")).unwrap();
     fs::write(repo.join("sub/.gitattributes"), b"a.secret -filter\n").unwrap();
     fs::write(repo.join("sub/[a].secret"), b"decoy\n").unwrap();
-    fs::write(repo.join("sub/:(glob)*.secret"), b"decoy two\n").unwrap();
+    // Windows file names cannot contain `:` or `*`.
+    let magic = cfg!(unix);
+    if magic { fs::write(repo.join("sub/:(glob)*.secret"), b"decoy two\n").unwrap(); }
     commit(&repo, &["sub"], "hostile names");
     run(&repo, bin(), &["lock"], None);
     fs::write(repo.join("sub/a.secret"), b"UNTRACKED PLAINTEXT\n").unwrap();
     fs::write(repo.join("sub/b.secret"), b"UNTRACKED PLAINTEXT\n").unwrap();
     unlock(&repo);
     let staged = run(&repo, "git", &["ls-files", "-z", "sub"], None);
-    assert_eq!(staged, b"sub/.gitattributes\0sub/:(glob)*.secret\0sub/[a].secret\0", "untracked file staged");
+    let expected: &[u8] = if magic { b"sub/.gitattributes\0sub/:(glob)*.secret\0sub/[a].secret\0" }
+        else { b"sub/.gitattributes\0sub/[a].secret\0" };
+    assert_eq!(staged, expected, "untracked file staged");
     assert_eq!(fs::read(repo.join("sub/[a].secret")).unwrap(), b"decoy\n");
-    assert_eq!(fs::read(repo.join("sub/:(glob)*.secret")).unwrap(), b"decoy two\n");
+    if magic { assert_eq!(fs::read(repo.join("sub/:(glob)*.secret")).unwrap(), b"decoy two\n"); }
     let status = run(&repo, "git", &["status", "--porcelain", "--untracked-files=no"], None);
     assert!(status.is_empty(), "{}", String::from_utf8_lossy(&status));
     fs::remove_file(repo.join("sub/a.secret")).unwrap();
@@ -317,6 +321,7 @@ fn hydration_never_stages_untracked_files_through_pathspec_magic() {
 /// protected file named `0:a.secret` was read as stage 0 of `a.secret`.
 /// Objects are now read by the object id of the verified index snapshot.
 #[test]
+#[cfg(unix)] // Windows file names cannot contain `:`, so none looks like `0:path`.
 fn staged_objects_are_read_by_object_id_not_revision_syntax() {
     let mut scratch = Scratch::new("revsyntax");
     let repo = scratch.repo("repo");
@@ -414,7 +419,10 @@ fn worktree_files(root: &Path) -> Vec<PathBuf> {
         for entry in fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path == root.join(".git") { continue; }
-            if path.is_dir() { walk(&path, root, out) } else { out.push(path.strip_prefix(root).unwrap().to_path_buf()) }
+            // Git's names: `/` between components, also on Windows.
+            let relative = path.strip_prefix(root).unwrap().to_str().unwrap();
+            let relative = if cfg!(windows) { relative.replace('\\', "/") } else { relative.to_owned() };
+            if path.is_dir() { walk(&path, root, out) } else { out.push(PathBuf::from(relative)) }
         }
     }
     let mut out = Vec::new();
@@ -768,7 +776,9 @@ fn remote_enforcement_check_detects_unprotected_remotes() {
         if protected {
             fs::copy(&hook, scratch.root.join(name).join("hooks/pre-receive")).unwrap();
         }
-        let out = Command::new(&script).arg(format!("../{name}")).current_dir(&repo)
+        // Git for Windows' sh runs the script there.
+        let mut command = if cfg!(windows) { let mut sh = Command::new("sh"); sh.arg(&script); sh } else { Command::new(&script) };
+        let out = command.arg(format!("../{name}")).current_dir(&repo)
             .env("TRANSCRYPT_V3", bin()).output().unwrap();
         let text = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
         assert_eq!(out.status.success(), protected, "{name}: {text}");
@@ -989,7 +999,8 @@ fn secrets_merge_as_plaintext() {
     assert!(is_record(&staged(&repo, "a.secret")));
     assert_no_exposed_plaintext(&repo, "clean merge");
     // Overlapping edits conflict; the markers are decrypted for resolution.
-    for (mask, needs_hydrate) in [("022", true), ("077", false)] {
+    // Windows never treats a checkout as private: hydrate always decrypts.
+    for (mask, needs_hydrate) in [("022", true), ("077", cfg!(windows))] {
         fs::write(repo.join("a.secret"), b"ONE\nmain two\n").unwrap();
         run(&repo, "git", &["commit", "-qam", "main conflict"], None);
         git_with_umask(&repo, mask, &["checkout", "-q", "side"]);

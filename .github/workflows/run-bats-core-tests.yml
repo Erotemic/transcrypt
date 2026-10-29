@@ -75,18 +75,24 @@ jobs:
 
   rust:
     # The v3 executable and the legacy-v2 parity crates, built from source.
-    # ubuntu-22.04 has Git 2.34, the oldest Git the adapter supports. macOS
-    # is not a release platform yet (docs/RELEASING.md): it is tested, but
-    # does not fail the run.
+    # ubuntu-22.04 has Git 2.34, the oldest Git the adapter supports. Windows
+    # builds with the MSVC toolchain here (releases cross-build with mingw;
+    # the release workflow tests that binary on Windows).
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Configure Git
+        run: |
+          git config --global user.name CI
+          git config --global user.email ci@example.test
       - name: Install the pinned Rust toolchain
         run: |
           if ! command -v rustup >/dev/null; then
@@ -101,10 +107,14 @@ jobs:
           git --version
           rustc --version
       - name: Check Bash v2 byte contract
+        if: runner.os != 'Windows'
         run: bash tests/interop/check-bash-legacy-contract.sh
       - name: Check v3 proof input tooling (no mock proof claims)
+        if: runner.os != 'Windows'
         run: python3 proofs/aeneas/tests/test_v3_proof_inputs.py -v
       - name: Test legacy-v2 parity against Bash
+        # Bash transcrypt (v2) never supported Windows.
+        if: runner.os != 'Windows'
         working-directory: rust-legacy
         run: cargo test --locked --workspace
       - name: Test the v3 end-to-end Git lifecycle
@@ -121,6 +131,36 @@ jobs:
         run: |
           cargo install --locked --version 0.22.2 cargo-audit
           cargo audit --deny warnings
+
+  freebsd:
+    # The v3 suite and the legacy-v2 parity on FreeBSD (in a VM on a Linux
+    # runner), as an unprivileged user like the other runners.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test on FreeBSD 14
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "14.4"
+          mem: 8192
+          envs: RUST_TOOLCHAIN
+          prepare: |
+            pkg install -y git bash python3 curl ca_root_nss
+            pw useradd ci -m -s /bin/sh
+          run: |
+            set -e
+            chown -R ci .
+            su ci -c '
+              set -e
+              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+              . "$HOME/.cargo/env"
+              git config --global user.name CI
+              git config --global user.email ci@example.test
+              git config --global init.defaultBranch main
+              (cd rust && cargo test --locked --workspace)
+              (cd rust-legacy && cargo test --locked --workspace)
+            '
 
   linux-release:
     # The release archives, built exactly as a release is (scripts/
@@ -190,9 +230,14 @@ jobs:
         run: bash contrib/verification/d02-openssl-cli-probe.sh
 
   proof-base64-lean:
-    # Independent Lean check of equivalent pure bit-vector obligations.
-    runs-on: ubuntu-24.04
+    # Independent Lean check of equivalent pure bit-vector obligations, and
+    # the v3 policy specification, on each OS (FreeBSD: freebsd-proofs).
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: leanprover/lean-action@v1
@@ -203,16 +248,30 @@ jobs:
 
   v3-tracked-aeneas-refinement:
     # The tracked definitions come from the production Rust v3 codec. Compile
-    # them together with the independent specification and imported theorems.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # them together with the independent specification and imported theorems,
+    # on each OS that Lean supports (FreeBSD: freebsd-proofs).
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHON: python
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - name: Verify code provenance and snapshot regression tests
         run: |
-          python3 -m unittest discover -s proofs/aeneas/tests -p 'test_v3_*.py' -v
-          python3 proofs/aeneas/v3_snapshot.py verify
-          python3 proofs/aeneas/v3_snapshot.py stage
+          # The proof-input tests create symlinks, which Windows restricts.
+          if [ "$RUNNER_OS" != Windows ]; then python -m unittest discover -s proofs/aeneas/tests -p 'test_v3_*.py' -v; fi
+          python proofs/aeneas/v3_snapshot.py verify
+          python proofs/aeneas/v3_snapshot.py stage
       - name: Lean build of actual generated code and refinement theorems
         uses: leanprover/lean-action@v1
         with:

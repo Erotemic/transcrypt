@@ -531,6 +531,9 @@ impl IndexUpdate {
 
     /// Write the blobs and stage them, with `update-index` `options` (such as
     /// `--add`). `--done` makes a truncated stream fail without writing.
+    /// `update-index` skips a path it considers invalid (on Windows, one that
+    /// NTFS cannot name) with only a warning and success, so the index is
+    /// read back: every entry must now be staged exactly.
     pub(crate) fn apply(mut self, root: &Path, options: &[&str]) -> Result<(), String> {
         if self.entries.is_empty() { return Ok(()); }
         for mark in 1..=self.entries.len() {
@@ -543,12 +546,21 @@ impl IndexUpdate {
             return Err("malformed git fast-import output".into());
         }
         let mut info = Vec::new();
-        for ((mode, path), oid) in self.entries.iter().zip(oids) {
+        for ((mode, path), oid) in self.entries.iter().zip(&oids) {
             push_index_record(&mut info, mode, &String::from_utf8_lossy(oid), path);
         }
         let arguments: Vec<&str> = ["update-index", "-z"].into_iter().chain(options.iter().copied())
             .chain(["--index-info"]).collect();
         git_with_input(root, &arguments, &info)?;
+        let listing = index_listing(root)?;
+        let staged: std::collections::HashSet<&[u8]> = records(&listing).collect();
+        for ((mode, path), oid) in self.entries.iter().zip(oids) {
+            let mut record = format!("{mode} {} 0\t", String::from_utf8_lossy(oid)).into_bytes();
+            record.extend_from_slice(path);
+            if !staged.contains(&record[..]) {
+                return Err(format!("Git did not stage {} (it refuses that path name here)", String::from_utf8_lossy(path)));
+            }
+        }
         Ok(())
     }
 }
@@ -814,7 +826,8 @@ mod tests {
         let blobs: [(&[u8], &[u8]); 4] = [
             (b"empty", b""),
             (b"commands", b"done\nget-mark :1\nblob\nmark :9\ndata 3\n"),
-            (b"dir/binary\n name", b"\0\xff\n\n"),
+            // A newline is a file name character on Unix only.
+            (if cfg!(unix) { b"dir/binary\n name" } else { b"dir/binary name" }, b"\0\xff\n\n"),
             (b"no newline", b"x"),
         ];
         let mut update = IndexUpdate::default();
@@ -830,6 +843,11 @@ mod tests {
             assert!(listing.split(|b| *b == 0).any(|r| r == &record[..]), "{}", String::from_utf8_lossy(path));
             assert_eq!(git(&root, &["cat-file", "blob", oid.trim_end()]).unwrap(), bytes);
         }
+        // A path Git refuses to stage (it only warns, and succeeds) is an error.
+        let mut update = IndexUpdate::default();
+        update.add("100644", b".git/hooks/pre-commit", b"x");
+        let err = update.apply(&root, &["--add"]).unwrap_err();
+        assert!(err.contains("did not stage .git/hooks/pre-commit"), "{err}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

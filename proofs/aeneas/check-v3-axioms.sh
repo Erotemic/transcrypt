@@ -2,6 +2,7 @@
 # Audit the axioms used by the headline v3 refinement theorems. Fails if any
 # theorem uses sorryAx or an axiom beyond propext, Classical.choice and
 # Quot.sound (Lean's standard axioms). Run after build-v3-tracked.sh.
+# PYTHON names the Python 3 interpreter (default python3).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root/proofs/aeneas/v3"
@@ -9,7 +10,7 @@ out=$(lake env lean audit/Axioms.lean 2>&1)
 printf '%s\n' "$out"
 expected=$(grep -c '^#print axioms' audit/Axioms.lean)
 # Lean wraps long axiom lists over several lines; parse the whole output.
-printf '%s\n' "$out" | python3 -c '
+printf '%s\n' "$out" | "${PYTHON:-python3}" -c '
 import re, sys
 out = sys.stdin.read()
 expected = int(sys.argv[1])

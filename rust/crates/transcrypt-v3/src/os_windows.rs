@@ -535,9 +535,23 @@ pub(crate) fn accept(listener: &Listener, idle: Option<Duration>) -> Option<Stre
     if s == INVALID_SOCKET { None } else { Some(Stream(Socket(s))) }
 }
 
-/// Keep a background agent alive when the console that started it closes.
+/// Start the agent detached: alive when the console that started it closes,
+/// and holding none of this process's standard handles. Windows passes every
+/// inheritable handle to a child, and a caller waiting for the end of this
+/// process's output (`git`, a test) would otherwise wait for the agent too.
+/// The child still gets its own standard handles, which Rust makes for it.
 pub(crate) fn detach(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    use windows_sys::Win32::{
+        Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT},
+        System::{
+            Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
+            Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS},
+        },
+    };
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: clearing a flag of this process's own standard handle.
+        unsafe { SetHandleInformation(GetStdHandle(which), HANDLE_FLAG_INHERIT, 0) };
+    }
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
