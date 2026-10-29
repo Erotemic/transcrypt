@@ -1,7 +1,5 @@
-import Std.Tactic.BVDecide
-
-/-
-  Abstract preflight decision gates. The properties hold for all Boolean
+/-!
+  **Legacy (pre-v3).** Abstract preflight decision gates. The properties hold for all Boolean
   evidence inputs; *correct production of the evidence* is a separate
   external Git/crypto adapter obligation. These definitions intentionally
   do not assert that Transcrypt v2 currently uses these gates.
@@ -31,16 +29,14 @@ def migrationPublishAllowed (sourceAuthenticated contextsComplete targetAuthenti
 theorem secure_stage_sound (p l r c m a : Bool) :
     secureStageAllowed p l r c m a = true →
       (p = true ∨ l = true) ∧ r = true ∧ c = true ∧ m = true ∧ a = true := by
-  unfold secureStageAllowed
-  bv_decide
+  revert p l r c m a; decide
 
 /-- A wrong password, absent verifier, or failed preflight cannot authorize
     persistent writes (conditional on correctly classified evidence). -/
 theorem unlock_no_writes_on_failed_preflight (a c d s : Bool) :
     unlockWritesAllowed a c d s = true →
       a = true ∧ c = true ∧ d = true ∧ s = true := by
-  unfold unlockWritesAllowed
-  bv_decide
+  revert a c d s; decide
 
 /-- Migration publication is withheld unless source and target evidence,
     snapshot stability and a rollback path have all been established. -/
@@ -48,7 +44,6 @@ theorem migration_publish_requires_complete_evidence
     (a b c d e f : Bool) :
     migrationPublishAllowed a b c d e f = true →
       a = true ∧ b = true ∧ c = true ∧ d = true ∧ e = true ∧ f = true := by
-  unfold migrationPublishAllowed
-  bv_decide
+  revert a b c d e f; decide
 
 end Transcrypt.PolicyGates
