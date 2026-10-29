@@ -26,6 +26,7 @@ def pktAcc (l : List Nat) : Nat → Option Nat
 
 theorem pkt_hexValue_lt {c d : Nat} (h : hexValue c = some d) : d < 16 := by
   unfold hexValue at h
+  unfold_v3_bytes
   split_ifs at h <;> simp at h <;> omega
 
 theorem pktAcc_lt (l : List Nat) : ∀ k v, pktAcc l k = some v → v < 16 ^ k
@@ -53,14 +54,14 @@ theorem pktAcc_none_mono (l : List Nat) (i : Nat) (h : pktAcc l i = none) :
         subst this; exact h
 
 theorem pkt_hex_dec {c : Nat} (h1 : 48 ≤ c) (h2 : c ≤ 57) : hexValue c = some (c - 48) := by
-  unfold hexValue; rw [if_pos ⟨h1, h2⟩]
+  unfold hexValue; unfold_v3_bytes; rw [if_pos ⟨h1, h2⟩]
 
 theorem pkt_hex_low {c : Nat} (h1 : 97 ≤ c) (h2 : c ≤ 102) : hexValue c = some (c - 87) := by
-  unfold hexValue; rw [if_neg (by omega), if_pos ⟨h1, h2⟩]
+  unfold hexValue; unfold_v3_bytes; rw [if_neg (by omega), if_pos ⟨h1, h2⟩]
 
 theorem pkt_hex_none {c : Nat} (h1 : ¬(48 ≤ c ∧ c ≤ 57)) (h2 : ¬(97 ≤ c ∧ c ≤ 102)) :
     hexValue c = none := by
-  unfold hexValue; rw [if_neg h1, if_neg h2]
+  unfold hexValue; unfold_v3_bytes; rw [if_neg h1, if_neg h2]
 
 /-- Invariant of the digit scan: `i` stays within the header and `ok` with
     `value` record exactly the decoded value of the first `i` digits. -/
@@ -203,6 +204,7 @@ theorem decode_pkt_len_spec (header : Std.Array U8 4#usize) :
   step with pkt_loop_spec header as ⟨ value, ok1, hr ⟩
   have hmax : MAX_PKT_LEN.val = 65520 := MAX_PKT_LEN_val
   unfold Transcrypt.V3Policy.maxPktLen
+  unfold_v3_bytes
   cases ok1
   · simp only [Bool.false_eq_true, ↓reduceIte] at hr ⊢
     simp only [WP.spec_ok, true_and]

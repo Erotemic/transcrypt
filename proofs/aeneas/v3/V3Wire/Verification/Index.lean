@@ -75,6 +75,7 @@ theorem index_complete (l : List Nat) (reg : Bool) (path : List Nat)
       (reg = true ↔ l.take 6 = Transcrypt.V3Policy.regularMode ∨
         l.take 6 = Transcrypt.V3Policy.executableMode) := by
   obtain ⟨mode, oid, rfl, hm, ho, h9m, h9o, hp, hreg⟩ := h
+  unfold_v3_bytes
   have hol : 0 < oid.length := List.length_pos_iff.mpr ho
   have hpl : 0 < path.length := List.length_pos_iff.mpr hp
   let A := mode ++ [32] ++ oid ++ [32, 48]
