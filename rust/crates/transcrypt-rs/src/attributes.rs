@@ -113,8 +113,13 @@ fn check_pattern(root: &Path, submodules: &[Vec<u8>], pattern: &[u8]) -> Result<
     Ok(pattern.to_vec())
 }
 
-/// The key, and the checked patterns with their `.gitattributes` lines.
-type Checked = (Key, Vec<Vec<u8>>, Vec<Line>);
+/// The patterns of `protect` or `unprotect`, checked, and the key.
+struct Checked {
+    key: Key,
+    patterns: Vec<Vec<u8>>,
+    /// The `.gitattributes` line of each pattern.
+    lines: Vec<Line>,
+}
 
 /// The key, and each of `patterns` checked, with its `.gitattributes` line.
 fn checked_patterns(root: &Path, patterns: &[OsString]) -> Result<Checked, String> {
@@ -123,7 +128,7 @@ fn checked_patterns(root: &Path, patterns: &[OsString]) -> Result<Checked, Strin
     let submodules: Vec<Vec<u8>> = indexed_files(root)?.into_iter().filter(|e| e.mode == GITLINK_MODE).map(|e| e.path).collect();
     let patterns = patterns.iter().map(|p| check_pattern(root, &submodules, crate::os::os_bytes(p))).collect::<Result<Vec<_>, _>>()?;
     let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<_, _>>()?;
-    Ok((key, patterns, lines))
+    Ok(Checked { key, patterns, lines })
 }
 
 /// After `.gitattributes` was edited: a pattern that names an existing file
@@ -233,7 +238,7 @@ fn protect_line(pattern: &[u8]) -> Result<Line, String> {
 /// patterns now select (the pre-commit hook would do it at the next commit
 /// anyway; doing it now makes `git status` and `git diff --cached` honest).
 pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
-    let (key, patterns, lines) = checked_patterns(root, patterns)?;
+    let Checked { key, patterns, lines } = checked_patterns(root, patterns)?;
     AttributesUndo::guard(root, |_| {
         let staging = staging_dir(root)?;
         edit_attributes(root, &staging, true, |existing| {
@@ -267,7 +272,7 @@ pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> 
 /// released is decrypted first; on any error `.gitattributes` and the index
 /// are restored.
 pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
-    let (key, _, lines) = checked_patterns(root, patterns)?;
+    let Checked { key, lines, .. } = checked_patterns(root, patterns)?;
     let before = staged_protected(root, indexed_files(root)?)?;
     let released = AttributesUndo::guard(root, |undo| {
         let staging = staging_dir(root)?;
