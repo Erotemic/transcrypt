@@ -584,16 +584,20 @@ fn oversized_hostile_blobs_are_refused() {
 #[cfg(unix)] // Windows creates every handle non-inheritable.
 fn agent_does_not_keep_inherited_descriptors() {
     use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
     let mut scratch = Scratch::new("fds");
     let repo = scratch.repo("repo");
     run(&repo, bin(), &["lock"], None);
     let (mut reader, writer) = std::io::pipe().unwrap();
     let fd = writer.as_raw_fd();
-    // Make the write end inheritable, as a shell would leave it.
-    unsafe { libc_fcntl_clear_cloexec(fd) };
-    let mut child = Command::new(bin()).args(["unlock", "--password-stdin", "--no-hydrate"])
-        .current_dir(&repo).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
-        .spawn().unwrap();
+    let mut unlock = Command::new(bin());
+    unlock.args(["unlock", "--password-stdin", "--no-hydrate"])
+        .current_dir(&repo).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    // Make the write end inheritable, as a shell would leave it, in this
+    // child only: cleared in the test process, any process another test
+    // thread started meanwhile would inherit it too and hold back the EOF.
+    unsafe { unlock.pre_exec(move || { libc_fcntl_clear_cloexec(fd); Ok(()) }) };
+    let mut child = unlock.spawn().unwrap();
     child.stdin.take().unwrap().write_all(PASS).unwrap();
     assert!(child.wait().unwrap().success());
     drop(writer);
