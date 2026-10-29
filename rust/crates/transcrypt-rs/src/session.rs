@@ -28,14 +28,34 @@ use zeroize::Zeroizing;
 use crate::os::{self, sigpipe_blocked, Listener, Stream};
 
 const SOCK: &str = "session.sock";
+/// The first byte of a reply: the rest is the result, or the refusal.
+const REPLY_OK: u8 = 0;
+const REPLY_ERR: u8 = 1;
+/// How long the client waits between checks of the agent's socket.
+const POLL: Duration = Duration::from_millis(25);
+// Every request length fits the frame's 32-bit fields (`request` checks
+// them against these bounds before sending).
+const _: () = assert!(MAX_RECORD <= u32::MAX as usize);
+const _: () = assert!(MAX_PATH <= u32::MAX as usize);
 
-#[derive(Clone, Copy)]
-#[repr(u8)]
-pub(crate) enum Operation {
-    Ping = b'P',
-    Encrypt = b'E',
-    Decrypt = b'D',
-    Stop = b'X',
+/// The opcode byte of `op` on the wire: the one the verified
+/// `authorize_agent_request` maps back to `op` (tested below).
+fn opcode(op: AgentOp) -> u8 {
+    match op {
+        AgentOp::Ping => b'P',
+        AgentOp::Encrypt => b'E',
+        AgentOp::Decrypt => b'D',
+        AgentOp::Stop => b'X',
+    }
+}
+
+/// Whether `done` holds within about a second, checked after each pause.
+fn poll(mut done: impl FnMut() -> Result<bool, String>) -> Result<bool, String> {
+    for _ in 0..40 {
+        thread::sleep(POLL);
+        if done()? { return Ok(true); }
+    }
+    Ok(false)
 }
 
 fn directory(root: &Path) -> Result<PathBuf, String> {
@@ -113,8 +133,8 @@ fn set_timeouts(stream: &Stream) -> Result<(), String> {
 
 fn reply(stream: &mut Stream, response: Result<Vec<u8>, String>) -> io::Result<()> {
     let (status, data) = match response {
-        Ok(value) => (0u8, value),
-        Err(message) => (1u8, message.into_bytes()),
+        Ok(value) => (REPLY_OK, value),
+        Err(message) => (REPLY_ERR, message.into_bytes()),
     };
     let data = Zeroizing::new(data);
     let length = u32::try_from(data.len()).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "oversized response"))?;
@@ -127,7 +147,7 @@ fn reply(stream: &mut Stream, response: Result<Vec<u8>, String>) -> io::Result<(
 /// A single operation on the *live* agent. The caller sends the complete
 /// public config each time: a stale agent cannot authorize a newly changed
 /// configuration merely because the directory or socket still exists.
-pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u8], body: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+pub(crate) fn request(root: &Path, config: &[u8], op: AgentOp, path_bytes: &[u8], body: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     let config: &[u8; CONFIG_LEN] = config.try_into().map_err(|_| "invalid v3 agent request length")?;
     if body.len() > MAX_RECORD || path_bytes.len() > MAX_PATH {
         return Err("invalid v3 agent request length".into());
@@ -139,12 +159,14 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
     same_user(&stream)?;
     set_timeouts(&stream)?;
     // Frame layout is defined (and proved to roundtrip) by the verified core.
+    // The `as u32` casts are exact: both lengths were bounded above.
     sigpipe_blocked(|| {
-        stream.write_all(&encode_frame_header(op as u8, config, path_bytes.len() as u32))?;
+        stream.write_all(&encode_frame_header(opcode(op), config, path_bytes.len() as u32))?;
         stream.write_all(path_bytes)?;
         stream.write_all(&encode_be_u32(body.len() as u32))?;
         stream.write_all(body)
     }).map_err(|_| "cannot send the request to the credential agent")?;
+    // The status byte, then the result's length.
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).map_err(|_| "credential agent failed before replying")?;
     let size = decode_be_u32(header[1..5].try_into().map_err(|_| "malformed agent response")?) as usize;
@@ -152,8 +174,8 @@ pub(crate) fn request(root: &Path, config: &[u8], op: Operation, path_bytes: &[u
     let mut value = Zeroizing::new(vec![0u8; size]);
     stream.read_exact(&mut value).map_err(|_| "incomplete credential agent response")?;
     match header[0] {
-        0 => Ok(value),
-        1 => Err(format!("credential agent: {}", String::from_utf8_lossy(&value))),
+        REPLY_OK => Ok(value),
+        REPLY_ERR => Err(format!("credential agent: {}", String::from_utf8_lossy(&value))),
         _ => Err("malformed agent response status".into()),
     }
 }
@@ -171,12 +193,9 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Du
             if connect(&dir)?.is_ok() {
                 // An agent whose worktree config has changed (a pulled rekey)
                 // stops when it refuses this request; give it a moment.
-                let _ = request(root, config, Operation::Ping, &[], &[]);
-                let stale = (0..40).any(|_| {
-                    thread::sleep(Duration::from_millis(25));
-                    fs::symlink_metadata(&path).is_err()
-                        || connect(&dir).is_ok_and(|r| r.is_err())
-                });
+                let _ = request(root, config, AgentOp::Ping, &[], &[]);
+                let stale = poll(|| Ok(fs::symlink_metadata(&path).is_err()
+                    || connect(&dir).is_ok_and(|r| r.is_err())))?;
                 if !stale {
                     return Err("an agent for another .transcrypt/config is running (another worktree?); \
                         lock it there first".into());
@@ -212,7 +231,7 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
     }
     let mut last = "agent is not ready".to_owned();
     for _ in 0..120 {
-        match request(root, config, Operation::Ping, &[], &[]) {
+        match request(root, config, AgentOp::Ping, &[], &[]) {
             Ok(_) => return Ok(()),
             Err(e) => last = e,
         }
@@ -221,7 +240,7 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
             Err(_) => return Err("cannot inspect credential agent process".into()),
             Ok(None) => {},
         }
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(POLL);
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -229,13 +248,10 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
 }
 
 pub(crate) fn stop(root: &Path, config: &[u8]) -> Result<(), String> {
-    request(root, config, Operation::Stop, &[], &[])?;
+    request(root, config, AgentOp::Stop, &[], &[])?;
     // The server unlinks its own socket on exit. The agent key is erased when
     // the process exits; we do not claim erasure of OS swap or crash dumps.
-    for _ in 0..40 {
-        if fs::symlink_metadata(directory(root)?.join(SOCK)).is_err() { return Ok(()); }
-        thread::sleep(Duration::from_millis(25));
-    }
+    if poll(|| Ok(fs::symlink_metadata(directory(root)?.join(SOCK)).is_err()))? { return Ok(()); }
     Err("agent acknowledged shutdown but socket still exists".into())
 }
 
@@ -303,7 +319,7 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
                 // A refused request may come from a checkout whose config has
                 // since changed (a pulled rekey). If this agent's own
                 // worktree no longer has its config, its key is obsolete.
-                if fs::read(root.join(".transcrypt/config")).ok().as_deref() != Some(&config[..]) {
+                if fs::read(root.join(crate::git::CONFIG_PATH)).ok().as_deref() != Some(&config[..]) {
                     break;
                 }
             },
@@ -312,4 +328,20 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
     drop(listener);
     let _ = fs::remove_file(&path);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each opcode the client sends is the one the agent's verified check
+    /// authorizes as that operation.
+    #[test]
+    fn opcodes_authorize_as_their_operation() {
+        let config = [0u8; CONFIG_LEN];
+        for op in [AgentOp::Ping, AgentOp::Encrypt, AgentOp::Decrypt, AgentOp::Stop] {
+            let path: &[u8] = if matches!(op, AgentOp::Encrypt | AgentOp::Decrypt) { b"x.env" } else { b"" };
+            assert_eq!(authorize_agent_request(opcode(op), &config, &config, path, 0), Ok(op));
+        }
+    }
 }

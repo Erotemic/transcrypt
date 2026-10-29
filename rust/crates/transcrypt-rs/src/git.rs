@@ -10,8 +10,18 @@ use zeroize::Zeroizing;
 pub(crate) use crate::os::sigpipe_blocked;
 use transcrypt_v3_core::{
     blob_read, is_object_id, listing_fields, object_order_ok, parse_attr_response, parse_batch_header,
-    parse_index_entry, parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, MAX_RECORD,
+    parse_index_entry, parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, ATTRIBUTES_NAME,
+    ATTRIBUTES_SUFFIX, FILTER_DRIVER, MAX_RECORD,
 };
+
+/// The repository's public v3 configuration, relative to the worktree root.
+pub(crate) const CONFIG_PATH: &str = ".transcrypt/config";
+
+/// The value in `slot`, computed by `init` (and kept) if there is none yet.
+pub(crate) fn get_or_try_init<T, E>(slot: &mut Option<T>, init: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {
+    let value = match slot.take() { Some(value) => value, None => init()? };
+    Ok(slot.insert(value))
+}
 
 /// The most any Git subprocess may print to us. Listings of a hostile index
 /// or tree beyond this are refused (and the process killed), not buffered.
@@ -73,15 +83,21 @@ pub(crate) fn run_bounded_status(mut command: Command, input: Option<&[u8]>, lim
     })
 }
 
+/// Why `read_wiped` stopped.
+pub(crate) enum ReadError {
+    Failed,
+    TooLarge,
+}
+
 /// Read at most `limit` bytes into memory that is wiped when dropped,
 /// including every smaller buffer it outgrows.
-pub(crate) fn read_wiped(read: &mut impl Read, limit: usize) -> Result<Zeroizing<Vec<u8>>, String> {
+pub(crate) fn read_wiped(read: &mut impl Read, limit: usize) -> Result<Zeroizing<Vec<u8>>, ReadError> {
     let mut out = Zeroizing::new(Vec::new());
     let mut chunk = Zeroizing::new([0u8; 64 * 1024]);
     loop {
-        let n = read.read(&mut chunk[..]).map_err(|_| "cannot read input")?;
+        let n = read.read(&mut chunk[..]).map_err(|_| ReadError::Failed)?;
         if n == 0 { return Ok(out); }
-        if out.len() + n > limit { return Err("input exceeds its size limit".into()); }
+        if out.len() + n > limit { return Err(ReadError::TooLarge); }
         append_wiped(&mut out, &chunk[..n]);
     }
 }
@@ -129,6 +145,9 @@ static GIT_DIRS: std::sync::OnceLock<GitDirs> = std::sync::OnceLock::new();
 
 /// This worktree's own Git directory (`.git`, or `.git/worktrees/<name>`
 /// for a linked worktree): private staging and scratch files go here.
+/// `repo_root` records both directories for every command run in a
+/// worktree; the `root/.git` fallback serves only code run without it (unit
+/// tests; the bare-repository `audit` finds its own).
 pub(crate) fn git_dir(root: &Path) -> PathBuf {
     GIT_DIRS.get().map_or_else(|| root.join(".git"), |d| d.git_dir.clone())
 }
@@ -161,7 +180,10 @@ pub(crate) const TOO_LARGE: &str = "input exceeds the 16 MiB v3 size limit";
 
 /// Read at most a v3 record's worth of bytes, into wiped memory.
 pub(crate) fn read_record(mut read: impl Read) -> Result<Zeroizing<Vec<u8>>, String> {
-    read_wiped(&mut read, MAX_RECORD).map_err(|e| if e == "cannot read input" { e } else { TOO_LARGE.into() })
+    read_wiped(&mut read, MAX_RECORD).map_err(|e| match e {
+        ReadError::Failed => "cannot read input".into(),
+        ReadError::TooLarge => TOO_LARGE.into(),
+    })
 }
 
 /// The content of one Git blob, named by an id the verified core accepted
@@ -191,11 +213,7 @@ fn read_blob(root: &Path, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>
     }
     OBJECTS.with(|cell| {
         let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(Objects::open(root)?);
-        }
-        let objects = slot.as_mut().ok_or("Git object reader unavailable")?;
-        let result = objects.blob(oid, skip_large);
+        let result = get_or_try_init(&mut slot, || Objects::open(root))?.blob(oid, skip_large);
         if result.is_err() {
             // The stream may be out of step; never reuse it.
             *slot = None;
@@ -285,6 +303,16 @@ pub(crate) struct Staged {
 }
 
 impl Staged {
+    /// The entry of the fields of a record the verified core delimited.
+    fn new(regular: bool, mode: &[u8], oid: &[u8], path: &[u8]) -> Result<Staged, String> {
+        Ok(Staged {
+            regular,
+            mode: String::from_utf8_lossy(mode).into_owned(),
+            oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
+            path: path.to_vec(),
+        })
+    }
+
     /// The path, for messages.
     pub(crate) fn name(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.path)
@@ -298,7 +326,7 @@ pub(crate) fn paths_of(entries: &[Staged]) -> Vec<&[u8]> {
 
 /// Whether `path` is a `.gitattributes` file (at the top or nested).
 pub(crate) fn is_attributes_file(path: &[u8]) -> bool {
-    path == b".gitattributes" || path.ends_with(b"/.gitattributes")
+    path == ATTRIBUTES_NAME || path.ends_with(&ATTRIBUTES_SUFFIX)
 }
 
 /// One snapshot of the index or of a commit's tree: the exact listing (Git's
@@ -344,12 +372,7 @@ impl Listing {
         }
         let entries = (0..ends.len()).map(|i| {
             let f = listing_fields(&bytes, &ends, i).ok_or("malformed Git listing")?;
-            Ok(Staged {
-                regular: f.regular,
-                mode: String::from_utf8_lossy(&bytes[f.start..f.start + 6]).into_owned(),
-                oid: String::from_utf8(bytes[f.start + 7..f.oid_end].to_vec()).map_err(|_| "malformed Git object id")?,
-                path: bytes[f.path_start..f.end].to_vec(),
-            })
+            Staged::new(f.regular, &bytes[f.start..f.start + 6], &bytes[f.start + 7..f.oid_end], &bytes[f.path_start..f.end])
         }).collect::<Result<_, String>>()?;
         Ok(Listing { bytes, ends, entries })
     }
@@ -371,11 +394,6 @@ impl Listing {
     }
 }
 
-/// The entries of an index listing (`Listing::parse`).
-pub(crate) fn parse_listing(data: &[u8]) -> Result<Vec<Staged>, String> {
-    Ok(Listing::parse(data.to_vec())?.entries)
-}
-
 /// The non-empty NUL-separated records of Git `-z` output.
 pub(crate) fn records(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     data.split(|b| *b == 0).filter(|record| !record.is_empty())
@@ -394,7 +412,7 @@ pub(crate) fn index_listing(root: &Path) -> Result<Vec<u8>, String> {
     git(root, &["ls-files", "--stage", "-z"])
 }
 
-/// One `<mode> SP <oid> SP 0 TAB <path>` record (see `parse_listing`).
+/// One `<mode> SP <oid> SP 0 TAB <path>` record (see `Listing`).
 fn parse_entry(entry: &[u8]) -> Result<Staged, String> {
     let parsed = parse_index_entry(entry)
         .map_err(|_| "malformed or unmerged Git index entry; resolve conflicts first")?;
@@ -402,19 +420,10 @@ fn parse_entry(entry: &[u8]) -> Result<Staged, String> {
     if !is_object_id(oid) {
         return Err("malformed Git object id in index entry".into());
     }
-    Ok(Staged {
-        regular: parsed.regular,
-        mode: String::from_utf8_lossy(&entry[..6]).into_owned(),
-        oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
-        path: entry[parsed.path_start..].to_vec(),
-    })
+    Staged::new(parsed.regular, &entry[..6], oid, &entry[parsed.path_start..])
 }
 
-/// The blobs of a commit's tree. `ls-tree -r -z` prints `<mode> SP <type> SP
-/// <oid> TAB <path>` (every Git version; `--format` needs 2.36); each record
-/// is rewritten as `<mode> SP <oid> SP 0 TAB <path>`, with the path copied
-/// verbatim, and the listing is then parsed and checked by the verified core
-/// exactly like an index listing.
+/// The blobs of a commit's tree.
 pub(crate) fn tree_files(root: &Path, commit: &str) -> Result<Vec<Staged>, String> {
     Ok(tree_listing(root, commit)?.entries)
 }
@@ -424,18 +433,18 @@ pub(crate) fn tree_listing(root: &Path, commit: &str) -> Result<Listing, String>
     Listing::parse(tree_listing_bytes(root, &["ls-tree", "-r", "-z", "--full-tree", commit])?)
 }
 
-/// An `ls-tree -z` listing rewritten to index records (`tree_record`).
-pub(crate) fn tree_listing_bytes(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
+/// An `ls-tree -z` listing rewritten to index records. `ls-tree` prints
+/// `<mode> SP <type> SP <oid> TAB <path>` (every Git version; `--format`
+/// needs 2.36); each record is rewritten as `<mode> SP <oid> SP 0 TAB
+/// <path>`, with the path copied verbatim, so that the verified core parses
+/// and checks the listing exactly like an index listing.
+fn tree_listing_bytes(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     for entry in records(&git(root, arguments)?) {
         bytes.extend_from_slice(&tree_record(entry)?);
         bytes.push(0);
     }
     Ok(bytes)
-}
-
-fn ls_tree(root: &Path, arguments: &[&str]) -> Result<Vec<Staged>, String> {
-    Ok(Listing::parse(tree_listing_bytes(root, arguments)?)?.entries)
 }
 
 /// Rewrite one `ls-tree` record as `<mode> SP <oid> SP 0 TAB <path>`.
@@ -472,13 +481,16 @@ pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
     Ok(Index { merged, listing, conflicted })
 }
 
+/// The stage-0 entries of the index (`Listing::parse`).
 pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
-    parse_listing(&index_listing(root)?)
+    Ok(Listing::parse(index_listing(root)?)?.entries)
 }
 
 /// The blobs Git already has for exactly `path`: every index stage, and
 /// `HEAD`'s. Used to let a filter pass bytes through unchanged only when
-/// they are one of these, never because of a header alone.
+/// they are one of these, never because of a header alone. A path that is
+/// not UTF-8 (which cannot be passed as an argument on every OS) has none:
+/// fail-closed, since the filter then never passes bytes through for it.
 pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> {
     let name = std::str::from_utf8(path).ok().map(str::to_owned);
     let mut oids = Vec::new();
@@ -675,7 +687,7 @@ pub(crate) fn filter_values(root: &Path, paths: &[&[u8]], from: Attributes) -> R
 /// Whether a `filter` value hands the file to another named filter driver
 /// (not unset or unspecified, which are deliberate exclusions).
 pub(crate) fn other_filter(value: &[u8]) -> bool {
-    !matches!(value, b"unspecified" | b"unset" | b"transcrypt-v3")
+    value != FILTER_DRIVER && !matches!(value, b"unspecified" | b"unset")
 }
 
 /// Whether Git resolves the `transcrypt` macro to `filter=transcrypt-v3`
@@ -689,7 +701,7 @@ pub(crate) fn macro_resolves(root: &Path, index_dir: &Path, top: Option<&str>) -
     let rules = hash_object(root, b"probe transcrypt\n")?;
     let mut info = Vec::new();
     push_index_record(&mut info, "100644", &rules, b"transcrypt-v3-probe/.gitattributes");
-    if let Some(top) = top { push_index_record(&mut info, "100644", top, b".gitattributes"); }
+    if let Some(top) = top { push_index_record(&mut info, "100644", top, &ATTRIBUTES_NAME); }
     let index = index_dir.join(format!("transcrypt-v3-probe-{}.index", std::process::id()));
     let _ = std::fs::remove_file(&index);
     let mut command = git_command(Some(root));
@@ -707,7 +719,7 @@ pub(crate) fn marked_unfiltered(root: &Path, paths: &[&[u8]], from: Attributes) 
     let values = attr_values(root, paths, from, &["transcrypt", "filter"])?;
     for (path, values) in paths.iter().zip(&values) {
         let [mark, filter] = &values[..] else { return Err("unexpected git check-attr output".into()) };
-        if mark == b"set" && !matches!(&filter[..], b"transcrypt-v3" | b"unset") {
+        if mark == b"set" && *filter != FILTER_DRIVER && filter != b"unset" {
             let name = String::from_utf8_lossy(path);
             return Ok(Some(if filter == b"unspecified" {
                 format!("{name}: {}", crate::attributes::MACRO_MISSING)
@@ -779,8 +791,9 @@ fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
 
 /// The `.transcrypt/config` blob of a commit, if it has one.
 pub(crate) fn config_blob(root: &Path, commit: &str) -> Result<Option<String>, String> {
-    Ok(ls_tree(root, &["ls-tree", "-z", "--full-tree", commit, "--", ".transcrypt/config"])?.into_iter()
-        .find(|e| e.path == b".transcrypt/config" && e.regular).map(|e| e.oid))
+    let listing = tree_listing_bytes(root, &["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])?;
+    Ok(Listing::parse(listing)?.entries.into_iter()
+        .find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular).map(|e| e.oid))
 }
 
 /// Re-index exactly `paths`, whose worktree content cleans to the staged
@@ -877,8 +890,8 @@ mod tests {
                 }
             }
             if let Ok(record) = tree_record(&input) {
-                if let Ok(parsed) = parse_listing(&[record.as_slice(), b"\0"].concat()) {
-                    for e in parsed {
+                if let Ok(parsed) = Listing::parse([record.as_slice(), b"\0"].concat()) {
+                    for e in parsed.entries {
                         assert!(is_object_id(e.oid.as_bytes()));
                         assert!(input.ends_with(&e.path) && input.starts_with(&input[..6]));
                     }
@@ -898,7 +911,7 @@ mod tests {
             }
         }
         // The valid records parse to exactly their fields.
-        let tree = parse_listing(&[tree_record(&valid_tree).unwrap().as_slice(), b"\0"].concat()).unwrap();
+        let tree = Listing::parse([tree_record(&valid_tree).unwrap().as_slice(), b"\0"].concat()).unwrap().entries;
         assert_eq!((tree[0].regular, tree[0].oid.as_str(), tree[0].path.as_slice()), (true, oid, &b"dir/a b.secret"[..]));
         let (diff, _, _) = parse_diff_tree(&valid_diff).unwrap();
         assert_eq!((diff[0].regular, diff[0].oid.as_str(), diff[0].path.as_slice()), (true, oid, &b"dir/a\tb.secret"[..]));
