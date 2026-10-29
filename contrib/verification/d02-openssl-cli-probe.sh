@@ -108,8 +108,13 @@ if [ "$HAVE_PBKDF2" = 1 ] && "$O" enc -e -aes-256-cbc -pbkdf2 -iter 1000 -md sha
 	#     AES-256-CBC of a zero-length input (one PKCS7 pad block);
 	#     key = PBKDF2-HMAC-SHA256(pw, 0011223344556677, 1000, 32),
 	#     iv  = PBKDF2-HMAC-SHA256(pw, 0011223344556677, 1000, 48)[32:48]
+	#     OpenSSL 1.1 writes `Salted__` and the salt before the ciphertext
+	#     even with an explicit -S (3.0 does not); compare the ciphertext.
 	pycrepto_expected='f0c944791e0817f81674ed5e8868d9af'
-	[ "$(cat "$TMPDIR_LOCAL/pbkdf2_file.hex")" = "$pycrepto_expected" ] &&
+	salted_header="$(printf 'Salted__' | hex)0011223344556677"
+	pbkdf2_ciphertext=$(cat "$TMPDIR_LOCAL/pbkdf2_file.hex")
+	pbkdf2_ciphertext=${pbkdf2_ciphertext#"$salted_header"}
+	[ "$pbkdf2_ciphertext" = "$pycrepto_expected" ] &&
 		ok "enc -pbkdf2 ciphertext matches independent (pycryptodome) computation" ||
 		bad "enc -pbkdf2 ciphertext differs from independent computation"
 	# (d) differs from the legacy EVP_BytesToKey-MD5 derivation
