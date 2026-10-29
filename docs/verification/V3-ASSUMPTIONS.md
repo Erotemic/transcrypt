@@ -56,7 +56,7 @@ one.
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); discharged by the hook/audit of `HEAD` (REVIEWED + TESTED) |
-| A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS in CI only; REVIEWED |
+| A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS not yet run (its CI jobs have not been seen passing); REVIEWED |
 
 ## Detailed register
 
@@ -91,7 +91,12 @@ one.
 - **Evidence:** pinned toolchain; CI re-extraction reproduces the tracked
   snapshot byte-for-byte; the same Rust functions are exercised by unit,
   integration and differential tests; axiom audit shows only `propext`,
-  `Classical.choice`, `Quot.sound`.
+  `Classical.choice`, `Quot.sound`. Every declaration the proofs depend on,
+  mathlib's included, is replayed from scratch through the kernel
+  (`leanchecker --fresh`) on five systems: Linux, Windows, FreeBSD, and
+  NetBSD and OpenBSD with Lean built from source under a runtime and
+  build-flag port (`proofs/aeneas/ports`), so a kernel or `.olean` fault
+  specific to one build or platform would have to recur on all of them.
 - **Residual:** a translator bug that tests happen not to exercise.
 - **Next reduction:** differential execution of the extracted definitions
   once they can be made computable.

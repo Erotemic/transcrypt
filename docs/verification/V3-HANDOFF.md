@@ -269,13 +269,18 @@ check).
 
 The Lean proofs (the specification, the full generated-code refinement
 build and the axiom audit of all 100 ledger theorems) pass on Linux,
-Windows Server 2025 and FreeBSD 14.5. FreeBSD uses Lean's Linux build
-under its Linux ABI layer, since Lean publishes no FreeBSD build; that
-toolchain tree is byte-identical to the one elan installs. macOS runs
-them in CI. Lean cannot run on NetBSD (Lean's Linux build crashes under
-NetBSD's Linux emulation) or OpenBSD (no emulation, no Lean build); there
-the binaries run the same verified core, compiled for them, and pass the
-suite.
+Windows Server 2025, FreeBSD 14.5, NetBSD 10.1 and OpenBSD 7.9, and on each
+`replay-v3-kernel.sh` re-checks every declaration they depend on, Mathlib,
+Aeneas and Lean's library included, through that system's own kernel
+(`leanchecker --fresh`), so no system trusts `.olean` files compiled on
+another. FreeBSD uses Lean's Linux build under its Linux ABI layer, since
+Lean publishes no FreeBSD build. NetBSD and OpenBSD have no Lean release
+and no Lake cache: there Lean v4.31.0 is built from source with a small
+runtime and linker-flag port (`proofs/aeneas/ports`, no change to the
+kernel or elaborator), and `check-v3-without-lake.sh` compiles the proofs
+against a kit of the compiled dependencies, then replays and audits them
+natively (`.github/workflows/bsd-proofs.yml`). macOS has proof jobs in CI that
+have not yet been seen to pass; no Mac was available to run them locally.
 
 **Gates at this checkpoint.**
 - Rust: 152 tests across the workspace.

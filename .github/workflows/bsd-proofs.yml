@@ -1,0 +1,115 @@
+# The v3 proofs on the BSDs, where Lean publishes no toolchain (see
+# proofs/aeneas/ports/README.md). Building Lean takes hours, so this runs on
+# demand and weekly rather than on every push.
+name: BSD proofs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  kit:
+    # The compiled dependencies of the proofs' import closure, for the
+    # systems where Lake cannot fetch them.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage the specification
+        run: python3 proofs/aeneas/v3_snapshot.py stage
+      - name: Build the proofs
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: proofs/aeneas/v3
+          test: false
+          use-mathlib-cache: true
+      - name: Export the dependency kit
+        run: bash proofs/aeneas/export-v3-kit.sh v3-kit.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v3-kit
+          path: v3-kit.tgz
+          retention-days: 7
+
+  freebsd:
+    # Lean's Linux build under FreeBSD's Linux ABI layer.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove on FreeBSD 14
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "14.4"
+          mem: 12288
+          prepare: |
+            pkg install -y git bash python3 curl zstd linux_base-rl9
+            sysrc linux_enable=YES
+            service linux start
+            pw useradd ci -m -s /bin/sh
+          run: |
+            set -e
+            chown -R ci .
+            su ci -c '
+              set -e
+              version=$(sed "s/.*://" proofs/aeneas/v3/lean-toolchain)
+              curl --proto =https --tlsv1.2 -sSfL -o /tmp/lean.tar.zst \
+                "https://github.com/leanprover/lean4/releases/download/$version/lean-${version#v}-linux.tar.zst"
+              zstd -dc /tmp/lean.tar.zst | tar xf - -C "$HOME"
+              export PATH="$HOME/lean-${version#v}-linux/bin:$PATH"
+              bash proofs/aeneas/build-v3-tracked.sh
+              bash proofs/aeneas/check-v3-axioms.sh
+              bash proofs/aeneas/replay-v3-kernel.sh
+            '
+
+  netbsd:
+    needs: kit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: v3-kit
+      - name: Build Lean and prove on NetBSD 10.1
+        uses: cross-platform-actions/action@ef53f0d3fd471648f2758f3fcdc3cb2aa40c87cb # v1.7.0
+        with:
+          operating_system: netbsd
+          version: "10.1"
+          memory: 12G
+          cpu_count: 4
+          run: |
+            set -e
+            sudo pkgin -y install git bash python313 cmake gmp libuv gmake pkgconf gcc14 mozilla-rootcerts-openssl
+            bin=$(sh proofs/aeneas/ports/build-lean.sh "$HOME/lean-build")
+            PATH=$bin:$PATH PYTHON=python3.13 bash proofs/aeneas/check-v3-without-lake.sh v3-kit.tgz
+
+  openbsd:
+    needs: kit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: v3-kit
+      - name: Build Lean and prove on OpenBSD 7.9
+        uses: cross-platform-actions/action@ef53f0d3fd471648f2758f3fcdc3cb2aa40c87cb # v1.7.0
+        with:
+          operating_system: openbsd
+          version: "7.9"
+          memory: 12G
+          cpu_count: 4
+          run: |
+            set -e
+            sudo pkg_add -I git bash python%3 cmake gmp libuv gmake
+            sudo sysctl kern.maxthread=8192 kern.maxproc=4096
+            # OpenBSD counts threads against the per-user process limit,
+            # which root may raise.
+            sudo env PATH="$PATH" sh -c 'ulimit -p 4096 && ulimit -d unlimited &&
+              bin=$(sh proofs/aeneas/ports/build-lean.sh "$PWD/../lean-build") &&
+              PATH=$bin:$PATH LD_LIBRARY_PATH=$bin/../lib/lean bash proofs/aeneas/check-v3-without-lake.sh v3-kit.tgz'

@@ -279,7 +279,7 @@ jobs:
 
   proof-base64-lean:
     # Independent Lean check of equivalent pure bit-vector obligations, and
-    # the v3 policy specification, on each OS (FreeBSD: freebsd-proofs).
+    # the v3 policy specification, on each OS (the BSDs: bsd-proofs.yml).
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -297,7 +297,7 @@ jobs:
   v3-tracked-aeneas-refinement:
     # The tracked definitions come from the production Rust v3 codec. Compile
     # them together with the independent specification and imported theorems,
-    # on each OS that Lean supports (FreeBSD: freebsd-proofs).
+    # on each OS that Lean supports (the BSDs: bsd-proofs.yml).
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:

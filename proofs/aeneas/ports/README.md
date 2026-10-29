@@ -4,24 +4,22 @@ Lean publishes no toolchain for NetBSD or OpenBSD, and Lake cannot fetch
 Mathlib's cache there. The proofs are checked on those systems with Lean
 built from source and without Lake:
 
-1. Build Lean v4.31.0 (commit `68218e8`, the `lean-toolchain` pin) with
-   `lean-v4.31.0-bsd.patch` applied to both `src/` and `stage0/src/`:
+1. Build Lean v4.31.0 (commit `68218e8`, the `lean-toolchain` pin) from
+   source with `lean-v4.31.0-bsd.patch` applied to both `src/` and
+   `stage0/src/`: `build-lean.sh <work dir>` does this and prints the
+   toolchain's `bin` directory, to put first on `PATH`. On OpenBSD also set
+   `LD_LIBRARY_PATH=<bin>/../lib/lean`: its `ld.so` cannot resolve
+   `$ORIGIN` for a command found on `PATH`.
 
-   ```sh
-   git clone --depth 1 -b v4.31.0 https://github.com/leanprover/lean4
-   cd lean4
-   for d in src stage0/src; do patch -p1 -d $d < .../lean-v4.31.0-bsd.patch; done
-   mkdir -p build/release && cd build/release
-   cmake ../.. -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=<pkg prefix>
-   make -j8          # GNU make, first on PATH as `make`
-   export PATH=$PWD/stage1/bin:$PATH
-   ```
-
-   NetBSD needs pkgsrc `cmake gmp libuv gmake pkgconf gcc14` and
-   `CC=/usr/pkg/gcc14/bin/gcc CXX=/usr/pkg/gcc14/bin/g++
-   LDFLAGS="-Wl,-R/usr/pkg/gcc14/lib -Wl,-R/usr/pkg/lib"` (the base system's C++ library predates
-   C++20's `atomic::wait`). OpenBSD needs `pkg_add cmake gmp libuv gmake
-   python%3` and builds with its base clang.
+   NetBSD needs pkgsrc `cmake gmp libuv gmake pkgconf gcc14`; the script
+   builds with gcc14, because the base system's C++ library predates C++20's
+   `atomic::wait`. OpenBSD needs `pkg_add cmake gmp libuv gmake python%3`
+   and builds with its base clang. OpenBSD counts threads against the
+   per-process-count limit, which Lean (multithreaded, mapping large
+   `.olean` files) exceeds under the default login classes: raise
+   `kern.maxthread` and `kern.maxproc` to 8192 and 4096, and run the build
+   and check with `ulimit -p 4096` and `ulimit -d unlimited` (as root, or in
+   a login class allowing them), as `bsd-proofs.yml` does.
 
 2. On a machine with Lake, after `build-v3-tracked.sh`, export the compiled
    dependencies: `export-v3-kit.sh v3-kit.tgz`.
