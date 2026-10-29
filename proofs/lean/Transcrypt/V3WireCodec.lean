@@ -1,10 +1,12 @@
 import Transcrypt.V3Wire
 
-/-
+/-!
 Independent executable *shape* decoder for the v3 committed wire protocol.
-It is not an Aeneas translation. Its theorems specify the behaviors that
-must subsequently be proved for Aeneas-generated Rust functions.
-Ciphertext authentication remains outside the shape decoder.
+It is not an Aeneas translation. The production slice parsers are proved to
+compute exactly `decodeConfigShape` / `decodeFileHeaderShape`
+(`parse_config_spec`, `parse_file_header_spec` in
+`proofs/aeneas/v3/V3Wire/Verification/Codec.lean`). Ciphertext
+authentication remains outside the shape decoder.
 -/
 
 namespace Transcrypt.V3Wire

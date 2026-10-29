@@ -4,7 +4,7 @@ import V3Wire.Verification.Objects
 /-!
 # End to end: selected paths enter Git as authenticated ciphertext
 
-The pre-commit hook (`transcrypt_v3::lifecycle::verify` with `seal`) is the
+The pre-commit hook (`transcrypt_rs::lifecycle::verify` with `seal`) is the
 last code that sees the index before Git records a commit. This file states,
 as one conditional theorem, what its acceptance guarantees about that commit,
 and names every assumption it rests on.

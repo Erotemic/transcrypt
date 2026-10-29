@@ -9,9 +9,9 @@ sources are bound by `SNAPSHOT.json`. No `.lake` dependencies or compiled files
 are tracked.
 
 The one authoritative independent specification remains in
-`proofs/lean/Transcrypt/{V3Wire,V3WireCodec}.lean`. The build script stages
-byte-for-byte copies as *ignored* build inputs under `Transcrypt/`; it cannot
-silently fork the specification.
+`proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. The build script
+stages byte-for-byte copies as *ignored* build inputs under `Transcrypt/`; it
+cannot silently fork the specification.
 
 ## Build (no Charon regeneration required)
 
@@ -21,16 +21,19 @@ python3 -m unittest discover -s proofs/aeneas/tests -p 'test_v3_snapshot.py' -v
 bash proofs/aeneas/build-v3-tracked.sh
 ```
 
-The tracked `V3Wire` library imports both the production extraction and the
-actual `V3Wire/Verification/Refinement.lean` proof module. Compilation is a
-real Lean kernel gate. The current refinement theorems establish **only**
-that the two magic/version discriminants output by the translated production
-code equal the independent specification, and that they are disjoint.
+The tracked `V3Wire` library imports the production extraction and the
+hand-written proof modules under `V3Wire/Verification/`. Compilation is a
+real Lean kernel gate. What those modules prove, function by function, is the
+ledger [`PROOF-STATUS.md`](PROOF-STATUS.md): the complete result of every
+core function (all bytes, every error outcome, no panic or divergence)
+against the independent specification, protocol results relative to the
+explicit primitive contract `Realizes`, and end-to-end statements about Lean
+models of the adapter. `bash proofs/aeneas/check-v3-axioms.sh` audits the
+axioms of every theorem the ledger names (`audit/Axioms.lean`).
 
-They **do not yet** establish the full encoder/decoder roundtrip or validation
-behavior, and they do **not** verify Argon2id, AES-SIV, Git, Unix IPC, or
-filesystem transactions. The generated `RustM` loop invariants are the next
-substantial functional-refinement task.
+They do **not** verify Argon2id, AES-SIV, SHA-256, Git, the credential
+agent's IPC, or filesystem transactions; see
+[`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTIONS.md).
 
 ## Update when verified Rust changes
 
@@ -61,9 +64,8 @@ regeneration CI job compares with the real managed Charon/Aeneas output.
 - Translator: cargo-hax 0.4.2 / Charon `nightly-2026.09.02` /
   Aeneas `build-183e4f0`
 - Lean: `leanprover/lean4:v4.31.0`, hax Lean library `v0.3.30`
-- Next: prove each generated `RustM` decoder/encoder function refines the
-  independent list-of-byte reference and prove `RustM.fail` is returned on
-  every forbidden magic byte, with explicit array and loop invariants.
+- Proofs: `V3Wire/Verification/*.lean` (shared lemmas in `Basic.lean`,
+  production constants in `Refinement.lean`); status in `PROOF-STATUS.md`.
 
 Do not count `V3Wire/Extraction.lean` compilation, a check of `SNAPSHOT.json`,
 or the mere presence of Aeneas-generated files as a full functional proof.

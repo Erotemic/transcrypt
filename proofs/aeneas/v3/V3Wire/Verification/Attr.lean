@@ -12,7 +12,7 @@ independent specification's `AttrRecordAt` / `attrResponse`.
 `parse_attr_record` (with the helper `find_byte`, proved in `Bytes`) accepts exactly the spec's
 `git check-attr -z filter` record for the requested path at the given offset
 and reports exactly whether its value selects the v3 filter;
-`parse_attr_response` (used by `transcrypt_v3::git::protected_flags`) accepts
+`parse_attr_response` (used by `transcrypt_rs::git::protected_flags`) accepts
 exactly Git's complete answer for the NUL-terminated request and returns the
 selection of every requested path.
 -/

@@ -15,7 +15,11 @@ the instance is arbitrary, constrained only by `Realizes`, the explicit
 contract that it computes the abstract `Suite`'s deterministic SIV function
 with the spec's domain strings and associated-data order, and the truncated
 digest. `Realizes` is assumption A5 of `docs/verification/V3-ASSUMPTIONS.md`;
-it is tested against independent OpenSSL/argon2-cffi vectors, not proved.
+it is tested, not proved: `rust/crates/transcrypt-rs/tests/v3_differential.rs`
+checks the production `Keyed` against OpenSSL AES-SIV and `hashlib` SHA-256
+(`tests/v3/reference/differential.py`; argon2-cffi only derives the corpus
+keys, and Argon2id is not part of `Realizes`), and
+`keyed_satisfies_the_realizes_contract` tests its clauses directly.
 -/
 
 open CoreModels Aeneas

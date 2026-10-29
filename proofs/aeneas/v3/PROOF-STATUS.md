@@ -6,8 +6,9 @@ translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All are `WP.spec`
 triples, so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;
-`bash proofs/aeneas/check-v3-axioms.sh` confirms the 67 headline theorems use
-only `propext`, `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
+`bash proofs/aeneas/check-v3-axioms.sh` confirms that all 100 theorems named in
+the table below (listed in `audit/Axioms.lean`) use only `propext`,
+`Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
 `axiom`, `native_decide` or `bv_decide` occurs in any verification module
 (enforced by `v3_snapshot.py verify`).
 
@@ -68,8 +69,10 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
   instance computes the abstract suite's deterministic SIV with the spec's
   domain strings and AD order, preserves `&mut` slice lengths, never claims
   success wrongly, opens genuine right-sized records, and computes the
-  truncated digest. Production instance `transcrypt_v3::Keyed` is checked by
-  independent vectors and `keyed_satisfies_the_realizes_contract` (A5).
+  truncated digest. Production instance `transcrypt_rs::Keyed` is checked
+  by `rust/crates/transcrypt-rs/tests/v3_differential.rs` against a corpus
+  from OpenSSL AES-SIV (`tests/v3/reference/differential.py`), and its
+  clauses by `keyed_satisfies_the_realizes_contract` (A5).
 - **`Suite`** fields: SIV output length, injectivity per AD (true of any
   deterministic AE), digest length. Unforgeability/confidentiality are
   computational assumptions (A10), not Lean theorems.
