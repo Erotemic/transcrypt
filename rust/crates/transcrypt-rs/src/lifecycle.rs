@@ -662,21 +662,18 @@ fn run_in(dir: &Path, command: &str) -> Result<Finished, String> {
     run_bounded_status(child, None, SHORT_OUTPUT_LIMIT)
 }
 
-/// The other worktrees of this repository (from `git worktree list`), that
-/// still exist on disk.
+/// The other worktrees of this repository (`git worktree list`), except
+/// those Git found gone (`prunable`). One that exists but cannot be
+/// resolved is an error, never skipped: `lock` must not forget the key
+/// while an unchecked worktree may still hold plaintext.
 fn other_worktrees(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let listing = String::from_utf8(git(root, &["worktree", "list", "--porcelain"])?)
-        .map_err(|_| "worktree paths must be UTF-8")?;
     let this = root.canonicalize().map_err(|_| "cannot resolve the repository root")?;
     let mut others = Vec::new();
-    for block in listing.split("\n\n") {
-        let mut lines = block.lines();
-        let Some(path) = lines.next().and_then(|l| l.strip_prefix("worktree ")) else { continue };
-        if block.lines().any(|l| l == "bare") { continue; }
-        let path = PathBuf::from(path);
-        if path.canonicalize().is_ok_and(|p| p != this) {
-            others.push(path);
-        }
+    for worktree in worktrees(root)? {
+        if worktree.bare || worktree.prunable { continue; }
+        let path = worktree.path.canonicalize()
+            .map_err(|e| format!("cannot inspect worktree {}: {e}", worktree.path.display()))?;
+        if path != this { others.push(worktree.path); }
     }
     Ok(others)
 }

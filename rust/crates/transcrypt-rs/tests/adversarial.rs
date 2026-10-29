@@ -1183,6 +1183,23 @@ fn unlock_and_lock_are_idempotent() {
     run(&repo, bin(), &["lock"], None);
 }
 
+/// A linked worktree whose path contains a newline is still found: run in
+/// it, every command knows its own root; and `lock` in another worktree
+/// flushes it rather than leaving its plaintext behind with the key gone.
+#[test]
+#[cfg(unix)] // No Windows file name contains a newline.
+fn worktrees_with_a_newline_in_their_path_are_locked_too() {
+    let mut scratch = Scratch::new("worktree-newline");
+    let repo = scratch.repo("repo");
+    let linked = scratch.root.join("odd\nname");
+    run(&repo, "git", &["worktree", "add", "-q", "-b", "odd", linked.to_str().unwrap()], None);
+    assert_eq!(fs::read(linked.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    run(&linked, bin(), &["verify-index"], None);
+    run(&repo, bin(), &["lock"], None);
+    assert!(is_record(&fs::read(linked.join("a.secret")).unwrap()), "the linked worktree was not locked");
+    scratch.repos.push(linked);
+}
+
 /// Linked worktrees share the repository's key, hooks and drivers: one
 /// unlock decrypts every worktree, each with its own private staging, and
 /// commits made in a linked worktree are encrypted and verified.

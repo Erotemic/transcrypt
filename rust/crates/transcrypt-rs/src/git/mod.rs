@@ -242,18 +242,74 @@ pub(crate) fn common_dir(root: &Path) -> PathBuf {
 
 /// The worktree root, after recording its Git directories.
 pub(crate) fn repo_root() -> Result<PathBuf, String> {
-    let mut command = git_command(None);
-    command.args(["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"]);
-    let bytes = output(command)?;
-    let text = String::from_utf8(bytes).map_err(|_| "repository path is not UTF-8")?;
-    let [root, git_dir, common_dir] = text.lines().collect::<Vec<_>>()[..] else {
-        return Err("not inside a Git worktree".into());
+    // One path per command: a path may itself contain a newline, so only
+    // the one Git ends its answer with is taken off.
+    let path = |option: &str| -> Result<PathBuf, String> {
+        let mut command = git_command(None);
+        command.args(["rev-parse", "--path-format=absolute", option]);
+        let bytes = output(command)?;
+        let path = bytes.strip_suffix(b"\n").filter(|p| !p.is_empty()).ok_or("not inside a Git worktree")?;
+        Ok(PathBuf::from(crate::os::os_string(path)?))
     };
-    let (root, git_dir, common_dir) = (PathBuf::from(root), PathBuf::from(git_dir), PathBuf::from(common_dir));
+    let (root, git_dir, common_dir) = (path("--show-toplevel")?, path("--git-dir")?, path("--git-common-dir")?);
     if !root.is_dir() || !git_dir.is_dir() || !common_dir.is_dir() {
         return Err("Git repository directories are missing".into());
     }
     let mut dirs = GIT_DIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !dirs.iter().any(|(r, _)| *r == root) { dirs.push((root.clone(), GitDirs { git_dir, common_dir })); }
     Ok(root)
+}
+
+/// One entry of `git worktree list --porcelain`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Worktree {
+    pub(crate) path: PathBuf,
+    pub(crate) bare: bool,
+    /// Git found its directory gone (`prunable`): nothing there to check.
+    pub(crate) prunable: bool,
+}
+
+/// The worktrees of the repository at `root`. With `-z` (Git 2.36 and
+/// later) every path is exact; older Git prints a path containing a
+/// newline across two lines, which `parse_worktrees` refuses rather than
+/// mistakes for another worktree.
+pub(crate) fn worktrees(root: &Path) -> Result<Vec<Worktree>, String> {
+    match git(root, &["worktree", "list", "--porcelain", "-z"]) {
+        Ok(listing) => parse_worktrees(&listing, b'\0'),
+        Err(_) => parse_worktrees(&git(root, &["worktree", "list", "--porcelain"])?, b'\n'),
+    }
+}
+
+/// Parse `worktree list --porcelain` whose lines end with `end` (NUL for
+/// `-z`): records of `worktree <path>` and attribute lines, each record
+/// ended by an empty line. Anything else, an attribute this does not know
+/// included, is an error: a worktree is never silently left out.
+pub(crate) fn parse_worktrees(listing: &[u8], end: u8) -> Result<Vec<Worktree>, String> {
+    const MALFORMED: &str = "unexpected `git worktree list` output (a worktree path with a newline needs Git 2.36 or later)";
+    if !listing.is_empty() && listing.last() != Some(&end) { return Err(MALFORMED.into()); }
+    let mut worktrees = Vec::new();
+    let mut current: Option<Worktree> = None;
+    // The last split piece is the empty one after the final terminator.
+    let mut lines = listing.split(|b| *b == end);
+    lines.next_back();
+    for line in lines {
+        if line.is_empty() {
+            worktrees.push(current.take().ok_or(MALFORMED)?);
+            continue;
+        }
+        match (&mut current, line.strip_prefix(b"worktree ")) {
+            (None, Some(path)) => {
+                current = Some(Worktree { path: PathBuf::from(crate::os::os_string(path)?), bare: false, prunable: false });
+            },
+            (Some(worktree), None) => match line.split(|b| *b == b' ').next().unwrap_or_default() {
+                b"HEAD" | b"branch" | b"detached" | b"locked" => {},
+                b"bare" => worktree.bare = true,
+                b"prunable" => worktree.prunable = true,
+                _ => return Err(MALFORMED.into()),
+            },
+            _ => return Err(MALFORMED.into()),
+        }
+    }
+    if current.is_some() { return Err(MALFORMED.into()); }
+    Ok(worktrees)
 }

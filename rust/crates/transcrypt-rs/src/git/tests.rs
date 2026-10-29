@@ -230,3 +230,23 @@ fn subprocess_output_is_bounded_and_the_producer_killed() {
     command.args(["-c", &format!("head -c {ERROR_FLOOD} /dev/zero >&2; echo done")]);
     assert_eq!(run_bounded(command, None, SHORT_OUTPUT_LIMIT).unwrap(), b"done\n");
 }
+
+/// `worktree list --porcelain` is parsed exactly, with `-z` or newlines,
+/// and anything unexpected (a path split by a newline, which older Git
+/// prints, an unknown attribute, a truncated listing) is an error rather
+/// than a worktree left out.
+#[test]
+fn worktree_listings_are_parsed_exactly() {
+    let z = b"worktree /r\0HEAD 0123\0branch refs/heads/main\0\0worktree /r/odd\nname\0HEAD 0123\0detached\0\0\
+        worktree /gone\0HEAD 0123\0prunable gitdir file points to non-existent location\0\0worktree /bare\0bare\0\0";
+    let parsed = parse_worktrees(z, b'\0').unwrap();
+    let paths: Vec<_> = parsed.iter().map(|w| w.path.clone()).collect();
+    assert_eq!(paths, [PathBuf::from("/r"), PathBuf::from("/r/odd\nname"), PathBuf::from("/gone"), PathBuf::from("/bare")]);
+    assert!(parsed[2].prunable && !parsed[1].prunable && parsed[3].bare);
+    let lines = b"worktree /r\nHEAD 0123\nbranch refs/heads/main\n\nworktree /r/odd\nname\nHEAD 0123\n\n";
+    assert!(parse_worktrees(lines, b'\n').is_err(), "a path split across lines");
+    assert!(parse_worktrees(b"worktree /r\nHEAD 0123\nnewattribute x\n\n", b'\n').is_err());
+    assert!(parse_worktrees(b"worktree /r\nHEAD 0123\n", b'\n').is_err(), "a record without its end");
+    assert!(parse_worktrees(b"worktree /r\nHEAD 0123", b'\n').is_err(), "a truncated listing");
+    assert_eq!(parse_worktrees(b"", b'\n').unwrap(), []);
+}
