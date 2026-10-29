@@ -47,6 +47,23 @@ use windows_sys::{
 };
 use crate::os::{attribute_tag, is_private, set_inherited, set_private, win32, PrivateDescriptor};
 
+/// Bytes per UTF-16 code unit, the unit of NT name lengths.
+const WCHAR: usize = size_of::<u16>();
+/// UTF-16 code units of the characters a path component must not contain
+/// (or, for `.` and space, end with).
+const NUL: u16 = 0;
+const SLASH: u16 = b'/' as u16;
+const BACKSLASH: u16 = b'\\' as u16;
+const COLON: u16 = b':' as u16;
+const DOT: u16 = b'.' as u16;
+const SPACE: u16 = b' ' as u16;
+/// The size of the buffer a directory listing is read into, in aligned
+/// 8-byte words.
+const LISTING_BUFFER: usize = 64 * transcrypt_rs::KIB;
+const WORD: usize = size_of::<u64>();
+/// A Win32 `BOOLEAN` true (here `ReplaceIfExists`).
+const BOOLEAN_TRUE: u32 = 1;
+
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.to_owned())
 }
@@ -61,7 +78,7 @@ fn nt(status: NTSTATUS) -> io::Result<()> {
 /// owner-only (set atomically, never briefly open to others) when `mode`
 /// has no group or other permissions; otherwise none, so it inherits.
 fn with_mode<T>(mode: u32, create: impl FnOnce(*const SECURITY_DESCRIPTOR) -> io::Result<T>) -> io::Result<T> {
-    let private = if mode & 0o077 == 0 { Some(PrivateDescriptor::new()?) } else { None };
+    let private = if mode & crate::modes::GROUP_OTHER_BITS == 0 { Some(PrivateDescriptor::new()?) } else { None };
     create(private.as_ref().map_or(null(), |d| d.as_ptr().cast_const().cast()))
 }
 
@@ -70,8 +87,8 @@ fn with_mode<T>(mode: u32, create: impl FnOnce(*const SECURITY_DESCRIPTOR) -> io
 /// space (which Win32 path parsing, and so Git for Windows, would strip).
 fn component(name: &OsStr) -> io::Result<Vec<u16>> {
     let wide: Vec<u16> = name.encode_wide().collect();
-    let forbidden = |c: &u16| matches!(*c, 0 | 0x2f | 0x5c | 0x3a);
-    if wide.is_empty() || wide.iter().any(forbidden) || matches!(wide.last(), Some(0x2e | 0x20)) {
+    let forbidden = |c: &u16| matches!(*c, NUL | SLASH | BACKSLASH | COLON);
+    if wide.is_empty() || wide.iter().any(forbidden) || matches!(wide.last(), Some(&(DOT | SPACE))) {
         return Err(invalid("not a single path component"));
     }
     Ok(wide)
@@ -93,7 +110,7 @@ fn information(handle: HANDLE) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
 impl Stamp {
     fn of_handle(handle: HANDLE) -> io::Result<Stamp> {
         let info = information(handle)?;
-        let join = |high: u32, low: u32| ((high as i64) << 32) | low as i64;
+        let join = |high: u32, low: u32| ((high as i64) << u32::BITS) | low as i64;
         Ok(Stamp([
             info.dwVolumeSerialNumber as i64,
             join(info.nFileIndexHigh, info.nFileIndexLow),
@@ -147,7 +164,7 @@ impl Dir {
     fn create(&self, name: &mut [u16], access: u32, share: u32, disposition: u32, options: u32,
         security: *const SECURITY_DESCRIPTOR) -> io::Result<OwnedHandle>
     {
-        let bytes = u16::try_from(name.len() * 2).map_err(|_| invalid("name too long"))?;
+        let bytes = u16::try_from(name.len() * WCHAR).map_err(|_| invalid("name too long"))?;
         let unicode = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: name.as_mut_ptr() };
         let attributes = OBJECT_ATTRIBUTES {
             Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
@@ -234,8 +251,9 @@ impl Dir {
         let source = self.entry(from, DELETE, FILE_OPEN, 0, null())?;
         let target = component(to)?;
         let offset = offset_of!(FILE_RENAME_INFO, FileName);
-        let size = offset + target.len() * 2;
-        let mut buffer = vec![0u64; (size + 2).div_ceil(8)];
+        let size = offset + target.len() * WCHAR;
+        // Room for a terminating NUL, in aligned words.
+        let mut buffer = vec![0u64; (size + WCHAR).div_ceil(WORD)];
         let mut rename = |class, flags: u32| {
             // FILE_RENAME_INFORMATION has FILE_RENAME_INFO's layout.
             let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
@@ -245,7 +263,7 @@ impl Dir {
             unsafe {
                 (*info).Anonymous.Flags = flags;
                 (*info).RootDirectory = to_dir.raw();
-                (*info).FileNameLength = (target.len() * 2) as u32;
+                (*info).FileNameLength = (target.len() * WCHAR) as u32;
                 std::ptr::copy_nonoverlapping(target.as_ptr(), buffer.as_mut_ptr().cast::<u8>().add(offset).cast(), target.len());
                 nt(NtSetInformationFile(source.as_raw_handle(), &mut status, buffer.as_ptr().cast(), size as u32, class))
             }
@@ -253,7 +271,7 @@ impl Dir {
         rename(FileRenameInformationEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS)
             // `ReplaceIfExists` (a BOOLEAN in the same place) where the
             // extended rename is unsupported (older Windows, FAT).
-            .or_else(|_| rename(FileRenameInformation, 1))
+            .or_else(|_| rename(FileRenameInformation, BOOLEAN_TRUE))
     }
 
     pub(crate) fn unlink(&self, name: &OsStr) -> io::Result<()> {
@@ -314,11 +332,11 @@ impl Dir {
     /// Names of the entries of this directory (excluding `.` and `..`).
     pub(crate) fn entries(&self) -> io::Result<Vec<OsString>> {
         let mut names = Vec::new();
-        let mut buffer = vec![0u64; 8192];
+        let mut buffer = vec![0u64; LISTING_BUFFER / WORD];
         let mut class = FileFullDirectoryRestartInfo;
         loop {
             // SAFETY: a directory handle and a buffer of the given size.
-            let ok = unsafe { GetFileInformationByHandleEx(self.raw(), class, buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32) };
+            let ok = unsafe { GetFileInformationByHandleEx(self.raw(), class, buffer.as_mut_ptr().cast(), (buffer.len() * WORD) as u32) };
             if ok == 0 {
                 let error = io::Error::last_os_error();
                 if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) { return Ok(names); }
@@ -333,9 +351,9 @@ impl Dir {
                 let entry = unsafe { &*base.add(offset).cast::<FILE_FULL_DIR_INFO>() };
                 let name = unsafe {
                     std::slice::from_raw_parts(base.add(offset + offset_of!(FILE_FULL_DIR_INFO, FileName)).cast::<u16>(),
-                        entry.FileNameLength as usize / 2)
+                        entry.FileNameLength as usize / WCHAR)
                 };
-                if name != [0x2e] && name != [0x2e, 0x2e] { names.push(OsString::from_wide(name)); }
+                if name != [DOT] && name != [DOT, DOT] { names.push(OsString::from_wide(name)); }
                 if entry.NextEntryOffset == 0 { break; }
                 offset += entry.NextEntryOffset as usize;
             }

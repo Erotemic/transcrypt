@@ -53,7 +53,7 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     for (staged, plaintext) in &plaintexts {
         update.add(&staged.mode, &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?);
     }
-    update.add("100644", CONFIG_PATH.as_bytes(), &config);
+    update.add(REGULAR_FILE_MODE, CONFIG_PATH.as_bytes(), &config);
     update.apply(root, &[])?;
     let undo = "; run `git reset` to undo the staged rekey";
     write_repository_file(root, &staging, Path::new(CONFIG_PATH), &config)
@@ -115,7 +115,7 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         content trusted under the current config:");
     let head = commit_files(root, "HEAD")?;
     for file in &stale {
-        eprintln!("  {} (config {}; {})", file.staged.name(), crate::hex(&file.config[..4]), origin(root, &head, &file.staged));
+        eprintln!("  {} (config {}; {})", file.staged.name(), crate::short_id(&file.config), origin(root, &head, &file.staged));
     }
     if !options.yes {
         let confirmed = !options.password_stdin && rpassword::prompt_password("Type yes to continue: ")
@@ -129,7 +129,7 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
     for old in configs.iter().filter(|c| stale.iter().any(|f| f.config == c.id)) {
         let names: Vec<String> = stale.iter().filter(|f| f.config == old.id).map(|f| f.staged.name().into_owned()).collect();
         eprintln!("Passphrase of config {} (introduced by {}), for: {}",
-            crate::hex(&old.id[..4]), old.introduced, names.join(", "));
+            crate::short_id(&old.id), old.introduced, names.join(", "));
         let password = passphrase(options.password_stdin, false)?;
         keys.push((old, unlock_config(&password, &old.bytes)?));
     }
@@ -163,6 +163,9 @@ fn stale_files(root: &Path, id: &Id) -> Result<Vec<Stale>, String> {
 /// Configs from this branch's history other than the current one: a
 /// safety net against adopting another branch's config or newer content,
 /// not a guarantee (history is a graph; a reverted rekey reappears).
+/// Hex digits of a commit id shown to identify it to people.
+const SHORT_COMMIT_LEN: usize = 12;
+
 fn earlier_configs(root: &Path, current: &[u8]) -> Result<Vec<Earlier>, String> {
     let mut configs: Vec<Earlier> = Vec::new();
     let log = git(root, &["log", "--format=%H %s", "HEAD", "--", CONFIG_PATH])?;
@@ -173,7 +176,7 @@ fn earlier_configs(root: &Path, current: &[u8]) -> Result<Vec<Earlier>, String> 
             if bytes != current && transcrypt_v3_core::parse_config(&bytes).is_ok()
                 && !configs.iter().any(|c| c.bytes == bytes) {
                 let id = transcrypt_rs::config_id(&bytes);
-                configs.push(Earlier { bytes, id, introduced: format!("{} {subject}", &commit[..commit.len().min(12)]) });
+                configs.push(Earlier { bytes, id, introduced: format!("{} {subject}", &commit[..commit.len().min(SHORT_COMMIT_LEN)]) });
             }
         }
     }

@@ -8,7 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use zeroize::Zeroizing;
-use crate::{fsat, git::read_record};
+use crate::{fsat, git::read_record, modes};
 
 /// A Git path as a relative OS path. Only a root and `..` are refused here:
 /// a Windows prefix (`C:`) or a leading `.` is not a plain name, which
@@ -105,7 +105,7 @@ impl Protected {
     pub(crate) fn replace(&self, staging: &Staging, contents: &[u8], expected: &fsat::Stamp, private: bool) -> Result<(), String> {
         let mode = self.dir.replacement_mode(&self.leaf, private).map_err(|_| "cannot stat protected worktree file")?;
         let temp = staging.temporary();
-        let mut file = staging.dir.create_new(&temp, 0o600)
+        let mut file = staging.dir.create_new(&temp, modes::PRIVATE_FILE)
             .map_err(|e| format!("cannot create private staged file: {e}"))?;
         // Until the rename, a failure removes the temporary.
         let fail = |message: String| -> Result<(), String> {
@@ -158,10 +158,10 @@ pub(crate) fn write_repository_file(root: &Path, staging: &Staging, relative: &P
     };
     let mut dir = fsat::Dir::open(root).map_err(|_| "cannot open repository root")?;
     for name in parents {
-        dir.mkdir(name, 0o777).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
+        dir.mkdir(name, modes::NEW_DIR).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
         dir = dir.subdir(name).map_err(|_| format!("{} has a parent that is a symlink or not a directory", relative.display()))?;
     }
-    let mut file = dir.create_new(leaf, 0o666).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
+    let mut file = dir.create_new(leaf, modes::NEW_FILE).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
     file.write_all(contents).and_then(|_| file.sync_all())
         .map_err(|e| format!("cannot write {}: {e}", relative.display()))?;
     dir.sync().map_err(|e| format!("cannot sync {}: {e}", relative.display()))
@@ -193,8 +193,8 @@ impl Staging {
 /// that only this user can enter. `what` names it in errors.
 fn private_git_dir(root: &Path, name: &str, what: &str) -> Result<fsat::Dir, String> {
     let git_dir = fsat::Dir::open(&crate::git::git_dir(root)).map_err(|_| "cannot open the Git directory")?;
-    let unsafe_dir = || format!("unsafe .git/{name}; require a real 0700 directory");
-    git_dir.mkdir(OsStr::new(name), 0o700).map_err(|e| format!("cannot create private {what} directory: {e}"))?;
+    let unsafe_dir = || format!("unsafe .git/{name}; require a real {:04o} directory", modes::PRIVATE_DIR);
+    git_dir.mkdir(OsStr::new(name), modes::PRIVATE_DIR).map_err(|e| format!("cannot create private {what} directory: {e}"))?;
     let dir = git_dir.subdir(OsStr::new(name)).map_err(|_| unsafe_dir())?;
     if !dir.is_private().map_err(|_| format!("cannot examine private {what} directory"))? {
         return Err(unsafe_dir());
@@ -245,7 +245,7 @@ impl Scratch {
     /// Write `contents` to a new private file; returns its absolute path.
     pub(crate) fn write(&self, name: &str, contents: &[u8]) -> Result<PathBuf, String> {
         let file_name = OsString::from(format!("{}-{name}", self.prefix));
-        let mut file = self.dir.create_new(&file_name, 0o600)
+        let mut file = self.dir.create_new(&file_name, modes::PRIVATE_FILE)
             .map_err(|e| format!("cannot create private scratch file: {e}"))?;
         self.written.borrow_mut().push(file_name.clone());
         file.write_all(contents).map_err(|e| format!("cannot write private scratch file: {e}"))?;
@@ -264,14 +264,24 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{fs, time::Duration};
+
+    /// How often, and how long apart, `staging` retries a held lock.
+    const STAGING_ATTEMPTS: usize = 100;
+    const STAGING_RETRY: Duration = Duration::from_millis(10);
+    /// Longer than the coarsest file-time granularity the stamp tests rely on.
+    const STAMP_TICK: Duration = Duration::from_millis(20);
+    /// Owner-writable, readable and enterable by everyone: what a
+    /// permissive parent passes on.
+    #[cfg(unix)]
+    const LOOSE_DIR: u32 = 0o755;
 
     /// `staging_dir`, retried briefly: another test thread may fork a child
     /// that holds a copy of a just-released lock descriptor until it execs.
     fn staging(root: &Path) -> Staging {
-        for _ in 0..100 {
+        for _ in 0..STAGING_ATTEMPTS {
             if let Ok(staging) = staging_dir(root) { return staging; }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(STAGING_RETRY);
         }
         staging_dir(root).unwrap()
     }
@@ -281,7 +291,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::metadata(path).unwrap().permissions().mode() & 0o077 == 0
+            fs::metadata(path).unwrap().permissions().mode() & crate::modes::GROUP_OTHER_BITS == 0
         }
         #[cfg(windows)]
         {
@@ -297,7 +307,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(LOOSE_DIR)).unwrap();
         }
         #[cfg(windows)]
         assert!(std::process::Command::new("icacls").arg(dir).arg("/inheritance:e").output().unwrap().status.success());
@@ -380,7 +390,7 @@ mod tests {
         let target = open_protected(tmp, Path::new("item.secret")).unwrap();
         let (_, stamp) = target.read().unwrap();
         // A concurrent edit after the check, even one of the same size.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(STAMP_TICK);
         fs::write(&path, b"edited contents!").unwrap();
         assert!(target.replace(&staging, b"replacement", &stamp, false).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"edited contents!", "edit must survive");

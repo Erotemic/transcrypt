@@ -11,8 +11,43 @@ pub(crate) use crate::os::sigpipe_blocked;
 use transcrypt_v3_core::{
     blob_read, is_object_id, listing_fields, object_order_ok, parse_attr_response, parse_batch_header,
     parse_index_entry, parse_listing as parse_listing_ends, parse_listing_attrs, BlobRead, ATTRIBUTES_NAME,
-    ATTRIBUTES_SUFFIX, FILTER_DRIVER, MAX_RECORD,
+    ATTRIBUTES_SUFFIX, FILTER_DRIVER, MAX_FILE, MAX_RECORD, REGULAR_MODE,
 };
+use transcrypt_rs::{states_mib_limit, KIB, MIB};
+
+/// The Git mode of a non-executable regular file (the core's `REGULAR_MODE`).
+pub(crate) const REGULAR_FILE_MODE: &str = match std::str::from_utf8(&REGULAR_MODE) {
+    Ok(mode) => mode,
+    Err(_) => panic!("REGULAR_MODE is ASCII"),
+};
+/// The Git mode of a submodule (a gitlink).
+pub(crate) const GITLINK_MODE: &str = "160000";
+
+/// Bytes in the mode field that starts every index record.
+const MODE_LEN: usize = REGULAR_MODE.len();
+/// Where the object id starts in an index record: after the mode and a SP.
+const OID_START: usize = MODE_LEN + 1;
+/// The stage-0 field between an index record's object id and its path.
+const STAGE_ZERO_FIELD: &[u8] = b" 0\t";
+/// An unmerged index record's ` <stage>` field, just before its TAB.
+const STAGE_FIELD_LEN: usize = 2;
+/// The stages of an unmerged index entry: base, ours and theirs.
+const CONFLICT_STAGES: std::ops::RangeInclusive<u8> = b'1'..=b'3';
+/// `git check-attr -z` prints each answer as path, attribute and value.
+const CHECK_ATTR_FIELDS: usize = 3;
+
+/// The output limit for a Git command that prints only a short answer or
+/// nothing (its errors are kept separately).
+pub(crate) const SHORT_OUTPUT_LIMIT: usize = MIB;
+/// How much of a subprocess's error output is kept for its error message.
+const KEPT_ERROR_OUTPUT: usize = 64 * KIB;
+/// The chunk size in which subprocess output is read.
+const READ_CHUNK: usize = 64 * KIB;
+/// The longest `git cat-file --batch` header line read: well beyond any
+/// valid one (a SHA-256 id, ` blob `, a 20-digit size and LF).
+const BATCH_HEADER_LIMIT: u64 = 160;
+/// How much a wiped buffer at least grows when it is full.
+const GROWTH_FACTOR: usize = 2;
 
 /// The repository's public v3 configuration, relative to the worktree root.
 pub(crate) const CONFIG_PATH: &str = ".transcrypt/config";
@@ -25,7 +60,7 @@ pub(crate) fn get_or_try_init<T, E>(slot: &mut Option<T>, init: impl FnOnce() ->
 
 /// The most any Git subprocess may print to us. Listings of a hostile index
 /// or tree beyond this are refused (and the process killed), not buffered.
-const GIT_OUTPUT_LIMIT: usize = 256 * 1024 * 1024;
+const GIT_OUTPUT_LIMIT: usize = 256 * MIB;
 
 fn output(command: Command) -> Result<Vec<u8>, String> {
     run_bounded(command, None, GIT_OUTPUT_LIMIT)
@@ -63,7 +98,7 @@ pub(crate) fn run_bounded_status(mut command: Command, input: Option<&[u8]>, lim
         let writer = input.zip(stdin).map(|(bytes, mut stdin)| scope.spawn(move || sigpipe_blocked(&mut stdin, |stdin| stdin.write_all(bytes))));
         let errors = scope.spawn(move || {
             let mut kept = Vec::new();
-            let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut kept);
+            let _ = (&mut stderr).take(KEPT_ERROR_OUTPUT as u64).read_to_end(&mut kept);
             let _ = io::copy(&mut stderr, &mut io::sink());
             kept
         });
@@ -75,7 +110,7 @@ pub(crate) fn run_bounded_status(mut command: Command, input: Option<&[u8]>, lim
         let status = child.wait().map_err(|_| format!("cannot wait for {desc}"))?;
         let written = writer.map(|w| w.join().map_err(|_| ()).and_then(|r| r.map_err(|_| ())));
         let errors = errors.join().unwrap_or_default();
-        let data = data.map_err(|_| format!("output of {desc} exceeds the {} MiB limit", limit >> 20))?;
+        let data = data.map_err(|_| format!("output of {desc} exceeds the {} MiB limit", limit / MIB))?;
         if matches!(written, Some(Err(()))) {
             return Err(format!("cannot send input to {desc}: {}", String::from_utf8_lossy(&errors)));
         }
@@ -93,7 +128,7 @@ pub(crate) enum ReadError {
 /// including every smaller buffer it outgrows.
 pub(crate) fn read_wiped(read: &mut impl Read, limit: usize) -> Result<Zeroizing<Vec<u8>>, ReadError> {
     let mut out = Zeroizing::new(Vec::new());
-    let mut chunk = Zeroizing::new([0u8; 64 * 1024]);
+    let mut chunk = Zeroizing::new([0u8; READ_CHUNK]);
     loop {
         let n = read.read(&mut chunk[..]).map_err(|_| ReadError::Failed)?;
         if n == 0 { return Ok(out); }
@@ -105,7 +140,7 @@ pub(crate) fn read_wiped(read: &mut impl Read, limit: usize) -> Result<Zeroizing
 /// Append without leaving an unwiped copy behind when the buffer grows.
 pub(crate) fn append_wiped(buffer: &mut Zeroizing<Vec<u8>>, data: &[u8]) {
     if buffer.len() + data.len() > buffer.capacity() {
-        let mut bigger = Zeroizing::new(Vec::with_capacity((buffer.len() + data.len()).max(2 * buffer.capacity())));
+        let mut bigger = Zeroizing::new(Vec::with_capacity((buffer.len() + data.len()).max(GROWTH_FACTOR * buffer.capacity())));
         bigger.extend_from_slice(buffer);
         *buffer = bigger;
     }
@@ -199,6 +234,7 @@ pub(crate) fn repo_root() -> Result<PathBuf, String> {
 
 /// The refusal of anything larger than a v3 record.
 pub(crate) const TOO_LARGE: &str = "input exceeds the 16 MiB v3 size limit";
+const _: () = assert!(states_mib_limit(TOO_LARGE, MAX_FILE));
 
 /// Read at most a v3 record's worth of bytes, into wiped memory.
 pub(crate) fn read_record(mut read: impl Read) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -276,7 +312,7 @@ impl Objects {
         sigpipe_blocked(input, |input| input.write_all(format!("{oid}\n").as_bytes()).and_then(|_| input.flush()))
             .map_err(|_| "cannot query git cat-file")?;
         let mut header = Vec::new();
-        (&mut self.output).take(160).read_until(b'\n', &mut header)
+        (&mut self.output).take(BATCH_HEADER_LIMIT).read_until(b'\n', &mut header)
             .map_err(|_| "cannot read git cat-file reply")?;
         // The verified core checks the header and decides what to read.
         let size = parse_batch_header(&header, oid.as_bytes())
@@ -394,7 +430,7 @@ impl Listing {
         }
         let entries = (0..ends.len()).map(|i| {
             let f = listing_fields(&bytes, &ends, i).ok_or("malformed Git listing")?;
-            Staged::new(f.regular, &bytes[f.start..f.start + 6], &bytes[f.start + 7..f.oid_end], &bytes[f.path_start..f.end])
+            Staged::new(f.regular, &bytes[f.start..f.start + MODE_LEN], &bytes[f.start + OID_START..f.oid_end], &bytes[f.path_start..f.end])
         }).collect::<Result<_, String>>()?;
         Ok(Listing { bytes, ends, entries })
     }
@@ -438,11 +474,11 @@ pub(crate) fn index_listing(root: &Path) -> Result<Vec<u8>, String> {
 fn parse_entry(entry: &[u8]) -> Result<Staged, String> {
     let parsed = parse_index_entry(entry)
         .map_err(|_| "malformed or unmerged Git index entry; resolve conflicts first")?;
-    let oid = &entry[7..parsed.path_start - 3];
+    let oid = &entry[OID_START..parsed.path_start - STAGE_ZERO_FIELD.len()];
     if !is_object_id(oid) {
         return Err("malformed Git object id in index entry".into());
     }
-    Staged::new(parsed.regular, &entry[..6], oid, &entry[parsed.path_start..])
+    Staged::new(parsed.regular, &entry[..MODE_LEN], oid, &entry[parsed.path_start..])
 }
 
 /// The blobs of a commit's tree.
@@ -474,7 +510,7 @@ fn tree_record(entry: &[u8]) -> Result<Vec<u8>, String> {
     let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed git ls-tree record")?;
     let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
     let [mode, _kind, oid] = fields[..] else { return Err("malformed git ls-tree record".into()) };
-    Ok([mode, b" ", oid, b" 0", &entry[tab..]].concat())
+    Ok([mode, b" ", oid, STAGE_ZERO_FIELD, &entry[tab + 1..]].concat())
 }
 
 /// The index during a merge: its exact listing, the stage-0 entries (parsed
@@ -493,7 +529,7 @@ pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
     let mut conflicted: Vec<Vec<u8>> = Vec::new();
     for entry in complete_records(&listing)? {
         let tab = entry.iter().position(|b| *b == b'\t').ok_or("malformed Git index entry")?;
-        if tab >= 2 && entry[tab - 2] == b' ' && matches!(entry[tab - 1], b'1'..=b'3') {
+        if tab >= STAGE_FIELD_LEN && entry[tab - STAGE_FIELD_LEN] == b' ' && CONFLICT_STAGES.contains(&entry[tab - 1]) {
             let path = entry[tab + 1..].to_vec();
             if conflicted.last() != Some(&path) { conflicted.push(path); }
         } else {
@@ -521,7 +557,10 @@ pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> 
             let Some(tab) = entry.iter().position(|b| *b == b'\t') else { continue };
             if &entry[tab + 1..] != path { continue; }
             let fields: Vec<&[u8]> = entry[..tab].split(|b| *b == b' ').collect();
-            let oid = if tree { fields.get(2) } else { fields.get(1) };
+            // `<mode> <oid> <stage>` (index) or `<mode> <type> <oid>` (tree).
+            const INDEX_OID_FIELD: usize = 1;
+            const TREE_OID_FIELD: usize = 2;
+            let oid = fields.get(if tree { TREE_OID_FIELD } else { INDEX_OID_FIELD });
             if let Some(oid) = oid.filter(|o| is_object_id(o)) {
                 oids.push(String::from_utf8_lossy(oid).into_owned());
             }
@@ -689,12 +728,12 @@ pub(crate) fn attr_values(root: &Path, paths: &[&[u8]], from: Attributes, attrib
     if paths.is_empty() { return Ok(Vec::new()); }
     let (_, response) = check_attr(root, paths, from, attributes)?;
     let fields: Vec<&[u8]> = response.split(|b| *b == 0).collect();
-    let width = 3 * attributes.len();
+    let width = CHECK_ATTR_FIELDS * attributes.len();
     if fields.len() != width * paths.len() + 1 || fields.last() != Some(&&b""[..]) {
         return Err("unexpected git check-attr output".into());
     }
     paths.iter().zip(fields.chunks(width)).map(|(path, record)| {
-        record.chunks(3).zip(attributes).map(|(field, name)| match field {
+        record.chunks(CHECK_ATTR_FIELDS).zip(attributes).map(|(field, name)| match field {
             [p, n, value] if p == path && *n == name.as_bytes() => Ok(value.to_vec()),
             _ => Err("unexpected git check-attr output".into()),
         }).collect()
@@ -722,13 +761,13 @@ pub(crate) fn other_filter(value: &[u8]) -> bool {
 pub(crate) fn macro_resolves(root: &Path, index_dir: &Path, top: Option<&str>) -> Result<bool, String> {
     let rules = hash_object(root, b"probe transcrypt\n")?;
     let mut info = Vec::new();
-    push_index_record(&mut info, "100644", &rules, b"transcrypt-v3-probe/.gitattributes");
-    if let Some(top) = top { push_index_record(&mut info, "100644", top, &ATTRIBUTES_NAME); }
+    push_index_record(&mut info, REGULAR_FILE_MODE, &rules, b"transcrypt-v3-probe/.gitattributes");
+    if let Some(top) = top { push_index_record(&mut info, REGULAR_FILE_MODE, top, &ATTRIBUTES_NAME); }
     let index = index_dir.join(format!("transcrypt-v3-probe-{}.index", std::process::id()));
     let _ = std::fs::remove_file(&index);
     let mut command = git_command(Some(root));
     command.env("GIT_INDEX_FILE", &index).args(["update-index", "-z", "--index-info"]);
-    let result = run_bounded(command, Some(&info), 1 << 20)
+    let result = run_bounded(command, Some(&info), SHORT_OUTPUT_LIMIT)
         .and_then(|_| protected_flags(root, &[b"transcrypt-v3-probe/probe"], Attributes::Index(&index)));
     let _ = std::fs::remove_file(&index);
     Ok(result?.first() == Some(&true))
@@ -834,17 +873,33 @@ mod tests {
     use super::*;
     use transcrypt_v3_core::is_object_id;
 
+    /// Repetitions of a test of a race-dependent outcome.
+    const RACE_ROUNDS: usize = 20;
+    /// Rounds of randomized parser mutation.
+    const FUZZ_ROUNDS: usize = 20_000;
+    /// Marsaglia's xorshift64 (shifts 13, 7, 17) from a fixed seed.
+    const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+    const SHIFTS: (u32, u32, u32) = (13, 7, 17);
+    /// The most mutations applied to one fuzz input.
+    const MAX_MUTATIONS: u64 = 3;
+    /// The exit status of the test's early-exiting subprocess.
+    const EARLY_EXIT: i32 = 3;
+    /// Bound on a test that must not hang on an endless producer.
+    const HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+
     /// A subprocess that exits without reading its input is an error, not
     /// a silent death by SIGPIPE (which `main` does not ignore).
     #[test]
     fn early_exit_of_a_subprocess_is_reported() {
         crate::os::default_sigpipe();
-        let input = vec![b'x'; 4 << 20];
-        for _ in 0..20 {
+        // Larger than any pipe buffer, so the writer is still writing.
+        const BEYOND_PIPE_BUFFER: usize = 4 * MIB;
+        let input = vec![b'x'; BEYOND_PIPE_BUFFER];
+        for _ in 0..RACE_ROUNDS {
             let mut command = Command::new("sh");
-            command.args(["-c", "exit 3"]);
-            match run_bounded_status(command, Some(&input), 1 << 20) {
-                Ok((status, _, _)) => assert_eq!(status.code(), Some(3)),
+            command.args(["-c", &format!("exit {EARLY_EXIT}")]);
+            match run_bounded_status(command, Some(&input), SHORT_OUTPUT_LIMIT) {
+                Ok((status, _, _)) => assert_eq!(status.code(), Some(EARLY_EXIT)),
                 Err(e) => assert!(e.contains("cannot send input"), "{e}"),
             }
         }
@@ -866,7 +921,7 @@ mod tests {
             (b"no newline", b"x"),
         ];
         let mut update = IndexUpdate::default();
-        for (path, bytes) in blobs { update.add("100644", path, bytes); }
+        for (path, bytes) in blobs { update.add(REGULAR_FILE_MODE, path, bytes); }
         update.apply(&root, &["--add"]).unwrap();
         let listing = git(&root, &["ls-files", "--stage", "-z"]).unwrap();
         assert_eq!(listing.split(|b| *b == 0).filter(|r| !r.is_empty()).count(), blobs.len());
@@ -880,7 +935,7 @@ mod tests {
         }
         // A path Git refuses to stage (it only warns, and succeeds) is an error.
         let mut update = IndexUpdate::default();
-        update.add("100644", b".git/hooks/pre-commit", b"x");
+        update.add(REGULAR_FILE_MODE, b".git/hooks/pre-commit", b"x");
         let err = update.apply(&root, &["--add"]).unwrap_err();
         assert!(err.contains("did not stage .git/hooks/pre-commit"), "{err}");
         std::fs::remove_dir_all(&root).unwrap();
@@ -893,18 +948,20 @@ mod tests {
     #[test]
     fn git_output_parsers_never_panic_and_accept_only_exact_records() {
         let oid = "0123456789abcdef0123456789abcdef01234567";
-        let mut state = 0x9e37_79b9_7f4a_7c15u64;
-        let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+        let mut state = SEED;
+        let mut next = move || { state ^= state << SHIFTS.0; state ^= state >> SHIFTS.1; state ^= state << SHIFTS.2; state };
         let alphabet = b"0123456789abcdef :\t\n\0blobtreeAMDT.secret/-";
         let valid_tree = format!("100644 blob {oid}\tdir/a b.secret").into_bytes();
         let valid_diff = format!(":100644 100644 {oid} {oid} M\0dir/a\tb.secret\0").into_bytes();
-        for round in 0..20000 {
-            let base: &[u8] = match round % 3 { 0 => &valid_tree, 1 => &valid_diff, _ => b"" };
-            let mut input = base.to_vec();
-            for _ in 0..(next() % 4) {
+        let bases: [&[u8]; 3] = [&valid_tree, &valid_diff, b""];
+        for round in 0..FUZZ_ROUNDS {
+            let mut input = bases[round % bases.len()].to_vec();
+            for _ in 0..(next() % (MAX_MUTATIONS + 1)) {
                 let at = (next() as usize) % (input.len() + 1);
                 let byte = alphabet[(next() as usize) % alphabet.len()];
-                match next() % 3 {
+                // Insert, replace or remove one byte.
+                const MUTATION_KINDS: u64 = 3;
+                match next() % MUTATION_KINDS {
                     0 => input.insert(at, byte),
                     1 if at < input.len() => input[at] = byte,
                     _ if at < input.len() => { input.remove(at); },
@@ -915,7 +972,7 @@ mod tests {
                 if let Ok(parsed) = Listing::parse([record.as_slice(), b"\0"].concat()) {
                     for e in parsed.entries {
                         assert!(is_object_id(e.oid.as_bytes()));
-                        assert!(input.ends_with(&e.path) && input.starts_with(&input[..6]));
+                        assert!(input.ends_with(&e.path) && input.starts_with(&input[..MODE_LEN]));
                     }
                 }
             }
@@ -953,12 +1010,14 @@ mod tests {
         let mut command = Command::new("sh");
         command.args(["-c", "yes transcrypt; echo noise >&2"]);
         let started = std::time::Instant::now();
-        let err = run_bounded(command, None, 1 << 20).unwrap_err();
+        let err = run_bounded(command, None, SHORT_OUTPUT_LIMIT).unwrap_err();
         assert!(err.contains("exceeds"), "{err}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert!(started.elapsed() < HANG_LIMIT);
         // Endless error output is drained, never blocking the child.
         let mut command = Command::new("sh");
-        command.args(["-c", "head -c 5000000 /dev/zero >&2; echo done"]);
-        assert_eq!(run_bounded(command, None, 1 << 20).unwrap(), b"done\n");
+        // Far more error output than is kept, or than a pipe buffers.
+        const ERROR_FLOOD: usize = 5_000_000;
+        command.args(["-c", &format!("head -c {ERROR_FLOOD} /dev/zero >&2; echo done")]);
+        assert_eq!(run_bounded(command, None, SHORT_OUTPUT_LIMIT).unwrap(), b"done\n");
     }
 }

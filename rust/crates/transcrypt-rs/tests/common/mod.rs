@@ -10,6 +10,34 @@ use std::{fs, time::Duration};
 
 pub const PASS: &[u8] = b"long correct horse battery staple test passphrase\n";
 
+/// The adapter's own permission bits (one definition for it and the tests).
+#[path = "../../src/modes.rs"]
+pub mod modes;
+/// Owner-writable and readable by everyone: an ordinary public file.
+pub const PUBLIC_FILE: u32 = 0o644;
+/// An ordinary executable file, runnable by everyone.
+pub const EXECUTABLE_FILE: u32 = 0o755;
+
+/// The Git mode of a non-executable regular file (the core's `REGULAR_MODE`).
+pub const REGULAR_FILE_MODE: &str = match std::str::from_utf8(&transcrypt_v3_core::REGULAR_MODE) {
+    Ok(mode) => mode,
+    Err(_) => panic!("REGULAR_MODE is ASCII"),
+};
+/// How much of the passphrase a search for it looks for.
+pub const PASS_EXCERPT: usize = 8;
+
+/// How long a test waits for the agent's reply before failing.
+pub const AGENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The agent's reply: a status byte (0 for success), then a big-endian
+/// `u32` length and that many bytes.
+pub const REPLY_STATUS_LEN: usize = 1;
+pub const REPLY_HEADER_LEN: usize = REPLY_STATUS_LEN + size_of::<u32>();
+pub const REPLY_OK: u8 = 0;
+
+/// Hexadecimal: two digits per byte.
+const HEX_RADIX: u32 = 16;
+const HEX_DIGITS_PER_BYTE: usize = 2;
+
 /// The binary under test: the one Cargo built, or `TRANSCRYPT_RS_TEST_BIN`
 /// (a release binary, tested on the machine it was built for).
 pub fn bin() -> &'static str {
@@ -81,8 +109,9 @@ pub fn committed(repo: &Path, path: &str) -> Vec<u8> {
 
 /// Bytes from hexadecimal text.
 pub fn hex(value: &str) -> Vec<u8> {
-    assert_eq!(value.len() % 2, 0);
-    value.as_bytes().chunks(2).map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap()).collect()
+    assert_eq!(value.len() % HEX_DIGITS_PER_BYTE, 0);
+    value.as_bytes().chunks(HEX_DIGITS_PER_BYTE)
+        .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), HEX_RADIX).unwrap()).collect()
 }
 
 pub fn is_record(bytes: &[u8]) -> bool {
@@ -124,9 +153,9 @@ pub(crate) use os::{Listener as UnixListener, Stream as UnixStream};
 pub fn agent_request(repo: &Path, op: u8, config: &[u8], path: &[u8], body: &[u8]) -> Result<Vec<u8>, String> {
     let mut stream = UnixStream::connect(socket(repo)).map_err(|e| e.to_string())?;
     #[cfg(unix)]
-    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    stream.set_read_timeout(Some(AGENT_TIMEOUT)).unwrap();
     #[cfg(windows)]
-    os::set_timeouts(&stream, Duration::from_secs(30)).unwrap();
+    os::set_timeouts(&stream, AGENT_TIMEOUT).unwrap();
     let mut frame = vec![op];
     frame.extend_from_slice(config);
     frame.extend_from_slice(&(path.len() as u32).to_be_bytes());
@@ -134,11 +163,11 @@ pub fn agent_request(repo: &Path, op: u8, config: &[u8], path: &[u8], body: &[u8
     frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
     frame.extend_from_slice(body);
     stream.write_all(&frame).map_err(|e| e.to_string())?;
-    let mut header = [0u8; 5];
+    let mut header = [0u8; REPLY_HEADER_LEN];
     stream.read_exact(&mut header).map_err(|e| e.to_string())?;
-    let mut value = vec![0u8; u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize];
+    let mut value = vec![0u8; u32::from_be_bytes(header[REPLY_STATUS_LEN..].try_into().unwrap()) as usize];
     stream.read_exact(&mut value).map_err(|e| e.to_string())?;
-    if header[0] == 0 { Ok(value) } else { Err(String::from_utf8_lossy(&value).into_owned()) }
+    if header[0] == REPLY_OK { Ok(value) } else { Err(String::from_utf8_lossy(&value).into_owned()) }
 }
 
 /// A scratch directory, removed (every repository locked and any agent
@@ -222,7 +251,7 @@ pub fn make_private_dir(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(modes::PRIVATE_DIR)).unwrap();
     }
     #[cfg(windows)]
     icacls(path, &["/inheritance:r", "/grant:r", &format!("*{}:(OI)(CI)F", user_sid())]);
@@ -233,7 +262,7 @@ pub fn make_public(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(PUBLIC_FILE)).unwrap();
     }
     #[cfg(windows)]
     icacls(path, &["/grant", "*S-1-1-0:(R)"]);
@@ -244,7 +273,8 @@ pub fn make_executable(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        // Owner-only, like the hooks v3 writes.
+        fs::set_permissions(path, fs::Permissions::from_mode(modes::PRIVATE_DIR)).unwrap();
     }
     #[cfg(windows)]
     let _ = path;
@@ -257,7 +287,7 @@ pub fn owner_only(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path).unwrap().permissions().mode() & 0o077 == 0
+        fs::metadata(path).unwrap().permissions().mode() & modes::GROUP_OTHER_BITS == 0
     }
     #[cfg(windows)]
     {
@@ -330,8 +360,10 @@ fn user_sid() -> &'static str { &whoami().1 }
 pub fn bash_v2() -> PathBuf {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../transcrypt");
     let path = path.to_str().unwrap().replace('\\', "/");
+    const DRIVE_LEN: usize = "C:".len();
     match path.as_bytes() {
-        [drive, b':', b'/', ..] if cfg!(windows) => PathBuf::from(format!("/{}{}", (*drive as char).to_ascii_lowercase(), &path[2..])),
+        [drive, b':', b'/', ..] if cfg!(windows) =>
+            PathBuf::from(format!("/{}{}", (*drive as char).to_ascii_lowercase(), &path[DRIVE_LEN..])),
         _ => PathBuf::from(path),
     }
 }

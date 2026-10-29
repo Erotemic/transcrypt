@@ -499,7 +499,7 @@ pub(crate) fn auto_hydrate(root: &Path) -> Result<(), String> {
     }
     match hydrate(root) {
         Ok(0) => {},
-        Ok(n) => eprintln!("transcrypt-rs: decrypted {n} file(s) with mode 0600."),
+        Ok(n) => eprintln!("transcrypt-rs: decrypted {n} file(s) with mode {:04o}.", crate::modes::PRIVATE_FILE),
         Err(e) => eprintln!("transcrypt-rs: automatic decryption skipped: {e}\n\
             Inspect with `transcrypt-rs status`, then run `transcrypt-rs hydrate`."),
     }
@@ -677,7 +677,7 @@ pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
 fn run_in(dir: &Path, command: &str) -> Result<(bool, Vec<u8>), String> {
     let mut child = std::process::Command::new(env::current_exe().map_err(|_| "cannot locate executable")?);
     child.arg(command).current_dir(dir);
-    let (status, _, errors) = run_bounded_status(child, None, 1 << 20)?;
+    let (status, _, errors) = run_bounded_status(child, None, SHORT_OUTPUT_LIMIT)?;
     Ok((status.success(), errors))
 }
 

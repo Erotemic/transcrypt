@@ -8,6 +8,7 @@
 //! not eliminate, same-UID races: such a process can still change a file's
 //! contents between our read and our rename.
 
+use crate::modes::{GROUP_OTHER_BITS, OWNER_BITS, PERMISSION_BITS};
 use std::{
     ffi::{CStr, CString, OsStr, OsString},
     fs::File,
@@ -185,7 +186,7 @@ impl Dir {
     #[allow(clippy::unnecessary_cast)] // `mode_t` is u16 on macOS.
     pub(crate) fn replacement_mode(&self, name: &OsStr, private: bool) -> io::Result<Mode> {
         let mode = self.lstat(name)?.st_mode as u32;
-        Ok(Mode(if private { mode & 0o700 } else { mode & 0o777 }))
+        Ok(Mode(if private { mode & OWNER_BITS } else { mode & PERMISSION_BITS }))
     }
 
     /// After `name` was renamed into this directory with the permissions
@@ -200,8 +201,8 @@ impl Dir {
     pub(crate) fn make_private(&self, name: &OsStr) -> io::Result<()> {
         let file = self.open_regular(name)?;
         let mode = file.metadata()?.permissions().mode();
-        if mode & 0o077 != 0 {
-            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o700))?;
+        if mode & GROUP_OTHER_BITS != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(mode & OWNER_BITS))?;
         }
         Ok(())
     }
@@ -212,8 +213,9 @@ impl Dir {
     }
 
     /// Whether only this directory's owner can enter it.
+    #[allow(clippy::unnecessary_cast)] // `mode_t` is u16 on macOS.
     pub(crate) fn is_private(&self) -> io::Result<bool> {
-        Ok(fstat(&self.0)?.st_mode & 0o077 == 0)
+        Ok(fstat(&self.0)?.st_mode as u32 & GROUP_OTHER_BITS == 0)
     }
 
     /// Names of the entries of this directory (excluding `.` and `..`). A

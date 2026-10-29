@@ -15,7 +15,7 @@ use crate::{
     attributes::{edit_attributes, filter_overrides, protect, restore_worktree_attributes, worktree_attributes},
     credential::{self, Key, Unlock},
     git::*,
-    hex,
+    short_id,
     lifecycle::*,
     load_config, os, passphrase, session,
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
@@ -432,7 +432,7 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
         }
     };
     let id = transcrypt_rs::config_id(&config);
-    println!("repository: v3 config {}", hex(&id[..4]));
+    println!("repository: v3 config {}", short_id(&id));
     let unlock = credential::lookup(root, &config)?;
     println!("key:        {}", match &unlock {
         Unlock::Unlocked(key) if !key.private() => "unlocked (stored in .git/transcrypt-v3/key)",
@@ -441,10 +441,10 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
         Unlock::Stale => "locked: the stored key does not match .transcrypt/config (rekeyed?); run unlock",
     });
     let key = unlock.key();
-    let mut counts = [0usize; 4];
+    let mut counts = [0usize; BUCKETS];
     let mut count = |state: FileState, name: &str| {
         counts[state.bucket() as usize] += 1;
-        println!("  {:<22} {name}", state.label());
+        println!("  {:<LABEL_WIDTH$} {name}", state.label());
     };
     let index = index_with_conflicts(root)?;
     for path in protected_paths(root, &index.conflicted)? {
@@ -494,6 +494,10 @@ enum FileState {
 /// The categories `status` counts, in the order it prints them.
 #[derive(Clone, Copy)]
 enum Bucket { Ciphertext, Plaintext, Modified, Other }
+/// The number of `Bucket`s (`Other` is the last).
+const BUCKETS: usize = Bucket::Other as usize + 1;
+/// The column width of a `FileState` label in `status`.
+const LABEL_WIDTH: usize = 22;
 
 impl FileState {
     fn label(self) -> &'static str {

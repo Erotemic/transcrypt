@@ -2,6 +2,7 @@
 //! Unix and Windows (`os_windows.rs` has the same items): Git path bytes,
 //! signals, process hardening, file privacy and the private agent's socket.
 
+use crate::modes::{EXECUTE_BITS, GROUP_OTHER_BITS, PRIVATE_DIR, PRIVATE_FILE};
 use std::{
     ffi::{OsStr, OsString},
     fs,
@@ -104,33 +105,39 @@ pub(crate) fn close_inherited() {
     let fds: Vec<i32> = fs::read_dir("/dev/fd")
         .map(|dir| dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok()).collect())
         .unwrap_or_default();
-    for fd in fds.into_iter().filter(|fd| *fd > 2) {
+    for fd in fds.into_iter().filter(|fd| *fd > libc::STDERR_FILENO) {
         // SAFETY: nothing in this process uses these descriptors yet; closing
         // an already closed one (the directory listing's own) is harmless.
         unsafe { libc::close(fd) };
     }
 }
 
+/// The `poll` timeout that waits without limit.
+const POLL_FOREVER: i32 = -1;
+/// The signal number that only checks whether a process can be signalled.
+const NO_SIGNAL: i32 = 0;
+
 /// Whether the process `pid` still runs.
 pub(crate) fn process_running(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else { return false };
     // SAFETY: kill with signal 0 only checks whether the process exists.
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    let alive = unsafe { libc::kill(pid, NO_SIGNAL) } == 0;
     alive || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Whether files Git creates now are private to this user. Git creates
 /// worktree files with mode `0666 & !umask`, and its filters inherit its
 /// umask, so the smudge filter sees exactly the mask Git will apply.
+#[allow(clippy::unnecessary_cast)] // `mode_t` is u16 on macOS.
 pub(crate) fn checkouts_private() -> bool {
     // SAFETY: umask cannot fail and has no memory-safety preconditions. The
     // mask is process-wide, so it is put back at once; no other thread runs
     // at the callers (the smudge filter and `doctor`: `git.rs`'s helper
     // threads are scoped and joined), so none creates a file meanwhile.
-    let previous = unsafe { libc::umask(0o077) };
+    let previous = unsafe { libc::umask(GROUP_OTHER_BITS as libc::mode_t) };
     // SAFETY: as above.
     unsafe { libc::umask(previous) };
-    previous & 0o077 == 0o077
+    previous as u32 & GROUP_OTHER_BITS == GROUP_OTHER_BITS
 }
 
 /// How `doctor` describes `checkouts_private`.
@@ -142,17 +149,17 @@ pub(crate) const CHECKOUTS_PRIVATE: [&str; 2] = [
 /// Create a file that Git runs as a hook (executable on Unix).
 pub(crate) fn create_hook(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new().write(true).create_new(true).mode(0o700).open(path)
+    fs::OpenOptions::new().write(true).create_new(true).mode(PRIVATE_DIR).open(path)
 }
 
 /// Make an existing hook file runnable; Git skips one that is not.
 pub(crate) fn make_runnable(path: &Path) -> io::Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_DIR))
 }
 
 /// Whether Git would run the hook file at `path`.
 pub(crate) fn runnable(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    fs::metadata(path).is_ok_and(|m| m.permissions().mode() & EXECUTE_BITS != 0)
 }
 
 fn euid() -> u32 {
@@ -168,13 +175,13 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<Option<bool>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(Some(meta.is_dir() && !meta.file_type().is_symlink() && meta.permissions().mode() & 0o077 == 0
+    Ok(Some(meta.is_dir() && !meta.file_type().is_symlink() && meta.permissions().mode() & GROUP_OTHER_BITS == 0
         && meta.uid() == euid()))
 }
 
 /// Create a directory that only this user can enter.
 pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
-    fs::DirBuilder::new().mode(0o700).create(path)
+    fs::DirBuilder::new().mode(PRIVATE_DIR).create(path)
 }
 
 /// Whether `path` is a socket (not a symlink or another file); `None` if
@@ -190,12 +197,12 @@ pub(crate) fn is_socket(path: &Path) -> io::Result<Option<bool>> {
 /// Whether `path` is a socket that only this user, who owns it, can use.
 pub(crate) fn private_socket(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket()
-        && meta.permissions().mode() & 0o077 == 0 && meta.uid() == euid())
+        && meta.permissions().mode() & GROUP_OTHER_BITS == 0 && meta.uid() == euid())
 }
 
 /// Restrict a just-bound socket to this user.
 pub(crate) fn secure_socket(path: &Path) -> io::Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE))
 }
 
 /// The effective UID of the process at the other end of a Unix socket, as
@@ -239,11 +246,11 @@ pub(crate) fn set_timeouts(stream: &Stream, limit: Duration) -> io::Result<()> {
 /// The next client, or `None` once `idle` passes without one (or the
 /// listener fails).
 pub(crate) fn accept(listener: &Listener, idle: Option<Duration>) -> Option<Stream> {
-    let idle_ms = idle.map_or(-1, |d| i32::try_from(d.as_millis()).unwrap_or(i32::MAX));
+    let idle_ms = idle.map_or(POLL_FOREVER, |d| i32::try_from(d.as_millis()).unwrap_or(i32::MAX));
     loop {
-        let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        // SAFETY: one valid pollfd for the listener's open descriptor.
-        match unsafe { libc::poll(&mut ready, 1, idle_ms) } {
+        let mut ready = [libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        // SAFETY: valid pollfds, as many as given, for the listener's open descriptor.
+        match unsafe { libc::poll(ready.as_mut_ptr(), ready.len() as libc::nfds_t, idle_ms) } {
             0 => return None,
             n if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
             n if n < 0 => return None,

@@ -14,16 +14,20 @@ use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD};
 use zeroize::Zeroizing;
 use crate::{filter::Filters, git::{append_wiped, TOO_LARGE}};
 
+/// A pkt-line header: the packet's total length in 4 lowercase hex digits.
+const PKT_HEADER_LEN: usize = 4;
+/// The flush packet: a header of length 0.
+const FLUSH_PKT: &[u8; PKT_HEADER_LEN] = b"0000";
 /// The most data one packet carries.
-const MAX_DATA: usize = MAX_PKT_LEN - 4;
+const MAX_DATA: usize = MAX_PKT_LEN - PKT_HEADER_LEN;
 
 /// One packet, or `None` for a flush packet.
 fn read_packet(input: &mut impl Read) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-    let mut header = [0u8; 4];
+    let mut header = [0u8; PKT_HEADER_LEN];
     input.read_exact(&mut header).map_err(|_| "Git closed the filter stream")?;
     let len = decode_pkt_len(&header).map_err(|_| "malformed pkt-line from Git")?;
     if len == 0 { return Ok(None); }
-    let mut data = Zeroizing::new(vec![0u8; len - 4]);
+    let mut data = Zeroizing::new(vec![0u8; len - PKT_HEADER_LEN]);
     input.read_exact(&mut data).map_err(|_| "truncated pkt-line from Git")?;
     Ok(Some(data))
 }
@@ -50,7 +54,7 @@ fn read_request(input: &mut impl Read) -> Result<Option<Vec<Vec<u8>>>, String> {
 }
 
 fn write_packet(out: &mut impl Write, data: &[u8]) -> io::Result<()> {
-    write!(out, "{:04x}", data.len() + 4)?;
+    write!(out, "{:0PKT_HEADER_LEN$x}", data.len() + PKT_HEADER_LEN)?;
     out.write_all(data)
 }
 
@@ -59,7 +63,7 @@ fn write_text(out: &mut impl Write, text: &str) -> io::Result<()> {
 }
 
 fn write_flush(out: &mut impl Write) -> io::Result<()> {
-    out.write_all(b"0000")
+    out.write_all(FLUSH_PKT)
 }
 
 /// A flush packet, and everything written before it sent to Git at once.

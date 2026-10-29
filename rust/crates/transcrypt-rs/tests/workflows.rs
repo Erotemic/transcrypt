@@ -10,6 +10,8 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::{io::Write, process::{Command, Stdio}};
 use std::{ffi::OsString, fs, time::{Duration, Instant}};
+use transcrypt_rs::KEY_SIZE;
+use transcrypt_v3_core::{KEY_FILE_LEN, REGULAR_MODE};
 
 const NEW: &[u8] = b"a completely different long passphrase\n";
 
@@ -46,7 +48,7 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
         fs::write(repo.join(path), content).unwrap();
     }
     #[cfg(unix)]
-    fs::set_permissions(repo.join("private/run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(repo.join("private/run.sh"), fs::Permissions::from_mode(EXECUTABLE_FILE)).unwrap();
     // A nested policy, and a public file excluded from a protected directory.
     fs::write(repo.join("nested/.gitattributes"), b"local.cfg transcrypt\n").unwrap();
     fs::write(repo.join("private/PUBLIC.md"), b"public readme\n").unwrap();
@@ -57,19 +59,26 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     commit_all(&repo, "protected files");
     let listing = run(&repo, "git", &["ls-files", "-z", "-s"], None);
     #[cfg(unix)]
-    assert!(listing.split(|b| *b == 0).any(|e| e.starts_with(b"100755") && e.ends_with(b"private/run.sh")));
+    assert!(listing.split(|b| *b == 0).any(|e| e.starts_with(&transcrypt_v3_core::EXECUTABLE_MODE) && e.ends_with(b"private/run.sh")));
+    // An index record is `<mode> <oid> 0\t<path>`; a leak probe is the
+    // first bytes of a file's content.
+    const OID_START: usize = REGULAR_MODE.len() + 1;
+    const STAGE_FIELD_LEN: usize = b" 0".len();
+    const LEAK_PROBE: usize = 6;
     for (path, content) in &files {
         let name = path.to_str().map(str::to_owned).unwrap_or_else(|| String::from_utf8_lossy(odd.as_encoded_bytes()).into_owned());
         let blob = match path.to_str() {
             Some(p) => committed(&repo, p),
             None => {
                 let entry = listing.split(|b| *b == 0).find(|e| e.ends_with(b"odd \xff'\"\nname")).unwrap();
-                let oid = std::str::from_utf8(&entry[7..entry.iter().position(|b| *b == b'\t').unwrap() - 2]).unwrap();
+                let tab = entry.iter().position(|b| *b == b'\t').unwrap();
+                let oid = std::str::from_utf8(&entry[OID_START..tab - STAGE_FIELD_LEN]).unwrap();
                 run(&repo, "git", &["cat-file", "blob", oid], None)
             },
         };
         assert!(is_record(&blob), "{name} committed unencrypted");
-        assert!(!blob.windows(content.len().min(6)).any(|w| w == &content[..content.len().min(6)]), "{name} leaks");
+        let probe = &content[..content.len().min(LEAK_PROBE)];
+        assert!(!blob.windows(probe.len()).any(|w| w == probe), "{name} leaks");
         assert_eq!(fs::read(repo.join(path)).unwrap(), *content, "{name} worktree");
     }
     for public in ["README", "private/PUBLIC.md", "config/development.yaml", ".gitattributes", "nested/.gitattributes"] {
@@ -85,14 +94,15 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
         assert_eq!(fs::read(clone.join(path)).unwrap(), *content);
     }
     #[cfg(unix)]
-    assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & 0o111, 0o111,
-        "an executable protected file stays executable");
+    assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & modes::EXECUTE_BITS,
+        modes::EXECUTE_BITS, "an executable protected file stays executable");
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
     // Lock restores ciphertext (keeping modes), and unlock decrypts again.
     run(&clone, bin(), &["lock"], None);
     assert!(is_record(&fs::read(clone.join("private/run.sh")).unwrap()));
     #[cfg(unix)]
-    assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & 0o111, 0o111);
+    assert_eq!(fs::metadata(clone.join("private/run.sh")).unwrap().permissions().mode() & modes::EXECUTE_BITS,
+        modes::EXECUTE_BITS);
     assert!(run(&clone, "git", &["status", "--porcelain"], None).is_empty());
     unlock(&clone);
     assert_eq!(fs::read(clone.join(&odd)).unwrap(), b"odd secret\x00\xff");
@@ -111,7 +121,7 @@ fn stored_key_unlock_needs_no_agent_and_follows_the_umask() {
     let key = repo.join(".git/transcrypt-v3/key");
     assert!(owner_only(&key));
     assert!(!repo.join(".git/transcrypt-v3/session.sock").exists(), "no agent in the default mode");
-    assert!(!fs::read(repo.join(".git/config")).unwrap().windows(8).any(|w| w == &PASS[..8]));
+    assert!(!fs::read(repo.join(".git/config")).unwrap().windows(PASS_EXCERPT).any(|w| w == &PASS[..PASS_EXCERPT]));
     // Every later Git command finds the key by itself.
     run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
     fs::write(repo.join(".env"), b"two\n").unwrap();
@@ -120,7 +130,7 @@ fn stored_key_unlock_needs_no_agent_and_follows_the_umask() {
     run(&repo, "sh", &["-c", script], None);
     assert_eq!(fs::read(repo.join(".env")).unwrap(), b"one\n", "checkout decrypts directly");
     #[cfg(unix)]
-    assert_eq!(fs::metadata(repo.join(".env")).unwrap().permissions().mode() & 0o777, 0o644,
+    assert_eq!(fs::metadata(repo.join(".env")).unwrap().permissions().mode() & modes::PERMISSION_BITS, PUBLIC_FILE,
         "plaintext follows the umask in the default mode");
     #[cfg(windows)]
     assert!(!owner_only(&repo.join(".env")), "plaintext has its directory's access in the default mode");
@@ -405,7 +415,7 @@ fn merges_are_verified_before_the_merge_commit() {
     // A branch that moves a.secret's record over b.secret without re-encryption.
     run(&repo, "git", &["checkout", "-q", "-b", "hostile"], None);
     let a_oid = String::from_utf8(run(&repo, "git", &["rev-parse", ":a.secret"], None)).unwrap();
-    run(&repo, "git", &["update-index", "--cacheinfo", "100644", a_oid.trim(), "b.secret"], None);
+    run(&repo, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, a_oid.trim(), "b.secret"], None);
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "hostile move"], None);
     run(&repo, "git", &["checkout", "-q", "-f", main.trim()], None);
     fs::write(repo.join("README"), b"diverge\n").unwrap();
@@ -523,7 +533,9 @@ fn protect_refuses_patterns_that_select_nothing() {
     let before = fs::read(repo.join(".gitattributes")).unwrap();
     let patterns = [("secrets/", "secrets/**"), ("secrets", "secrets/**"), ("!x.env", "no negative"),
                     ("back\\slash.txt", "glob characters")];
-    for (pattern, says) in &patterns[..if cfg!(unix) { 4 } else { 3 }] {
+    // The last pattern names a file that only Unix can have.
+    let tested = if cfg!(unix) { &patterns[..] } else { &patterns[..patterns.len() - 1] };
+    for (pattern, says) in tested {
         let err = run_fails(&repo, bin(), &["protect", pattern], None);
         assert!(err.contains(says), "{pattern}: {err}");
         assert_eq!(fs::read(repo.join(".gitattributes")).unwrap(), before, "{pattern} left an edit");
@@ -750,12 +762,16 @@ fn private_sessions_expire_when_idle() {
     // which take far longer on some systems (Windows, OpenBSD): measure one.
     const PAUSE: Duration = Duration::from_millis(1500);
     const SHORTEST_LIMIT: Duration = Duration::from_secs(3);
+    // Uses of the session within the limit, each after a `PAUSE`; a margin
+    // of this many measured `status` runs per pause.
+    const KEEPALIVE_ROUNDS: u32 = 3;
     let status = || String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     let started = Instant::now();
     status();
-    let limit = SHORTEST_LIMIT.max(PAUSE + 3 * started.elapsed()).as_secs() + 1;
+    // Rounded up to whole seconds.
+    let limit = SHORTEST_LIMIT.max(PAUSE + KEEPALIVE_ROUNDS * started.elapsed()).as_secs() + 1;
     run(&repo, bin(), &["unlock", "--private", &format!("--timeout={limit}s"), "--password-stdin"], Some(PASS));
-    for _ in 0..3 {
+    for _ in 0..KEEPALIVE_ROUNDS {
         std::thread::sleep(PAUSE);
         assert!(status().contains("unlocked (private"), "use keeps the session alive");
     }
@@ -822,15 +838,15 @@ fn legacy_keys_macro_redefinitions_and_crlf() {
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
     fs::write(repo.join("a.env"), b"S=1\n").unwrap();
     commit_all(&repo, "init");
-    fs::write(repo.join(".git/transcrypt-v3/key"), [7u8; 64]).unwrap();
+    fs::write(repo.join(".git/transcrypt-v3/key"), [7u8; KEY_SIZE]).unwrap();
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
     assert!(status.contains("key:        locked"), "{status}");
     unlock(&repo);
-    assert_eq!(fs::metadata(repo.join(".git/transcrypt-v3/key")).unwrap().len(), 119);
+    assert_eq!(fs::metadata(repo.join(".git/transcrypt-v3/key")).unwrap().len(), KEY_FILE_LEN as u64);
     // Any other length is damaged (the verified `stored_key_state`), and
     // `unlock` repairs it.
     let stored = fs::read(repo.join(".git/transcrypt-v3/key")).unwrap();
-    for damaged in [&stored[..118], &[&stored[..], b"x"].concat()[..]] {
+    for damaged in [&stored[..KEY_FILE_LEN - 1], &[&stored[..], b"x"].concat()[..]] {
         fs::write(repo.join(".git/transcrypt-v3/key"), damaged).unwrap();
         let err = run_fails(&repo, bin(), &["verify-index"], None);
         assert!(err.contains("damaged .git/transcrypt-v3/key"), "{err}");
@@ -992,7 +1008,7 @@ fn foreign_hooks_executable_bits_and_one_line_passphrases() {
     #[cfg(unix)]
     {
         for hook in ["pre-commit", "pre-push"] {
-            fs::set_permissions(repo.join(".git/hooks").join(hook), fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(repo.join(".git/hooks").join(hook), fs::Permissions::from_mode(modes::PRIVATE_FILE)).unwrap();
         }
         let out = String::from_utf8(exec(&repo, bin(), &["doctor"], None).stdout).unwrap();
         assert!(out.contains("FAIL pre-commit hook installed"), "{out}");
@@ -1197,7 +1213,7 @@ fn octopus_merges_check_every_incoming_commit() {
     run(&repo, "git", &["merge", "-q", "--no-commit", "one", "two"], None);
     assert_eq!(fs::read_to_string(repo.join(".git/MERGE_HEAD")).unwrap().lines().count(), 2);
     let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(b"local plaintext\n"))).unwrap();
-    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("100644,{},three.secret", blob.trim())], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{},three.secret", blob.trim())], None);
     run(&repo, "git", &["commit", "-qm", "octopus"], None);
     assert_eq!(run(&repo, "git", &["rev-list", "--parents", "-1", "HEAD"], None).split(|b| *b == b' ').count(), 4);
     assert_eq!(committed(&repo, "one.secret"), run(&repo, "git", &["show", "one:one.secret"], None));

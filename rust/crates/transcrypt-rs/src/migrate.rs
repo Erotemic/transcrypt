@@ -40,6 +40,9 @@ fn v2_rule(line: &[u8]) -> bool {
         && split_pattern(line).1.split(u8::is_ascii_whitespace).any(v2_token)
 }
 
+/// A backslash escape: the backslash and the byte it escapes.
+const ESCAPE_LEN: usize = 2;
+
 /// Split an attribute line into its pattern and the rest. A pattern that
 /// starts with `"` is C-quoted (it may contain blanks) and ends at the
 /// closing unescaped quote; otherwise it ends at the first blank.
@@ -49,7 +52,7 @@ fn split_pattern(line: &[u8]) -> (&[u8], &[u8]) {
     let end = if body.starts_with(b"\"") {
         let mut i = 1;
         while i < body.len() && body[i] != b'"' {
-            i += if body[i] == b'\\' { 2 } else { 1 };
+            i += if body[i] == b'\\' { ESCAPE_LEN } else { 1 };
         }
         (i + 1).min(body.len())
     } else {
@@ -102,8 +105,10 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
         .map(|(path, _)| *path).collect();
     // A committed state, except for an interrupted migration's own changes.
     let status = git(root, &["status", "--porcelain", "-z", "--untracked-files=no"])?;
-    for entry in status.split(|b| *b == 0).filter(|e| e.len() > 3) {
-        let path = &entry[3..];
+    // `git status --porcelain`: the two status letters, a space, the path.
+    const STATUS_PREFIX_LEN: usize = b"XY ".len();
+    for entry in status.split(|b| *b == 0).filter(|e| e.len() > STATUS_PREFIX_LEN) {
+        let path = &entry[STATUS_PREFIX_LEN..];
         let own = resuming && entry[0] != b'R'
             && (path == CONFIG_PATH.as_bytes() || is_attributes_file(path) || selected.contains(&path));
         if !own {

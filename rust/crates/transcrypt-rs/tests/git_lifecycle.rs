@@ -2,6 +2,8 @@
 mod common;
 use common::*;
 use std::{fs, path::Path};
+use transcrypt_rs::KEY_SIZE;
+use transcrypt_v3_core::CONFIG_LEN;
 
 /// Unlocked means exactly one private key file in a private directory, and
 /// no agent; locked means no key file.
@@ -10,8 +12,8 @@ fn assert_unlocked(root: &Path, expected: bool) {
     let key = dir.join("key");
     if expected {
         let meta = fs::symlink_metadata(&key).expect("unlocked checkout must store its key");
-        assert!(meta.file_type().is_file() && meta.len() == 55 + 64,
-            "the key file holds the public config it unlocks and the 64-byte derived key");
+        assert!(meta.file_type().is_file() && meta.len() == (CONFIG_LEN + KEY_SIZE) as u64,
+            "the key file holds the public config it unlocks and the derived key");
         assert!(owner_only(&key), "key file must be private");
         assert!(owner_only(&dir));
         let items: Vec<_> = fs::read_dir(&dir).unwrap().map(|f| f.unwrap().file_name()).collect();
@@ -32,14 +34,14 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     // The passphrase itself is stored nowhere.
     for file in ["config", "transcrypt-v3/key"] {
         let bytes = fs::read(source.join(".git").join(file)).unwrap();
-        assert!(!bytes.windows(20).any(|w| w == &pass[..20]), "passphrase found in .git/{file}");
+        assert!(!bytes.windows(PASS_EXCERPT).any(|w| w == &pass[..PASS_EXCERPT]), "passphrase found in .git/{file}");
     }
     fs::write(source.join("account.secret"), b"private content\n").unwrap();
     fs::write(source.join("ledger.secret"), b"ledger content\n").unwrap();
     commit(&source, &["account.secret", "ledger.secret"], "private data");
     let object = run(&source, "git", &["show", "HEAD:account.secret"], None);
     assert!(is_record(&object));
-    assert!(!object.windows(7).any(|w| w == b"private"));
+    assert!(!object.windows(b"private".len()).any(|w| w == b"private"));
     let ledger_object = run(&source, "git", &["show", "HEAD:ledger.secret"], None);
     // A local .git/info/attributes override is the user's choice, but
     // doctor reports it as missing protection.
@@ -109,11 +111,11 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     let ledger_oid = String::from_utf8(run(
         &clone, "git", &["rev-parse", ":ledger.secret"], None,
     )).unwrap();
-    run(&clone, "git", &["update-index", "--cacheinfo", "100644", ledger_oid.trim(), "account.secret"], None);
+    run(&clone, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, ledger_oid.trim(), "account.secret"], None);
     run_fails(&clone, bin, &["verify-index"], None);
     run_fails(&clone, bin, &["hydrate"], None);
     assert_eq!(fs::read(clone.join("account.secret")).unwrap(), b"private content\n");
-    run(&clone, "git", &["update-index", "--cacheinfo", "100644", account_oid.trim(), "account.secret"], None);
+    run(&clone, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, account_oid.trim(), "account.secret"], None);
     run(&clone, bin, &["verify-index"], None);
     // The lower-level filter must also reject valid ciphertext with a
     // mismatched Git path, even if an attacker invokes it directly.
@@ -125,7 +127,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     let staged_id = String::from_utf8(run(
         &clone, "git", &["hash-object", "-w", "--stdin"], Some(&staged_blob),
     )).unwrap();
-    run(&clone, "git", &["update-index", "--cacheinfo", "100644", staged_id.trim(), "account.secret"], None);
+    run(&clone, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, staged_id.trim(), "account.secret"], None);
     fs::write(clone.join("account.secret"), &staged_blob).unwrap();
     run(&clone, bin, &["hydrate"], None);
     assert_eq!(fs::read(clone.join("account.secret")).unwrap(), b"staged snapshot\n");
@@ -152,7 +154,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     let forged_oid = String::from_utf8(run(
         &clone, "git", &["hash-object", "-w", "--stdin"], Some(b"STAGED PLAINTEXT\n"),
     )).unwrap();
-    run(&clone, "git", &["update-index", "--cacheinfo", "100644", forged_oid.trim(), "account.secret"], None);
+    run(&clone, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, forged_oid.trim(), "account.secret"], None);
     run(&clone, "git", &["commit", "-qm", "plaintext staged around the filter"], None);
     let committed = run(&clone, "git", &["show", "HEAD:account.secret"], None);
     assert!(is_record(&committed));
@@ -160,7 +162,7 @@ fn git_init_commit_clone_unlock_hydrate_commit_lock_reunlock() {
     // A record moved to another path in a commit is never re-encrypted for
     // it: the hook refuses, it does not launder the move.
     run(&clone, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
-    run(&clone, "git", &["update-index", "--cacheinfo", "100644", ledger_oid.trim(), "account.secret"], None);
+    run(&clone, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, ledger_oid.trim(), "account.secret"], None);
     run(&clone, "git", &["commit", "-q", "--no-verify", "-m", "hostile move"], None);
     run_fails(&clone, bin, &["verify-index"], None);
     fs::write(clone.join("README"), b"public edit\n").unwrap();

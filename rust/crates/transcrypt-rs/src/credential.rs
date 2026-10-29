@@ -192,7 +192,7 @@ pub(crate) fn store(root: &Path, config: &[u8], key: &SecretKey) -> Result<(), S
     let temp = format!("{KEY_FILE}.{}.tmp", std::process::id());
     let temp = OsStr::new(&temp);
     let _ = dir.unlink(temp);
-    let mut file = dir.create_new(temp, 0o600).map_err(|e| format!("cannot create the key file: {e}"))?;
+    let mut file = dir.create_new(temp, crate::modes::PRIVATE_FILE).map_err(|e| format!("cannot create the key file: {e}"))?;
     let written = file.write_all(config).and_then(|_| file.write_all(&key[..])).and_then(|_| file.sync_all());
     drop(file);
     if let Err(e) = written.and_then(|_| dir.rename_to(temp, &dir, OsStr::new(KEY_FILE))) {

@@ -8,6 +8,17 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{fs, time::Duration};
+use transcrypt_rs::MAX_RECORD;
+use transcrypt_v3_core::MAX_PKT_LEN;
+
+/// Marsaglia's xorshift64 shifts (13, 7, 17).
+const SHIFTS: (u32, u32, u32) = (13, 7, 17);
+/// A pkt-line header: the total length in 4 hex digits; `0000` is a flush.
+const PKT_HEADER_LEN: usize = 4;
+const FLUSH_PKT: &[u8] = b"0000";
+const HEX_RADIX: u32 = 16;
+/// Longer than any Unix socket address (`sun_path`: 104 or 108 bytes).
+const SUN_PATH_MAX: usize = 108;
 
 #[test]
 fn interrupted_lock_resumes_and_unstaged_edits_are_never_discarded() {
@@ -139,7 +150,7 @@ fn foreign_truncated_and_plaintext_index_entries_fail_closed() {
     // Valid ciphertext from another repository (different salt and key).
     let foreign = staged(&other, "a.secret");
     let id = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(&foreign))).unwrap();
-    run(&repo, "git", &["update-index", "--cacheinfo", "100644", id.trim(), "a.secret"], None);
+    run(&repo, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, id.trim(), "a.secret"], None);
     run_fails(&repo, bin(), &["verify-index"], None);
     run(&repo, "git", &["reset", "-q", "HEAD", "--", "a.secret"], None);
     run(&repo, bin(), &["verify-index"], None);
@@ -147,7 +158,7 @@ fn foreign_truncated_and_plaintext_index_entries_fail_closed() {
     let record = staged(&repo, "dir/b.secret");
     for bad in [record[..record.len() - 1].to_vec(), [record.clone(), vec![0]].concat()] {
         let id = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(&bad))).unwrap();
-        run(&repo, "git", &["update-index", "--cacheinfo", "100644", id.trim(), "dir/b.secret"], None);
+        run(&repo, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, id.trim(), "dir/b.secret"], None);
         run_fails(&repo, bin(), &["verify-index"], None);
         run_fails(&repo, bin(), &["hydrate"], None);
         run(&repo, "git", &["reset", "-q", "HEAD", "--", "dir/b.secret"], None);
@@ -203,7 +214,9 @@ fn key_agent_is_not_dumpable_or_ptrace_readable() {
     let proc_dir = PathBuf::from(format!("/proc/{}", cred.pid));
     let limits = fs::read_to_string(proc_dir.join("limits")).unwrap();
     let core = limits.lines().find(|l| l.starts_with("Max core file size")).unwrap();
-    assert!(core.split_whitespace().nth(4) == Some("0"), "core dumps enabled: {core}");
+    // "Max core file size <soft> <hard> <units>".
+    const SOFT_LIMIT_FIELD: usize = 4;
+    assert!(core.split_whitespace().nth(SOFT_LIMIT_FIELD) == Some("0"), "core dumps enabled: {core}");
     // The kernel makes a non-dumpable process's /proc entries root-owned,
     // which is what denies same-UID ptrace attach and /proc/PID/mem reads.
     use std::os::unix::fs::MetadataExt;
@@ -215,11 +228,12 @@ fn key_agent_is_not_dumpable_or_ptrace_readable() {
 fn deep_repository_paths_and_subdirectories_work() {
     let mut scratch = Scratch::new("deep");
     // The absolute socket path would exceed the 104/108-byte sun_path limit.
-    let deep = scratch.root.join("a".repeat(60)).join("b".repeat(60));
+    const COMPONENT_LEN: usize = 60;
+    let deep = scratch.root.join("a".repeat(COMPONENT_LEN)).join("b".repeat(COMPONENT_LEN));
     fs::create_dir_all(&deep).unwrap();
     let repo_name = deep.strip_prefix(&scratch.root).unwrap().join("repo");
     let repo = scratch.repo(repo_name.to_str().unwrap());
-    assert!(socket(&repo).as_os_str().len() > 108);
+    assert!(socket(&repo).as_os_str().len() > SUN_PATH_MAX);
     run(&repo.join("dir"), bin(), &["status"], None);
     run(&repo.join("dir"), bin(), &["verify-index"], None);
     run(&repo, bin(), &["lock"], None);
@@ -350,12 +364,12 @@ fn pre_push_and_audit_refuse_plaintext_in_history() {
     // A plaintext secret committed with --no-verify.
     let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
         Some(b"PLAINTEXT LEAK\n"))).unwrap();
-    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", REGULAR_FILE_MODE, blob.trim(), "leak.secret"], None);
     // The pre-commit hook encrypts what was staged around the filter.
     run(&repo, "git", &["commit", "-qm", "sealed by pre-commit"], None);
     assert!(is_record(&staged(&repo, "leak.secret")));
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
-    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", REGULAR_FILE_MODE, blob.trim(), "leak.secret"], None);
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "bypass"], None);
     let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
     assert!(err.contains("leak.secret") && err.contains("refusing to push"), "{err}");
@@ -398,7 +412,7 @@ fn locked_pre_commit_checks_envelopes_and_allows_other_commits() {
     run(&repo, "git", &["commit", "-qam", "public change while locked"], None);
     let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
         Some(b"PLAINTEXT WHILE LOCKED\n"))).unwrap();
-    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "late.secret"], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", REGULAR_FILE_MODE, blob.trim(), "late.secret"], None);
     run_fails(&repo, "git", &["commit", "-qm", "plaintext while locked"], None);
     run(&repo, "git", &["rm", "-q", "--cached", "late.secret"], None);
     // The locked checkout holds ciphertext and stays usable: it is clean,
@@ -439,7 +453,10 @@ fn worktree_files(root: &Path) -> Vec<PathBuf> {
 fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
     let mut scratch = Scratch::new("kill");
     let repo = scratch.repo("repo");
-    for i in 0..20 {
+    // Added to the two secrets of `Scratch::repo`.
+    const ADDED: usize = 20;
+    const SEEDED: usize = 2;
+    for i in 0..ADDED {
         fs::write(repo.join(format!("dir/f{i}.secret")), format!("plaintext number {i}\n")).unwrap();
     }
     commit_all(&repo, "many secrets");
@@ -451,21 +468,27 @@ fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
             files.push((path, plaintext, run(&repo, "git", &["show", &format!(":{name}")], None)));
         }
     }
-    assert_eq!(files.len(), 22);
+    assert_eq!(files.len(), ADDED + SEEDED);
     let listing = worktree_files(&repo);
     let start = std::time::Instant::now();
     run(&repo, bin(), &["lock"], None);
     let full = start.elapsed().as_micros() as u64;
     unlock(&repo);
     let live = |repo: &Path| unlocked(repo);
-    for round in 0..12u64 {
-        let op = if round % 2 == 0 { "lock" } else { "hydrate" };
+    // Each operation is killed at 1/7, 2/7, ... 6/7 of a full `lock`.
+    const OPS: [&str; 2] = ["lock", "hydrate"];
+    const KILL_FRACTIONS: u64 = 7;
+    const KILL_ROUNDS: u64 = (KILL_FRACTIONS - 1) * OPS.len() as u64;
+    const RESUME_ATTEMPTS: usize = 20;
+    const RESUME_RETRY: Duration = Duration::from_millis(100);
+    for round in 0..KILL_ROUNDS {
+        let op = OPS[(round % OPS.len() as u64) as usize];
         if !live(&repo) {
             run(&repo, bin(), &["unlock", "--password-stdin", "--no-hydrate"], Some(PASS));
         }
         let mut child = Command::new(bin()).arg(op).current_dir(&repo)
             .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-        std::thread::sleep(Duration::from_micros(full * (round / 2 + 1) / 7));
+        std::thread::sleep(Duration::from_micros(full * (round / OPS.len() as u64 + 1) / KILL_FRACTIONS));
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(worktree_files(&repo), listing, "round {round}: unexpected worktree file");
@@ -481,8 +504,8 @@ fn killed_lock_and_hydrate_never_corrupt_or_leave_plaintext_behind() {
         let mut attempts = 0;
         while !exec(&repo, bin(), &[op], None).status.success() {
             attempts += 1;
-            assert!(attempts < 20, "round {round}: {op} cannot resume");
-            std::thread::sleep(Duration::from_millis(100));
+            assert!(attempts < RESUME_ATTEMPTS, "round {round}: {op} cannot resume");
+            std::thread::sleep(RESUME_RETRY);
         }
         for (path, plaintext, ciphertext) in &files {
             let expected = if op == "lock" { ciphertext } else { plaintext };
@@ -539,16 +562,17 @@ fn init_encrypts_files_already_tracked_in_plaintext() {
 fn oversized_hostile_blobs_are_refused() {
     let mut scratch = Scratch::new("oversized");
     let repo = scratch.repo("repo");
-    let big = vec![b'A'; 16 * 1024 * 1024 + 39];
+    let big = vec![b'A'; MAX_RECORD + 1];
     let path = scratch.root.join("big");
     fs::write(&path, &big).unwrap();
     let oid = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--no-filters", path.to_str().unwrap()], None)).unwrap();
-    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", oid.trim(), "big.secret"], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", REGULAR_FILE_MODE, oid.trim(), "big.secret"], None);
+    let limit = format!("{} MiB", transcrypt_rs::MAX_FILE / transcrypt_rs::MIB);
     let err = run_fails(&repo, bin(), &["verify-index"], None);
-    assert!(err.contains("16 MiB"), "{err}");
+    assert!(err.contains(&limit), "{err}");
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "oversized"], None);
     let err = run_fails(&repo, bin(), &["audit", "HEAD"], None);
-    assert!(err.contains("16 MiB") && err.contains("big.secret"), "{err}");
+    assert!(err.contains(&limit) && err.contains("big.secret"), "{err}");
     run(&repo, bin(), &["audit", "HEAD~1"], None);
     run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
     run(&repo, bin(), &["verify-index"], None);
@@ -576,7 +600,8 @@ fn agent_does_not_keep_inherited_descriptors() {
     // EOF arrives only if no process (the agent) still holds the write end.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || { let mut buf = Vec::new(); let _ = reader.read_to_end(&mut buf); let _ = tx.send(()); });
-    assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok(), "agent kept an inherited pipe open");
+    const EVENT_WAIT: Duration = Duration::from_secs(10);
+    assert!(rx.recv_timeout(EVENT_WAIT).is_ok(), "agent kept an inherited pipe open");
 }
 
 #[cfg(unix)]
@@ -605,7 +630,7 @@ fn server_pre_receive_hook_refuses_plaintext_pushes() {
     assert!(push(&["push", "-q", "origin", "HEAD:refs/heads/main"]).status.success());
     let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
         Some(b"SERVER MUST REFUSE\n"))).unwrap();
-    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "leak.secret"], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", REGULAR_FILE_MODE, blob.trim(), "leak.secret"], None);
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "bypass"], None);
     let out = push(&["push", "-q", "--no-verify", "origin", "HEAD:refs/heads/main"]);
     let err = String::from_utf8_lossy(&out.stderr);
@@ -701,7 +726,7 @@ fn incremental_audit_covers_merges_and_config_changes() {
     run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
     let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"],
         Some(b"MERGED PLAINTEXT\n"))).unwrap();
-    run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "side.secret"], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", REGULAR_FILE_MODE, blob.trim(), "side.secret"], None);
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "plaintext on side"], None);
     run(&repo, "git", &["checkout", "-q", &main], None);
     fs::write(repo.join("README"), b"main moves on\n").unwrap();
@@ -718,7 +743,7 @@ fn incremental_audit_covers_merges_and_config_changes() {
     let mut config = fs::read(repo.join(".transcrypt/config")).unwrap();
     config[10] ^= 1;
     let oid = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(&config))).unwrap();
-    run(&repo, "git", &["update-index", "--cacheinfo", "100644", oid.trim(), ".transcrypt/config"], None);
+    run(&repo, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, oid.trim(), ".transcrypt/config"], None);
     run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "swap config"], None);
     let err = run_fails(&repo, bin(), &["audit", "HEAD", "--not", "published"], None);
     assert!(err.contains("not v3 ciphertext for its configuration"), "{err}");
@@ -799,23 +824,35 @@ fn agent_survives_random_hostile_frames() {
     private(&repo);
     let config = fs::read(repo.join(".transcrypt/config")).unwrap();
     let record = staged(&repo, "a.secret");
-    let mut state = 0x51ed_270b_2b3a_44c1u64;
-    let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
-    for _ in 0..150 {
-        let op = [b'P', b'E', b'D', b'X', b'Q', 0][(next() % 6) as usize];
+    const SEED: u64 = 0x51ed_270b_2b3a_44c1;
+    const ROUNDS: usize = 150;
+    // One in so many requests has its config, or its body, damaged, or
+    // is sent as a lying frame.
+    const DAMAGE_CONFIG: u64 = 3;
+    const DAMAGE_BODY: u64 = 2;
+    const LYING_FRAME: u64 = 4;
+    /// The most garbage bytes after a lying frame's config.
+    const MAX_GARBAGE: u64 = 64;
+    const OPS: [u8; 6] = [b'P', b'E', b'D', b'X', b'Q', 0];
+    const PATHS: [&[u8]; 5] = [b"a.secret", b"dir/b.secret", b"../a.secret", b"", b"a.secret\0"];
+    let mut state = SEED;
+    let mut next = move || { state ^= state << SHIFTS.0; state ^= state >> SHIFTS.1; state ^= state << SHIFTS.2; state };
+    let pick = |n: u64, len: usize| (n % len as u64) as usize;
+    for _ in 0..ROUNDS {
+        let op = OPS[pick(next(), OPS.len())];
         let mut cfg = config.clone();
-        if next() % 3 == 0 { let i = (next() as usize) % cfg.len(); cfg[i] ^= 1 << (next() % 8); }
-        let path: &[u8] = [&b"a.secret"[..], b"dir/b.secret", b"../a.secret", b"", b"a.secret\0"][(next() % 5) as usize];
+        if next() % DAMAGE_CONFIG == 0 { let i = pick(next(), cfg.len()); cfg[i] ^= 1 << (next() % u64::from(u8::BITS)); }
+        let path: &[u8] = PATHS[pick(next(), PATHS.len())];
         let mut body = record.clone();
-        if next() % 2 == 0 && !body.is_empty() { let i = (next() as usize) % body.len(); body[i] ^= 1; }
+        if next() % DAMAGE_BODY == 0 && !body.is_empty() { let i = pick(next(), body.len()); body[i] ^= 1; }
         let exact = op == b'D' && cfg == config && path == b"a.secret" && body == record;
         if op == b'X' && cfg == config { continue; } // a valid stop request would end the session
-        if next() % 4 == 0 {
+        if next() % LYING_FRAME == 0 {
             // Garbage or a frame whose length fields lie (claims more than sent).
             let mut stream = UnixStream::connect(socket(&repo)).unwrap();
             let mut frame = vec![op];
             frame.extend_from_slice(&cfg[..(next() as usize) % (cfg.len() + 1)]);
-            frame.extend((0..(next() % 64)).map(|_| next() as u8));
+            frame.extend((0..(next() % MAX_GARBAGE)).map(|_| next() as u8));
             let _ = stream.write_all(&frame);
             drop(stream);
             continue;
@@ -830,15 +867,15 @@ fn agent_survives_random_hostile_frames() {
 }
 
 fn pkt(data: &[u8]) -> Vec<u8> {
-    [format!("{:04x}", data.len() + 4).as_bytes(), data].concat()
+    [format!("{:0PKT_HEADER_LEN$x}", data.len() + PKT_HEADER_LEN).as_bytes(), data].concat()
 }
 
 fn read_pkt(r: &mut impl Read) -> Option<Vec<u8>> {
-    let mut h = [0u8; 4];
+    let mut h = [0u8; PKT_HEADER_LEN];
     r.read_exact(&mut h).unwrap();
-    let n = usize::from_str_radix(std::str::from_utf8(&h).unwrap(), 16).unwrap();
+    let n = usize::from_str_radix(std::str::from_utf8(&h).unwrap(), HEX_RADIX).unwrap();
     if n == 0 { return None; }
-    let mut d = vec![0u8; n - 4];
+    let mut d = vec![0u8; n - PKT_HEADER_LEN];
     r.read_exact(&mut d).unwrap();
     Some(d)
 }
@@ -861,14 +898,14 @@ fn long_running_filter_protocol() {
         .current_dir(&repo).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
     let mut to = child.stdin.take().unwrap();
     let mut from = child.stdout.take().unwrap();
-    to.write_all(&[pkt(b"git-filter-client\n"), pkt(b"version=2\n"), b"0000".to_vec(),
-        pkt(b"capability=clean\n"), pkt(b"capability=smudge\n"), pkt(b"capability=delay\n"), b"0000".to_vec()].concat()).unwrap();
+    to.write_all(&[pkt(b"git-filter-client\n"), pkt(b"version=2\n"), FLUSH_PKT.to_vec(),
+        pkt(b"capability=clean\n"), pkt(b"capability=smudge\n"), pkt(b"capability=delay\n"), FLUSH_PKT.to_vec()].concat()).unwrap();
     assert_eq!(read_until_flush(&mut from), b"git-filter-server\nversion=2\n");
     assert_eq!(read_until_flush(&mut from), b"capability=clean\ncapability=smudge\n");
     let mut request = |command: &str, path: &[u8], content: &[u8]| -> (Vec<u8>, Vec<u8>) {
-        let mut frame = [pkt(format!("command={command}\n").as_bytes()), pkt(&[b"pathname=", path, b"\n"].concat()), b"0000".to_vec()].concat();
-        for chunk in content.chunks(65516) { frame.extend(pkt(chunk)); }
-        frame.extend(b"0000");
+        let mut frame = [pkt(format!("command={command}\n").as_bytes()), pkt(&[b"pathname=", path, b"\n"].concat()), FLUSH_PKT.to_vec()].concat();
+        for chunk in content.chunks(MAX_PKT_LEN - PKT_HEADER_LEN) { frame.extend(pkt(chunk)); }
+        frame.extend(FLUSH_PKT);
         to.write_all(&frame).unwrap();
         let status = read_until_flush(&mut from);
         if status != b"status=success\n" { return (status, Vec::new()); }
@@ -882,7 +919,7 @@ fn long_running_filter_protocol() {
     assert_eq!(request("smudge", b"dir/b.secret", &record).0, b"status=error\n");
     assert_eq!(request("clean", b"../x.secret", b"x").0, b"status=error\n");
     // Oversized content is read to its end and refused; the session goes on.
-    assert_eq!(request("clean", b"a.secret", &vec![b'x'; 16 * 1024 * 1024 + 39]).0, b"status=error\n");
+    assert_eq!(request("clean", b"a.secret", &vec![b'x'; MAX_RECORD + 1]).0, b"status=error\n");
     assert_eq!(request("smudge", b"a.secret", &record).1, b"alpha plaintext\n");
     // A malformed packet ends the process with an error.
     to.write_all(b"00G0").unwrap();
@@ -1040,7 +1077,7 @@ fn unknown_incoming_commits_are_never_taken_for_none() {
     let mut scratch = Scratch::new("incoming");
     let repo = scratch.repo("repo");
     let blob = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(b"staged plaintext\n"))).unwrap();
-    let stage = || run(&repo, "git", &["update-index", "--add", "--cacheinfo", "100644", blob.trim(), "new.secret"], None);
+    let stage = || run(&repo, "git", &["update-index", "--add", "--cacheinfo", REGULAR_FILE_MODE, blob.trim(), "new.secret"], None);
     let head = || run(&repo, "git", &["rev-parse", "HEAD"], None);
     for (name, contents) in [("MERGE_HEAD", &b"not an object id\n"[..]), ("CHERRY_PICK_HEAD", b"0000\n")] {
         stage();
@@ -1088,7 +1125,8 @@ fn crashed_merge_inputs_are_purged() {
     let dir = repo.join(".git/transcrypt-v3-scratch");
     fs::create_dir(&dir).unwrap();
     make_private_dir(&dir);
-    fs::write(dir.join("2147483646-ours"), b"LEFTOVER PLAINTEXT\n").unwrap();
+    // Named for a process id no live process has.
+    fs::write(dir.join(format!("{}-ours", i32::MAX - 1)), b"LEFTOVER PLAINTEXT\n").unwrap();
     let main = String::from_utf8(run(&repo, "git", &["branch", "--show-current"], None)).unwrap();
     run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
     fs::write(repo.join("a.secret"), b"side\n").unwrap();
@@ -1226,7 +1264,9 @@ fn pulled_rekey_retires_the_stale_agent() {
     run(&clone, bin(), &["unlock", "--private", "--password-stdin"], Some(PASS));
     run(&clone, "git", &["pull", "-q", "--no-rebase"], None);
     run(&clone, bin(), &["lock"], None);
-    std::thread::sleep(Duration::from_millis(300));
+    // Time for the stale agent to remove its socket as it exits.
+    const AGENT_EXIT: Duration = Duration::from_millis(300);
+    std::thread::sleep(AGENT_EXIT);
     assert!(!socket(&clone).exists(), "a stale agent survived lock");
 }
 
@@ -1245,14 +1285,14 @@ fn trees_listing_a_path_twice_are_refused() {
         let listing = String::from_utf8(run(&repo, "git", &["ls-tree", "HEAD"], None)).unwrap();
         let mut tree: String = listing.lines().filter(|l| !l.ends_with("\ta.secret")).map(|l| format!("{l}\n")).collect();
         let (x, y) = if moved_first { (&b, &a) } else { (&a, &b) };
-        tree.push_str(&format!("100644 blob {x}\ta.secret\n100644 blob {y}\ta.secret\n"));
+        tree.push_str(&format!("{REGULAR_FILE_MODE} blob {x}\ta.secret\n{REGULAR_FILE_MODE} blob {y}\ta.secret\n"));
         let tree = String::from_utf8(run(&repo, "git", &["mktree"], Some(tree.as_bytes()))).unwrap();
         let first = String::from_utf8(run(&repo, "git", &["commit-tree", tree.trim(), "-p", "HEAD", "-m", "dup"], None)).unwrap();
         let second = String::from_utf8(run(&repo, "git", &["commit-tree", tree.trim(), "-p", first.trim(), "-m", "dup"], None)).unwrap();
         run(&repo, "git", &["reset", "-q", "--soft", second.trim()], None);
         // The keyed audit refuses that history (the record does not open there).
         run_fails(&repo, bin(), &["audit", "HEAD"], None);
-        run(&repo, "git", &["update-index", "--cacheinfo", &format!("100644,{b},a.secret")], None);
+        run(&repo, "git", &["update-index", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{b},a.secret")], None);
         fs::write(repo.join("z"), b"z\n").unwrap();
         run(&repo, "git", &["add", "z"], None);
         for locked in [false, true] {
@@ -1282,7 +1322,7 @@ fn newly_protected_files_are_authenticated_by_the_hook() {
     let mut scratch = Scratch::new("newlyprotected");
     let repo = scratch.repo("repo");
     let record = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD:a.secret"], None)).unwrap();
-    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("100644,{},c.data", record.trim())], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{},c.data", record.trim())], None);
     run(&repo, "git", &["commit", "-qm", "copy", "--no-verify"], None);
     fs::write(repo.join("README"), b"edited\n").unwrap();
     commit(&repo, &["README"], "unrelated");

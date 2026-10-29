@@ -41,6 +41,7 @@ mod git;
 mod lifecycle;
 mod merge;
 mod migrate;
+mod modes;
 #[cfg_attr(unix, path = "os_unix.rs")]
 #[cfg_attr(windows, path = "os_windows.rs")]
 mod os;
@@ -141,7 +142,7 @@ fn run() -> Result<(), String> {
             }
         },
         "protect" | "unprotect" => {
-            if args.len() < 2 { return Err(format!("{action} takes one or more .gitattributes patterns")); }
+            if args[1..].is_empty() { return Err(format!("{action} takes one or more .gitattributes patterns")); }
             if action == "protect" { protect(&root, &args[1..]) } else { unprotect(&root, &args[1..]) }
         },
         "diff" => {
@@ -166,13 +167,15 @@ fn run() -> Result<(), String> {
             }
         },
         "clean" | "smudge" => {
-            if args.len() != 2 { return Err("Git filter requires exactly one %f pathname".into()); }
+            let [_, path] = &args[..] else { return Err("Git filter requires exactly one %f pathname".into()) };
             let input = read_record(io::stdin())?;
-            let output = Filters::new(&root).convert(action == "clean", os::os_bytes(&args[1]), input)?;
+            let output = Filters::new(&root).convert(action == "clean", os::os_bytes(path), input)?;
             io::stdout().write_all(&output).map_err(|_| "cannot write output".into())
         },
         "pre-push" => {
-            if args.len() > 3 { return Err("pre-push takes the remote name and URL".into()); }
+            // Git passes the remote's name and URL.
+            const PRE_PUSH_ARGUMENTS: usize = 2;
+            if args[1..].len() > PRE_PUSH_ARGUMENTS { return Err("pre-push takes the remote name and URL".into()); }
             pre_push(&root, args.get(1).map(OsString::as_os_str))
         },
         _ => Err(format!("unknown v3 operation; {USAGE}")),
@@ -284,6 +287,11 @@ text, and `git mv` is re-encrypted for the new name when you commit. Equal
 plaintexts at the same path give equal ciphertexts. Filenames, sizes and
 history structure are public. See docs/verification/V3-USER-GUIDE.md.";
 
+/// Seconds in each unit `parse_duration` accepts.
+const SECOND: u64 = 1;
+const MINUTE: u64 = 60 * SECOND;
+const HOUR: u64 = 60 * MINUTE;
+
 /// A positive duration: a number with an optional unit `s`, `m` (the
 /// default) or `h`.
 fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
@@ -291,15 +299,23 @@ fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
         Some((i, _)) => text.split_at(i),
         None => (text, "m"),
     };
-    let scale = match unit { "s" => 1, "m" => 60, "h" => 3600, _ => 0 };
-    match number.parse::<u64>() {
-        Ok(n) if n > 0 && scale > 0 => Ok(std::time::Duration::from_secs(n.saturating_mul(scale))),
+    let scale = match unit { "s" => Some(SECOND), "m" => Some(MINUTE), "h" => Some(HOUR), _ => None };
+    match (number.parse::<u64>(), scale) {
+        (Ok(n), Some(scale)) if n > 0 => Ok(std::time::Duration::from_secs(n.saturating_mul(scale))),
         _ => Err(format!("--timeout takes a positive duration such as 90s, 15m or 2h (got {text:?})")),
     }
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Bytes of a config id shown to identify it to people.
+const SHORT_ID_LEN: usize = 4;
+
+/// A config id as shown to people: the hex of its first bytes.
+pub(crate) fn short_id(id: &[u8]) -> String {
+    hex(&id[..SHORT_ID_LEN])
 }
 
 /// The public config in force: the worktree's `.transcrypt/config` (read
@@ -332,7 +348,7 @@ pub(crate) fn passphrase(from_stdin: bool, new: bool) -> Result<Zeroizing<Vec<u8
     // Preallocated and wrapped before reading, so the buffer never grows
     // (leaving unwiped copies) and every exit path wipes it.
     let bytes = if from_stdin {
-        let mut value = Zeroizing::new(Vec::with_capacity(MAX_PASSPHRASE + 2));
+        let mut value = Zeroizing::new(Vec::with_capacity(MAX_PASSPHRASE + b"\r\n".len()));
         io::stdin().take(MAX_PASSPHRASE as u64 + 1).read_to_end(&mut value)
             .map_err(|_| "cannot read passphrase from stdin")?;
         if value.len() > MAX_PASSPHRASE {
