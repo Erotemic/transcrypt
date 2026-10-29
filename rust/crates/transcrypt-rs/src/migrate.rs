@@ -11,12 +11,17 @@
 
 use std::{fs, path::{Path, PathBuf}};
 use crate::{
+    attributes::split_lines,
     git::*,
     passphrase,
     setup::{init_with_rollback, uncommitted_setup},
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
     Options,
 };
+
+/// How a Bash transcrypt (v2) record starts: OpenSSL's `Salted__`, in
+/// base64.
+const V2_CIPHERTEXT: &[u8] = b"U2FsdGVk";
 
 /// A Bash transcrypt driver name: `crypt` or `crypt-<context>`.
 fn v2_value(value: &[u8]) -> bool {
@@ -57,8 +62,8 @@ fn split_pattern(line: &[u8]) -> (&[u8], &[u8]) {
 /// pattern and other attributes and gets `transcrypt` instead. Returns the
 /// new text if anything changed.
 fn rewrite_attributes(text: &[u8]) -> Option<Vec<u8>> {
-    if !text.split(|b| *b == b'\n').any(v2_rule) { return None; }
-    let lines: Vec<Vec<u8>> = text.split(|b| *b == b'\n').map(|line| {
+    if !split_lines(text).any(v2_rule) { return None; }
+    let lines: Vec<Vec<u8>> = split_lines(text).map(|line| {
         if !v2_rule(line) { return line.to_vec(); }
         let (pattern, rest) = split_pattern(line);
         let mut out = pattern.to_vec();
@@ -84,7 +89,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
     // Rules outside the repository's own files cannot be converted for
     // everyone; files they select would silently stay unprotected.
     let info = common_dir(root).join("info/attributes");
-    if fs::read(&info).is_ok_and(|text| text.split(|b| *b == b'\n').any(v2_rule)) {
+    if fs::read(&info).is_ok_and(|text| split_lines(&text).any(v2_rule)) {
         return Err(format!("{} has Bash transcrypt rules; move them to .gitattributes (and commit) \
             first, so that the conversion keeps them for everyone", info.display()));
     }
@@ -109,7 +114,7 @@ pub(crate) fn migrate(root: &Path, options: &Options) -> Result<(), String> {
         let name = String::from_utf8_lossy(path);
         let target = find_protected(root, &indexed_path(path)?)?
             .ok_or_else(|| format!("{name} is missing from the worktree"))?;
-        if target.read()?.0.starts_with(b"U2FsdGVk") {
+        if target.read()?.0.starts_with(V2_CIPHERTEXT) {
             return Err(format!("{name} still holds v2 ciphertext: unlock it with Bash transcrypt first"));
         }
     }
@@ -202,7 +207,7 @@ fn convert(root: &Path, attribute_files: &[PathBuf], selected: &[&[u8]], rewritt
     // Nothing may stay v2 ciphertext (a rule Git applied only
     // case-insensitively, or one that could not be converted).
     for entry in indexed_files(root)? {
-        if git_blob_if_record_sized(root, &entry.oid)?.is_some_and(|b| b.starts_with(b"U2FsdGVk")) {
+        if git_blob_if_record_sized(root, &entry.oid)?.is_some_and(|b| b.starts_with(V2_CIPHERTEXT)) {
             return Err(format!("{} is still v2 ciphertext after the conversion (selected by a rule v3 \
                 does not apply, e.g. only case-insensitively); fix its rule in .gitattributes and rerun",
                 entry.name()));

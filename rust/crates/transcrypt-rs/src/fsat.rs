@@ -23,6 +23,15 @@ fn cstr(name: &OsStr) -> io::Result<CString> {
     CString::new(name.as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
 }
 
+/// One path component (no separator, no NUL), as every name-taking `Dir`
+/// operation needs, so that none can reach outside the held directory.
+fn component(name: &OsStr) -> io::Result<CString> {
+    if name.is_empty() || name.as_bytes().contains(&b'/') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a single path component"));
+    }
+    cstr(name)
+}
+
 /// Set this thread's errno.
 fn set_errno(value: libc::c_int) {
     // SAFETY: each returns a pointer to the calling thread's errno.
@@ -38,6 +47,14 @@ fn set_errno(value: libc::c_int) {
 
 fn check(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(rc) }
+}
+
+fn fstat(fd: &impl AsRawFd) -> io::Result<libc::stat> {
+    // SAFETY: `stat` is plain data, for which all zeroes is a valid value.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: an open descriptor and a writable `stat`.
+    check(unsafe { libc::fstat(fd.as_raw_fd(), &mut st) })?;
+    Ok(st)
 }
 
 /// Identity, size and modification time of a file. Writing, truncating or
@@ -61,10 +78,7 @@ impl Stamp {
 
     /// The stamp of an open file.
     pub(crate) fn of(file: &File) -> io::Result<Stamp> {
-        // SAFETY: `st` is fully written by a successful fstat.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        check(unsafe { libc::fstat(file.as_raw_fd(), &mut st) })?;
-        Ok(Stamp::from_stat(&st))
+        fstat(file).map(|st| Stamp::from_stat(&st))
     }
 }
 
@@ -90,22 +104,20 @@ impl Dir {
     /// Open a directory by path (the trusted repository root).
     pub(crate) fn open(path: &Path) -> io::Result<Dir> {
         let name = cstr(path.as_os_str())?;
-        // SAFETY: `name` is a valid NUL-terminated string; the returned fd is owned.
+        // SAFETY: `name` is NUL-terminated and outlives the call.
         let fd = check(unsafe { libc::open(name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) })?;
-        // SAFETY: `fd` is a fresh descriptor we own.
+        // SAFETY: `fd` is a fresh descriptor that nothing else owns.
         Ok(Dir(unsafe { OwnedFd::from_raw_fd(fd) }))
     }
 
-    fn openat(&self, name: &OsStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<OwnedFd> {
-        if name.is_empty() || name.as_bytes().contains(&b'/') {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a single path component"));
-        }
-        let c = cstr(name)?;
-        // SAFETY: valid dirfd and NUL-terminated name; the returned fd is owned.
+    fn openat(&self, name: &OsStr, flags: libc::c_int, mode: u32) -> io::Result<OwnedFd> {
+        let c = component(name)?;
+        // SAFETY: an open directory descriptor and a NUL-terminated name;
+        // the variadic mode is passed as the C `unsigned int` it promotes to.
         let fd = check(unsafe {
             libc::openat(self.0.as_raw_fd(), c.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode as libc::c_uint)
         })?;
-        // SAFETY: `fd` is a fresh descriptor we own.
+        // SAFETY: `fd` is a fresh descriptor that nothing else owns.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
@@ -124,16 +136,16 @@ impl Dir {
     }
 
     /// Exclusively create a new regular file.
-    pub(crate) fn create_new(&self, name: &OsStr, mode: libc::mode_t) -> io::Result<File> {
+    pub(crate) fn create_new(&self, name: &OsStr, mode: u32) -> io::Result<File> {
         self.openat(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode).map(File::from)
     }
 
     /// Create a directory; one that already exists (whatever it is) is not
     /// an error: open it with `subdir`, which refuses anything else.
-    pub(crate) fn mkdir(&self, name: &OsStr, mode: libc::mode_t) -> io::Result<()> {
-        let c = cstr(name)?;
-        // SAFETY: valid dirfd and NUL-terminated name.
-        match check(unsafe { libc::mkdirat(self.0.as_raw_fd(), c.as_ptr(), mode) }) {
+    pub(crate) fn mkdir(&self, name: &OsStr, mode: u32) -> io::Result<()> {
+        let c = component(name)?;
+        // SAFETY: an open directory descriptor and a NUL-terminated name.
+        match check(unsafe { libc::mkdirat(self.0.as_raw_fd(), c.as_ptr(), mode as libc::mode_t) }) {
             Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
             _ => Ok(()),
         }
@@ -141,21 +153,23 @@ impl Dir {
 
     /// Atomically rename `from` in this directory to `to` in `to_dir`.
     pub(crate) fn rename_to(&self, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
-        let (f, t) = (cstr(from)?, cstr(to)?);
-        // SAFETY: valid dirfds and NUL-terminated names.
+        let (f, t) = (component(from)?, component(to)?);
+        // SAFETY: open directory descriptors and NUL-terminated names.
         check(unsafe { libc::renameat(self.0.as_raw_fd(), f.as_ptr(), to_dir.0.as_raw_fd(), t.as_ptr()) }).map(|_| ())
     }
 
     pub(crate) fn unlink(&self, name: &OsStr) -> io::Result<()> {
-        let c = cstr(name)?;
-        // SAFETY: valid dirfd and NUL-terminated name.
+        let c = component(name)?;
+        // SAFETY: an open directory descriptor and a NUL-terminated name.
         check(unsafe { libc::unlinkat(self.0.as_raw_fd(), c.as_ptr(), 0) }).map(|_| ())
     }
 
     fn lstat(&self, name: &OsStr) -> io::Result<libc::stat> {
-        let c = cstr(name)?;
-        // SAFETY: `st` is fully written by a successful fstatat.
+        let c = component(name)?;
+        // SAFETY: `stat` is plain data, for which all zeroes is a valid value.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: an open directory descriptor, a NUL-terminated name and a
+        // writable `stat`.
         check(unsafe { libc::fstatat(self.0.as_raw_fd(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) })?;
         Ok(st)
     }
@@ -199,23 +213,21 @@ impl Dir {
 
     /// Whether only this directory's owner can enter it.
     pub(crate) fn is_private(&self) -> io::Result<bool> {
-        // SAFETY: `st` is fully written by a successful fstat.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        check(unsafe { libc::fstat(self.0.as_raw_fd(), &mut st) })?;
-        Ok(st.st_mode & 0o077 == 0)
+        Ok(fstat(&self.0)?.st_mode & 0o077 == 0)
     }
 
     /// Names of the entries of this directory (excluding `.` and `..`). A
     /// read error is an error, never a shorter listing (callers purge what
     /// they list).
     pub(crate) fn entries(&self) -> io::Result<Vec<OsString>> {
-        // SAFETY: dup returns a new descriptor that fdopendir takes ownership of.
+        // SAFETY: duplicating an open descriptor; the duplicate is ours.
         let dup = check(unsafe { libc::fcntl(self.0.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) })?;
-        // SAFETY: `dup` is a fresh directory descriptor; on failure we still own it.
+        // SAFETY: `dup` is an open directory descriptor; on success the
+        // stream owns it, on failure we still do.
         let stream = unsafe { libc::fdopendir(dup) };
         if stream.is_null() {
             let err = io::Error::last_os_error();
-            // SAFETY: closing the descriptor fdopendir did not take.
+            // SAFETY: `dup` is ours and not used again.
             unsafe { libc::close(dup) };
             return Err(err);
         }
@@ -240,7 +252,7 @@ impl Dir {
                 names.push(OsString::from_vec(name.to_vec()));
             }
         };
-        // SAFETY: closes the stream and the duplicated descriptor.
+        // SAFETY: `stream` is open and not used again; this also closes `dup`.
         unsafe { libc::closedir(stream) };
         result
     }
@@ -248,12 +260,12 @@ impl Dir {
     /// Take an exclusive advisory lock on this directory without waiting;
     /// it is released when the descriptor is closed (also on a crash).
     pub(crate) fn try_lock(&self) -> io::Result<()> {
-        // SAFETY: valid descriptor; flock takes integer arguments only.
+        // SAFETY: an open descriptor; flock takes integer arguments only.
         check(unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }).map(|_| ())
     }
 
     pub(crate) fn sync(&self) -> io::Result<()> {
-        // SAFETY: valid descriptor.
+        // SAFETY: an open descriptor.
         check(unsafe { libc::fsync(self.0.as_raw_fd()) }).map(|_| ())
     }
 }

@@ -1052,18 +1052,7 @@ fn interrupted_commands_converge_when_rerun() {
     fs::write(repo.join(".gitattributes"), b"*.key filter=crypt diff=crypt merge=crypt\n").unwrap();
     fs::write(repo.join("db.key"), b"v2 secret\n").unwrap();
     commit_all(&repo, "v2");
-    let shim = scratch.root.join("shim");
-    fs::create_dir(&shim).unwrap();
-    let real_git = String::from_utf8(run(&repo, "sh", &["-c", "command -v git"], None)).unwrap();
-    fs::write(shim.join("git"), format!("#!/bin/sh\ncase \"$*\" in *--renormalize*) kill -9 $PPID; exit 1;; esac\nexec {} \"$@\"\n",
-        real_git.trim())).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
-    let mut child = Command::new(bin()).args(["migrate", "--password-stdin"]).current_dir(&repo)
-        .env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    child.stdin.take().unwrap().write_all(PASS).unwrap();
-    assert!(!child.wait().unwrap().success(), "the shim kills migrate");
+    assert!(!migrate_with_shim(&scratch.root.join("shim"), &repo, KILL).status.success(), "the shim kills migrate");
     run(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
     assert!(is_record(&staged(&repo, "db.key")));
     run(&repo, "git", &["commit", "-qm", "converted"], None);
@@ -1137,6 +1126,27 @@ fn probe_spoofs_and_amends_are_refused() {
     assert!(err.contains("y.env"), "{err}");
 }
 
+/// What a `git` shim does to kill the `migrate` that runs it.
+#[cfg(unix)]
+const KILL: &str = "kill -9 $PPID; exit 1";
+
+/// `migrate --password-stdin`, with a `git` (in the directory `shim`) on
+/// PATH that runs the shell command `action` instead of the re-encryption
+/// (`git add --renormalize`).
+#[cfg(unix)]
+fn migrate_with_shim(shim: &std::path::Path, repo: &std::path::Path, action: &str) -> std::process::Output {
+    fs::create_dir_all(shim).unwrap();
+    let real_git = String::from_utf8(run(repo, "sh", &["-c", "command -v git"], None)).unwrap();
+    fs::write(shim.join("git"), format!("#!/bin/sh\ncase \"$*\" in *--renormalize*) {action};; esac\nexec {} \"$@\"\n",
+        real_git.trim())).unwrap();
+    make_executable(&shim.join("git"));
+    let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
+    let mut child = Command::new(bin()).args(["migrate", "--password-stdin"]).current_dir(repo)
+        .env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(PASS).unwrap();
+    child.wait_with_output().unwrap()
+}
+
 /// Seventh review F3: a resumed migration that fails again stays
 /// resumable, and a third run completes it.
 #[test]
@@ -1150,21 +1160,8 @@ fn a_failed_resume_of_migrate_stays_resumable() {
     fs::write(repo.join("a.key"), b"v2 secret\n").unwrap();
     commit_all(&repo, "v2");
     let shim = scratch.root.join("shim");
-    fs::create_dir(&shim).unwrap();
-    let real_git = String::from_utf8(run(&repo, "sh", &["-c", "command -v git"], None)).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    let migrate_with = |action: &str| {
-        fs::write(shim.join("git"), format!("#!/bin/sh\ncase \"$*\" in *--renormalize*) {action};; esac\nexec {} \"$@\"\n",
-            real_git.trim())).unwrap();
-        fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
-        let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
-        let mut child = Command::new(bin()).args(["migrate", "--password-stdin"]).current_dir(&repo)
-            .env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
-        child.stdin.take().unwrap().write_all(PASS).unwrap();
-        child.wait_with_output().unwrap()
-    };
-    assert!(!migrate_with("kill -9 $PPID; exit 1").status.success());
-    let out = migrate_with("exit 1");
+    assert!(!migrate_with_shim(&shim, &repo, KILL).status.success());
+    let out = migrate_with_shim(&shim, &repo, "exit 1");
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("rerun"), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(repo.join(".transcrypt/config").exists(), "still resumable");

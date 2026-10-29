@@ -45,7 +45,7 @@ use windows_sys::{
         System::{IO::IO_STATUS_BLOCK, WindowsProgramming::{FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS}},
     },
 };
-use crate::os::{attribute_tag, is_private, set_inherited, set_private, PrivateDescriptor};
+use crate::os::{attribute_tag, is_private, set_inherited, set_private, win32, PrivateDescriptor};
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.to_owned())
@@ -57,8 +57,12 @@ fn nt(status: NTSTATUS) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32))
 }
 
-fn win32(ok: i32) -> io::Result<()> {
-    if ok != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+/// Run `create` with the security descriptor of a new entry of `mode`:
+/// owner-only (set atomically, never briefly open to others) when `mode`
+/// has no group or other permissions; otherwise none, so it inherits.
+fn with_mode<T>(mode: u32, create: impl FnOnce(*const SECURITY_DESCRIPTOR) -> io::Result<T>) -> io::Result<T> {
+    let private = if mode & 0o077 == 0 { Some(PrivateDescriptor::new()?) } else { None };
+    create(private.as_ref().map_or(null(), |d| d.as_ptr().cast_const().cast()))
 }
 
 /// One path component, in UTF-16, that names exactly the entry Git means:
@@ -79,6 +83,7 @@ fn component(name: &OsStr) -> io::Result<Vec<u16>> {
 pub(crate) struct Stamp([i64; 4]);
 
 fn information(handle: HANDLE) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
+    // SAFETY: plain data, for which all zeroes is a valid value.
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
     // SAFETY: a valid handle and out-pointer.
     win32(unsafe { GetFileInformationByHandle(handle, &mut info) })?;
@@ -154,6 +159,7 @@ impl Dir {
             SecurityQualityOfService: null(),
         };
         let mut handle: HANDLE = null_mut();
+        // SAFETY: plain data, for which all zeroes is a valid value.
         let mut status: IO_STATUS_BLOCK = unsafe { zeroed() };
         // SAFETY: valid object attributes and out-pointers; the handle is owned.
         nt(unsafe {
@@ -183,6 +189,11 @@ impl Dir {
         Ok(handle)
     }
 
+    /// Open the regular file `name` to change its DACL, refusing a reparse point.
+    fn open_dac(&self, name: &OsStr) -> io::Result<OwnedHandle> {
+        self.openat(name, WRITE_DAC | READ_CONTROL, FILE_OPEN, FILE_NON_DIRECTORY_FILE, null())
+    }
+
     /// A subdirectory; fails if `name` is a reparse point or not a directory.
     pub(crate) fn subdir(&self, name: &OsStr) -> io::Result<Dir> {
         let access = FILE_LIST_DIRECTORY | FILE_TRAVERSE | READ_CONTROL;
@@ -200,19 +211,15 @@ impl Dir {
     /// Exclusively create a new regular file; `mode` without group or
     /// other permissions makes it owner-only, otherwise it inherits.
     pub(crate) fn create_new(&self, name: &OsStr, mode: u32) -> io::Result<File> {
-        let private = if mode & 0o077 == 0 { Some(PrivateDescriptor::new()?) } else { None };
-        let security = private.as_ref().map_or(null(), |d| d.as_ptr().cast_const().cast());
         let access = FILE_GENERIC_WRITE | FILE_GENERIC_READ | DELETE;
-        self.openat(name, access, FILE_CREATE, FILE_NON_DIRECTORY_FILE, security).map(File::from)
+        with_mode(mode, |security| self.openat(name, access, FILE_CREATE, FILE_NON_DIRECTORY_FILE, security)).map(File::from)
     }
 
     /// Create a directory; one that already exists (whatever it is) is not
     /// an error: open it with `subdir`, which refuses anything else. A mode
     /// without group or other permissions makes it owner-only.
     pub(crate) fn mkdir(&self, name: &OsStr, mode: u32) -> io::Result<()> {
-        let private = if mode & 0o077 == 0 { Some(PrivateDescriptor::new()?) } else { None };
-        let security = private.as_ref().map_or(null(), |d| d.as_ptr().cast_const().cast());
-        match self.entry(name, FILE_LIST_DIRECTORY, FILE_CREATE, FILE_DIRECTORY_FILE, security) {
+        match with_mode(mode, |security| self.entry(name, FILE_LIST_DIRECTORY, FILE_CREATE, FILE_DIRECTORY_FILE, security)) {
             Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
             _ => Ok(()),
         }
@@ -232,6 +239,7 @@ impl Dir {
         let mut rename = |class, flags: u32| {
             // FILE_RENAME_INFORMATION has FILE_RENAME_INFO's layout.
             let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+            // SAFETY: plain data, for which all zeroes is a valid value.
             let mut status: IO_STATUS_BLOCK = unsafe { zeroed() };
             // SAFETY: the buffer is aligned and holds the header and the name.
             unsafe {
@@ -257,6 +265,7 @@ impl Dir {
                 size_of::<FILE_DISPOSITION_INFO_EX>() as u32)
         }).or_else(|_| {
             let delete = FILE_DISPOSITION_INFO { DeleteFile: true };
+            // SAFETY: as above.
             win32(unsafe {
                 SetFileInformationByHandle(file.as_raw_handle(), FileDispositionInfo, (&delete as *const FILE_DISPOSITION_INFO).cast(),
                     size_of::<FILE_DISPOSITION_INFO>() as u32)
@@ -285,18 +294,16 @@ impl Dir {
 
     /// After `name` was renamed into this directory from the private
     /// staging directory: give it the access its directory passes on, or
-    /// keep it owner-only. Windows journals the directory change itself
-    /// and has no directory fsync for unprivileged handles.
+    /// keep it owner-only (there is nothing to sync: see `sync`).
     pub(crate) fn finish_replace(&self, name: &OsStr, mode: Mode) -> io::Result<()> {
-        let file = self.openat(name, WRITE_DAC | READ_CONTROL, FILE_OPEN, FILE_NON_DIRECTORY_FILE, null())?;
+        let file = self.open_dac(name)?;
         if mode.0 { set_private(file.as_raw_handle()) } else { set_inherited(file.as_raw_handle()) }
     }
 
     /// Restrict the regular file `name` to this user (never following a
     /// reparse point).
     pub(crate) fn make_private(&self, name: &OsStr) -> io::Result<()> {
-        let file = self.openat(name, WRITE_DAC | READ_CONTROL, FILE_OPEN, FILE_NON_DIRECTORY_FILE, null())?;
-        set_private(file.as_raw_handle())
+        set_private(self.open_dac(name)?.as_raw_handle())
     }
 
     /// Whether only this directory's owner, this user, can enter it.

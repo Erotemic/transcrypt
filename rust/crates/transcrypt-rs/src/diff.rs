@@ -6,13 +6,14 @@
 //! cached, unlike a textconv cache, which would keep plaintext in
 //! `refs/notes`.
 
-use std::{fs, io::{self, Write}, path::Path, process::Command};
+use std::{io::{self, Write}, path::Path, process::Command};
 use transcrypt_v3_core::{record_envelope_ok, MAX_RECORD};
 use zeroize::Zeroizing;
 use crate::{
     credential::Key,
-    git::{read_record, run_bounded_status},
+    git::run_bounded_status,
     load_config,
+    merge::read_input,
     worktree::Scratch,
 };
 
@@ -24,8 +25,7 @@ pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], ne
     let key = Key::load(root, &config)?;
     // `None`: an encrypted side that cannot be opened while locked.
     let side = |file: &Path, path: &[u8]| -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-        let input = fs::File::open(file).map_err(|_| "cannot read a diff input")?;
-        let bytes = read_record(input)?;
+        let bytes = read_input(file, "diff")?;
         if !record_envelope_ok(&bytes, &id) { return Ok(Some(bytes)); }
         let Some(key) = &key else { return Ok(None) };
         // A staged `git mv` still holds the record of the old path, which
@@ -44,8 +44,9 @@ pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], ne
     let mut command = Command::new("diff");
     command.args(["-u", "-L", &a_label, "-L", &b_label]).arg(&a).arg(&b).current_dir(root);
     // At most both inputs, each line once more for its marker.
-    let (status, output, _) = run_bounded_status(command, None, 4 * MAX_RECORD)?;
+    let result = run_bounded_status(command, None, 4 * MAX_RECORD);
     drop(scratch);
+    let (status, output, _) = result?;
     match status.code() {
         Some(0 | 1) => io::stdout().write_all(&output).map_err(|_| "cannot write the diff".into()),
         _ => Err("diff failed".into()),

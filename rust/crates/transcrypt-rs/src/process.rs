@@ -62,11 +62,16 @@ fn write_flush(out: &mut impl Write) -> io::Result<()> {
     out.write_all(b"0000")
 }
 
+/// A flush packet, and everything written before it sent to Git at once.
+fn send_flush(out: &mut impl Write) -> io::Result<()> {
+    write_flush(out)?;
+    out.flush()
+}
+
 /// Text packets, then a flush, sent to Git at once.
 fn write_list(out: &mut impl Write, lines: &[&str]) -> io::Result<()> {
     for line in lines { write_text(out, line)?; }
-    write_flush(out)?;
-    out.flush()
+    send_flush(out)
 }
 
 /// The reply to one request: the converted content, or an error status.
@@ -76,14 +81,14 @@ fn write_reply(out: &mut impl Write, converted: Option<&[u8]>) -> io::Result<()>
     write_flush(out)?;
     for chunk in data.chunks(MAX_DATA) { write_packet(out, chunk)?; }
     write_flush(out)?;
-    // An empty list keeps the status.
-    write_list(out, &[])
+    // An empty status list keeps the status.
+    send_flush(out)
 }
 
 pub(crate) fn serve(root: &Path) -> Result<(), String> {
     let mut input = io::stdin().lock();
     let mut output = io::BufWriter::new(io::stdout().lock());
-    let io_error = |_| "cannot write to Git".to_owned();
+    let io_error = |_: io::Error| "cannot write to Git".to_owned();
     // Handshake: Git announces itself and its versions, then capabilities.
     let hello = read_list(&mut input)?;
     if hello.first().map(Vec::as_slice) != Some(b"git-filter-client") || !hello.iter().any(|l| l == b"version=2") {

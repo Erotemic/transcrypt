@@ -3,12 +3,13 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
-    io::{self, Read},
+    io::{self, BufRead, Read},
     path::{Path, PathBuf},
     process::Stdio,
     rc::Rc,
 };
 use crate::{
+    attributes::split_lines,
     credential::Key,
     git::{changed_files, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
         push_index_record, read_record, tree_files, Attributes, Staged},
@@ -47,21 +48,11 @@ pub(crate) fn audit(root: &Path, revs: &[OsString], keyed: bool, max_commits: Op
     let mut lines = io::BufReader::new(stdout);
     let git_dir = PathBuf::from(String::from_utf8(git(root, &["rev-parse", "--absolute-git-dir"])?)
         .map_err(|_| "Git directory path is not UTF-8")?.trim_end());
-    let mut state = AuditState {
-        authenticated: true,
-        commits: 0,
-        records: 0,
-        configs: HashMap::new(),
-        commit_configs: HashMap::new(),
-        commit_attributes: HashMap::new(),
-        policy: AttributeIndex { file: git_dir.join(format!("transcrypt-v3-audit-{}.index", std::process::id())), files: None },
-        checked: HashSet::new(),
-    };
+    let mut state = AuditState::new(&git_dir);
     let result = (|| -> Result<(), String> {
         let mut line = Vec::new();
         loop {
             line.clear();
-            use io::BufRead;
             (&mut lines).take(4096).read_until(b'\n', &mut line).map_err(|_| "cannot read git rev-list")?;
             if line.is_empty() { return Ok(()); }
             let ids: Vec<&[u8]> = line.strip_suffix(b"\n").ok_or("malformed git rev-list output")?
@@ -70,9 +61,8 @@ pub(crate) fn audit(root: &Path, revs: &[OsString], keyed: bool, max_commits: Op
                 return Err("malformed git rev-list output".into());
             }
             state.commits += 1;
-            if max_commits.is_some_and(|max| state.commits > max) {
-                return Err(format!("more than {} commits to audit; refusing (raise --max-commits)",
-                    max_commits.unwrap_or(0)));
+            if let Some(max) = max_commits.filter(|max| state.commits > *max) {
+                return Err(format!("more than {max} commits to audit; refusing (raise --max-commits)"));
             }
             let text = |id: &[u8]| String::from_utf8_lossy(id).into_owned();
             audit_commit(root, keyed, &mut state, &text(ids[0]), ids.get(1).map(|p| text(p)))?;
@@ -100,6 +90,22 @@ struct AuditState {
     commit_attributes: HashMap<String, Rc<AttributeFiles>>,
     policy: AttributeIndex,
     checked: HashSet<(String, String, Vec<u8>)>,
+}
+
+impl AuditState {
+    /// Nothing audited yet; the policy index is a temporary file in `git_dir`.
+    fn new(git_dir: &Path) -> AuditState {
+        AuditState {
+            authenticated: true,
+            commits: 0,
+            records: 0,
+            configs: HashMap::new(),
+            commit_configs: HashMap::new(),
+            commit_attributes: HashMap::new(),
+            policy: AttributeIndex { file: git_dir.join(format!("transcrypt-v3-audit-{}.index", std::process::id())), files: None },
+            checked: HashSet::new(),
+        }
+    }
 }
 
 /// A committed config: its bytes, id and the key, if unlocked for it.
@@ -147,10 +153,14 @@ impl Drop for AttributeIndex {
     }
 }
 
+/// `path` in `commit`, for messages.
+fn at(commit: &str, path: &[u8]) -> String {
+    format!("commit {commit}, {}", String::from_utf8_lossy(path))
+}
+
 fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, parent: Option<String>)
     -> Result<(), String>
 {
-    let at = |path: &[u8]| format!("commit {commit}, {}", String::from_utf8_lossy(path));
     let (mut entries, deleted, modified) = changed_files(root, commit, parent.as_deref())?;
     let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|(p, _)| test(p));
     let config_changed = parent.is_none() || touched(&|p| p == b".transcrypt/config");
@@ -203,47 +213,73 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     // (`git lfs track` writing `filter=lfs`) silently lost its protection.
     let was_record: Vec<(&Staged, &str)> = unprotected.iter()
         .filter_map(|e| old.get(e.path.as_slice()).map(|oid| (*e, *oid))).collect();
-    // While a v3 config exists, the policy must define the `transcrypt`
-    // macro (checked when either changes).
-    if config_oid.is_some() && (config_changed || attributes_changed) {
-        let top = attributes.iter().find(|(p, _)| p == b".gitattributes").map(|(_, oid)| oid.as_str());
-        let dir = state.policy.file.parent().map(Path::to_path_buf).unwrap_or_default();
-        if !crate::git::macro_resolves(root, &dir, top)? {
-            return Err(format!("commit {commit}: {}", crate::attributes::MACRO_MISSING));
-        }
-    }
     if config_oid.is_some() {
-        // The policy index holds this commit's attributes (loaded above).
-        if let Some(problem) = crate::git::marked_unfiltered(root, &paths, Attributes::Index(&state.policy.file))? {
-            return Err(format!("commit {commit}: {problem}"));
-        }
+        check_policy(root, &state.policy, commit, &attributes, &paths, config_changed || attributes_changed)?;
     }
     if protected.is_empty() && moved_away.is_empty() && was_record.is_empty() { return Ok(()); }
     if let Some(config_oid) = &config_oid {
-        let id = transcrypt_rs::config_id(&git_blob(root, config_oid)?);
-        let is_record = |oid: &str| crate::git::is_record(root, oid, &id);
-        for (entry, from) in moved_away {
-            if is_record(&entry.oid)? {
-                return Err(format!("{}: the encrypted {} moved to this unprotected name without decryption; \
-                    nothing decrypts it here", at(&entry.path), String::from_utf8_lossy(from)));
-            }
-        }
-        let mut drifted = Vec::new();
-        for (entry, old) in was_record {
-            if is_record(old)? && !is_record(&entry.oid)? { drifted.push(entry.path.as_slice()); }
-        }
-        let values = crate::git::filter_values(root, &drifted, Attributes::Index(&state.policy.file))?;
-        if let Some((path, value)) = drifted.iter().zip(values).find(|(_, v)| crate::git::other_filter(v)) {
-            return Err(format!("{}: was encrypted, and is now stored unencrypted for the filter `{}`; a \
-                .gitattributes rule (e.g. from `git lfs track`) overrides `transcrypt`", at(path),
-                String::from_utf8_lossy(&value)));
-        }
+        check_moves(root, &state.policy, commit, config_oid, moved_away, was_record)?;
     }
     if protected.is_empty() { return Ok(()); }
     let Some(config_oid) = config_oid else {
         return Err(format!("{}: protected file in a commit without a v3 configuration (plaintext?)",
-            at(&protected[0].path)));
+            at(commit, &protected[0].path)));
     };
+    check_records(root, keyed, state, commit, config_oid, protected, &moved)
+}
+
+/// While a v3 config exists, the policy must define the `transcrypt` macro
+/// (checked when either `changed`), and no file may be marked for v3
+/// without its filter.
+fn check_policy(root: &Path, policy: &AttributeIndex, commit: &str, attributes: &AttributeFiles, paths: &[&[u8]], changed: bool)
+    -> Result<(), String>
+{
+    if changed {
+        let top = attributes.iter().find(|(p, _)| p == b".gitattributes").map(|(_, oid)| oid.as_str());
+        let dir = policy.file.parent().map(Path::to_path_buf).unwrap_or_default();
+        if !crate::git::macro_resolves(root, &dir, top)? {
+            return Err(format!("commit {commit}: {}", crate::attributes::MACRO_MISSING));
+        }
+    }
+    // The policy index holds this commit's attributes (loaded by the caller).
+    if let Some(problem) = crate::git::marked_unfiltered(root, paths, Attributes::Index(&policy.file))? {
+        return Err(format!("commit {commit}: {problem}"));
+    }
+    Ok(())
+}
+
+/// Records of the config `config_oid` that this commit moved to an
+/// unprotected path, or whose path another filter now takes.
+fn check_moves(root: &Path, policy: &AttributeIndex, commit: &str, config_oid: &str, moved_away: Vec<(&Staged, &[u8])>,
+    was_record: Vec<(&Staged, &str)>) -> Result<(), String>
+{
+    let id = transcrypt_rs::config_id(&git_blob(root, config_oid)?);
+    let is_record = |oid: &str| crate::git::is_record(root, oid, &id);
+    for (entry, from) in moved_away {
+        if is_record(&entry.oid)? {
+            return Err(format!("{}: the encrypted {} moved to this unprotected name without decryption; \
+                nothing decrypts it here", at(commit, &entry.path), String::from_utf8_lossy(from)));
+        }
+    }
+    let mut drifted = Vec::new();
+    for (entry, old) in was_record {
+        if is_record(old)? && !is_record(&entry.oid)? { drifted.push(entry.path.as_slice()); }
+    }
+    let values = crate::git::filter_values(root, &drifted, Attributes::Index(&policy.file))?;
+    if let Some((path, value)) = drifted.iter().zip(values).find(|(_, v)| crate::git::other_filter(v)) {
+        return Err(format!("{}: was encrypted, and is now stored unencrypted for the filter `{}`; a \
+            .gitattributes rule (e.g. from `git lfs track`) overrides `transcrypt`", at(commit, path),
+            String::from_utf8_lossy(&value)));
+    }
+    Ok(())
+}
+
+/// Every protected file of the commit is a regular file holding a record of
+/// its config `config_oid`, at the path it was sealed for (authenticated
+/// there when this checkout has the key).
+fn check_records(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, config_oid: String, protected: Vec<&Staged>,
+    moved: &HashMap<&str, &[u8]>) -> Result<(), String>
+{
     if !state.configs.contains_key(&config_oid) {
         let bytes = git_blob(root, &config_oid)?;
         transcrypt_v3_core::parse_config(&bytes)
@@ -257,20 +293,20 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     // record moved without re-encryption: it does not open at its new path.
     for entry in protected {
         if !entry.regular {
-            return Err(format!("{}: protected path is not a regular file", at(&entry.path)));
+            return Err(format!("{}: protected path is not a regular file", at(commit, &entry.path)));
         }
         if !state.checked.insert((entry.oid.clone(), config_oid.clone(), entry.path.clone())) { continue; }
-        let record = git_blob(root, &entry.oid).map_err(|e| format!("{}: {e}", at(&entry.path)))?;
+        let record = git_blob(root, &entry.oid).map_err(|e| format!("{}: {e}", at(commit, &entry.path)))?;
         if !record_envelope_ok(&record, id) {
-            return Err(format!("{}: not v3 ciphertext for its configuration (plaintext?)", at(&entry.path)));
+            return Err(format!("{}: not v3 ciphertext for its configuration (plaintext?)", at(commit, &entry.path)));
         }
         if let Some(from) = moved.get(entry.oid.as_str()) {
             return Err(format!("{}: the encrypted {} moved here without re-encryption (renamed while \
                 locked or with --no-verify?); it cannot be decrypted at its new path",
-                at(&entry.path), String::from_utf8_lossy(from)));
+                at(commit, &entry.path), String::from_utf8_lossy(from)));
         }
         if let Some(key) = key {
-            key.open(&entry.path, &record).map_err(|e| format!("{}: {e}", at(&entry.path)))?;
+            key.open(&entry.path, &record).map_err(|e| format!("{}: {e}", at(commit, &entry.path)))?;
         }
         state.records += 1;
     }
@@ -285,7 +321,7 @@ pub(crate) fn pre_push(root: &Path, remote: Option<&OsStr>) -> Result<(), String
     // Never silently drop refs: oversized input is refused, not truncated.
     let input = read_record(io::stdin()).map_err(|_| "cannot read pre-push input")?;
     let mut revs: Vec<OsString> = Vec::new();
-    for line in input.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+    for line in split_lines(&input).filter(|l| !l.is_empty()) {
         let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
         if fields.len() != 4 || !is_object_id(fields[1]) || !is_object_id(fields[3]) {
             return Err("malformed pre-push input".into());
