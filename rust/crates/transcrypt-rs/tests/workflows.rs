@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::{io::Write, process::{Command, Stdio}};
 use std::{ffi::OsString, fs, time::{Duration, Instant}};
 use transcrypt_rs::KEY_SIZE;
-use transcrypt_v3_core::{KEY_FILE_LEN, REGULAR_MODE};
+use transcrypt_v3_core::{KEY_FILE_LEN, OID_START};
 
 const NEW: &[u8] = b"a completely different long passphrase\n";
 
@@ -62,7 +62,6 @@ fn arbitrary_patterns_protect_exactly_the_selected_files() {
     assert!(listing.split(|b| *b == 0).any(|e| e.starts_with(&transcrypt_v3_core::EXECUTABLE_MODE) && e.ends_with(b"private/run.sh")));
     // An index record is `<mode> <oid> 0\t<path>`; a leak probe is the
     // first bytes of a file's content.
-    const OID_START: usize = REGULAR_MODE.len() + 1;
     const STAGE_FIELD_LEN: usize = b" 0".len();
     const LEAK_PROBE: usize = 6;
     for (path, content) in &files {

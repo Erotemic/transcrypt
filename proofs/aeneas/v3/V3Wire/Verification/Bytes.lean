@@ -234,4 +234,16 @@ theorem seal_action_spec (opens isLocal envelope moved : Bool) :
     rcases moved with _ | _ <;>
     simp [seal_action, Transcrypt.V3Policy.sealSpec, sealResult]
 
+/-- `entry_check` authenticates exactly when the key is available and the
+    entry is not a settled one in the incremental hook; otherwise it checks
+    the envelope, and skips the move check only for a settled entry. -/
+@[step]
+theorem entry_check_spec (keyed incremental settled : Bool) :
+    entry_check keyed incremental settled ⦃ c =>
+      (c = .Authenticate ↔ keyed = true ∧ ¬ (incremental = true ∧ settled = true)) ∧
+      (c = .Envelope ↔ ¬ (keyed = true ∧ ¬ (incremental = true ∧ settled = true)) ∧
+        settled = true) ⦄ := by
+  rcases keyed with _ | _ <;> rcases incremental with _ | _ <;> rcases settled with _ | _ <;>
+    simp [entry_check]
+
 end Transcrypt.V3Verification

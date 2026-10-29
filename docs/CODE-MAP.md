@@ -41,7 +41,7 @@ and [V3-ASSUMPTIONS](verification/V3-ASSUMPTIONS.md).
    reads the index back to confirm every entry was staged exactly.
 5. **Check.** `check_index` re-reads the final index and requires every
    protected entry to be a record that authenticates at its path with the
-   key (or, locked, at least has the envelope). Git then commits that index
+   key (or, locked, at least has the envelope), as `entry_check` decides. Git then commits that index
    (A22).
 
 ## Authenticated versus keyless
@@ -64,6 +64,7 @@ happened.
 | Is an entry held by `HEAD` or an incoming commit | `held_entries` | `held_entries_spec` (SnapshotLookup) |
 | Is a staged entry the user's own change | `is_local_change` | `is_local_change_spec` (SnapshotAttrs) |
 | Keep, seal or re-encrypt it | `seal_action` | `seal_action_spec`, `sealSpec_repairs_only_local` (Bytes) |
+| Check it: authenticate, or (keyless or settled) the envelope | `entry_check` | `entry_check_spec` (Bytes) |
 | Where a renamed record came from | `next_move_source` | `next_move_source_spec` (SnapshotMoves) |
 | Encrypt, decrypt | `seal_record`, `open_record` | `seal_record_spec`, `open_record_spec` (Protocol) |
 | Keyless check of a record (`is_record` reads only its size and first bytes) | `record_envelope_ok`, `record_envelope_prefix_ok` | `record_envelope_ok_spec`, `record_envelope_prefix_ok_spec`, `record_envelope_prefix_ok_record` (Envelope) |

@@ -5,9 +5,9 @@
 use std::{collections::{HashMap, HashSet}, env, fs, io, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    hydrate_action, is_local_change, is_object_id, is_reserved_path, lock_action, parse_file_header,
+    entry_check, hydrate_action, is_local_change, is_object_id, is_reserved_path, lock_action, parse_file_header,
     record_envelope_ok, seal_action,
-    HydrateAction, LockAction, SealAction, ATTRIBUTES_NAME,
+    EntryCheck, HydrateAction, LockAction, SealAction, ATTRIBUTES_NAME,
 };
 use crate::{
     credential::Key,
@@ -147,14 +147,15 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
                 (cherry-picked or rebased across a rekey?); run `transcrypt-rs reencrypt` with that config's passphrase")),
             Ok(_) => {},
         }
-        match key.filter(|_| !incremental || !settled) {
-            Some(key) => { key.open(&staged.path, &record).map_err(|e| format!("staged {name}: {e}; if it \
-                was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
-            None if !record_envelope_ok(&record, &id) =>
+        match (entry_check(key.is_some(), incremental, settled), key) {
+            (EntryCheck::Authenticate, Some(key)) => { key.open(&staged.path, &record).map_err(|e| format!("staged \
+                {name}: {e}; if it was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
+            (EntryCheck::Authenticate, None) => unreachable!("entry_check authenticates only with the key"),
+            _ if !record_envelope_ok(&record, &id) =>
                 return Err(format!("staged {name} is not v3 ciphertext for this repository")),
             // A copy already in history is reported where it was made.
-            None if settled => {},
-            None => {
+            (EntryCheck::Envelope, _) => {},
+            (EntryCheck::EnvelopeNotMoved, _) => {
                 let [index_ordered, head_ordered, parent_ordered] = get_or_try_init(&mut ordered, || -> Result<_, String> {
                     Ok([snapshot.listing.ordered()?, head.ordered()?, parent.ordered()?])
                 })?;

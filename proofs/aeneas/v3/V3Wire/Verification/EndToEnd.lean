@@ -72,23 +72,27 @@ structure HookEntry where
   settled : Bool
   elsewhere : Bool
 
-/-- The check `check_staged` makes of one protected entry. With the key
-    (and, in the incremental pre-commit hook, unless the entry is
-    `settled`), the blob must authenticate at the entry's path
-    (`open_record`). Otherwise it must have this configuration's envelope
-    (`record_envelope_ok`), and, unless settled, must not be a blob of
+/-- The check `check_staged` makes of one protected entry, as the verified
+    `entry_check` decides it: the blob must authenticate at the entry's path
+    (`open_record`), or have this configuration's envelope
+    (`record_envelope_ok`) and, for `EnvelopeNotMoved`, not be a blob of
     another path (a record moved without the key). The adapter also checks
     the header first; it accepts an entry only if this model does (A4). -/
 def hookEntry (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
     (id : Std.Array U8 16#usize) (keyed incremental : Bool) (e : HookEntry) : RustM Bool := do
-  if keyed && !(incremental && e.settled) then
+  let check ← entry_check keyed incremental e.settled
+  match check with
+  | .Authenticate =>
     let (r, _) ← open_record inst prims config e.path e.record e.buffer
     match r with
     | core.result.Result.Ok _ => ok true
     | core.result.Result.Err _ => ok false
-  else
+  | .Envelope =>
     let env ← record_envelope_ok e.record id
-    ok (env && (e.settled || !e.elsewhere))
+    ok env
+  | .EnvelopeNotMoved =>
+    let env ← record_envelope_ok e.record id
+    ok (env && !e.elsewhere)
 
 /-- The hook checks every protected entry; one refusal refuses the commit. -/
 def hookPlan (inst : V3Primitives P) (prims : P) (config : Std.Array U8 55#usize)
@@ -125,22 +129,23 @@ theorem hookEntry_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#us
     hookEntry inst prims config id keyed incremental e ⦃ b =>
       b = true → EntryAccepted σ (wireBytes config) (wireBytes id) keyed incremental e ⦄ := by
   unfold hookEntry
-  split
-  · rename_i hk
-    have hk' : keyed = true ∧ ¬ (incremental = true ∧ e.settled = true) := by
-      revert hk; cases keyed <;> cases incremental <;> cases e.settled <;> simp
+  step with entry_check_spec keyed incremental e.settled as ⟨ c, hauth, henvc ⟩
+  rcases c with _ | _ | _
+  · have hk' := hauth.mp rfl
     step with open_record_spec h config e.path e.record e.buffer as ⟨ r, pt, hr ⟩
     rcases r with u | x
     · simp only at hr ⊢
       exact fun _ => EntryAccepted.of_opens hk' ⟨_, hr⟩
     · simp
-  · rename_i hk
-    have hk' : ¬ (keyed = true ∧ ¬ (incremental = true ∧ e.settled = true)) := by
-      revert hk; cases keyed <;> cases incremental <;> cases e.settled <;> simp
+  · obtain ⟨hk', hs⟩ := henvc.mp rfl
+    step with record_envelope_ok_spec as ⟨ env, henv ⟩
+    exact fun hb => EntryAccepted.of_envelope hk' (henv.mp hb) (Or.inl hs)
+  · have hk' : ¬ (keyed = true ∧ ¬ (incremental = true ∧ e.settled = true)) := fun hk => by
+      simpa using hauth.mpr hk
     step with record_envelope_ok_spec as ⟨ env, henv ⟩
     intro hb
-    simp only [Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true'] at hb
-    exact EntryAccepted.of_envelope hk' (henv.mp hb.1) hb.2
+    simp only [Bool.and_eq_true, Bool.not_eq_true'] at hb
+    exact EntryAccepted.of_envelope hk' (henv.mp hb.1) (Or.inr hb.2)
 
 theorem hookPlan_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
     (id : Std.Array U8 16#usize) (keyed incremental : Bool) (es : List HookEntry) :

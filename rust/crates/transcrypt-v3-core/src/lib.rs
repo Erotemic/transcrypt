@@ -673,6 +673,9 @@ pub fn decode_be_u32(b: &[u8; 4]) -> u32 {
 /// Git modes of a regular file: non-executable and executable.
 pub const REGULAR_MODE: [u8; 6] = *b"100644";
 pub const EXECUTABLE_MODE: [u8; 6] = *b"100755";
+/// Where an index or tree record's object id starts: after the mode
+/// (`REGULAR_MODE.len()` bytes) and one SP.
+pub const OID_START: usize = 7;
 
 /// One parsed `git ls-files --stage -z` record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -688,7 +691,7 @@ pub struct IndexEntry {
 /// The path, which becomes AES-SIV associated data, is everything after the
 /// *first* TAB (Git paths may themselves contain TABs; modes and object ids
 /// cannot). Unmerged entries (stage 1-3) and malformed records are refused.
-/// The object id `entry[7..path_start - 3]` is not inspected here: the
+/// The object id `entry[OID_START..path_start - 3]` is not inspected here: the
 /// adapter checks it with `is_object_id` before passing it to Git.
 pub fn parse_index_entry(entry: &[u8]) -> Result<IndexEntry, Refusal> {
     let n = entry.len();
@@ -816,6 +819,36 @@ pub fn seal_action(opens: bool, local_change: bool, envelope: bool, moved: bool)
     }
 }
 
+/// How the pre-commit hook's final check examines one staged protected entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryCheck {
+    /// The blob must open at the entry's path (`open_record`).
+    Authenticate,
+    /// The blob must have this configuration's envelope
+    /// (`record_envelope_ok`). The entry is unchanged since `HEAD` and
+    /// `HEAD^1`, so a copy of it is reported where it was made.
+    Envelope,
+    /// The blob must have the envelope and must not be another path's blob:
+    /// a record moved without the key is refused.
+    EnvelopeNotMoved,
+}
+
+/// The final check of one protected entry. `keyed`: the key is available.
+/// `incremental`: the pre-commit hook, which trusts history. `settled`: the
+/// entry is unchanged since `HEAD` and `HEAD^1`. With the key every entry
+/// authenticates, except a settled one in the incremental hook; otherwise
+/// only the envelope is checked, and an unsettled entry must not have been
+/// moved.
+pub fn entry_check(keyed: bool, incremental: bool, settled: bool) -> EntryCheck {
+    if keyed && (!incremental || !settled) {
+        EntryCheck::Authenticate
+    } else if settled {
+        EntryCheck::Envelope
+    } else {
+        EntryCheck::EnvelopeNotMoved
+    }
+}
+
 /// Largest pkt-line Git sends or accepts: 4 length digits plus 65516 data bytes.
 pub const MAX_PKT_LEN: usize = 65520;
 
@@ -871,10 +904,10 @@ fn record_start(ends: &[usize], i: usize) -> usize {
 }
 
 /// Whether `entry` is a stage-0 index record (`parse_index_entry`) whose
-/// object id `entry[7..path_start - 3]` passes `is_object_id`.
+/// object id `entry[OID_START..path_start - 3]` passes `is_object_id`.
 fn record_ok(entry: &[u8]) -> bool {
     match parse_index_entry(entry) {
-        Ok(parsed) => is_object_id(&entry[7..parsed.path_start - 3]),
+        Ok(parsed) => is_object_id(&entry[OID_START..parsed.path_start - 3]),
         Err(_) => false,
     }
 }
@@ -950,7 +983,7 @@ pub fn parse_listing(listing: &[u8], ends: &mut [usize], unique: bool) -> bool {
 }
 
 /// The fields of one listing record: the record is `listing[start..end]`,
-/// its object id `listing[start + 7..oid_end]`, its path
+/// its object id `listing[start + OID_START..oid_end]`, its path
 /// `listing[path_start..end]`, and `regular` says whether its mode is
 /// `100644` or `100755`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -986,8 +1019,8 @@ fn record_is(listing: &[u8], start: usize, end: usize, oid: &[u8], path: &[u8], 
     if start > end || end > listing.len() || end - start < 10 || end - start - 10 < oid.len() {
         return false;
     }
-    let at = start + 7 + oid.len();
-    if !matches_at(listing, start + 7, oid) || !matches_at(listing, at, &OID_END) {
+    let at = start + OID_START + oid.len();
+    if !matches_at(listing, start + OID_START, oid) || !matches_at(listing, at, &OID_END) {
         return false;
     }
     let here = end - at - 3 == path.len() && matches_at(listing, at + 3, path);
@@ -1061,7 +1094,7 @@ pub fn held_entries(
         if wanted[i] {
             match listing_fields(index, index_ends, i) {
                 Some(f) => {
-                    let j = find_entry(other, other_ends, &index[f.start + 7..f.oid_end], &index[f.path_start..f.end]);
+                    let j = find_entry(other, other_ends, &index[f.start + OID_START..f.oid_end], &index[f.path_start..f.end]);
                     held[i] = j < other_ends.len();
                 }
                 None => held[i] = false,
@@ -1089,7 +1122,7 @@ pub fn is_local_change(in_head: bool, incoming_known: bool, in_incoming: bool, f
 fn object_before(listing: &[u8], ends: &[usize], j: usize, oid: &[u8], at: usize) -> bool {
     match listing_fields(listing, ends, j) {
         Some(f) => {
-            let id = &listing[f.start + 7..f.oid_end];
+            let id = &listing[f.start + OID_START..f.oid_end];
             bytes_lt(id, oid) | (bytes_eq(id, oid) & (j < at))
         }
         None => false,
@@ -1109,7 +1142,7 @@ pub fn object_order_ok(listing: &[u8], ends: &[usize], order: &[usize]) -> bool 
         let j = order[t];
         match listing_fields(listing, ends, j) {
             Some(f) => {
-                if t > 0 && !object_before(listing, ends, order[t - 1], &listing[f.start + 7..f.oid_end], j) {
+                if t > 0 && !object_before(listing, ends, order[t - 1], &listing[f.start + OID_START..f.oid_end], j) {
                     return false;
                 }
             }
@@ -1140,7 +1173,7 @@ fn find_object(listing: &[u8], ends: &[usize], order: &[usize], oid: &[u8], at: 
 /// Whether record `j` exists and names `oid`.
 fn names_oid(listing: &[u8], ends: &[usize], j: usize, oid: &[u8]) -> bool {
     match listing_fields(listing, ends, j) {
-        Some(f) => bytes_eq(&listing[f.start + 7..f.oid_end], oid),
+        Some(f) => bytes_eq(&listing[f.start + OID_START..f.oid_end], oid),
         None => false,
     }
 }
@@ -1207,7 +1240,7 @@ pub fn next_move_source(
 ) -> usize {
     match listing_fields(index, index_ends, i) {
         Some(f) => {
-            let oid = &index[f.start + 7..f.oid_end];
+            let oid = &index[f.start + OID_START..f.oid_end];
             let path = &index[f.path_start..f.end];
             let t = find_object(head, head_ends, head_order, oid, from);
             move_source_from(index, index_ends, head, head_ends, head_order, oid, path, t)
@@ -1258,7 +1291,7 @@ pub fn blob_elsewhere(
 ) -> bool {
     match listing_fields(index, index_ends, i) {
         Some(f) => {
-            let oid = &index[f.start + 7..f.oid_end];
+            let oid = &index[f.start + OID_START..f.oid_end];
             let path = &index[f.path_start..f.end];
             elsewhere_in(index, index_ends, index_order, oid, path)
                 | elsewhere_in(head, head_ends, head_order, oid, path)
@@ -1786,6 +1819,25 @@ mod tests {
     }
 
     #[test]
+    fn keyless_or_settled_entries_check_the_envelope() {
+        use EntryCheck::*;
+        for (keyed, incremental, settled, expected) in [
+            (true, false, false, Authenticate), (true, false, true, Authenticate),
+            (true, true, false, Authenticate), (true, true, true, Envelope),
+            (false, false, false, EnvelopeNotMoved), (false, false, true, Envelope),
+            (false, true, false, EnvelopeNotMoved), (false, true, true, Envelope),
+        ] {
+            assert_eq!(entry_check(keyed, incremental, settled), expected);
+        }
+    }
+
+    #[test]
+    fn object_ids_start_after_the_mode() {
+        assert_eq!(OID_START, REGULAR_MODE.len() + 1);
+        assert_eq!(OID_START, EXECUTABLE_MODE.len() + 1);
+    }
+
+    #[test]
     fn pkt_line_lengths() {
         assert_eq!(decode_pkt_len(b"0000"), Ok(0));
         assert_eq!(decode_pkt_len(b"0005"), Ok(5));
@@ -1833,7 +1885,7 @@ mod tests {
 
     /// The object order of a listing (by object id, then position).
     fn order(l: &Listing) -> std::vec::Vec<usize> {
-        let id = |j: usize| listing_fields(&l.0, &l.1, j).map(|f| l.0[f.start + 7..f.oid_end].to_vec()).unwrap();
+        let id = |j: usize| listing_fields(&l.0, &l.1, j).map(|f| l.0[f.start + OID_START..f.oid_end].to_vec()).unwrap();
         let mut order: std::vec::Vec<usize> = (0..l.1.len()).collect();
         order.sort_by_key(|j| (id(*j), *j));
         assert!(object_order_ok(&l.0, &l.1, &order));
@@ -1860,7 +1912,7 @@ mod tests {
     fn listings_are_parsed_exactly() {
         let (bytes, ends) = listing(&[("100644", b'a', b"x\ty"), ("120000", b'b', b"y/l")]);
         let first = listing_fields(&bytes, &ends, 0).unwrap();
-        assert_eq!(&bytes[first.start + 7..first.oid_end], &[b'a'; 40]);
+        assert_eq!(&bytes[first.start + OID_START..first.oid_end], &[b'a'; 40]);
         assert_eq!(&bytes[first.path_start..first.end], b"x\ty");
         assert!(first.regular);
         let second = listing_fields(&bytes, &ends, 1).unwrap();
@@ -1975,7 +2027,7 @@ mod tests {
             let (index, head, parent) = (random(6), random(5), random(3));
             let entries = |l: &Listing| (0..l.1.len()).map(|j| {
                 let f = listing_fields(&l.0, &l.1, j).unwrap();
-                (l.0[f.start + 7..f.oid_end].to_vec(), l.0[f.path_start..f.end].to_vec())
+                (l.0[f.start + OID_START..f.oid_end].to_vec(), l.0[f.path_start..f.end].to_vec())
             }).collect::<std::vec::Vec<_>>();
             let (es, hs, ps) = (entries(&index), entries(&head), entries(&parent));
             let holds = |l: &[(std::vec::Vec<u8>, std::vec::Vec<u8>)], e: &(std::vec::Vec<u8>, std::vec::Vec<u8>)| l.contains(e);

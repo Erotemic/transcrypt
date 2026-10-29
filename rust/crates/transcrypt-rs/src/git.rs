@@ -11,7 +11,8 @@ pub(crate) use crate::os::sigpipe_blocked;
 pub(crate) use crate::listing::{paths_of, Listing, OrderedListing, Staged};
 use transcrypt_v3_core::{
     blob_read, is_object_id, parse_attr_response, parse_batch_header, parse_index_entry, record_envelope_prefix_ok,
-    BlobRead, ATTRIBUTES_NAME, ATTRIBUTES_SUFFIX, ENVELOPE_PREFIX_LEN, FILTER_DRIVER, MAX_FILE, MAX_RECORD, REGULAR_MODE,
+    BlobRead, ATTRIBUTES_NAME, ATTRIBUTES_SUFFIX, ENVELOPE_PREFIX_LEN, FILTER_DRIVER, MAX_FILE, MAX_RECORD, OID_START,
+    REGULAR_MODE,
 };
 use transcrypt_rs::{states_mib_limit, KIB, MIB};
 
@@ -25,8 +26,6 @@ pub(crate) const GITLINK_MODE: &str = "160000";
 
 /// Bytes in the mode field that starts every index record.
 pub(crate) const MODE_LEN: usize = REGULAR_MODE.len();
-/// Where the object id starts in an index record: after the mode and a SP.
-pub(crate) const OID_START: usize = MODE_LEN + 1;
 /// The stage-0 field between an index record's object id and its path.
 const STAGE_ZERO_FIELD: &[u8] = b" 0\t";
 /// An unmerged index record's ` <stage>` field, just before its TAB.

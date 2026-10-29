@@ -150,7 +150,8 @@ one.
   - that the adapter acts on the verified results as `HookEvidence` and the
     models `hookPlan`/`hookEntry` say (it builds entries from
     `listing_fields`, iterates the flagged positions, and its per-entry
-    check is at least as strict as `hookEntry`);
+    check is at least as strict as `hookEntry`; which check an entry gets is
+    the verified `entry_check`, on which both dispatch);
   - the rewrite of `ls-tree` records to index records (`tree_record`, A20);
   - sorting the object orders (`Listing::object_order`; a wrong order is
     refused by the verified `object_order_ok`, so this only fails closed)

@@ -205,10 +205,10 @@ theorem entryRecord_inj {e e' : Entry} (hm : e.mode.length = 6) (hm' : e'.mode.l
     rw [entryRecord_split, entryRecord_split, heq] at this
     exact List.append_cancel_left this
   have hmode : e.mode = e'.mode := by
-    have := congrArg (List.take 6) heq
+    have := congrArg (List.take modeLen) heq
     simpa [List.take_append_of_le_length, hm, hm'] using this
   have hoid : e.oid = e'.oid := by
-    have := congrArg (List.drop 7) heq
+    have := congrArg (List.drop oidStart) heq
     rwa [List.drop_left' (by simp [hm]), List.drop_left' (by simp [hm'])] at this
   cases e; cases e'
   simp_all
@@ -234,12 +234,12 @@ theorem record_ok_spec (entry : Slice U8) :
     have hPpos : 0 < P.length := List.length_pos_iff.mpr hp
     have hps : parsed.path_start.val = 10 + oid.length := by omega
     step as ⟨ i, hi ⟩
-    step with index_range_spec entry 7#usize i (by simp; omega) (by omega) as ⟨ s, hs ⟩
+    step with index_range_spec entry OID_START i (by simp; unfold_v3_bytes; omega) (by omega) as ⟨ s, hs ⟩
     have hso : sliceBytes s = oid := by
-      rw [hs, List.extract_eq_take_drop, heq, hi, hps]
+      rw [hs, List.extract_eq_take_drop, heq, hi, hps, OID_START_val]
       have : mode ++ [32] ++ oid ++ [32, 48, 9] ++ P = (mode ++ [32]) ++ (oid ++ ([32, 48, 9] ++ P)) := by
         simp
-      rw [this, List.drop_left' (by simp [hm]), show 10 + oid.length - 3 - 7 = oid.length by omega]
+      rw [this, List.drop_left' (by simp [hm]), show 10 + oid.length - 3 - oidStart = oid.length by unfold_v3_bytes; omega]
       simp
     step with is_object_id_spec as ⟨ b, hb ⟩
     rw [hb, hso]

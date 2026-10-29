@@ -56,6 +56,7 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.sealSpec_repairs_only_local
 #print axioms Transcrypt.V3Policy.sealSpec_seal_plain
 #print axioms Transcrypt.V3Policy.sealSpec_rebind_moved
+#print axioms entry_check_spec
 -- Envelope
 #print axioms is_object_id_spec
 #print axioms record_envelope_ok_spec
