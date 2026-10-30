@@ -7,8 +7,10 @@ adapter: `is_object_id` accepts exactly the Git object names of
 `record_envelope_ok` accepts exactly the records satisfying
 `Transcrypt.V3Policy.EnvelopeOk` (size bound plus a v3 file header naming the
 given configuration id). As `WP.spec` triples they also exclude panics and
-divergence. `record_envelope_prefix_ok_record` shows the envelope needs only
-the record's size and its first `FILE_MIN_LEN` bytes.
+divergence. `record_envelope_prefix_ok` refuses a declared size outside the
+record bounds or shorter than its prefix, so its answer holds for any
+caller; `record_envelope_prefix_ok_record` shows the envelope of a real
+record needs only its size and its first `FILE_MIN_LEN` bytes.
 -/
 
 open CoreModels Aeneas
@@ -112,45 +114,77 @@ theorem is_object_id_spec (oid : Slice U8) :
   simp [UScalar.eq_equiv]
 
 /-- `record_envelope_prefix_ok` decides the keyless envelope from a declared
-    size and leading bytes: the size is within the record bound and `prefix`
-    has the v3 file header naming configuration id `id`. -/
+    size and leading bytes, meaningfully for any caller: the declared size
+    lies in `fileMinLen ..= maxRecord`, `prefix` is no longer than it, and
+    `prefix` has the v3 file header naming configuration id `id`. -/
 @[step]
 theorem record_envelope_prefix_ok_spec (size : Usize) («prefix» : Slice U8) (id : Std.Array U8 16#usize) :
     record_envelope_prefix_ok size «prefix» id ⦃ r => r = true ↔
-      size.val ≤ Transcrypt.V3Policy.maxRecord ∧
+      Transcrypt.V3Wire.fileMinLen ≤ size.val ∧ size.val ≤ Transcrypt.V3Policy.maxRecord ∧
+        «prefix».length ≤ size.val ∧
         Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes «prefix») = some (wireBytes id) ⦄ := by
   unfold record_envelope_prefix_ok
+  simp_len
   have hbl := sliceBytes_length «prefix»
+  have hfm : Transcrypt.V3Wire.fileMinLen = 38 := rfl
   have := usize_max_ge
-  step with MAX_RECORD_spec as ⟨ i1, i1_post ⟩
+  step with FILE_MIN_LEN_spec as ⟨ i0, i0_post ⟩
   split
-  · rename_i hgt
-    simp only [gt_iff_lt, UScalar.lt_equiv, i1_post] at hgt
+  · rename_i hlt
+    simp only [UScalar.lt_equiv, i0_post] at hlt
     simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
     intro h; omega
-  · rename_i hgt
-    have hmax : size.val ≤ Transcrypt.V3Policy.maxRecord := by
-      simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, i1_post] at hgt
-      exact hgt
-    step with parse_file_header_spec as ⟨ r, hr ⟩
-    cases r with
-    | Ok found =>
-      simp only at hr ⊢
-      step*
-      rw [r_post, s_post, s1_post, hr, Option.some_inj]
-      simp only [hmax, true_and, Array.to_slice]
-      exact (wireBytes_inj found id).symm
-    | Err e =>
+  · rename_i hlt
+    have hmin : Transcrypt.V3Wire.fileMinLen ≤ size.val := by
+      simp only [UScalar.lt_equiv, not_lt, i0_post] at hlt; omega
+    step with MAX_RECORD_spec as ⟨ i1, i1_post ⟩
+    split
+    · rename_i hgt
+      simp only [gt_iff_lt, UScalar.lt_equiv, i1_post] at hgt
       simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
-      intro _
-      cases e with
-      | Magic =>
-        simp only at hr
-        rw [hr.2]; simp
-      | Length =>
-        simp only at hr
-        rw [Transcrypt.V3Wire.file_truncated _ (by rw [hbl]; exact hr)]
-        simp
+      intro _ h; omega
+    · rename_i hgt
+      have hmax : size.val ≤ Transcrypt.V3Policy.maxRecord := by
+        simp only [gt_iff_lt, UScalar.lt_equiv, not_lt, i1_post] at hgt
+        exact hgt
+      split
+      · rename_i hlong
+        simp only [gt_iff_lt, UScalar.lt_equiv] at hlong
+        simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
+        have hpv : «prefix».length = «prefix».val.length := rfl
+        intro _ _ h; simp at hlong; omega
+      · rename_i hlong
+        have hle : «prefix».length ≤ size.val := by
+          have hpv : «prefix».length = «prefix».val.length := rfl
+          simp only [gt_iff_lt, UScalar.lt_equiv, not_lt] at hlong; simp at hlong; omega
+        step with parse_file_header_spec as ⟨ r, hr ⟩
+        cases r with
+        | Ok found =>
+          simp only at hr ⊢
+          step*
+          rw [r_post, s_post, s1_post, hr, Option.some_inj]
+          simp only [hmin, hmax, hle, true_and, Array.to_slice]
+          exact (wireBytes_inj found id).symm
+        | Err e =>
+          simp only [WP.spec_ok, Bool.false_eq_true, false_iff, not_and]
+          intro _ _ _
+          cases e with
+          | Magic =>
+            simp only at hr
+            rw [hr.2]; simp
+          | Length =>
+            simp only at hr
+            rw [Transcrypt.V3Wire.file_truncated _ (by rw [hbl]; exact hr)]
+            simp
+
+/-- A decoded file header implies the bytes are at least `fileMinLen` long. -/
+theorem decodeFileHeaderShape_length {l id : List Nat}
+    (h : Transcrypt.V3Wire.decodeFileHeaderShape l = some id) :
+    Transcrypt.V3Wire.fileMinLen ≤ l.length := by
+  unfold Transcrypt.V3Wire.decodeFileHeaderShape at h
+  split at h
+  · assumption
+  · exact absurd h (by simp)
 
 /-- `record_envelope_ok` accepts exactly the records whose keyless envelope
     is valid for configuration id `id`. -/
@@ -165,6 +199,12 @@ theorem record_envelope_ok_spec (record : Slice U8) (id : Std.Array U8 16#usize)
   apply WP.spec_mono (record_envelope_prefix_ok_spec record.len record id)
   intro r hr
   rw [hr, hrl, sliceBytes_length]
+  constructor
+  · exact fun ⟨_, hmax, _, hd⟩ => ⟨hmax, hd⟩
+  · intro ⟨hmax, hd⟩
+    have := decodeFileHeaderShape_length hd
+    rw [sliceBytes_length] at this
+    exact ⟨this, hmax, le_refl _, hd⟩
 
 /-- The file header decision reads only the first `fileMinLen` bytes. -/
 theorem decodeFileHeaderShape_take (l : List Nat) :
@@ -202,7 +242,15 @@ theorem record_envelope_prefix_ok_record (record «prefix» : Slice U8) (id : St
   rw [hr, hprefix, decodeFileHeaderShape_take]
   unfold Transcrypt.V3Policy.EnvelopeOk
   have hrl : record.len.val = record.length := by simp
+  have hpl : «prefix».length ≤ record.length := by
+    rw [← sliceBytes_length «prefix», hprefix, List.length_take, sliceBytes_length]; omega
   rw [hrl, sliceBytes_length]
+  constructor
+  · exact fun ⟨_, hmax, _, hd⟩ => ⟨hmax, hd⟩
+  · intro ⟨hmax, hd⟩
+    have := decodeFileHeaderShape_length hd
+    rw [sliceBytes_length] at this
+    exact ⟨this, hmax, hpl, hd⟩
 
 /-! ## Smudge decision -/
 
