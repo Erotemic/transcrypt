@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-14, macos-15]
+        os: [ubuntu-22.04, ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v4
       - name: Install Bash 4.4 or later (macOS ships 3.2, which Bash v2 cannot run on)
@@ -278,7 +278,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-14, macos-15]
+        os: [ubuntu-22.04, ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v4
       - name: Print openssl version
