@@ -119,7 +119,7 @@ structure IndexEntry where
   path_start : Std.Usize
 
 /-- [transcrypt_v3_core::SmudgeAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 790:0-796:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 792:0-798:1
     Visibility: public -/
 @[discriminant isize]
 inductive SmudgeAction where
@@ -127,7 +127,7 @@ inductive SmudgeAction where
 | Keep : SmudgeAction
 
 /-- [transcrypt_v3_core::SealAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 821:0-830:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 823:0-832:1
     Visibility: public -/
 @[discriminant isize]
 inductive SealAction where
@@ -137,7 +137,7 @@ inductive SealAction where
 | Leave : SealAction
 
 /-- [transcrypt_v3_core::EntryCheck]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 856:0-866:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 858:0-868:1
     Visibility: public -/
 @[discriminant isize]
 inductive EntryCheck where
@@ -146,7 +146,7 @@ inductive EntryCheck where
 | EnvelopeNotMoved : EntryCheck
 
 /-- [transcrypt_v3_core::Fields]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1025:0-1031:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1027:0-1033:1
     Visibility: public -/
 structure Fields where
   start : Std.Usize
@@ -156,7 +156,7 @@ structure Fields where
   regular : Bool
 
 /-- [transcrypt_v3_core::StoredKey]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1397:0-1409:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1399:0-1411:1
     Visibility: public -/
 @[discriminant isize]
 inductive StoredKey where
@@ -166,7 +166,7 @@ inductive StoredKey where
 | Unlocked : StoredKey
 
 /-- [transcrypt_v3_core::BlobRead]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1492:0-1499:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1494:0-1501:1
     Visibility: public -/
 @[discriminant isize]
 inductive BlobRead where

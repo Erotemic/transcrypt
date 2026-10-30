@@ -771,10 +771,12 @@ pub fn record_envelope_ok(record: &[u8], id: &[u8; ID_LEN]) -> bool {
 pub const ENVELOPE_PREFIX_LEN: usize = FILE_MIN_LEN;
 
 /// `record_envelope_ok` of a record of `size` bytes, decided from its first
-/// `ENVELOPE_PREFIX_LEN` bytes `prefix` (all of it when shorter; any further
-/// bytes are ignored), so a reader need not load the rest.
+/// `ENVELOPE_PREFIX_LEN` bytes `prefix` (any further bytes are ignored), so
+/// a reader need not load the rest. The answer holds for any caller: a
+/// `size` outside `FILE_MIN_LEN..=MAX_RECORD`, or a `prefix` longer than
+/// `size`, is refused whatever the bytes say.
 pub fn record_envelope_prefix_ok(size: usize, prefix: &[u8], id: &[u8; ID_LEN]) -> bool {
-    if size > MAX_RECORD {
+    if size < FILE_MIN_LEN || size > MAX_RECORD || prefix.len() > size {
         return false;
     }
     // `parse_file_header` refuses prefixes shorter than `FILE_MIN_LEN`, and
@@ -1834,6 +1836,30 @@ mod tests {
         record[0] ^= 1;
         assert!(!record_envelope_ok(&record, &id));
         assert!(!record_envelope_ok(b"plaintext that is long enough to pass the size bound", &id));
+    }
+
+    #[test]
+    fn envelope_prefix_refuses_impossible_sizes() {
+        let id = core::array::from_fn(|i| i as u8);
+        let header = encode_file_header(&id);
+        let mut prefix = std::vec::Vec::from(&header[..]);
+        prefix.extend_from_slice(&[0u8; TAG_LEN]);
+        assert_eq!(prefix.len(), ENVELOPE_PREFIX_LEN);
+        assert!(record_envelope_prefix_ok(FILE_MIN_LEN, &prefix, &id));
+        assert!(record_envelope_prefix_ok(MAX_RECORD, &prefix, &id));
+        // A declared size too small to hold a record, whatever the prefix.
+        for size in [0, 1, FILE_HEADER_LEN, FILE_MIN_LEN - 1] {
+            assert!(!record_envelope_prefix_ok(size, &prefix, &id), "{size}");
+        }
+        assert!(!record_envelope_prefix_ok(MAX_RECORD + 1, &prefix, &id));
+        assert!(!record_envelope_prefix_ok(usize::MAX, &prefix, &id));
+        // A prefix longer than the declared size.
+        let mut longer = prefix.clone();
+        longer.push(0);
+        assert!(record_envelope_prefix_ok(FILE_MIN_LEN + 1, &longer, &id));
+        assert!(!record_envelope_prefix_ok(FILE_MIN_LEN, &longer, &id));
+        // A prefix shorter than `ENVELOPE_PREFIX_LEN` cannot show the envelope.
+        assert!(!record_envelope_prefix_ok(FILE_MIN_LEN, &prefix[..FILE_MIN_LEN - 1], &id));
     }
 
     #[test]
