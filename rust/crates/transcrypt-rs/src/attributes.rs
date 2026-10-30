@@ -54,7 +54,7 @@ impl AttributesUndo {
     fn capture(root: &Path) -> Result<AttributesUndo, String> {
         Ok(AttributesUndo {
             worktree: worktree_attributes(root)?,
-            staged: indexed_files(root)?.into_iter().find(|e| e.path == b".gitattributes").map(|e| (e.mode, e.oid)),
+            staged: indexed_files(root)?.into_iter().find(|e| e.path == b".gitattributes").map(|e| (e.mode().to_owned(), e.oid)),
         })
     }
 
@@ -125,7 +125,7 @@ struct Checked {
 fn checked_patterns(root: &Path, patterns: &[OsString]) -> Result<Checked, String> {
     let config = load_config(root)?;
     let key = Key::require(root, &config)?;
-    let submodules: Vec<Vec<u8>> = indexed_files(root)?.into_iter().filter(|e| e.mode == GITLINK_MODE).map(|e| e.path).collect();
+    let submodules: Vec<Vec<u8>> = indexed_files(root)?.into_iter().filter(|e| e.mode() == GITLINK_MODE).map(|e| e.path).collect();
     let patterns = patterns.iter().map(|p| check_pattern(root, &submodules, crate::os::os_bytes(p))).collect::<Result<Vec<_>, _>>()?;
     let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<_, _>>()?;
     Ok(Checked { key, patterns, lines })
@@ -307,7 +307,7 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
         }
         let mut update = IndexUpdate::new(root, Blobs::Plaintext);
         for (staged, plaintext) in &released {
-            update.add(&staged.mode, &staged.path, plaintext)?;
+            update.add(staged.mode(), &staged.path, plaintext)?;
         }
         let rules = worktree_attributes(root)?.ok_or("missing .gitattributes")?;
         update.add(REGULAR_FILE_MODE, b".gitattributes", &rules)?;

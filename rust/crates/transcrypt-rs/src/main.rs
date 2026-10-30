@@ -329,7 +329,7 @@ pub(crate) fn load_config(root: &Path) -> Result<Vec<u8>, String> {
         None if fs::symlink_metadata(root.join(".transcrypt")).is_ok() => {
             return Err("missing committed .transcrypt/config".into());
         },
-        None => match indexed_files(root)?.into_iter().find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular) {
+        None => match indexed_files(root)?.into_iter().find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular()) {
             Some(staged) => git_blob(root, &staged.oid)?,
             None => return Err("missing .transcrypt directory: run init or clone a v3 repository".into()),
         },

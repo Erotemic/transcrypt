@@ -136,7 +136,7 @@ struct CheckedRecord {
 type AttributeFiles = Vec<PathBlob>;
 
 fn attribute_files(entries: &[Staged]) -> AttributeFiles {
-    entries.iter().filter(|e| e.regular && is_attributes_file(&e.path))
+    entries.iter().filter(|e| e.regular() && is_attributes_file(&e.path))
         .map(|e| PathBlob { path: e.path.clone(), oid: e.oid.clone() }).collect()
 }
 
@@ -197,7 +197,7 @@ fn audit_commit(root: &Path, keyed: bool, state: &mut AuditState, commit: &str, 
     // audited).
     let parent_id = parent.unwrap_or_default();
     let config_oid = if config_changed {
-        entries.iter().find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular).map(|e| e.oid.clone())
+        entries.iter().find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular()).map(|e| e.oid.clone())
     } else {
         match state.commit_configs.get(&parent_id) {
             Some(known) => known.clone(),
@@ -314,7 +314,7 @@ fn check_records(root: &Path, keyed: bool, state: &mut AuditState, commit: &str,
     // A blob this commit removed from one path and added at another is a
     // record moved without re-encryption: it does not open at its new path.
     for entry in protected {
-        if !entry.regular {
+        if !entry.regular() {
             return Err(format!("{}: protected path is not a regular file", at(commit, &entry.path)));
         }
         let checked = CheckedRecord { oid: entry.oid.clone(), config_oid: config_oid.clone(), path: entry.path.clone() };

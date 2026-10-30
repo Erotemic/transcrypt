@@ -532,7 +532,7 @@ impl FileState {
 fn file_state(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], key: Option<&Key>, staged: &Staged)
     -> Result<FileState, String>
 {
-    if !staged.regular { return Ok(FileState::Unsupported); }
+    if !staged.regular() { return Ok(FileState::Unsupported); }
     let object = git_blob(root, &staged.oid)?;
     if !record_envelope_ok(&object, id) {
         return Ok(if parse_file_header(&object).is_ok() { FileState::OtherConfig } else { FileState::Unencrypted });

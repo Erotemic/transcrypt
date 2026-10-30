@@ -197,7 +197,7 @@ pub(super) fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
 pub(crate) fn config_blob(root: &Path, commit: &str) -> Result<Option<String>, String> {
     let listing = tree_listing_bytes(root, &["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])?;
     Ok(Listing::parse(listing)?.into_entries().into_iter()
-        .find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular).map(|e| e.oid))
+        .find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular()).map(|e| e.oid))
 }
 
 /// Re-index exactly `paths`, whose worktree content cleans to the staged

@@ -200,9 +200,9 @@ fn git_output_parsers_never_panic_and_accept_only_exact_records() {
     }
     // The valid records parse to exactly their fields.
     let tree = Listing::parse([tree_record(&valid_tree).unwrap().as_slice(), b"\0"].concat()).unwrap().into_entries();
-    assert_eq!((tree[0].regular, tree[0].oid.as_str(), tree[0].path.as_slice()), (true, oid, &b"dir/a b.secret"[..]));
+    assert_eq!((tree[0].regular(), tree[0].oid.as_str(), tree[0].path.as_slice()), (true, oid, &b"dir/a b.secret"[..]));
     let diff = parse_diff_tree(&valid_diff).unwrap().entries;
-    assert_eq!((diff[0].regular, diff[0].oid.as_str(), diff[0].path.as_slice()), (true, oid, &b"dir/a\tb.secret"[..]));
+    assert_eq!((diff[0].regular(), diff[0].oid.as_str(), diff[0].path.as_slice()), (true, oid, &b"dir/a\tb.secret"[..]));
     assert_eq!(parse_batch_header(format!("{oid} blob 12\n").as_bytes(), oid.as_bytes()), Some(12));
     for bad in ["blob 12\n", " blob 012\n", " blob +12\n", " blob 12", " tree 12\n", " missing\n"] {
         let header = if bad.starts_with(' ') { format!("{oid}{bad}") } else { bad.to_owned() };

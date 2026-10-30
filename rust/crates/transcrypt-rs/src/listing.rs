@@ -14,9 +14,11 @@ use crate::git::{git_records, MODE_LEN};
 /// of its content goes through `oid`, so a concurrent index change cannot
 /// substitute other bytes for the ones that were verified.
 pub(crate) struct Staged {
-    /// The mode is 100644 or 100755 (`mode`): a file Git filters.
-    pub(crate) regular: bool,
-    pub(crate) mode: String,
+    /// Whether the verified core found `mode` 100644 or 100755: a file Git
+    /// filters. Both are private and set together by `new`, so no entry
+    /// can claim to be regular with another mode.
+    regular: bool,
+    mode: String,
     pub(crate) oid: String,
     pub(crate) path: Vec<u8>,
 }
@@ -30,6 +32,16 @@ impl Staged {
             oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
             path: path.to_vec(),
         })
+    }
+
+    /// A file Git filters (mode 100644 or 100755), as the core decided.
+    pub(crate) fn regular(&self) -> bool {
+        self.regular
+    }
+
+    /// The Git mode, as listed.
+    pub(crate) fn mode(&self) -> &str {
+        &self.mode
     }
 
     /// The path, for messages.
