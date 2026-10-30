@@ -7,10 +7,16 @@ name: Release
 # archive's binary) before anything is published. The Linux archives are
 # built on an x86_64 and an arm64 host; they should be byte-identical (a
 # difference is reported). A `v3-*` tag publishes a draft release; a manual
-# run only builds and tests.
+# run, or a change to the release machinery itself, only builds and tests
+# (GitHub cannot dispatch a workflow that is not yet on the default branch).
 on:
   push:
     tags: ["v3-*"]
+    # Path filters are not applied to tag pushes.
+    branches: ["**"]
+    paths: [.github/workflows/release.yml, scripts/build-release.sh]
+  pull_request:
+    paths: [.github/workflows/release.yml, scripts/build-release.sh]
   workflow_dispatch:
 
 permissions:
