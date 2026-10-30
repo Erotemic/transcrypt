@@ -22,12 +22,15 @@ and names every assumption it rests on.
   (`Realizes`, A5); Git commits the index the hook checked (A22, stated in
   prose: the conclusion is about `g.index`).
 * **The run.** `HookEvidence` is what the adapter obtained from the
-  verified core: the three snapshots (`OrderedListing`, as the adapter's
-  `OrderedListing`: parsed, each path once, with checked object orders),
-  the attribute flags, the selectability check, the `HEAD`/`HEAD^1`
-  membership, the keyless move check, each entry's fields, and the
-  per-entry checks `hookPlan` (a model of the loop in `check_staged`, like
-  `verifyPlan`). The adapter acts only on these results (A4).
+  verified core, in four groups: the parsed snapshots (`HookSnapshots`:
+  three `OrderedListing`s, as the adapter's `OrderedListing`: parsed, each
+  path once, with checked object orders), the attribute selection
+  (`HookSelection`), the `HEAD`/`HEAD^1` membership (`HookMembership`), and
+  the checked entries (`HookChecks`: each entry's fields, settled status
+  and keyless move check), on which `hookPlan` (a model of the loop in
+  `check_staged`, like `verifyPlan`) runs. The adapter acts only on these
+  results (A4). For the repairs, `RepairInputs` are the values the adapter
+  computed for one entry and `RepairContracts` what they are.
 
 `hook_accepts_only_authenticated_ciphertext`: if the run accepted, every
 path the committed attributes select is a regular, non-reserved entry whose
@@ -252,25 +255,27 @@ theorem OrderedListing.of_git {es : List Entry} (l : OrderedListing) (hg : GitLi
 
 /-! ## The hook's final check -/
 
-/-- What the adapter obtained from the verified core in the hook's final
-    check (`check_staged`, after any sealing): it refuses the commit unless
-    the results are as shown, and builds each protected entry's check from
-    them (A4). -/
-structure HookEvidence (g : GitState) where
-  /-- The index, `HEAD` and `HEAD^1`, each path once, with object orders. -/
+/-- The parsed snapshots: the index, `HEAD` and `HEAD^1`, each path once,
+    with object orders. -/
+structure HookSnapshots where
   index : OrderedListing
   head : OrderedListing
   parent : OrderedListing
-  /-- The protected flags: Git's `check-attr` answer, checked against the
-      index's own paths. -/
+
+/-- The attribute selection: the protected flags are Git's `check-attr`
+    answer, checked against the index's own paths, and no protected entry
+    is unselectable. -/
+structure HookSelection (g : GitState) (index : OrderedListing) where
   response : Slice U8
   flags0 : Slice Bool
   flags : Slice Bool
   flags0_len : flags0.length = g.index.length
   attrs : parse_listing_attrs index.bytes index.ends response flags0 = ok (true, flags)
-  /-- No protected entry is unselectable. -/
   selectable : ∃ sel : Usize, first_unselectable index.bytes index.ends flags = ok sel ∧ sel.val = g.index.length
-  /-- Membership in `HEAD` (every entry) and `HEAD^1` (protected entries). -/
+
+/-- Membership: in `HEAD` (every entry) and in `HEAD^1` (protected
+    entries), by `held_entries`. -/
+structure HookMembership (g : GitState) (index head parent : OrderedListing) (flags : Slice Bool) where
   all : Slice Bool
   inHead0 : Slice Bool
   inHead : Slice Bool
@@ -281,17 +286,28 @@ structure HookEvidence (g : GitState) where
   in_head : held_entries index.bytes index.ends all head.bytes head.ends inHead0 = ok (true, inHead)
   inParent0_len : inParent0.length = g.index.length
   in_parent : held_entries index.bytes index.ends flags parent.bytes parent.ends inParent0 = ok (true, inParent)
-  /-- One check per protected entry, in index order. -/
+
+/-- The checked entries: one check per protected entry, in index order,
+    each at the entry's path field (`listing_fields`), settled only if
+    `HEAD` and `HEAD^1` hold it (the adapter also requires unchanged
+    attribute files and config), with the keyless move check
+    (`blob_elsewhere`). -/
+structure HookChecks (g : GitState) (index head parent : OrderedListing) (flags inHead inParent : Slice Bool) where
   entries : List HookEntry
   positions : entries.map (fun e => e.index.val) = (List.range g.index.length).filter (fun i => flags.val[i]!)
-  /-- Each check's path is the entry's path field (`listing_fields`). -/
   fields : ∀ e ∈ entries, ∃ f, listing_fields index.bytes index.ends e.index = ok (core.option.Option.Some f) ∧
     sliceBytes e.path = (sliceBytes index.bytes).extract f.path_start.val f.end.val
-  /-- An entry counts as settled only if both `HEAD` and `HEAD^1` hold it
-      (the adapter also requires unchanged attribute files and config). -/
   settled : ∀ e ∈ entries, e.settled = true → (inHead.val[e.index.val]! && inParent.val[e.index.val]!) = true
   elsewhere : ∀ e ∈ entries, blob_elsewhere index.bytes index.ends index.order e.index head.bytes head.ends
     head.order parent.bytes parent.ends parent.order = ok e.elsewhere
+
+/-- What the adapter obtained from the verified core in the hook's final
+    check (`check_staged`, after any sealing): it refuses the commit unless
+    the results are as shown, and builds each protected entry's check from
+    them (A4). The four groups are flattened: `run.flags`, `run.inHead`,
+    `run.entries`, ... -/
+structure HookEvidence (g : GitState) extends HookSnapshots, HookSelection g index,
+    HookMembership g index head parent flags, HookChecks g index head parent flags inHead inParent
 
 /-- **A20, A19, A11, A21.** The adapter contracts the hook relies on, for
     one run: Git reported the index, `HEAD` and `HEAD^1` exactly, and the
@@ -343,7 +359,6 @@ theorem hook_accepts_only_authenticated_ciphertext (g : GitState) (run : HookEvi
           (incremental = true ∧ Settled g.head g.parent x ∧ EnvelopeOk content (σ.digest16 (wireBytes config)))) ∧
         (keyed = false → EnvelopeOk content (σ.digest16 (wireBytes config)) ∧
           (Settled g.head g.parent x ∨ ¬ BlobElsewhere [g.index, g.head, g.parent] x)) := by
-  -- The verified parses give exactly Git's snapshots, each path once.
   -- The verified parses give exactly Git's snapshots, each path once.
   obtain ⟨hL, hLs, hIo⟩ := run.index.of_git hgit.index
   obtain ⟨hH, hHs, hHo⟩ := run.head.of_git hgit.head
@@ -498,53 +513,114 @@ theorem sealResult_eq_rebind {a : Transcrypt.V3Policy.SealAction} :
     sealResult a = transcrypt_v3_core.SealAction.Rebind ↔ a = .rebind := by
   cases a <;> simp [sealResult]
 
+/-- What the adapter computed for one protected index entry before
+    `seal_action` (in `seal_snapshot` and `open_moved`): the snapshots it
+    parsed, the entry, and the results of the verified core it passes on.
+    `RepairContracts` says what these values are. -/
+structure RepairInputs where
+  /-- The index and `HEAD`, each path once. -/
+  index : ParsedListing true
+  head : ParsedListing true
+  /-- The protected flags, and membership in `HEAD` and in the incoming
+      commits (`held_entries`; `known`: the incoming commits were listed). -/
+  flags : Slice Bool
+  inHead0 : Slice Bool
+  inHead : Slice Bool
+  inInc0 : Slice Bool
+  inInc : Slice Bool
+  known : Bool
+  /-- The entry, its path and blob, and the configuration. -/
+  i : Usize
+  config : Std.Array U8 55#usize
+  path : Slice U8
+  record : Slice U8
+  openBuf : Slice U8
+  /-- `protect` forced sealing a plaintext. -/
+  forced : Bool
+  /-- The inputs of `seal_action`, and its decision. -/
+  opens : Bool
+  envelope : Bool
+  moved : Bool
+  localc : Bool
+  act : transcrypt_v3_core.SealAction
+
+/-- What the values of a `RepairInputs` are: Git's snapshots (A20) and
+    sequencing state (A23), and the results of the verified core on them
+    (A4): membership, the local-change input, whether the blob opens at its
+    path, whether it has the envelope, a move source at which it opens, and
+    the decision. -/
+structure RepairContracts (inst : V3Primitives P) (prims : P) (g : GitState) (run : RepairInputs) : Prop where
+  /-- **A20.** Git's index and `HEAD`, listed exactly. -/
+  index : GitListing run.index.bytes g.index
+  head : GitListing run.head.bytes g.head
+  /-- A protected entry of the index. -/
+  entry : run.i.val < g.index.length
+  flags_len : run.flags.length = g.index.length
+  protected_ : run.flags.val[run.i.val]! = true
+  /-- `HEAD` membership (`held_entries`). -/
+  inHead0_len : run.inHead0.length = g.index.length
+  in_head : held_entries run.index.bytes run.index.ends run.flags run.head.bytes run.head.ends run.inHead0 =
+    ok (true, run.inHead)
+  /-- **A20, A23.** When `known`, the incoming commits the sequencing state
+      names, listed exactly, and membership in them; otherwise they are
+      not consulted, which happens only when there are none or `HEAD`
+      holds the entry. -/
+  incoming : run.known = true → ∃ m, ∃ incoming : ParsedListing false, g.incoming = some m ∧
+    GitListing incoming.bytes m ∧ run.inInc0.length = g.index.length ∧
+    held_entries run.index.bytes run.index.ends run.flags incoming.bytes incoming.ends run.inInc0 =
+      ok (true, run.inInc)
+  lazy : run.known = false → g.incoming = none ∨ run.inHead.val[run.i.val]! = true
+  /-- The local-change input (`is_local_change`). -/
+  local_change : is_local_change run.inHead.val[run.i.val]! run.known (run.known && run.inInc.val[run.i.val]!)
+    run.forced run.envelope = ok run.localc
+  /-- `opens`: the blob authenticates at its own path (`open_record`). -/
+  opens : ∀ pt r, open_record inst prims run.config run.path run.record run.openBuf = ok (r, pt) →
+    (run.opens = true ↔ r = core.result.Result.Ok ())
+  /-- `envelope`: it has the v3 file header (`parse_file_header`). -/
+  envelope : ∀ r, parse_file_header run.record = ok r → (run.envelope = true ↔ ∃ x, r = core.result.Result.Ok x)
+  /-- `moved`: a move source from `next_move_source`, over a checked object
+      order of `HEAD`, whose path is that of the `HEAD` entry it names and
+      at which the blob authenticates. -/
+  moved : run.moved = true → ∃ (horder : Slice Usize) (from_ j : Usize) (src buf pt : Slice U8),
+    from_.val ≤ g.head.length ∧ object_order_ok run.head.bytes run.head.ends horder = ok true ∧
+    next_move_source run.index.bytes run.index.ends run.i run.head.bytes run.head.ends horder from_ = ok j ∧
+    j.val < g.head.length ∧ sliceBytes src = (g.head[j.val]?).elim [] (·.path) ∧
+    open_record inst prims run.config src run.record buf = ok (core.result.Result.Ok (), pt)
+  /-- The decision (`seal_action`). -/
+  decision : seal_action run.opens run.localc run.envelope run.moved = ok run.act
+
 /-- **The pre-commit hook repairs only local changes.** For a protected
     entry `i` of Git's index (A20), with `HEAD` and the commits being brought
     in parsed exactly (A20, A23: the sequencing state names those commits),
-    suppose the hook computed its inputs with the verified core — membership
-    in `HEAD` and the incoming commits (`held_entries`; the incoming commits
-    are only consulted when some protected entry changed, `known`), the
-    local-change input (`is_local_change`), whether the blob opens at its own
-    path (`open_record`), whether it has the v3 envelope
-    (`parse_file_header`), and, for `moved`, a move source
-    (`next_move_source`) at which it opens — and `seal_action` decided to
-    seal or re-seal it. Then the entry is a local change of the user
-    (`LocalChange`: never content of `HEAD` or of an incoming commit unless
-    `protect` forced plaintext), it did not already open at its path, only
-    plaintext is sealed, and a rebind re-encrypts exactly the plaintext of a
-    record that authenticates at a `HEAD` path it was moved from
-    (`MoveSource`). -/
-theorem hook_repairs_only_local_changes (g : GitState)
-    (index head : ParsedListing true) (flags inHead0 inHead inInc0 inInc : Slice Bool)
-    (i : Usize) (hi : i.val < g.index.length)
-    (config : Std.Array U8 55#usize) (path record openBuf : Slice U8)
-    (forced known opens envelope moved localc : Bool) (act : transcrypt_v3_core.SealAction)
-    (hR : Realizes inst prims σ)
-    (hindex : GitListing index.bytes g.index) (hhead : GitListing head.bytes g.head)
-    (hflen : flags.length = g.index.length) (hfi : flags.val[i.val]! = true)
-    (hInHead0 : inHead0.length = g.index.length)
-    (hinH : held_entries index.bytes index.ends flags head.bytes head.ends inHead0 = ok (true, inHead))
-    (hknown : known = true → ∃ m, ∃ incoming : ParsedListing false, g.incoming = some m ∧
-      GitListing incoming.bytes m ∧ inInc0.length = g.index.length ∧
-      held_entries index.bytes index.ends flags incoming.bytes incoming.ends inInc0 = ok (true, inInc))
-    (hlazy : known = false → g.incoming = none ∨ inHead.val[i.val]! = true)
-    (hlocal : is_local_change inHead.val[i.val]! known (known && inInc.val[i.val]!) forced envelope = ok localc)
-    (hopens : ∀ pt r, open_record inst prims config path record openBuf = ok (r, pt) →
-      (opens = true ↔ r = core.result.Result.Ok ()))
-    (henvelope : ∀ r, parse_file_header record = ok r → (envelope = true ↔ ∃ x, r = core.result.Result.Ok x))
-    (hmoved : moved = true → ∃ (horder : Slice Usize) (from_ j : Usize) (src buf pt : Slice U8),
-      from_.val ≤ g.head.length ∧ object_order_ok head.bytes head.ends horder = ok true ∧
-      next_move_source index.bytes index.ends i head.bytes head.ends horder from_ = ok j ∧ j.val < g.head.length ∧
-      sliceBytes src = (g.head[j.val]?).elim [] (·.path) ∧
-      open_record inst prims config src record buf = ok (core.result.Result.Ok (), pt))
-    (hseal : seal_action opens localc envelope moved = ok act)
-    (hrepair : act = transcrypt_v3_core.SealAction.Seal ∨ act = transcrypt_v3_core.SealAction.Rebind) :
-    LocalChange g.head g.incoming forced envelope g.index[i.val] ∧
-      (∀ r pt, open_record inst prims config path record openBuf = ok (r, pt) → r ≠ core.result.Result.Ok ()) ∧
-      (act = transcrypt_v3_core.SealAction.Seal →
-        ∀ r, parse_file_header record = ok r → ∀ x, r ≠ core.result.Result.Ok x) ∧
-      (act = transcrypt_v3_core.SealAction.Rebind → envelope = true ∧ ∃ h ∈ g.head,
-        MoveSource g.index g.index[i.val] h ∧ ∃ pt, OpensTo σ (wireBytes config) h.path (sliceBytes record) pt) := by
+    suppose the hook computed its inputs (`RepairInputs`) with the verified
+    core (`RepairContracts`): membership in `HEAD` and the incoming commits
+    (`held_entries`; the incoming commits are only consulted when some
+    protected entry changed, `known`), the local-change input
+    (`is_local_change`), whether the blob opens at its own path
+    (`open_record`), whether it has the v3 envelope (`parse_file_header`),
+    and, for `moved`, a move source (`next_move_source`) at which it opens;
+    and `seal_action` decided to seal or re-seal it. Then the entry is a
+    local change of the user (`LocalChange`: never content of `HEAD` or of
+    an incoming commit unless `protect` forced plaintext), it did not
+    already open at its path, only plaintext is sealed, and a rebind
+    re-encrypts exactly the plaintext of a record that authenticates at a
+    `HEAD` path it was moved from (`MoveSource`). -/
+theorem hook_repairs_only_local_changes (g : GitState) (run : RepairInputs)
+    (hR : Realizes inst prims σ) (hc : RepairContracts inst prims g run)
+    (hrepair : run.act = transcrypt_v3_core.SealAction.Seal ∨ run.act = transcrypt_v3_core.SealAction.Rebind) :
+    LocalChange g.head g.incoming run.forced run.envelope (g.index[run.i.val]'hc.entry) ∧
+      (∀ r pt, open_record inst prims run.config run.path run.record run.openBuf = ok (r, pt) →
+        r ≠ core.result.Result.Ok ()) ∧
+      (run.act = transcrypt_v3_core.SealAction.Seal →
+        ∀ r, parse_file_header run.record = ok r → ∀ x, r ≠ core.result.Result.Ok x) ∧
+      (run.act = transcrypt_v3_core.SealAction.Rebind → run.envelope = true ∧ ∃ h ∈ g.head,
+        MoveSource g.index (g.index[run.i.val]'hc.entry) h ∧
+          ∃ pt, OpensTo σ (wireBytes run.config) h.path (sliceBytes run.record) pt) := by
+  rcases run with ⟨index, head, flags, inHead0, inHead, inInc0, inInc, known, i, config, path, record, openBuf,
+    forced, opens, envelope, moved, localc, act⟩
+  obtain ⟨hindex, hhead, hi, hflen, hfi, hInHead0, hinH, hknown, hlazy, hlocal, hopens, henvelope, hmoved,
+    hseal⟩ := hc
+  dsimp only at *
   have hact := spec_result (seal_action_spec opens localc envelope moved) hseal
   -- What `seal_action` decided, in the spec's terms.
   have hspec : sealSpec opens localc envelope moved = .seal ∨ sealSpec opens localc envelope moved = .rebind := by

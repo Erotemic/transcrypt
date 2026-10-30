@@ -177,9 +177,9 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 | `Realizes inst prims σ` | the primitives compute AES-SIV / SHA-256 | A5 (with A9) | TESTED (vectors, differential) |
 | `hid : wireBytes id = σ.digest16 config` | the configuration id is the suite's digest | A5 | TESTED (vectors) |
 | `hcfg` | the configuration used is the staged `.transcrypt/config` | A4 | REVIEWED + TESTED (`check_staged` compares the staged blob with it) |
-| `run : HookEvidence g`, `hookPlan … = ok true` | the adapter called the verified functions on these inputs and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
+| `run : HookEvidence g`, `hookPlan … = ok true`; `RepairContracts` (Theorem 2, the core-call fields) | the adapter called the verified functions on these inputs and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
-| `hknown`, `hlazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
+| `RepairContracts.incoming`, `.lazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | `HeadAuthentic` (corollary) | the history the incremental hook trusts was checked | A24 | REVIEWED + TESTED (induction above; `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`) |
 | Unforgeability | only the key holder makes records that authenticate | A10 | ASSUMED (standard) |
 

@@ -91,7 +91,7 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
   sorts it and the core checks it.
 - **End-to-end contracts** (`EndToEnd`): `GitListing` (A20),
   `GitAttributes` (A19), `GitObject` (A11, A21), `Realizes` (A5), the
-  observed call results `HookEvidence` and the per-entry model `hookPlan` (A4),
+  observed call results `HookEvidence` (and `RepairInputs`/`RepairContracts` for the repairs) and the per-entry model `hookPlan` (A4),
   the sequencing state (A23); Git commits the checked index (A22).
 
 ## Not covered by Lean

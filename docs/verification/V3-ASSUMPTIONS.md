@@ -143,7 +143,8 @@ one.
     (`hook_accepts_only_authenticated_ciphertext`,
     `hook_repairs_only_local_changes`,
     `stored_key_authenticates_current_config`) take the adapter's observed
-    results of these calls as hypotheses (`HookEvidence`), so what remains of A4
+    results of these calls as hypotheses (`HookEvidence`; for the repairs,
+    `RepairInputs` with `RepairContracts`), so what remains of A4
     on this path is listed below. See [the security argument](V3-SECURITY-ARGUMENT.md).
 - **Residual:** the adapter Rust itself is not proved. On the pre-commit
   path what remains reviewed and tested, not proved, is:
