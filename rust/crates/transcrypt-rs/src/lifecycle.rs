@@ -66,7 +66,7 @@ fn selectable(entry: &Staged) -> Result<(), String> {
         return Err(format!("{name} is selected for encryption, but v3 never encrypts .gitattributes, \
             .gitmodules or .transcrypt/; narrow the .gitattributes pattern that selects it"));
     }
-    if !entry.regular {
+    if !entry.regular() {
         return Err(format!("{name} is selected for encryption but is a symlink or submodule, \
             which Git stores unfiltered; narrow the pattern or replace it by a file"));
     }
@@ -109,11 +109,11 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
 {
     let (entries, flags) = (snapshot.entries(), &snapshot.flags);
     match entries.iter().find(|e| e.path == CONFIG_PATH.as_bytes()) {
-        Some(e) if e.regular && git_blob(root, &e.oid)? == config => {},
+        Some(e) if e.regular() && git_blob(root, &e.oid)? == config => {},
         _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree \
             (an interrupted `rekey`? `git reset` undoes a staged rekey)".into()),
     }
-    let top = entries.iter().find(|e| e.path == ATTRIBUTES_NAME && e.regular).map(|e| e.oid.as_str());
+    let top = entries.iter().find(|e| e.path == ATTRIBUTES_NAME && e.regular()).map(|e| e.oid.as_str());
     if !macro_resolves(root, &git_dir(root), top)? {
         return Err(crate::attributes::MACRO_MISSING.into());
     }
@@ -185,7 +185,7 @@ fn check_unprotected(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], snapsho
 {
     let (head_oid, parent_oid) = (oids_by_path(head.entries()), oids_by_path(parent.entries()));
     let staged_unprotected = snapshot.entries().iter().zip(&snapshot.flags).zip(in_head)
-        .filter(|((e, p), unchanged)| !**p && e.regular && !**unchanged).map(|((e, _), _)| e);
+        .filter(|((e, p), unchanged)| !**p && e.regular() && !**unchanged).map(|((e, _), _)| e);
     let mut drifted: Vec<&[u8]> = Vec::new();
     for entry in staged_unprotected {
         let path = entry.path.as_slice();
@@ -425,7 +425,7 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
                 plaintext
             },
         };
-        update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
+        update.add(staged.mode(), &staged.path, &key.clean(&staged.path, &plaintext)?)?;
     }
     let count = update.len();
     update.apply(&[])?;
@@ -482,8 +482,15 @@ pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zer
 /// umask would expose plaintext); it never fails the finished Git command.
 pub(crate) fn auto_hydrate(root: &Path) -> Result<(), String> {
     let Ok(config) = load_config(root) else { return Ok(()) };
-    if !Key::load(root, &config).ok().flatten().is_some_and(|k| k.private()) {
-        return Ok(());
+    match Key::load(root, &config) {
+        Ok(Some(key)) if key.private() => {},
+        // Locked, or unlocked without the private mode: nothing to do.
+        Ok(_) => return Ok(()),
+        // The finished Git command must not fail; say why nothing happened.
+        Err(e) => {
+            eprintln!("transcrypt-rs: automatic decryption skipped: {e}");
+            return Ok(());
+        },
     }
     match hydrate(root) {
         Ok(0) => {},

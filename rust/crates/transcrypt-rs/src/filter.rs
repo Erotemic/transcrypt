@@ -53,8 +53,8 @@ impl<'a> Filters<'a> {
     /// The worktree config, or the staged one when the worktree has none.
     fn config(&mut self) -> Result<Vec<u8>, String> {
         if fs::symlink_metadata(self.root.join(".transcrypt")).is_ok() { return load_config(self.root); }
-        if self.staged_config.is_none() { self.staged_config = Some(load_config(self.root)?); }
-        Ok(self.staged_config.clone().unwrap_or_default())
+        let root = self.root;
+        Ok(get_or_try_init(&mut self.staged_config, || load_config(root))?.clone())
     }
 }
 
@@ -122,7 +122,11 @@ impl File<'_> {
         // ciphertext), so a record of this configuration passes
         // through unchanged. Plaintext is refused, never stored.
         if record_envelope_ok(&input, &self.id) { return Ok(input); }
-        Err(Key::require(root, self.config).err().unwrap_or_default())
+        match Key::require(root, self.config) {
+            Err(locked) => Err(locked),
+            // Unlocked since this filter started: refuse rather than guess.
+            Ok(_) => Err("the repository was unlocked while Git was running the clean filter; rerun the command".into()),
+        }
     }
 
     fn smudge(&self, stored: &mut StoredKey, input: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>, String> {

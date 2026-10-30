@@ -51,7 +51,7 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     // The new records, written as Git objects, and one index update.
     let mut update = IndexUpdate::new(root, Blobs::Records);
     for (staged, plaintext) in &plaintexts {
-        update.add(&staged.mode, &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?)?;
+        update.add(staged.mode(), &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?)?;
     }
     update.add(REGULAR_FILE_MODE, CONFIG_PATH.as_bytes(), &config)?;
     update.apply(&[])?;
@@ -133,15 +133,26 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
         let password = passphrase(options.password_stdin, false)?;
         keys.push((old, unlock_config(&password, &old.bytes)?));
     }
-    let mut update = IndexUpdate::new(root, Blobs::Records);
-    let staging = staging_dir(root)?;
+    // Decrypt and re-seal every file before writing any.
+    let mut resealed = Vec::new();
     for (old, old_key) in &keys {
         for Stale { staged, record, .. } in stale.iter().filter(|f| f.config == old.id) {
             let plaintext = transcrypt_rs::decrypt_file(&old.bytes, old_key, &staged.path, record)
                 .map_err(|e| format!("{}: {e}", staged.name()))?;
-            update.add(&staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
-            replace_if_holds(root, &staging, &staged.path, record, &plaintext, key.private())?;
+            let new_record = key.clean(&staged.path, &plaintext)?;
+            resealed.push((staged, record, plaintext, new_record));
         }
+    }
+    // The worktree first: a file that still holds its old record gets the
+    // plaintext. The index changes last, so after a failure it still names
+    // the old records and rerunning `reencrypt` finishes the job.
+    let staging = staging_dir(root)?;
+    for (staged, record, plaintext, _) in &resealed {
+        replace_if_holds(root, &staging, &staged.path, record, plaintext, key.private())?;
+    }
+    let mut update = IndexUpdate::new(root, Blobs::Records);
+    for (staged, _, _, new_record) in &resealed {
+        update.add(staged.mode(), &staged.path, new_record)?;
     }
     update.apply(&[])?;
     eprintln!("Re-encrypted {} file(s) under the current config; they are staged. Commit them.", stale.len());
