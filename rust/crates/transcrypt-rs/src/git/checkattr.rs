@@ -109,11 +109,11 @@ pub(crate) fn other_filter(value: &[u8]) -> bool {
 /// they do to Git's filters. A missing, redefined or overridden macro all
 /// show as a probe Git would not encrypt. The hooks and the audit use this
 /// one predicate.
-pub(crate) fn macro_resolves(repo: &Repository, top: Option<&str>) -> Result<bool, String> {
+pub(crate) fn macro_resolves(repo: &Repository, top: Option<&ObjectId>) -> Result<bool, String> {
     let rules = hash_object(repo, b"probe transcrypt\n")?;
     let mut info = Vec::new();
-    push_index_record(&mut info, REGULAR_FILE_MODE, &rules, b"transcrypt-v3-probe/.gitattributes");
-    if let Some(top) = top { push_index_record(&mut info, REGULAR_FILE_MODE, top, &ATTRIBUTES_NAME); }
+    push_index_record(&mut info, Mode::REGULAR, &rules, b"transcrypt-v3-probe/.gitattributes");
+    if let Some(top) = top { push_index_record(&mut info, Mode::REGULAR, top, &ATTRIBUTES_NAME); }
     let index = repo.git_dir().join(format!("transcrypt-v3-probe-{}.index", std::process::id()));
     let _ = std::fs::remove_file(&index);
     let mut command = git_command(repo);

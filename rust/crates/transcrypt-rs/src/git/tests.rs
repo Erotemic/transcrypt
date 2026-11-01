@@ -54,7 +54,7 @@ fn object_reads_follow_their_repository() {
     let _ = std::fs::remove_dir_all(&base);
     let repos: Vec<(Repository, &[u8])> = [("a", b"in a".as_slice()), ("b", b"in b")].into_iter()
         .map(|(name, bytes)| (new_repository(&base.join(name)), bytes)).collect();
-    let oids: Vec<String> = repos.iter().map(|(repo, bytes)| hash_object(repo, bytes).unwrap()).collect();
+    let oids: Vec<ObjectId> = repos.iter().map(|(repo, bytes)| hash_object(repo, bytes).unwrap()).collect();
     for _ in 0..2 {
         for ((repo, bytes), oid) in repos.iter().zip(&oids) {
             assert_eq!(git_blob(repo, oid).unwrap(), *bytes);
@@ -81,7 +81,7 @@ fn index_updates_stage_exact_blobs() {
     for kind in [Blobs::Records, Blobs::Plaintext] {
         git(&repo, &["read-tree", "--empty"]).unwrap();
         let mut update = IndexUpdate::new(&repo, kind);
-        for (path, bytes) in blobs { update.add(REGULAR_FILE_MODE, path, bytes).unwrap(); }
+        for (path, bytes) in blobs { update.add(Mode::REGULAR, path, bytes).unwrap(); }
         update.apply(&["--add"]).unwrap();
         let listing = git(&repo, &["ls-files", "--stage", "-z"]).unwrap();
         assert_eq!(listing.split(|b| *b == 0).filter(|r| !r.is_empty()).count(), blobs.len());
@@ -99,12 +99,12 @@ fn index_updates_stage_exact_blobs() {
     const MANY: usize = 4096;
     git(&repo, &["read-tree", "--empty"]).unwrap();
     let mut update = IndexUpdate::new(&repo, Blobs::Records);
-    for i in 0..MANY { update.add(REGULAR_FILE_MODE, format!("many/{i}").as_bytes(), i.to_string().as_bytes()).unwrap(); }
+    for i in 0..MANY { update.add(Mode::REGULAR, format!("many/{i}").as_bytes(), i.to_string().as_bytes()).unwrap(); }
     update.apply(&["--add"]).unwrap();
     assert_eq!(git_records(&git(&repo, &["ls-files", "--stage", "-z"]).unwrap()).unwrap().len(), MANY);
     // A path Git refuses to stage (it only warns, and succeeds) is an error.
     let mut update = IndexUpdate::new(&repo, Blobs::Records);
-    update.add(REGULAR_FILE_MODE, b".git/hooks/pre-commit", b"x").unwrap();
+    update.add(Mode::REGULAR, b".git/hooks/pre-commit", b"x").unwrap();
     let err = update.apply(&["--add"]).unwrap_err();
     assert!(err.contains("did not stage .git/hooks/pre-commit"), "{err}");
     std::fs::remove_dir_all(&root).unwrap();
@@ -137,7 +137,7 @@ fn header_only_record_checks_agree_with_whole_blobs() {
         record(MAX_RECORD + 1),
         vec![b'\n'; MAX_RECORD],
     ];
-    let oids: Vec<String> = blobs.iter().map(|bytes| hash_object(&repo, bytes).unwrap()).collect();
+    let oids: Vec<ObjectId> = blobs.iter().map(|bytes| hash_object(&repo, bytes).unwrap()).collect();
     for (bytes, oid) in blobs.iter().zip(&oids) {
         for want in [&id, &other] {
             assert_eq!(is_record(&repo, oid, want).unwrap(), record_envelope_ok(bytes, want), "{} bytes", bytes.len());
@@ -182,14 +182,14 @@ fn git_output_parsers_never_panic_and_accept_only_exact_records() {
         if let Ok(record) = tree_record(&input) {
             if let Ok(parsed) = Listing::parse([record.as_slice(), b"\0"].concat()) {
                 for e in parsed.into_entries() {
-                    assert!(is_object_id(e.oid.as_bytes()));
+                    assert!(is_object_id(e.oid.as_str().as_bytes()));
                     assert!(input.ends_with(&e.path) && input.starts_with(&input[..MODE_LEN]));
                 }
             }
         }
         if let Ok(Changes { entries, .. }) = parse_diff_tree(&input) {
             for e in entries {
-                assert!(is_object_id(e.oid.as_bytes()));
+                assert!(is_object_id(e.oid.as_str().as_bytes()));
                 let mut needle = e.path.clone();
                 needle.push(0);
                 assert!(input.windows(needle.len()).any(|w| w == needle.as_slice()), "{:?}", String::from_utf8_lossy(&input));
@@ -212,7 +212,7 @@ fn git_output_parsers_never_panic_and_accept_only_exact_records() {
     }
     let changes = parse_diff_tree(format!(":100644 100644 {oid} {oid} D\0gone.secret\0").as_bytes()).unwrap();
     assert!(changes.entries.is_empty()
-        && changes.deleted == [PathBlob { path: b"gone.secret".to_vec(), oid: oid.to_owned() }]);
+        && changes.deleted == [PathBlob { path: b"gone.secret".to_vec(), oid: ObjectId::new(oid.as_bytes()).unwrap() }]);
 }
 
 #[test]
@@ -268,4 +268,28 @@ fn git_records_are_taken_exactly() {
     assert!(parse_diff_tree(change.as_bytes()).is_ok());
     assert!(parse_diff_tree(format!("{change}trailing\0").as_bytes()).is_err(), "an unpaired header");
     assert!(parse_diff_tree(format!("{change}\0").as_bytes()).is_err(), "an empty record");
+}
+
+/// An object id is only what the verified core accepts, and an entry's
+/// regularity is its mode's, which must agree with the core's decision.
+#[test]
+fn object_ids_and_modes_are_only_what_the_core_accepts() {
+    use transcrypt_v3_core::{SHA1_OID_LEN, SHA256_OID_LEN};
+    let digits = "0123456789abcdef".repeat(SHA256_OID_LEN);
+    let (sha1, sha256) = (&digits[..SHA1_OID_LEN], &digits[..SHA256_OID_LEN]);
+    for good in [sha1, sha256] {
+        assert_eq!(ObjectId::new(good.as_bytes()).map(|id| id.to_string()).as_deref(), Some(good));
+    }
+    let upper = sha1.to_uppercase();
+    for bad in [&b""[..], b":0:x.secret", b"HEAD", b"--output=x", upper.as_bytes(), &sha1.as_bytes()[1..]] {
+        assert!(ObjectId::new(bad).is_none(), "{}", String::from_utf8_lossy(bad));
+    }
+    let oid = || ObjectId::new(sha1.as_bytes()).unwrap();
+    for (mode, regular) in [(&b"100644"[..], true), (b"100755", true), (b"120000", false), (b"160000", false)] {
+        let entry = Staged::new(regular, mode, oid(), b"x").unwrap();
+        assert!(entry.regular() == regular && entry.mode.to_string().as_bytes() == mode);
+        assert!(Staged::new(!regular, mode, oid(), b"x").is_err(), "a mode the core read otherwise");
+    }
+    assert!(Staged::new(true, b"10064", oid(), b"x").is_err(), "a mode of the wrong length");
+    assert!(Staged::new(false, b"160000", oid(), b"x").unwrap().mode == Mode::GITLINK);
 }

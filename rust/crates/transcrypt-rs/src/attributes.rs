@@ -47,14 +47,14 @@ pub(crate) fn restore_worktree_attributes(repo: &Repository, before: Option<&[u8
 /// so that a command that fails after editing it can put both back.
 struct AttributesUndo {
     worktree: Option<Vec<u8>>,
-    staged: Option<(String, String)>,
+    staged: Option<(Mode, ObjectId)>,
 }
 
 impl AttributesUndo {
     fn capture(repo: &Repository) -> Result<AttributesUndo, String> {
         Ok(AttributesUndo {
             worktree: worktree_attributes(repo)?,
-            staged: indexed_files(repo)?.into_iter().find(|e| e.path == b".gitattributes").map(|e| (e.mode().to_owned(), e.oid)),
+            staged: indexed_files(repo)?.into_iter().find(|e| e.path == b".gitattributes").map(|e| (e.mode, e.oid)),
         })
     }
 
@@ -125,7 +125,7 @@ struct Checked {
 fn checked_patterns(repo: &Repository, patterns: &[OsString]) -> Result<Checked, String> {
     let config = load_config(repo)?;
     let key = Key::require(repo, &config)?;
-    let submodules: Vec<Vec<u8>> = indexed_files(repo)?.into_iter().filter(|e| e.mode() == GITLINK_MODE).map(|e| e.path).collect();
+    let submodules: Vec<Vec<u8>> = indexed_files(repo)?.into_iter().filter(|e| e.mode == Mode::GITLINK).map(|e| e.path).collect();
     let patterns = patterns.iter().map(|p| check_pattern(repo, &submodules, crate::os::os_bytes(p))).collect::<Result<Vec<_>, _>>()?;
     let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<_, _>>()?;
     Ok(Checked { key, patterns, lines })
@@ -307,10 +307,10 @@ pub(crate) fn unprotect(repo: &Repository, patterns: &[OsString]) -> Result<(), 
         }
         let mut update = IndexUpdate::new(repo, Blobs::Plaintext);
         for (staged, plaintext) in &released {
-            update.add(staged.mode(), &staged.path, plaintext)?;
+            update.add(staged.mode, &staged.path, plaintext)?;
         }
         let rules = worktree_attributes(repo)?.ok_or("missing .gitattributes")?;
-        update.add(REGULAR_FILE_MODE, b".gitattributes", &rules)?;
+        update.add(Mode::REGULAR, b".gitattributes", &rules)?;
         update.apply(&["--add"])?;
         Ok(released.into_iter().map(|(staged, _)| staged.path.clone()).collect::<Vec<_>>())
     })?;

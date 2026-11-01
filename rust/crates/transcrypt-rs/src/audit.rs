@@ -12,7 +12,7 @@ use crate::{
     attributes::split_lines,
     credential::Key,
     git::{changed_files, Changes, PathBlob, CONFIG_PATH, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
-        push_index_record, read_record, tree_files, Attributes, Repository, Staged, REGULAR_FILE_MODE, SHORT_OUTPUT_LIMIT},
+        push_index_record, read_record, tree_files, Attributes, Mode, ObjectId, Repository, Staged, SHORT_OUTPUT_LIMIT},
 };
 use transcrypt_v3_core::{
     is_object_id, is_reserved_path, record_envelope_ok, ATTRIBUTES_NAME, ID_LEN,
@@ -89,9 +89,9 @@ struct AuditState {
     records: usize,
     authenticated: bool,
     /// Per committed config blob.
-    configs: HashMap<String, CommittedConfig>,
+    configs: HashMap<ObjectId, CommittedConfig>,
     /// The config blob of every commit audited so far (`None`: no config).
-    commit_configs: HashMap<String, Option<String>>,
+    commit_configs: HashMap<String, Option<ObjectId>>,
     /// The `.gitattributes` files of every commit audited so far.
     commit_attributes: HashMap<String, Rc<AttributeFiles>>,
     policy: AttributeIndex,
@@ -125,8 +125,8 @@ struct CommittedConfig {
 /// A record checked once: its blob, the config blob and the path.
 #[derive(PartialEq, Eq, Hash)]
 struct CheckedRecord {
-    oid: String,
-    config_oid: String,
+    oid: ObjectId,
+    config_oid: ObjectId,
     path: Vec<u8>,
 }
 
@@ -153,7 +153,7 @@ impl AttributeIndex {
             self.files = None;
             if !files.is_empty() {
                 let mut info = Vec::new();
-                for file in files.iter() { push_index_record(&mut info, REGULAR_FILE_MODE, &file.oid, &file.path); }
+                for file in files.iter() { push_index_record(&mut info, Mode::REGULAR, &file.oid, &file.path); }
                 let mut command = git_command(repo);
                 command.env("GIT_INDEX_FILE", &self.file).args(["update-index", "-z", "--index-info"]);
                 let finished = crate::git::run_bounded_status(command, Some(&info), SHORT_OUTPUT_LIMIT)?;
@@ -222,16 +222,16 @@ fn audit_commit(repo: &Repository, keyed: bool, state: &mut AuditState, commit: 
     }
     // The first deleted path of each removed blob, and the old blob of each
     // modified path.
-    let mut moved: HashMap<&str, &[u8]> = HashMap::new();
-    for d in &deleted { moved.entry(d.oid.as_str()).or_insert(d.path.as_slice()); }
-    let old: HashMap<&[u8], &str> = modified.iter().map(|m| (m.path.as_slice(), m.oid.as_str())).collect();
+    let mut moved: HashMap<&ObjectId, &[u8]> = HashMap::new();
+    for d in &deleted { moved.entry(&d.oid).or_insert(d.path.as_slice()); }
+    let old: HashMap<&[u8], &ObjectId> = modified.iter().map(|m| (m.path.as_slice(), &m.oid)).collect();
     // A record this commit moved from a deleted path to an unprotected one is
     // never decrypted there (`git mv x.env x.bak`, committed by any route).
     let moved_away: Vec<(&Staged, &[u8])> = unprotected.iter()
-        .filter_map(|e| moved.get(e.oid.as_str()).map(|from| (*e, *from))).collect();
+        .filter_map(|e| moved.get(&e.oid).map(|from| (*e, *from))).collect();
     // A file that was encrypted and is now handed to another named filter
     // (`git lfs track` writing `filter=lfs`) silently lost its protection.
-    let was_record: Vec<(&Staged, &str)> = unprotected.iter()
+    let was_record: Vec<(&Staged, &ObjectId)> = unprotected.iter()
         .filter_map(|e| old.get(e.path.as_slice()).map(|oid| (*e, *oid))).collect();
     if config_oid.is_some() {
         check_policy(repo, &state.policy, commit, &attributes, &paths, config_changed || attributes_changed)?;
@@ -255,7 +255,7 @@ fn check_policy(repo: &Repository, policy: &AttributeIndex, commit: &str, attrib
     -> Result<(), String>
 {
     if changed {
-        let top = attributes.iter().find(|a| a.path == ATTRIBUTES_NAME).map(|a| a.oid.as_str());
+        let top = attributes.iter().find(|a| a.path == ATTRIBUTES_NAME).map(|a| &a.oid);
         if !crate::git::macro_resolves(repo, top)? {
             return Err(format!("commit {commit}: {}", crate::attributes::MACRO_MISSING));
         }
@@ -269,11 +269,11 @@ fn check_policy(repo: &Repository, policy: &AttributeIndex, commit: &str, attrib
 
 /// Records of the config `config_oid` that this commit moved to an
 /// unprotected path, or whose path another filter now takes.
-fn check_moves(repo: &Repository, policy: &AttributeIndex, commit: &str, config_oid: &str, moved_away: Vec<(&Staged, &[u8])>,
-    was_record: Vec<(&Staged, &str)>) -> Result<(), String>
+fn check_moves(repo: &Repository, policy: &AttributeIndex, commit: &str, config_oid: &ObjectId,
+    moved_away: Vec<(&Staged, &[u8])>, was_record: Vec<(&Staged, &ObjectId)>) -> Result<(), String>
 {
     let id = transcrypt_rs::config_id(&git_blob(repo, config_oid)?);
-    let is_record = |oid: &str| crate::git::is_record(repo, oid, &id);
+    let is_record = |oid: &ObjectId| crate::git::is_record(repo, oid, &id);
     for (entry, from) in moved_away {
         if is_record(&entry.oid)? {
             return Err(format!("{}: the encrypted {} moved to this unprotected name without decryption; \
@@ -296,8 +296,8 @@ fn check_moves(repo: &Repository, policy: &AttributeIndex, commit: &str, config_
 /// Every protected file of the commit is a regular file holding a record of
 /// its config `config_oid`, at the path it was sealed for (authenticated
 /// there when this checkout has the key).
-fn check_records(repo: &Repository, keyed: bool, state: &mut AuditState, commit: &str, config_oid: String, protected: Vec<&Staged>,
-    moved: &HashMap<&str, &[u8]>) -> Result<(), String>
+fn check_records(repo: &Repository, keyed: bool, state: &mut AuditState, commit: &str, config_oid: ObjectId,
+    protected: Vec<&Staged>, moved: &HashMap<&ObjectId, &[u8]>) -> Result<(), String>
 {
     if !state.configs.contains_key(&config_oid) {
         let bytes = git_blob(repo, &config_oid)?;
@@ -320,7 +320,7 @@ fn check_records(repo: &Repository, keyed: bool, state: &mut AuditState, commit:
         if !record_envelope_ok(&record, id) {
             return Err(format!("{}: not v3 ciphertext for its configuration (plaintext?)", at(commit, &entry.path)));
         }
-        if let Some(from) = moved.get(entry.oid.as_str()) {
+        if let Some(from) = moved.get(&entry.oid) {
             return Err(format!("{}: the encrypted {} moved here without re-encryption (renamed while \
                 locked or with --no-verify?); it cannot be decrypted at its new path",
                 at(commit, &entry.path), String::from_utf8_lossy(from)));

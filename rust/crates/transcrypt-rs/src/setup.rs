@@ -599,7 +599,7 @@ pub(crate) fn doctor(repo: &Repository) -> Result<(), String> {
         report(installed, &format!("{name} hook installed"));
     }
     report(!hooks_bypassed(repo), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
-    report(macro_resolves(repo, top.as_deref()).unwrap_or(false),
+    report(macro_resolves(repo, top.as_ref()).unwrap_or(false),
         "the `transcrypt` macro sets filter=transcrypt-v3 for the next commit");
     // Attribute files outside the repository apply only here, and could
     // silently unprotect files that the committed .gitattributes protect.

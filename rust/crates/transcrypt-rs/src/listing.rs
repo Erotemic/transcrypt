@@ -4,44 +4,61 @@
 //! a decision can never be asked of one snapshot's bytes with another's
 //! ends, or of a listing with an object order that is not its own.
 
+use std::fmt;
 use transcrypt_v3_core::{
     blob_elsewhere, first_unselectable, held_entries, listing_fields, next_move_source, object_order_ok,
-    parse_listing as parse_listing_ends, parse_listing_attrs, OID_START,
+    parse_listing as parse_listing_ends, parse_listing_attrs, EXECUTABLE_MODE, OID_START, REGULAR_MODE,
 };
-use crate::git::{git_records, MODE_LEN};
+use crate::git::{git_records, ObjectId, MODE_LEN};
+
+/// The Git mode of an index or tree entry, exactly as Git listed it.
+/// Whether it is a file Git filters is derived from it (`regular`), so no
+/// entry can claim to be regular with another mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Mode([u8; MODE_LEN]);
+
+impl Mode {
+    /// A non-executable regular file (the core's `REGULAR_MODE`).
+    pub(crate) const REGULAR: Mode = Mode(REGULAR_MODE);
+    /// A submodule (a gitlink).
+    pub(crate) const GITLINK: Mode = Mode(*b"160000");
+
+    /// A file Git filters: mode 100644 or 100755, the test of the verified
+    /// core's `listing_fields` and `parse_index_entry` (`regular`), with
+    /// which `Staged::new` checks that it agrees.
+    pub(crate) fn regular(self) -> bool {
+        self.0 == REGULAR_MODE || self.0 == EXECUTABLE_MODE
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&String::from_utf8_lossy(&self.0))
+    }
+}
 
 /// One stage-0 record of the index or of a commit's tree. Every later read
 /// of its content goes through `oid`, so a concurrent index change cannot
 /// substitute other bytes for the ones that were verified.
 pub(crate) struct Staged {
-    /// Whether the verified core found `mode` 100644 or 100755: a file Git
-    /// filters. Both are private and set together by `new`, so no entry
-    /// can claim to be regular with another mode.
-    regular: bool,
-    mode: String,
-    pub(crate) oid: String,
+    pub(crate) mode: Mode,
+    pub(crate) oid: ObjectId,
     pub(crate) path: Vec<u8>,
 }
 
 impl Staged {
-    /// The entry of the fields of a record the verified core delimited.
-    pub(crate) fn new(regular: bool, mode: &[u8], oid: &[u8], path: &[u8]) -> Result<Staged, String> {
-        Ok(Staged {
-            regular,
-            mode: String::from_utf8_lossy(mode).into_owned(),
-            oid: String::from_utf8(oid.to_vec()).map_err(|_| "malformed Git object id")?,
-            path: path.to_vec(),
-        })
+    /// The entry of the fields of a record the verified core delimited:
+    /// `mode`, the verified object id `oid` and `path`. `regular` is the
+    /// core's decision, which must be what `mode` says.
+    pub(crate) fn new(regular: bool, mode: &[u8], oid: ObjectId, path: &[u8]) -> Result<Staged, String> {
+        let mode = <[u8; MODE_LEN]>::try_from(mode).ok().map(Mode).filter(|mode| mode.regular() == regular)
+            .ok_or("internal error: a Git mode the verified core read otherwise")?;
+        Ok(Staged { mode, oid, path: path.to_vec() })
     }
 
     /// A file Git filters (mode 100644 or 100755), as the core decided.
     pub(crate) fn regular(&self) -> bool {
-        self.regular
-    }
-
-    /// The Git mode, as listed.
-    pub(crate) fn mode(&self) -> &str {
-        &self.mode
+        self.mode.regular()
     }
 
     /// The path, for messages.
@@ -99,7 +116,8 @@ impl Listing {
         }
         let entries = (0..ends.len()).map(|i| {
             let f = listing_fields(&bytes, &ends, i).ok_or("malformed Git listing")?;
-            Staged::new(f.regular, &bytes[f.start..f.start + MODE_LEN], &bytes[f.start + OID_START..f.oid_end], &bytes[f.path_start..f.end])
+            let oid = ObjectId::new(&bytes[f.start + OID_START..f.oid_end]).ok_or("malformed Git object id")?;
+            Staged::new(f.regular, &bytes[f.start..f.start + MODE_LEN], oid, &bytes[f.path_start..f.end])
         }).collect::<Result<_, String>>()?;
         Ok(Listing { bytes, ends, entries })
     }

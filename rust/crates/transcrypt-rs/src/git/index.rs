@@ -3,12 +3,12 @@
 use super::*;
 
 /// The object id Git gives `bytes` (nothing is written).
-pub(crate) fn blob_id(repo: &Repository, bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn blob_id(repo: &Repository, bytes: &[u8]) -> Result<ObjectId, String> {
     object_id(git_with_input(repo, &["hash-object", "--no-filters", "--stdin"], bytes)?)
 }
 
 /// Write `bytes` as a Git blob, unfiltered; its verified object id.
-pub(crate) fn hash_object(repo: &Repository, bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn hash_object(repo: &Repository, bytes: &[u8]) -> Result<ObjectId, String> {
     object_id(git_with_input(repo, &["hash-object", "-w", "--no-filters", "--stdin"], bytes)?)
 }
 
@@ -31,7 +31,7 @@ pub(crate) struct IndexUpdate<'a> {
     blobs: Blobs,
     importer: Option<Importer>,
     held: Vec<Zeroizing<Vec<u8>>>,
-    entries: Vec<(String, Vec<u8>)>,
+    entries: Vec<(Mode, Vec<u8>)>,
 }
 
 impl<'a> IndexUpdate<'a> {
@@ -40,8 +40,8 @@ impl<'a> IndexUpdate<'a> {
     }
 
     /// Stage `bytes` (unfiltered) as a blob of `mode` at `path`.
-    pub(crate) fn add(&mut self, mode: &str, path: &[u8], bytes: &[u8]) -> Result<(), String> {
-        self.entries.push((mode.to_owned(), path.to_owned()));
+    pub(crate) fn add(&mut self, mode: Mode, path: &[u8], bytes: &[u8]) -> Result<(), String> {
+        self.entries.push((mode, path.to_owned()));
         match self.blobs {
             Blobs::Records => {
                 let mark = self.entries.len();
@@ -75,7 +75,7 @@ impl<'a> IndexUpdate<'a> {
         let repo = self.repo;
         let mut info = Vec::new();
         for ((mode, path), oid) in self.entries.iter().zip(&oids) {
-            push_index_record(&mut info, mode, oid, path);
+            push_index_record(&mut info, *mode, oid, path);
         }
         let arguments: Vec<&str> = ["update-index", "-z"].into_iter().chain(options.iter().copied())
             .chain(["--index-info"]).collect();
@@ -150,7 +150,7 @@ impl Importer {
 
     /// Ask for the object ids of marks 1 to `marks`, end the stream, and
     /// wait: each id, in order.
-    fn finish(&mut self, marks: usize) -> Result<Vec<String>, String> {
+    fn finish(&mut self, marks: usize) -> Result<Vec<ObjectId>, String> {
         let mut requests: String = (1..=marks).map(|mark| format!("get-mark :{mark}\n")).collect();
         requests.push_str("done\n");
         self.write(requests.as_bytes())?;
@@ -158,12 +158,8 @@ impl Importer {
         let output = self.output.take().and_then(|o| o.join().ok()).and_then(Result::ok);
         let status = self.child.wait().map_err(|_| "cannot wait for git fast-import")?;
         let Some(output) = output.filter(|_| status.success()) else { return Err(self.failure()) };
-        let oids: Vec<String> = output.split(|b| *b == b'\n').filter(|l| !l.is_empty())
-            .map(|l| String::from_utf8_lossy(l).into_owned()).collect();
-        if oids.len() != marks || !oids.iter().all(|oid| is_object_id(oid.as_bytes())) {
-            return Err("malformed git fast-import output".into());
-        }
-        Ok(oids)
+        let oids: Option<Vec<ObjectId>> = output.split(|b| *b == b'\n').filter(|l| !l.is_empty()).map(ObjectId::new).collect();
+        oids.filter(|oids| oids.len() == marks).ok_or_else(|| "malformed git fast-import output".into())
     }
 
     /// Stop the import, with what it said on its way out.
@@ -186,14 +182,13 @@ impl Drop for Importer {
 
 /// Append the `update-index -z --index-info` record `<mode> SP <oid> TAB
 /// <path> NUL` to `info`.
-pub(crate) fn push_index_record(info: &mut Vec<u8>, mode: &str, oid: &str, path: &[u8]) {
+pub(crate) fn push_index_record(info: &mut Vec<u8>, mode: Mode, oid: &ObjectId, path: &[u8]) {
     info.extend_from_slice(format!("{mode} {oid}\t").as_bytes());
     info.extend_from_slice(path);
     info.push(0);
 }
 
-fn object_id(output: Vec<u8>) -> Result<String, String> {
-    let oid = String::from_utf8_lossy(&output).trim_end().to_owned();
-    if !is_object_id(oid.as_bytes()) { return Err("malformed git hash-object output".into()); }
-    Ok(oid)
+fn object_id(output: Vec<u8>) -> Result<ObjectId, String> {
+    ObjectId::new(String::from_utf8_lossy(&output).trim_end().as_bytes())
+        .ok_or_else(|| "malformed git hash-object output".into())
 }

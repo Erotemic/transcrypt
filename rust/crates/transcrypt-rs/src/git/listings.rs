@@ -33,10 +33,8 @@ pub(crate) fn index_listing(repo: &Repository) -> Result<Vec<u8>, String> {
 fn parse_entry(entry: &[u8]) -> Result<Staged, String> {
     let parsed = parse_index_entry(entry)
         .map_err(|_| "malformed or unmerged Git index entry; resolve conflicts first")?;
-    let oid = &entry[OID_START..parsed.path_start - STAGE_ZERO_FIELD.len()];
-    if !is_object_id(oid) {
-        return Err("malformed Git object id in index entry".into());
-    }
+    let oid = ObjectId::new(&entry[OID_START..parsed.path_start - STAGE_ZERO_FIELD.len()])
+        .ok_or("malformed Git object id in index entry")?;
     Staged::new(parsed.regular, &entry[..MODE_LEN], oid, &entry[parsed.path_start..])
 }
 
@@ -108,7 +106,7 @@ pub(crate) fn indexed_files(repo: &Repository) -> Result<Vec<Staged>, String> {
 /// they are one of these, never because of a header alone. A path that is
 /// not UTF-8 (which cannot be passed as an argument on every OS) has none:
 /// fail-closed, since the filter then never passes bytes through for it.
-pub(crate) fn blobs_at(repo: &Repository, path: &[u8]) -> Result<Vec<String>, String> {
+pub(crate) fn blobs_at(repo: &Repository, path: &[u8]) -> Result<Vec<ObjectId>, String> {
     let name = std::str::from_utf8(path).ok().map(str::to_owned);
     let mut oids = Vec::new();
     let mut parse = |listing: &[u8], tree: bool| -> Result<(), String> {
@@ -120,9 +118,7 @@ pub(crate) fn blobs_at(repo: &Repository, path: &[u8]) -> Result<Vec<String>, St
             const INDEX_OID_FIELD: usize = 1;
             const TREE_OID_FIELD: usize = 2;
             let oid = fields.get(if tree { TREE_OID_FIELD } else { INDEX_OID_FIELD });
-            if let Some(oid) = oid.filter(|o| is_object_id(o)) {
-                oids.push(String::from_utf8_lossy(oid).into_owned());
-            }
+            oids.extend(oid.and_then(|oid| ObjectId::new(oid)));
         }
         Ok(())
     };
@@ -137,7 +133,7 @@ pub(crate) fn blobs_at(repo: &Repository, path: &[u8]) -> Result<Vec<String>, St
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PathBlob {
     pub(crate) path: Vec<u8>,
-    pub(crate) oid: String,
+    pub(crate) oid: ObjectId,
 }
 
 /// What a commit changes relative to its parent.
@@ -179,8 +175,8 @@ pub(super) fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
             .split(|b| *b == b' ').collect();
         let [_, mode, old, oid, status] = parts[..] else { return Err("malformed git diff-tree output".into()) };
         let old = || -> Result<_, String> {
-            if !is_object_id(old) { return Err("malformed git diff-tree output".into()); }
-            Ok(PathBlob { path: path.to_vec(), oid: String::from_utf8_lossy(old).into_owned() })
+            let oid = ObjectId::new(old).ok_or("malformed git diff-tree output")?;
+            Ok(PathBlob { path: path.to_vec(), oid })
         };
         match status {
             b"D" => { deleted.push(old()?); continue },
@@ -194,7 +190,7 @@ pub(super) fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
 }
 
 /// The `.transcrypt/config` blob of a commit, if it has one.
-pub(crate) fn config_blob(repo: &Repository, commit: &str) -> Result<Option<String>, String> {
+pub(crate) fn config_blob(repo: &Repository, commit: &str) -> Result<Option<ObjectId>, String> {
     let listing = tree_listing_bytes(repo, &["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])?;
     Ok(Listing::parse(listing)?.into_entries().into_iter()
         .find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular()).map(|e| e.oid))

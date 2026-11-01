@@ -3,6 +3,32 @@
 
 use super::*;
 
+/// A Git object id that the verified core accepted (`is_object_id`: 40 or
+/// 64 lowercase hexadecimal digits); `new` is the only way to make one.
+/// Objects are read only by such an id, never by revision syntax such as
+/// `:path`, which reads `:0:x.secret` as stage 0 of `x.secret`, or by text
+/// that Git could read as an option.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct ObjectId(String);
+
+impl ObjectId {
+    /// `bytes` as an object id, if the verified core accepts them as one.
+    pub(crate) fn new(bytes: &[u8]) -> Option<ObjectId> {
+        // Hexadecimal digits: the conversion is exact.
+        is_object_id(bytes).then(|| ObjectId(String::from_utf8_lossy(bytes).into_owned()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ObjectId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Read at most a v3 record's worth of bytes, into wiped memory.
 pub(crate) fn read_record(mut read: impl Read) -> Result<Zeroizing<Vec<u8>>, String> {
     read_wiped(&mut read, MAX_RECORD).map_err(|e| match e {
@@ -11,18 +37,16 @@ pub(crate) fn read_record(mut read: impl Read) -> Result<Zeroizing<Vec<u8>>, Str
     })
 }
 
-/// The content of one Git blob, named by an id the verified core accepted
-/// (never revision syntax such as `:path`, which reads `:0:x.secret` as stage
-/// 0 of `x.secret`). Reads stop at the v3 size bound, so a hostile oversized
+/// The content of one Git blob, named by its verified id. Reads stop at the v3 size bound, so a hostile oversized
 /// blob is refused without being loaded. All reads of one `Repository`
 /// share a single `git cat-file --batch`.
-pub(crate) fn git_blob(repo: &Repository, oid: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn git_blob(repo: &Repository, oid: &ObjectId) -> Result<Vec<u8>, String> {
     read_blob(repo, oid, false)?.ok_or_else(too_large)
 }
 
 /// Like `git_blob`, but `None` for a blob larger than any v3 record (an
 /// ordinary large file, which cannot be a record), skipped unread.
-pub(crate) fn git_blob_if_record_sized(repo: &Repository, oid: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn git_blob_if_record_sized(repo: &Repository, oid: &ObjectId) -> Result<Option<Vec<u8>>, String> {
     read_blob(repo, oid, true)
 }
 
@@ -30,20 +54,17 @@ pub(crate) fn git_blob_if_record_sized(repo: &Repository, oid: &str) -> Result<O
 /// its size and first `ENVELOPE_PREFIX_LEN` bytes are read, which decide the
 /// envelope exactly as the whole blob would (`record_envelope_prefix_ok`);
 /// the rest is skipped unread.
-pub(crate) fn is_record(repo: &Repository, oid: &str, id: &[u8; transcrypt_v3_core::ID_LEN]) -> Result<bool, String> {
-    let prefix = with_objects(repo, oid, |objects| objects.blob_prefix(oid))?;
+pub(crate) fn is_record(repo: &Repository, oid: &ObjectId, id: &[u8; transcrypt_v3_core::ID_LEN]) -> Result<bool, String> {
+    let prefix = with_objects(repo, |objects| objects.blob_prefix(oid))?;
     Ok(prefix.is_some_and(|(size, prefix)| record_envelope_prefix_ok(size, &prefix, id)))
 }
 
-fn read_blob(repo: &Repository, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
-    with_objects(repo, oid, |objects| objects.blob(oid, skip_large))
+fn read_blob(repo: &Repository, oid: &ObjectId, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
+    with_objects(repo, |objects| objects.blob(oid, skip_large))
 }
 
-/// Run `read` on the object reader of `repo` for the verified id `oid`.
-fn with_objects<T>(repo: &Repository, oid: &str, read: impl FnOnce(&mut Objects) -> Result<T, String>) -> Result<T, String> {
-    if !is_object_id(oid.as_bytes()) {
-        return Err("invalid Git object id".into());
-    }
+/// Run `read` on the object reader of `repo`.
+fn with_objects<T>(repo: &Repository, read: impl FnOnce(&mut Objects) -> Result<T, String>) -> Result<T, String> {
     let mut slot = repo.objects.borrow_mut();
     let result = get_or_try_init(&mut slot, || Objects::open(&repo.root)).and_then(read);
     if result.is_err() {
@@ -82,7 +103,7 @@ impl Objects {
 
     /// Ask for `oid` and read the header of the reply, which the verified
     /// core checks: the blob's size.
-    fn request(&mut self, oid: &str) -> Result<u64, String> {
+    fn request(&mut self, oid: &ObjectId) -> Result<u64, String> {
         use io::BufRead;
         let input = self.input.as_mut().ok_or("Git object reader closed")?;
         sigpipe_blocked(input, |input| input.write_all(format!("{oid}\n").as_bytes()).and_then(|_| input.flush()))
@@ -90,7 +111,7 @@ impl Objects {
         let mut header = Vec::new();
         (&mut self.output).take(BATCH_HEADER_LIMIT).read_until(b'\n', &mut header)
             .map_err(|_| "cannot read git cat-file reply")?;
-        parse_batch_header(&header, oid.as_bytes()).ok_or_else(|| format!("Git object {oid} is missing or not a blob"))
+        parse_batch_header(&header, oid.as_str().as_bytes()).ok_or_else(|| format!("Git object {oid} is missing or not a blob"))
     }
 
     /// Discard the next `count` content bytes without keeping them, then
@@ -108,7 +129,7 @@ impl Objects {
         Ok(())
     }
 
-    fn blob(&mut self, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
+    fn blob(&mut self, oid: &ObjectId, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
         // The verified core checks the header and decides what to read.
         let size = self.request(oid)?;
         match blob_read(size, skip_large) {
@@ -132,7 +153,7 @@ impl Objects {
     /// The size of blob `oid` and its first `ENVELOPE_PREFIX_LEN` bytes (all
     /// of a shorter blob): what the keyless envelope check needs. The rest is
     /// skipped unread, and so is a blob larger than any record (`None`).
-    fn blob_prefix(&mut self, oid: &str) -> Result<Option<(usize, Vec<u8>)>, String> {
+    fn blob_prefix(&mut self, oid: &ObjectId) -> Result<Option<(usize, Vec<u8>)>, String> {
         let announced = self.request(oid)?;
         match blob_read(announced, true) {
             BlobRead::Read => {},

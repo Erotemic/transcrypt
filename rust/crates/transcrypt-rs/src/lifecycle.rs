@@ -5,7 +5,7 @@
 use std::{collections::{HashMap, HashSet}, env, fs, io, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    entry_check, hydrate_action, is_local_change, is_object_id, is_reserved_path, lock_action, parse_file_header,
+    entry_check, hydrate_action, is_local_change, is_reserved_path, lock_action, parse_file_header,
     record_envelope_ok, seal_action,
     EntryCheck, HydrateAction, LockAction, SealAction, ATTRIBUTES_NAME,
 };
@@ -113,7 +113,7 @@ fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Lis
         _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree \
             (an interrupted `rekey`? `git reset` undoes a staged rekey)".into()),
     }
-    let top = entries.iter().find(|e| e.path == ATTRIBUTES_NAME && e.regular()).map(|e| e.oid.as_str());
+    let top = entries.iter().find(|e| e.path == ATTRIBUTES_NAME && e.regular()).map(|e| &e.oid);
     if !macro_resolves(repo, top)? {
         return Err(crate::attributes::MACRO_MISSING.into());
     }
@@ -227,7 +227,7 @@ fn check_unprotected(repo: &Repository, id: &[u8; transcrypt_v3_core::ID_LEN], s
 /// checked when it was committed only if the selection and the config were
 /// the same then: entries count as settled only while this holds.
 fn policy_unchanged(entries: &[Staged], head: &Listing, parent: &Listing) -> bool {
-    let policy = |entries: &[Staged]| -> Vec<(Vec<u8>, String)> {
+    let policy = |entries: &[Staged]| -> Vec<(Vec<u8>, ObjectId)> {
         entries.iter().filter(|e| is_attributes_file(&e.path) || e.path == CONFIG_PATH.as_bytes())
             .map(|e| (e.path.clone(), e.oid.clone())).collect()
     };
@@ -236,8 +236,8 @@ fn policy_unchanged(entries: &[Staged], head: &Listing, parent: &Listing) -> boo
 }
 
 /// Each entry's object id, by path.
-fn oids_by_path(entries: &[Staged]) -> HashMap<&[u8], &str> {
-    entries.iter().map(|e| (e.path.as_slice(), e.oid.as_str())).collect()
+fn oids_by_path(entries: &[Staged]) -> HashMap<&[u8], &ObjectId> {
+    entries.iter().map(|e| (e.path.as_slice(), &e.oid)).collect()
 }
 
 /// The files of commit `rev`; none when there is no such commit (`HEAD`
@@ -251,7 +251,7 @@ pub(crate) fn commit_files(repo: &Repository, rev: &str) -> Result<Vec<Staged>, 
 /// listing another commit's than the one found.
 pub(crate) fn commit_listing(repo: &Repository, rev: &str) -> Result<Listing, String> {
     match resolve_commit(repo, rev)? {
-        Some(id) => tree_listing(repo, &id),
+        Some(id) => tree_listing(repo, id.as_str()),
         None => Ok(Listing::empty()),
     }
 }
@@ -273,8 +273,8 @@ fn incoming(repo: &Repository) -> Result<Option<Listing>, String> {
     let mut commits = Vec::new();
     match fs::read(git_dir.join("MERGE_HEAD")) {
         Ok(text) => for line in text.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-            if !is_object_id(line) { return Ok(None); }
-            commits.push(String::from_utf8_lossy(line).into_owned());
+            let Some(id) = ObjectId::new(line) else { return Ok(None) };
+            commits.push(id);
         },
         Err(e) if e.kind() == io::ErrorKind::NotFound => {},
         Err(_) => return Ok(None),
@@ -290,7 +290,7 @@ fn incoming(repo: &Repository) -> Result<Option<Listing>, String> {
     if commits.is_empty() && REBASE_DIRS.iter().any(|dir| git_dir.join(dir).exists()) {
         return Ok(None);
     }
-    let trees = commits.iter().map(|commit| tree_listing(repo, commit)).collect::<Result<Vec<_>, _>>()?;
+    let trees = commits.iter().map(|commit| tree_listing(repo, commit.as_str())).collect::<Result<Vec<_>, _>>()?;
     Ok(Some(Listing::merge(trees)?))
 }
 
@@ -425,7 +425,7 @@ fn seal_snapshot(repo: &Repository, key: &Key, force: &[Vec<u8>], snapshot: &Sna
                 plaintext
             },
         };
-        update.add(staged.mode(), &staged.path, &key.clean(&staged.path, &plaintext)?)?;
+        update.add(staged.mode, &staged.path, &key.clean(&staged.path, &plaintext)?)?;
     }
     let count = update.len();
     update.apply(&[])?;
@@ -555,7 +555,7 @@ pub(crate) fn hydrate_locked(repo: &Repository, staging: &Staging) -> Result<usi
     // unreadable file aborts the whole operation. Unmerged files have no
     // staged record of their own; they are decrypted when they hold a
     // record that authenticates at their path (the merge driver's result).
-    let targets = protected.iter().map(|e| (e.path.as_slice(), Some(e.oid.as_str())))
+    let targets = protected.iter().map(|e| (e.path.as_slice(), Some(&e.oid)))
         .chain(conflicted.iter().map(|p| (p.as_slice(), None)));
     for (path, oid) in targets {
         let relative = indexed_path(path)?;

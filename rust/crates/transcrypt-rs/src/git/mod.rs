@@ -22,21 +22,13 @@ use std::{
 };
 use zeroize::Zeroizing;
 pub(crate) use crate::os::sigpipe_blocked;
-pub(crate) use crate::listing::{paths_of, Listing, OrderedListing, Staged};
+pub(crate) use crate::listing::{paths_of, Listing, Mode, OrderedListing, Staged};
 use transcrypt_v3_core::{
     blob_read, is_object_id, parse_attr_response, parse_batch_header, parse_index_entry, record_envelope_prefix_ok,
     BlobRead, ATTRIBUTES_NAME, ATTRIBUTES_SUFFIX, ENVELOPE_PREFIX_LEN, FILTER_DRIVER, MAX_RECORD, OID_START,
     REGULAR_MODE,
 };
 use transcrypt_rs::{too_large, KIB, MIB};
-
-/// The Git mode of a non-executable regular file (the core's `REGULAR_MODE`).
-pub(crate) const REGULAR_FILE_MODE: &str = match std::str::from_utf8(&REGULAR_MODE) {
-    Ok(mode) => mode,
-    Err(_) => panic!("REGULAR_MODE is ASCII"),
-};
-/// The Git mode of a submodule (a gitlink).
-pub(crate) const GITLINK_MODE: &str = "160000";
 
 /// Bytes in the mode field that starts every index record.
 pub(crate) const MODE_LEN: usize = REGULAR_MODE.len();
@@ -194,15 +186,14 @@ const NO_SUCH_REVISION: i32 = 1;
 /// The commit `rev` names: `None` if it names none (an unborn branch, an
 /// absent pseudo-ref); an error if Git fails in any other way, never a
 /// silent `None`.
-pub(crate) fn resolve_commit(repo: &Repository, rev: &str) -> Result<Option<String>, String> {
+pub(crate) fn resolve_commit(repo: &Repository, rev: &str) -> Result<Option<ObjectId>, String> {
     let mut command = git_command(repo);
     command.args(["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]);
     let Finished { status, output, errors } = run_bounded_status(command, None, GIT_OUTPUT_LIMIT)?;
     match status.code() {
         Some(0) => {
             let id = String::from_utf8_lossy(&output).trim_end().to_owned();
-            if !is_object_id(id.as_bytes()) { return Err("malformed git rev-parse output".into()); }
-            Ok(Some(id))
+            ObjectId::new(id.as_bytes()).map(Some).ok_or_else(|| "malformed git rev-parse output".into())
         },
         Some(NO_SUCH_REVISION) if errors.is_empty() => Ok(None),
         _ => Err(format!("cannot resolve {rev}: {}", String::from_utf8_lossy(&errors).trim())),

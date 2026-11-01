@@ -52,9 +52,9 @@ pub(crate) fn rekey(repo: &Repository, password_stdin: bool) -> Result<(), Strin
     // The new records, written as Git objects, and one index update.
     let mut update = IndexUpdate::new(repo, Blobs::Records);
     for (staged, plaintext) in &plaintexts {
-        update.add(staged.mode(), &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?)?;
+        update.add(staged.mode, &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?)?;
     }
-    update.add(REGULAR_FILE_MODE, CONFIG_PATH.as_bytes(), &config)?;
+    update.add(Mode::REGULAR, CONFIG_PATH.as_bytes(), &config)?;
     update.apply(&[])?;
     let undo = "; run `git reset` to undo the staged rekey";
     write_repository_file(repo.root(), &staging, Path::new(CONFIG_PATH), &config)
@@ -154,7 +154,7 @@ pub(crate) fn reencrypt(repo: &Repository, args: &ReencryptArgs) -> Result<(), S
     }
     let mut update = IndexUpdate::new(repo, Blobs::Records);
     for (staged, _, _, new_record) in &resealed {
-        update.add(staged.mode(), &staged.path, new_record)?;
+        update.add(staged.mode, &staged.path, new_record)?;
     }
     update.apply(&[])?;
     eprintln!("Re-encrypted {} file(s) under the current config; they are staged. Commit them.", stale.len());
