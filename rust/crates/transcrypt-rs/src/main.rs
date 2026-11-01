@@ -8,7 +8,8 @@
 //!   `lock`, the steps whose order the Lean models follow.
 //! - `credential.rs`: the unlocked key (stored by default, or held by the
 //!   private-mode agent in `session.rs`).
-//! - `git.rs`: every Git subprocess (bounded), object reads by verified id,
+//! - `git/`: the `Repository` (found once, passed explicitly), every Git
+//!   subprocess (bounded), object reads by verified id,
 //!   listings and attribute answers parsed by the verified core.
 //! - `worktree.rs`: race-free worktree access and private staging;
 //!   `fsat.rs` (`fsat_windows.rs`): directory-relative I/O.
@@ -107,52 +108,49 @@ fn run() -> Result<(), String> {
     if action == "audit" {
         return run_audit(&args[1..]);
     }
-    let root = repo_root()?;
-    // File arguments (the merge driver's) are relative to where Git ran us.
-    let invoked_in = env::current_dir().map_err(|_| "cannot read working directory")?;
-    // All v3 paths, including the agent's short relative socket address,
-    // are interpreted from the repository root.
-    env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
-    let file = |arg: &OsString| invoked_in.join(arg);
+    // Found once, and passed to everything that needs it. The current
+    // directory stays where Git ran us: Git commands run in the repository's
+    // root, and the drivers' file arguments are relative to here.
+    let repo = Repository::discover()?;
     match action {
         "status" | "doctor" | "filter-process" | "lock" | "flush" | "check-encrypted" | "verify-index"
             | "pre-commit" | "serve" | "uninstall" if args.len() > 1 => Err(format!("{action} takes no arguments")),
-        "status" => status(&root),
-        "doctor" => doctor(&root),
-        "filter-process" => process::serve(&root),
-        "lock" => lock(&root),
-        "flush" => flush(&root),
-        "check-encrypted" => worktree_encrypted(&root, &load_config(&root)?),
-        "verify-index" => verify_index_command(&root),
-        "pre-commit" => pre_commit(&root),
-        "serve" => session::serve(&root, &load_config(&root)?),
-        "uninstall" => uninstall(&root),
+        "status" => status(&repo),
+        "doctor" => doctor(&repo),
+        "filter-process" => process::serve(&repo),
+        "lock" => lock(&repo),
+        "flush" => flush(&repo),
+        "check-encrypted" => worktree_encrypted(&repo, &load_config(&repo)?),
+        "verify-index" => verify_index_command(&repo),
+        "pre-commit" => pre_commit(&repo),
+        "serve" => session::serve(&repo, &load_config(&repo)?),
+        "uninstall" => uninstall(&repo),
         "hydrate" => match &args[1..] {
-            [] => hydrate(&root).map(|n| eprintln!("Decrypted {n} file(s).")),
-            [flag] if flag == "--auto" => auto_hydrate(&root),
+            [] => hydrate(&repo).map(|n| eprintln!("Decrypted {n} file(s).")),
+            [flag] if flag == "--auto" => auto_hydrate(&repo),
             _ => Err("hydrate takes no arguments".into()),
         },
         "init" | "unlock" | "rekey" | "migrate" | "reencrypt" => {
             let options = parse_options(action, &args[1..])?;
             match action {
-                "init" => init(&root, &options),
-                "rekey" => rekey(&root, &options),
-                "migrate" => migrate::migrate(&root, &options),
-                "reencrypt" => reencrypt(&root, &options),
-                _ => unlock(&root, &options),
+                "init" => init(&repo, &options),
+                "rekey" => rekey(&repo, &options),
+                "migrate" => migrate::migrate(&repo, &options),
+                "reencrypt" => reencrypt(&repo, &options),
+                _ => unlock(&repo, &options),
             }
         },
         "protect" | "unprotect" => {
             if args[1..].is_empty() { return Err(format!("{action} takes one or more .gitattributes patterns")); }
-            if action == "protect" { protect(&root, &args[1..]) } else { unprotect(&root, &args[1..]) }
+            if action == "protect" { protect(&repo, &args[1..]) } else { unprotect(&repo, &args[1..]) }
         },
         "diff" => {
             // Git's external diff interface: path old-file old-hex old-mode
             // new-file new-hex new-mode [new-path rename-message].
             match &args[1..] {
-                [path, old, _, _, new, _, _] => diff::diff(&root, os::os_bytes(path), &file(old), os::os_bytes(path), &file(new)),
+                [path, old, _, _, new, _, _] => diff::diff(&repo, os::os_bytes(path), Path::new(old), os::os_bytes(path), Path::new(new)),
                 [path, old, _, _, new, _, _, new_path, _] =>
-                    diff::diff(&root, os::os_bytes(path), &file(old), os::os_bytes(new_path), &file(new)),
+                    diff::diff(&repo, os::os_bytes(path), Path::new(old), os::os_bytes(new_path), Path::new(new)),
                 [path] => { println!("* Unmerged path {}", path.to_string_lossy()); Ok(()) },
                 _ => Err("unexpected external diff arguments".into()),
             }
@@ -161,7 +159,7 @@ fn run() -> Result<(), String> {
             let [_, base, ours, theirs, path] = &args[..] else {
                 return Err("merge driver takes %O %A %B %P".into());
             };
-            if merge::merge(&root, &file(base), &file(ours), &file(theirs), os::os_bytes(path))? {
+            if merge::merge(&repo, Path::new(base), Path::new(ours), Path::new(theirs), os::os_bytes(path))? {
                 Ok(())
             } else {
                 Err(format!("merge conflict in {}: resolve it in the decrypted file", path.to_string_lossy()))
@@ -170,14 +168,14 @@ fn run() -> Result<(), String> {
         "clean" | "smudge" => {
             let [_, path] = &args[..] else { return Err("Git filter requires exactly one %f pathname".into()) };
             let input = read_record(io::stdin())?;
-            let output = Filters::new(&root).convert(action == "clean", os::os_bytes(path), input)?;
+            let output = Filters::new(&repo).convert(action == "clean", os::os_bytes(path), input)?;
             io::stdout().write_all(&output).map_err(|_| "cannot write output".into())
         },
         "pre-push" => {
             // Git passes the remote's name and URL.
             const PRE_PUSH_ARGUMENTS: usize = 2;
             if args[1..].len() > PRE_PUSH_ARGUMENTS { return Err("pre-push takes the remote name and URL".into()); }
-            pre_push(&root, args.get(1).map(OsString::as_os_str))
+            pre_push(&repo, args.get(1).map(OsString::as_os_str))
         },
         _ => Err(format!("unknown v3 operation; {USAGE}")),
     }
@@ -187,18 +185,17 @@ fn run() -> Result<(), String> {
 /// repository (a server's pre-receive hook), where there is no worktree and
 /// no key.
 fn run_audit(args: &[OsString]) -> Result<(), String> {
-    let (root, keyed) = match repo_root() {
-        Ok(root) => (root, true),
-        Err(_) => (env::current_dir().map_err(|_| "cannot read working directory")?, false),
-    };
-    env::set_current_dir(&root).map_err(|_| "cannot enter repository root")?;
     let mut revs = args;
     let mut max_commits = None;
     if let Some(limit) = revs.first().and_then(|a| a.to_str()).and_then(|a| a.strip_prefix("--max-commits=")) {
         max_commits = Some(limit.parse::<usize>().map_err(|_| "--max-commits takes a number")?);
         revs = &revs[1..];
     }
-    let audited = audit(&root, revs, keyed, max_commits)?;
+    let (repo, keyed) = match Repository::discover() {
+        Ok(repo) => (repo, true),
+        Err(_) => (Repository::discover_bare()?, false),
+    };
+    let audited = audit(&repo, revs, keyed, max_commits)?;
     println!("audit: {} protected record(s) checked{}", audited.records,
         if audited.authenticated { ", all authenticated with the key" }
         else { " (envelopes only: unlock to authenticate them)" });
@@ -322,15 +319,15 @@ pub(crate) fn short_id(id: &[u8]) -> String {
 /// The public config in force: the worktree's `.transcrypt/config` (read
 /// without following symlinks), or the staged one when a sparse checkout
 /// leaves `.transcrypt/` out of the worktree.
-pub(crate) fn load_config(root: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn load_config(repo: &Repository) -> Result<Vec<u8>, String> {
     let unsafe_config = |_| "unsafe .transcrypt/config (a symlink or not a regular file)".to_owned();
-    let bytes = match find_protected(root, Path::new(CONFIG_PATH)).map_err(unsafe_config)? {
+    let bytes = match find_protected(repo.root(), Path::new(CONFIG_PATH)).map_err(unsafe_config)? {
         Some(file) => file.read()?.0.to_vec(),
-        None if fs::symlink_metadata(root.join(".transcrypt")).is_ok() => {
+        None if fs::symlink_metadata(repo.root().join(".transcrypt")).is_ok() => {
             return Err("missing committed .transcrypt/config".into());
         },
-        None => match indexed_files(root)?.into_iter().find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular()) {
-            Some(staged) => git_blob(root, &staged.oid)?,
+        None => match indexed_files(repo)?.into_iter().find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular()) {
+            Some(staged) => git_blob(repo, &staged.oid)?,
             None => return Err("missing .transcrypt directory: run init or clone a v3 repository".into()),
         },
     };

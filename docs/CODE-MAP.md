@@ -16,7 +16,7 @@ and [V3-ASSUMPTIONS](verification/V3-ASSUMPTIONS.md).
 | `rust/crates/transcrypt-rs/src/main.rs` | The executable: command dispatch, options, the passphrase. |
 | `lifecycle.rs` | The pre-commit hook and `verify-index`, `hydrate`, `lock`. |
 | `filter.rs`, `process.rs` | Git's clean and smudge filters, per file or as one long-running process. |
-| `git/` | Every Git subprocess, bounded (`mod.rs`), with replies parsed by the core: object reads (`objects.rs`), index and tree listings and diffs (`listings.rs`), index updates (`index.rs`), attribute queries (`checkattr.rs`). |
+| `git/` | The `Repository` a command works on (its root and Git directories, found once by `Repository::discover` and passed to everything that needs them, and its object reader) and every Git subprocess, bounded (`mod.rs`), with replies parsed by the core: object reads (`objects.rs`), index and tree listings and diffs (`listings.rs`), index updates (`index.rs`), attribute queries (`checkattr.rs`). |
 | `listing.rs` | `Listing` and `OrderedListing`: a snapshot's bytes and record ends, passed to the core only through their methods. |
 | `credential.rs`, `session.rs` | The stored key, and the private-mode agent. |
 | `worktree.rs`, `fsat*.rs`, `os_*.rs` | Writing worktree files safely (directory-relative, never following links), privacy, and the per-OS primitives (A8, A25). |
@@ -28,7 +28,7 @@ and [V3-ASSUMPTIONS](verification/V3-ASSUMPTIONS.md).
 ## One commit, start to finish
 
 1. Git runs the `pre-commit` hook, which runs `transcrypt-rs pre-commit`
-   calls `lifecycle::verify(root, true)`.
+   calls `lifecycle::verify(repo, true)`.
 2. **Evidence.** `Snapshot::read` takes one exact index listing, and the
    attributes Git reports for those paths, both parsed by the core. Then come
    `HEAD`'s listing (`commit_listing`) and the commits a merge or rebase is

@@ -29,18 +29,18 @@ const HOOKS_BYPASSED: &str = "core.hooksPath is set, so Git does not run the v3 
 const START_OVER: &str = "`git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`";
 
 /// Where Git runs hooks from by default, and v3 installs its own.
-fn hooks_dir(root: &Path) -> PathBuf {
-    common_dir(root).join("hooks")
+fn hooks_dir(repo: &Repository) -> PathBuf {
+    repo.common_dir().join("hooks")
 }
 
 /// Whether Git is configured to run hooks from somewhere other than
 /// `.git/hooks`, where v3 installs its checks.
-fn hooks_bypassed(root: &Path) -> bool {
-    let Ok(value) = git(root, &["config", "--path", "core.hooksPath"]) else { return false };
+fn hooks_bypassed(repo: &Repository) -> bool {
+    let Ok(value) = git(repo, &["config", "--path", "core.hooksPath"]) else { return false };
     let value = String::from_utf8_lossy(&value).trim().to_owned();
     if value.is_empty() { return false; }
-    let configured = root.join(&value);
-    configured.canonicalize().ok() != hooks_dir(root).canonicalize().ok()
+    let configured = repo.root().join(&value);
+    configured.canonicalize().ok() != hooks_dir(repo).canonicalize().ok()
 }
 
 fn shell_quote(text: &str) -> String {
@@ -73,22 +73,22 @@ fn expected_config() -> Result<[(&'static str, String); 7], String> {
 /// `.git/info/attributes`; the macro replaces it.
 const LEGACY_MERGE_ATTRIBUTE: &str = "*.secret diff=transcrypt-v3 merge=transcrypt-v3";
 
-fn install_filters(root: &Path) -> Result<(), String> {
+fn install_filters(repo: &Repository) -> Result<(), String> {
     for (k, value) in expected_config()? {
-        git(root, &["config", "--local", k, &value])?;
+        git(repo, &["config", "--local", k, &value])?;
     }
     Ok(())
 }
 
 /// The filters and drivers, then the hooks.
-fn install(root: &Path) -> Result<(), String> {
-    install_filters(root)?;
-    install_hooks(root)
+fn install(repo: &Repository) -> Result<(), String> {
+    install_filters(repo)?;
+    install_hooks(repo)
 }
 
-fn remove_filters(root: &Path) {
+fn remove_filters(repo: &Repository) {
     for section in ["filter.transcrypt-v3", "merge.transcrypt-v3", "diff.transcrypt-v3"] {
-        let _ = git(root, &["config", "--local", "--remove-section", section]);
+        let _ = git(repo, &["config", "--local", "--remove-section", section]);
     }
 }
 
@@ -154,13 +154,13 @@ fn shell_unquote(line: &str) -> Option<(String, &str)> {
     }
 }
 
-fn hook_path(root: &Path, name: &str) -> PathBuf {
-    hooks_dir(root).join(name)
+fn hook_path(repo: &Repository, name: &str) -> PathBuf {
+    hooks_dir(repo).join(name)
 }
 
-fn check_hook_available(root: &Path) -> Result<(), String> {
+fn check_hook_available(repo: &Repository) -> Result<(), String> {
     for (name, command) in HOOKS.into_iter().filter(|(name, _)| hook_required(name)) {
-        let path = hook_path(root, name);
+        let path = hook_path(repo, name);
         match fs::symlink_metadata(&path) {
             Ok(meta) => {
                 let text = fs::read_to_string(&path).map_err(|_| format!("cannot read existing {name} hook"))?;
@@ -175,11 +175,11 @@ fn check_hook_available(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn install_hooks(root: &Path) -> Result<(), String> {
-    check_hook_available(root)?;
-    fs::create_dir_all(hooks_dir(root)).map_err(|e| format!("cannot create .git/hooks: {e}"))?;
+fn install_hooks(repo: &Repository) -> Result<(), String> {
+    check_hook_available(repo)?;
+    fs::create_dir_all(hooks_dir(repo)).map_err(|e| format!("cannot create .git/hooks: {e}"))?;
     for (name, command) in HOOKS {
-        let path = hook_path(root, name);
+        let path = hook_path(repo, name);
         let script = hook_script(command)?;
         if let Ok(text) = fs::read_to_string(&path) {
             if text == script {
@@ -195,39 +195,39 @@ fn install_hooks(root: &Path) -> Result<(), String> {
         os::create_hook(&path).map_err(|e| format!("cannot install {name} hook: {e}"))?
             .write_all(script.as_bytes()).map_err(|e| format!("cannot write {name} hook: {e}"))?;
     }
-    if hooks_bypassed(root) {
+    if hooks_bypassed(repo) {
         eprintln!("warning: {HOOKS_BYPASSED}");
     }
     Ok(())
 }
 
-fn remove_hooks(root: &Path) -> Result<(), String> {
+fn remove_hooks(repo: &Repository) -> Result<(), String> {
     for (name, command) in HOOKS {
-        remove_hook(root, name, command).map_err(|e| format!("cannot remove {name} hook: {e}"))?;
+        remove_hook(repo, name, command).map_err(|e| format!("cannot remove {name} hook: {e}"))?;
     }
     Ok(())
 }
 
 /// Remove the hook `name` if it is one that v3 installed.
-fn remove_hook(root: &Path, name: &str, command: &str) -> io::Result<()> {
-    let path = hook_path(root, name);
+fn remove_hook(repo: &Repository, name: &str, command: &str) -> io::Result<()> {
+    let path = hook_path(repo, name);
     if fs::read_to_string(&path).is_ok_and(|text| ours(name, command, &text)) { fs::remove_file(&path)?; }
     Ok(())
 }
 
 /// Make `key` the credential of this checkout, in the requested mode, and
 /// remove the other mode's.
-pub(crate) fn activate(root: &Path, config: &[u8], key: &SecretKey, private: bool, idle: Option<std::time::Duration>)
+pub(crate) fn activate(repo: &Repository, config: &[u8], key: &SecretKey, private: bool, idle: Option<std::time::Duration>)
     -> Result<(), String>
 {
     if private {
-        credential::forget(root)?;
-        if Key::load(root, config)?.is_none() {
-            session::start(root, config, key, idle)?;
+        credential::forget(repo)?;
+        if Key::load(repo, config)?.is_none() {
+            session::start(repo, config, key, idle)?;
         }
     } else {
-        credential::store(root, config, key)?;
-        let _ = session::stop(root, config);
+        credential::store(repo, config, key)?;
+        let _ = session::stop(repo, config);
     }
     Ok(())
 }
@@ -235,11 +235,11 @@ pub(crate) fn activate(root: &Path, config: &[u8], key: &SecretKey, private: boo
 /// `init [PATTERN...]`: a new config and key, the attribute macro in
 /// `.gitattributes`, filters and hooks, the key stored (or the private
 /// agent started), and then `protect` for each pattern.
-pub(crate) fn init(root: &Path, options: &Options) -> Result<(), String> {
-    let rollback = init_with_rollback(root, options, None)?;
+pub(crate) fn init(repo: &Repository, options: &Options) -> Result<(), String> {
+    let rollback = init_with_rollback(repo, options, None)?;
     if !options.patterns.is_empty() {
-        if let Err(e) = protect(root, &options.patterns) {
-            rollback.run();
+        if let Err(e) = protect(repo, &options.patterns) {
+            rollback.run(repo);
             return Err(format!("{e}; initialization rolled back"));
         }
     } else {
@@ -253,7 +253,6 @@ pub(crate) fn init(root: &Path, options: &Options) -> Result<(), String> {
 /// the same command (`protect`, `migrate`) can undo it and the command can
 /// simply be rerun.
 pub(crate) struct Rollback {
-    root: PathBuf,
     config: Vec<u8>,
     attributes_before: Option<Vec<u8>>,
     hook_preexisted: [bool; HOOKS.len()],
@@ -262,21 +261,21 @@ pub(crate) struct Rollback {
 impl Rollback {
     /// Undo exactly what initialization created: staged metadata, the files
     /// it wrote (the config only if unchanged), its hooks (only those that
-    /// did not exist before), its Git configuration and the key.
-    pub(crate) fn run(&self) {
-        let root = self.root.as_path();
-        let _ = git(root, &["reset", "-q", "--", CONFIG_PATH, ".gitattributes"]);
-        if fs::read(root.join(CONFIG_PATH)).ok().as_deref() == Some(&self.config[..]) {
-            let _ = fs::remove_file(root.join(CONFIG_PATH));
-            let _ = fs::remove_dir(root.join(".transcrypt"));
+    /// did not exist before), its Git configuration and the key, in `repo`
+    /// (the repository it initialized).
+    pub(crate) fn run(&self, repo: &Repository) {
+        let _ = git(repo, &["reset", "-q", "--", CONFIG_PATH, ".gitattributes"]);
+        if fs::read(repo.root().join(CONFIG_PATH)).ok().as_deref() == Some(&self.config[..]) {
+            let _ = fs::remove_file(repo.root().join(CONFIG_PATH));
+            let _ = fs::remove_dir(repo.root().join(".transcrypt"));
         }
-        restore_worktree_attributes(root, self.attributes_before.as_deref());
+        restore_worktree_attributes(repo, self.attributes_before.as_deref());
         for ((name, command), preexisted) in HOOKS.into_iter().zip(self.hook_preexisted) {
-            if !preexisted { let _ = remove_hook(root, name, command); }
+            if !preexisted { let _ = remove_hook(repo, name, command); }
         }
-        remove_filters(root);
-        let _ = credential::forget(root);
-        let _ = session::stop(root, &self.config);
+        remove_filters(repo);
+        let _ = credential::forget(repo);
+        let _ = session::stop(repo, &self.config);
     }
 }
 
@@ -290,24 +289,24 @@ pub(crate) fn new_config(password: &[u8]) -> Result<([u8; transcrypt_v3_core::CO
 /// Whether `.transcrypt` exists but `HEAD` has no config: an interrupted
 /// `init` or `migrate`, which rerunning completes. `committed` is the
 /// refusal when `HEAD` already has one.
-pub(crate) fn uncommitted_setup(root: &Path, committed: &str) -> Result<bool, String> {
-    if fs::symlink_metadata(root.join(".transcrypt")).is_err() { return Ok(false); }
-    if config_blob(root, "HEAD").ok().flatten().is_some() { return Err(committed.into()); }
+pub(crate) fn uncommitted_setup(repo: &Repository, committed: &str) -> Result<bool, String> {
+    if fs::symlink_metadata(repo.root().join(".transcrypt")).is_err() { return Ok(false); }
+    if config_blob(repo, "HEAD").ok().flatten().is_some() { return Err(committed.into()); }
     Ok(true)
 }
 
 /// Initialize (without protecting anything yet); on failure everything is
 /// rolled back, on success the caller gets the rollback for later steps.
-pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Option<Zeroizing<Vec<u8>>>)
+pub(crate) fn init_with_rollback(repo: &Repository, options: &Options, password: Option<Zeroizing<Vec<u8>>>)
     -> Result<Rollback, String>
 {
     // An existing config not yet in `HEAD` is an interrupted `init`: rerunning
     // with the same passphrase completes it.
     let committed = ".transcrypt already exists: this repository is set up; run `transcrypt-rs unlock`";
-    let interrupted = if uncommitted_setup(root, committed)? {
-        Some(load_config(root).map_err(|e| format!("{e} (left by an interrupted init? to start over: {START_OVER})"))?)
+    let interrupted = if uncommitted_setup(repo, committed)? {
+        Some(load_config(repo).map_err(|e| format!("{e} (left by an interrupted init? to start over: {START_OVER})"))?)
     } else { None };
-    check_hook_available(root)?;
+    check_hook_available(repo)?;
     // Asked before anything is written: an interrupted prompt changes nothing.
     let password = match password { Some(p) => p, None => passphrase(options.password_stdin, interrupted.is_none())? };
     let (config, key) = match &interrupted {
@@ -319,20 +318,19 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
         None => new_config(&password)?,
     };
     let rollback = Rollback {
-        root: root.to_owned(),
         config: config.to_vec(),
-        attributes_before: worktree_attributes(root)?,
-        hook_preexisted: HOOKS.map(|(name, _)| fs::symlink_metadata(hook_path(root, name)).is_ok()),
+        attributes_before: worktree_attributes(repo)?,
+        hook_preexisted: HOOKS.map(|(name, _)| fs::symlink_metadata(hook_path(repo, name)).is_ok()),
     };
-    let staging = staging_dir(root)?;
+    let staging = staging_dir(repo)?;
     let result = (|| -> Result<(), String> {
         if interrupted.is_none() {
-            write_repository_file(root, &staging, Path::new(CONFIG_PATH), &config)?;
+            write_repository_file(repo.root(), &staging, Path::new(CONFIG_PATH), &config)?;
         }
-        edit_attributes(root, &staging, false, |_| Ok(()))?;
-        install(root)?;
-        activate(root, &config, &key, options.private, options.timeout)?;
-        git(root, &["add", "--", CONFIG_PATH, ".gitattributes"])?;
+        edit_attributes(repo, &staging, false, |_| Ok(()))?;
+        install(repo)?;
+        activate(repo, &config, &key, options.private, options.timeout)?;
+        git(repo, &["add", "--", CONFIG_PATH, ".gitattributes"])?;
         Ok(())
     })();
     drop(staging);
@@ -342,7 +340,7 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
         if interrupted.is_some() {
             return Err(format!("{e}; rerun to complete the initialization"));
         }
-        rollback.run();
+        rollback.run(repo);
         return Err(format!("{e}; initialization rolled back"));
     }
     eprintln!("Initialized v3 and unlocked this checkout{}.", if options.private { " (private mode)" } else { "" });
@@ -352,20 +350,20 @@ pub(crate) fn init_with_rollback(root: &Path, options: &Options, password: Optio
 /// `unlock`: authenticate the passphrase against the committed config
 /// before changing anything, install the filters and hooks, keep the key
 /// (stored, or in the private agent) and decrypt the worktree.
-pub(crate) fn unlock(root: &Path, options: &Options) -> Result<(), String> {
-    let config = load_config(root)?;
-    check_hook_available(root)?;
-    let current = credential::state_to_unlock(root, &config)?;
+pub(crate) fn unlock(repo: &Repository, options: &Options) -> Result<(), String> {
+    let config = load_config(repo)?;
+    check_hook_available(repo)?;
+    let current = credential::state_to_unlock(repo, &config)?;
     if current.key().is_some_and(|key| key.private() == options.private) {
-        install(root)?;
-        let n = if options.hydrate { hydrate(root)? } else { 0 };
+        install(repo)?;
+        let n = if options.hydrate { hydrate(repo)? } else { 0 };
         eprintln!("Already unlocked; decrypted {n} file(s).");
         return Ok(());
     }
     let password = passphrase(options.password_stdin, false)?;
     let key = unlock_config(&password, &config)?; // Authenticate BEFORE any persistent writes.
-    install(root)?;
-    activate(root, &config, &key, options.private, options.timeout)?;
+    install(repo)?;
+    activate(repo, &config, &key, options.private, options.timeout)?;
     let mode = if options.private { "private mode: key in memory until lock or logout" }
         else { "key stored in .git/transcrypt-v3/key until lock" };
     if !options.hydrate {
@@ -374,7 +372,7 @@ pub(crate) fn unlock(root: &Path, options: &Options) -> Result<(), String> {
     }
     // Unlocking is complete; hydration is a separate, all-or-nothing step
     // whose refusal must not hide that the checkout is now unlocked.
-    match hydrate(root) {
+    match hydrate(repo) {
         Ok(n) => eprintln!("Unlocked ({mode}); decrypted {n} file(s)."),
         Err(e) => eprintln!("Unlocked ({mode}), but decryption changed nothing: {e}\n\
             Inspect with `transcrypt-rs status`, then run `transcrypt-rs hydrate`."),
@@ -388,21 +386,21 @@ pub(crate) fn unlock(root: &Path, options: &Options) -> Result<(), String> {
 /// (only if unchanged) and the credential directory are removed. The
 /// committed `.transcrypt/config` and `.gitattributes` stay: removing them
 /// from the repository is a commit, and the history stays encrypted.
-pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
+pub(crate) fn uninstall(repo: &Repository) -> Result<(), String> {
     // On a branch without a v3 config (made before `init`) there is nothing
     // to lock here; other worktrees must still hold no plaintext.
-    if let Ok(config) = load_config(root) {
-        if Key::load(root, &config)?.is_some() {
-            lock(root)?;
+    if let Ok(config) = load_config(repo) {
+        if Key::load(repo, &config)?.is_some() {
+            lock(repo)?;
         }
-        worktree_encrypted(root, &config)
+        worktree_encrypted(repo, &config)
             .map_err(|e| format!("{e}; unlock, commit or discard it, and lock before uninstalling"))?;
     }
-    others_encrypted(root)?;
-    credential::forget(root)?;
-    remove_filters(root);
-    remove_hooks(root)?;
-    let attributes = common_dir(root).join("info/attributes");
+    others_encrypted(repo)?;
+    credential::forget(repo)?;
+    remove_filters(repo);
+    remove_hooks(repo)?;
+    let attributes = repo.common_dir().join("info/attributes");
     if let Ok(text) = fs::read_to_string(&attributes) {
         if text.lines().any(|l| l == LEGACY_MERGE_ATTRIBUTE) {
             let kept: Vec<&str> = text.lines().filter(|l| *l != LEGACY_MERGE_ATTRIBUTE).collect();
@@ -411,9 +409,9 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
             let _ = fs::write(&attributes, rewritten);
         }
     }
-    let _ = fs::remove_dir(common_dir(root).join("transcrypt-v3"));
+    let _ = fs::remove_dir(repo.common_dir().join("transcrypt-v3"));
     for dir in ["transcrypt-v3-staging", "transcrypt-v3-scratch"] {
-        let _ = fs::remove_dir(git_dir(root).join(dir));
+        let _ = fs::remove_dir(repo.git_dir().join(dir));
     }
     eprintln!("Removed transcrypt-rs from this checkout; protected files stay encrypted.\n\
         WARNING: without the filter, a protected file you add now is committed as plaintext. To stop \
@@ -423,8 +421,8 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
 
 /// Read-only summary for users. Never writes to the worktree, index or
 /// credential directory.
-pub(crate) fn status(root: &Path) -> Result<(), String> {
-    let config = match load_config(root) {
+pub(crate) fn status(repo: &Repository) -> Result<(), String> {
+    let config = match load_config(repo) {
         Ok(config) => config,
         Err(e) => {
             println!("repository: not initialized for v3 ({e})");
@@ -433,7 +431,7 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
     };
     let id = transcrypt_rs::config_id(&config);
     println!("repository: v3 config {}", short_id(&id));
-    let unlock = credential::lookup(root, &config)?;
+    let unlock = credential::lookup(repo, &config)?;
     println!("key:        {}", match &unlock {
         Unlock::Unlocked(key) if !key.private() => "unlocked (stored in .git/transcrypt-v3/key)",
         Unlock::Unlocked(_) => "unlocked (private: held in memory by an agent)",
@@ -446,12 +444,12 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
         counts[state.bucket() as usize] += 1;
         println!("  {:<LABEL_WIDTH$} {name}", state.label());
     };
-    let index = index_with_conflicts(root)?;
-    for path in protected_paths(root, &index.conflicted)? {
+    let index = index_with_conflicts(repo)?;
+    for path in protected_paths(repo, &index.conflicted)? {
         count(FileState::Conflicted, &String::from_utf8_lossy(&path));
     }
-    for staged in protected_entries(root, index.merged, Attributes::Staged)? {
-        count(file_state(root, &id, key, &staged).unwrap_or(FileState::Error), &staged.name());
+    for staged in protected_entries(repo, index.merged, Attributes::Staged)? {
+        count(file_state(repo, &id, key, &staged).unwrap_or(FileState::Error), &staged.name());
     }
     let [ciphertext, plaintext, modified, other] = counts;
     println!("protected:  {ciphertext} ciphertext, {plaintext} plaintext, {modified} modified, {other} other");
@@ -460,16 +458,16 @@ pub(crate) fn status(root: &Path) -> Result<(), String> {
             renamed; files encrypted under an earlier config (cherry-picked or rebased across a rekey) need \
             `transcrypt-rs reencrypt`");
     }
-    let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let untracked = git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     let untracked = git_records(&untracked)?;
-    let loose = protected_flags(root, &untracked, Attributes::Worktree)?.into_iter().filter(|p| *p).count();
+    let loose = protected_flags(repo, &untracked, Attributes::Worktree)?.into_iter().filter(|p| *p).count();
     if loose > 0 {
         println!("note:       {loose} untracked protected file(s); `git add` encrypts them");
     }
     if key.is_some() && ciphertext > 0 {
         println!("hint:       run `transcrypt-rs hydrate` to decrypt ciphertext in the worktree");
     }
-    if hooks_bypassed(root) {
+    if hooks_bypassed(repo) {
         println!("warning:    {HOOKS_BYPASSED}");
     }
     Ok(())
@@ -529,15 +527,15 @@ impl FileState {
 }
 
 /// What `status` says of one staged protected file.
-fn file_state(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], key: Option<&Key>, staged: &Staged)
+fn file_state(repo: &Repository, id: &[u8; transcrypt_v3_core::ID_LEN], key: Option<&Key>, staged: &Staged)
     -> Result<FileState, String>
 {
     if !staged.regular() { return Ok(FileState::Unsupported); }
-    let object = git_blob(root, &staged.oid)?;
+    let object = git_blob(repo, &staged.oid)?;
     if !record_envelope_ok(&object, id) {
         return Ok(if parse_file_header(&object).is_ok() { FileState::OtherConfig } else { FileState::Unencrypted });
     }
-    let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? else { return Ok(FileState::Deleted) };
+    let Some(target) = find_protected(repo.root(), &indexed_path(&staged.path)?)? else { return Ok(FileState::Deleted) };
     let (worktree, _) = target.read()?;
     if *worktree == object { return Ok(FileState::Ciphertext); }
     let Some(key) = key else { return Ok(FileState::ModifiedOrPlaintext) };
@@ -550,21 +548,21 @@ fn file_state(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], key: Option<&K
 
 /// Check that every local protection is actually in place, and say what
 /// cannot be checked from here. Exits non-zero if a protection is missing.
-pub(crate) fn doctor(root: &Path) -> Result<(), String> {
+pub(crate) fn doctor(repo: &Repository) -> Result<(), String> {
     let mut failures = 0;
     let mut report = |ok: bool, what: &str| {
         if !ok { failures += 1; }
         println!("{} {what}", if ok { "ok  " } else { "FAIL" });
     };
-    let config = load_config(root);
+    let config = load_config(repo);
     report(config.is_ok(), "committed .transcrypt/config is a valid v3 config");
     let unlock = match &config {
-        Ok(config) => Some(credential::lookup(root, config)?),
+        Ok(config) => Some(credential::lookup(repo, config)?),
         Err(_) => None,
     };
     let key = unlock.as_ref().and_then(Unlock::key);
     // Filters and drivers, as Git will resolve them (any config scope).
-    let effective = |key: &str| git(root, &["config", "--get", key]).ok()
+    let effective = |key: &str| git(repo, &["config", "--get", key]).ok()
         .map(|v| String::from_utf8_lossy(&v).trim_end().to_owned());
     match expected_config() {
         Ok(settings) => for (name, value) in settings {
@@ -575,16 +573,16 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         },
         Err(e) => report(false, &e),
     }
-    let entries = indexed_files(root);
+    let entries = indexed_files(repo);
     let top = entries.as_ref().ok().and_then(|e| e.iter().find(|e| e.path == ATTRIBUTES_NAME)).map(|e| e.oid.clone());
     if config.is_ok() {
-        match entries.and_then(|entries| staged_protected(root, entries)) {
+        match entries.and_then(|entries| staged_protected(repo, entries)) {
             Ok(protected) if protected.is_empty() => println!("note no tracked file is protected yet: \
                 `transcrypt-rs protect PATTERN` (for example .env)"),
             Ok(protected) => println!("note {} tracked file(s) protected by .gitattributes", protected.len()),
             Err(e) => report(false, &format!("protected-file selection: {e}")),
         }
-        let checked = check_index(root, key);
+        let checked = check_index(repo, key);
         report(checked.is_ok(), &match checked {
             Ok(_) if key.is_some() => "every staged protected file authenticates at its path".to_owned(),
             Ok(_) => "every staged protected file has the v3 envelope (unlock to authenticate)".to_owned(),
@@ -592,17 +590,17 @@ pub(crate) fn doctor(root: &Path) -> Result<(), String> {
         });
     }
     for (name, command) in HOOKS.into_iter().filter(|(name, _)| hook_required(name)) {
-        let path = hook_path(root, name);
+        let path = hook_path(repo, name);
         let installed = fs::read_to_string(&path).ok() == hook_script(command).ok()
             && os::runnable(&path);
         report(installed, &format!("{name} hook installed"));
     }
-    report(!hooks_bypassed(root), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
-    report(macro_resolves(root, &git_dir(root), top.as_deref()).unwrap_or(false),
+    report(!hooks_bypassed(repo), "Git runs the hooks in .git/hooks (core.hooksPath unset)");
+    report(macro_resolves(repo, top.as_deref()).unwrap_or(false),
         "the `transcrypt` macro sets filter=transcrypt-v3 for the next commit");
     // Attribute files outside the repository apply only here, and could
     // silently unprotect files that the committed .gitattributes protect.
-    let overrides = filter_overrides(root);
+    let overrides = filter_overrides(repo);
     report(overrides.is_empty(), &if overrides.is_empty() {
         "no local attribute file overrides `filter`".to_owned()
     } else {

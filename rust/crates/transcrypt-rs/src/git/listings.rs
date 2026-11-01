@@ -25,8 +25,8 @@ pub(crate) fn git_records(data: &[u8]) -> Result<Vec<&[u8]>, String> {
 }
 
 /// The exact index listing (`ls-files --stage -z`), unmerged stages included.
-pub(crate) fn index_listing(root: &Path) -> Result<Vec<u8>, String> {
-    git(root, &["ls-files", "--stage", "-z"])
+pub(crate) fn index_listing(repo: &Repository) -> Result<Vec<u8>, String> {
+    git(repo, &["ls-files", "--stage", "-z"])
 }
 
 /// One `<mode> SP <oid> SP 0 TAB <path>` record (see `Listing`).
@@ -41,13 +41,13 @@ fn parse_entry(entry: &[u8]) -> Result<Staged, String> {
 }
 
 /// The blobs of a commit's tree.
-pub(crate) fn tree_files(root: &Path, commit: &str) -> Result<Vec<Staged>, String> {
-    Ok(tree_listing(root, commit)?.into_entries())
+pub(crate) fn tree_files(repo: &Repository, commit: &str) -> Result<Vec<Staged>, String> {
+    Ok(tree_listing(repo, commit)?.into_entries())
 }
 
 /// `tree_files`, as a `Listing`.
-pub(crate) fn tree_listing(root: &Path, commit: &str) -> Result<Listing, String> {
-    Listing::parse(tree_listing_bytes(root, &["ls-tree", "-r", "-z", "--full-tree", commit])?)
+pub(crate) fn tree_listing(repo: &Repository, commit: &str) -> Result<Listing, String> {
+    Listing::parse(tree_listing_bytes(repo, &["ls-tree", "-r", "-z", "--full-tree", commit])?)
 }
 
 /// An `ls-tree -z` listing rewritten to index records. `ls-tree` prints
@@ -55,9 +55,9 @@ pub(crate) fn tree_listing(root: &Path, commit: &str) -> Result<Listing, String>
 /// needs 2.36); each record is rewritten as `<mode> SP <oid> SP 0 TAB
 /// <path>`, with the path copied verbatim, so that the verified core parses
 /// and checks the listing exactly like an index listing.
-fn tree_listing_bytes(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
+fn tree_listing_bytes(repo: &Repository, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    for entry in git_records(&git(root, arguments)?)? {
+    for entry in git_records(&git(repo, arguments)?)? {
         bytes.extend_from_slice(&tree_record(entry)?);
         bytes.push(0);
     }
@@ -82,8 +82,8 @@ pub(crate) struct Index {
     pub(crate) conflicted: Vec<Vec<u8>>,
 }
 
-pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
-    let listing = index_listing(root)?;
+pub(crate) fn index_with_conflicts(repo: &Repository) -> Result<Index, String> {
+    let listing = index_listing(repo)?;
     let mut merged = Vec::new();
     let mut conflicted: Vec<Vec<u8>> = Vec::new();
     for entry in git_records(&listing)? {
@@ -99,8 +99,8 @@ pub(crate) fn index_with_conflicts(root: &Path) -> Result<Index, String> {
 }
 
 /// The stage-0 entries of the index (`Listing::parse`).
-pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
-    Ok(Listing::parse(index_listing(root)?)?.into_entries())
+pub(crate) fn indexed_files(repo: &Repository) -> Result<Vec<Staged>, String> {
+    Ok(Listing::parse(index_listing(repo)?)?.into_entries())
 }
 
 /// The blobs Git already has for exactly `path`: every index stage, and
@@ -108,7 +108,7 @@ pub(crate) fn indexed_files(root: &Path) -> Result<Vec<Staged>, String> {
 /// they are one of these, never because of a header alone. A path that is
 /// not UTF-8 (which cannot be passed as an argument on every OS) has none:
 /// fail-closed, since the filter then never passes bytes through for it.
-pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> {
+pub(crate) fn blobs_at(repo: &Repository, path: &[u8]) -> Result<Vec<String>, String> {
     let name = std::str::from_utf8(path).ok().map(str::to_owned);
     let mut oids = Vec::new();
     let mut parse = |listing: &[u8], tree: bool| -> Result<(), String> {
@@ -127,9 +127,9 @@ pub(crate) fn blobs_at(root: &Path, path: &[u8]) -> Result<Vec<String>, String> 
         Ok(())
     };
     let Some(name) = name else { return Ok(oids) };
-    parse(&git(root, &["ls-files", "--stage", "-z", "--", &name])?, false)?;
+    parse(&git(repo, &["ls-files", "--stage", "-z", "--", &name])?, false)?;
     // No `HEAD` (an unborn branch) has no blobs to add.
-    if let Ok(listing) = git(root, &["ls-tree", "-z", "HEAD", "--", &name]) { parse(&listing, true)?; }
+    if let Ok(listing) = git(repo, &["ls-tree", "-z", "HEAD", "--", &name]) { parse(&listing, true)?; }
     Ok(oids)
 }
 
@@ -154,11 +154,11 @@ pub(crate) struct Changes {
 /// entries for a root commit), from `diff-tree -r -z --raw` between the two
 /// trees, rewritten to the index-record shape and parsed by the verified
 /// core, and the paths it deletes with their old object ids.
-pub(crate) fn changed_files(root: &Path, commit: &str, parent: Option<&str>) -> Result<Changes, String> {
+pub(crate) fn changed_files(repo: &Repository, commit: &str, parent: Option<&str>) -> Result<Changes, String> {
     let Some(parent) = parent else {
-        return Ok(Changes { entries: tree_files(root, commit)?, deleted: Vec::new(), modified: Vec::new() });
+        return Ok(Changes { entries: tree_files(repo, commit)?, deleted: Vec::new(), modified: Vec::new() });
     };
-    let data = git(root, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
+    let data = git(repo, &["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", parent, commit])?;
     parse_diff_tree(&data)
 }
 
@@ -194,18 +194,18 @@ pub(super) fn parse_diff_tree(data: &[u8]) -> Result<Changes, String> {
 }
 
 /// The `.transcrypt/config` blob of a commit, if it has one.
-pub(crate) fn config_blob(root: &Path, commit: &str) -> Result<Option<String>, String> {
-    let listing = tree_listing_bytes(root, &["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])?;
+pub(crate) fn config_blob(repo: &Repository, commit: &str) -> Result<Option<String>, String> {
+    let listing = tree_listing_bytes(repo, &["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])?;
     Ok(Listing::parse(listing)?.into_entries().into_iter()
         .find(|e| e.path == CONFIG_PATH.as_bytes() && e.regular()).map(|e| e.oid))
 }
 
 /// Re-index exactly `paths`, whose worktree content cleans to the staged
 /// blob, and check that no staged blob or mode changed from `listing`.
-pub(crate) fn reindex(root: &Path, listing: &[u8], paths: &[Vec<u8>]) -> Result<(), String> {
+pub(crate) fn reindex(repo: &Repository, listing: &[u8], paths: &[Vec<u8>]) -> Result<(), String> {
     if paths.is_empty() { return Ok(()); }
-    git_with_input(root, &["update-index", "-z", "--stdin"], &nul_terminated(paths))?;
-    if index_listing(root)? != listing {
+    git_with_input(repo, &["update-index", "-z", "--stdin"], &nul_terminated(paths))?;
+    if index_listing(repo)? != listing {
         return Err("staged Git objects changed while refreshing the index; inspect `git diff --cached`".into());
     }
     Ok(())

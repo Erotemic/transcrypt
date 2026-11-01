@@ -6,13 +6,10 @@
 //! when the config changes). Any malformed exchange ends the process, which
 //! makes Git fail the command (the filter is required).
 
-use std::{
-    io::{self, Read, Write},
-    path::Path,
-};
+use std::io::{self, Read, Write};
 use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD, PKT_HEADER_LEN};
 use zeroize::Zeroizing;
-use crate::{filter::Filters, git::append_wiped};
+use crate::{filter::Filters, git::{append_wiped, Repository}};
 
 /// The flush packet: a header of length 0.
 const FLUSH_PKT: &[u8; PKT_HEADER_LEN] = b"0000";
@@ -87,7 +84,7 @@ fn write_reply(out: &mut impl Write, converted: Option<&[u8]>) -> io::Result<()>
     send_flush(out)
 }
 
-pub(crate) fn serve(root: &Path) -> Result<(), String> {
+pub(crate) fn serve(repo: &Repository) -> Result<(), String> {
     let mut input = io::stdin().lock();
     let mut output = io::BufWriter::new(io::stdout().lock());
     let io_error = |_: io::Error| "cannot write to Git".to_owned();
@@ -101,7 +98,7 @@ pub(crate) fn serve(root: &Path) -> Result<(), String> {
     let offered: Vec<&str> = ["capability=clean", "capability=smudge"].into_iter()
         .filter(|wanted| capabilities.iter().any(|c| c == wanted.as_bytes())).collect();
     write_list(&mut output, &offered).map_err(io_error)?;
-    let mut filters = Filters::new(root);
+    let mut filters = Filters::new(repo);
     while let Some(request) = read_request(&mut input)? {
         let value = |key: &[u8]| request.iter().find_map(|line| line.strip_prefix(key));
         let (command, path) = (value(b"command="), value(b"pathname="));

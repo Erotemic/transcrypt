@@ -32,13 +32,13 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn read(root: &Path) -> Result<Snapshot, String> {
-        Snapshot::of(root, Listing::parse(index_listing(root)?)?)
+    fn read(repo: &Repository) -> Result<Snapshot, String> {
+        Snapshot::of(repo, Listing::parse(index_listing(repo)?)?)
     }
 
     /// The snapshot of `listing`, with Git's answer for its own paths.
-    fn of(root: &Path, listing: Listing) -> Result<Snapshot, String> {
-        let flags = listing_flags(root, &listing, Attributes::Staged)?;
+    fn of(repo: &Repository, listing: Listing) -> Result<Snapshot, String> {
+        let flags = listing_flags(repo, &listing, Attributes::Staged)?;
         Ok(Snapshot { listing, flags })
     }
 
@@ -75,8 +75,8 @@ fn selectable(entry: &Staged) -> Result<(), String> {
 
 /// The protected stage-0 entries of `entries`, by Git's staged attributes,
 /// each `selectable`.
-pub(crate) fn staged_protected(root: &Path, entries: Vec<Staged>) -> Result<Vec<Staged>, String> {
-    let protected = protected_entries(root, entries, Attributes::Staged)?;
+pub(crate) fn staged_protected(repo: &Repository, entries: Vec<Staged>) -> Result<Vec<Staged>, String> {
+    let protected = protected_entries(repo, entries, Attributes::Staged)?;
     protected.iter().try_for_each(selectable)?;
     Ok(protected)
 }
@@ -91,9 +91,9 @@ pub(crate) fn staged_protected(root: &Path, entries: Vec<Staged>) -> Result<Vec<
 /// - no unprotected entry staged since `HEAD` is a record of this
 ///   configuration: one moved to an unprotected name (`git mv x.env x.bak`)
 ///   would be committed where nothing ever decrypts it.
-pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, String> {
-    let config = load_config(root)?;
-    check_staged(root, &config, Snapshot::read(root)?, &commit_listing(root, "HEAD")?, key, false)
+pub(crate) fn check_index(repo: &Repository, key: Option<&Key>) -> Result<Verified, String> {
+    let config = load_config(repo)?;
+    check_staged(repo, &config, Snapshot::read(repo)?, &commit_listing(repo, "HEAD")?, key, false)
 }
 
 /// `check_index` of `snapshot`; with `incremental` (the pre-commit hook),
@@ -104,33 +104,33 @@ pub(crate) fn check_index(root: &Path, key: Option<&Key>) -> Result<Verified, St
 /// `hydrate`, `lock`, merge commits and the audit still authenticate
 /// everything. Nothing is settled while an attribute file or the config
 /// differs from `HEAD` or `HEAD^1`: a newly selected file was never checked.
-fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, key: Option<&Key>, incremental: bool)
+fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Listing, key: Option<&Key>, incremental: bool)
     -> Result<Verified, String>
 {
     let (entries, flags) = (snapshot.entries(), &snapshot.flags);
     match entries.iter().find(|e| e.path == CONFIG_PATH.as_bytes()) {
-        Some(e) if e.regular() && git_blob(root, &e.oid)? == config => {},
+        Some(e) if e.regular() && git_blob(repo, &e.oid)? == config => {},
         _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree \
             (an interrupted `rekey`? `git reset` undoes a staged rekey)".into()),
     }
     let top = entries.iter().find(|e| e.path == ATTRIBUTES_NAME && e.regular()).map(|e| e.oid.as_str());
-    if !macro_resolves(root, &git_dir(root), top)? {
+    if !macro_resolves(repo, top)? {
         return Err(crate::attributes::MACRO_MISSING.into());
     }
-    if let Some(problem) = marked_unfiltered(root, &paths_of(entries), Attributes::Staged)? {
+    if let Some(problem) = marked_unfiltered(repo, &paths_of(entries), Attributes::Staged)? {
         return Err(problem);
     }
     // With `--amend` (and squash/fixup) the commit's parent is `HEAD^`; its
     // files count too, as they do for the audit, which compares with the
     // parent.
-    let parent = commit_listing(root, "HEAD^1")?;
+    let parent = commit_listing(repo, "HEAD^1")?;
     // Whether `HEAD` holds each entry's blob at its path, and (protected
     // entries) `HEAD^1` too: the verified `held_entries`.
     let in_head = snapshot.listing.held_in(&vec![true; entries.len()], head)?;
     let in_parent = snapshot.listing.held_in(flags, &parent)?;
     let protected = snapshot.protected()?;
     let id = transcrypt_rs::config_id(config);
-    check_unprotected(root, &id, &snapshot, &in_head, head, &parent)?;
+    check_unprotected(repo, &id, &snapshot, &in_head, head, &parent)?;
     let same_policy = policy_unchanged(entries, head, &parent);
     // The keyless move check looks blobs up by object id (`blob_elsewhere`).
     let mut ordered: Option<[OrderedListing; 3]> = None;
@@ -138,7 +138,7 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
         let staged = &entries[i];
         // Unchanged since `HEAD` and `HEAD^1`: already in history.
         let settled = same_policy && in_head[i] && in_parent[i];
-        let record = git_blob(root, &staged.oid)?;
+        let record = git_blob(repo, &staged.oid)?;
         let name = staged.name();
         match parse_file_header(&record) {
             Err(_) => return Err(format!("staged {name} is not encrypted (was it staged before it was protected?); \
@@ -180,7 +180,7 @@ fn check_staged(root: &Path, config: &[u8], snapshot: Snapshot, head: &Listing, 
 /// since `HEAD` (`in_head` false): none is a record of this configuration
 /// `id`, and none that was a record in `HEAD` (or `HEAD^1`, `parent`) is
 /// now claimed by another named filter.
-fn check_unprotected(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], snapshot: &Snapshot, in_head: &[bool],
+fn check_unprotected(repo: &Repository, id: &[u8; transcrypt_v3_core::ID_LEN], snapshot: &Snapshot, in_head: &[bool],
     head: &Listing, parent: &Listing) -> Result<(), String>
 {
     let (head_oid, parent_oid) = (oids_by_path(head.entries()), oids_by_path(parent.entries()));
@@ -189,7 +189,7 @@ fn check_unprotected(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], snapsho
     let mut drifted: Vec<&[u8]> = Vec::new();
     for entry in staged_unprotected {
         let path = entry.path.as_slice();
-        if is_record(root, &entry.oid, id)? {
+        if is_record(repo, &entry.oid, id)? {
             return Err(format!("{} holds an encrypted record but is not protected (moved to an unprotected \
                 name? or a pattern that matches it only case-insensitively: v3 matches case-sensitively, \
                 so write it with the file's exact case): nothing would ever decrypt it there. Protect that \
@@ -199,7 +199,7 @@ fn check_unprotected(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], snapsho
         // amended commit. As strict as the audit: an unreadable one is an
         // error, not a plaintext.
         for old in [head_oid.get(path), parent_oid.get(path)].into_iter().flatten() {
-            if is_record(root, old, id)? {
+            if is_record(repo, old, id)? {
                 drifted.push(path);
                 break;
             }
@@ -208,7 +208,7 @@ fn check_unprotected(root: &Path, id: &[u8; transcrypt_v3_core::ID_LEN], snapsho
     // A file encrypted in `HEAD` that another named filter now claims
     // (`git lfs track` writing `filter=lfs`) silently lost its protection;
     // `unprotect` and `-filter` exclusions are deliberate and allowed.
-    let values = filter_values(root, &drifted, Attributes::Staged)?;
+    let values = filter_values(repo, &drifted, Attributes::Staged)?;
     for (path, value) in drifted.iter().zip(&values).filter(|(_, v)| !other_filter(v)) {
         eprintln!("transcrypt-rs: note: {} was encrypted in HEAD and is now staged unencrypted (`filter` is {}): \
             it is no longer selected by .gitattributes", String::from_utf8_lossy(path), String::from_utf8_lossy(value));
@@ -242,16 +242,16 @@ fn oids_by_path(entries: &[Staged]) -> HashMap<&[u8], &str> {
 
 /// The files of commit `rev`; none when there is no such commit (`HEAD`
 /// before the first commit, `HEAD^1` of a root commit).
-pub(crate) fn commit_files(root: &Path, rev: &str) -> Result<Vec<Staged>, String> {
-    Ok(commit_listing(root, rev)?.into_entries())
+pub(crate) fn commit_files(repo: &Repository, rev: &str) -> Result<Vec<Staged>, String> {
+    Ok(commit_listing(repo, rev)?.into_entries())
 }
 
 /// `commit_files`, as a `Listing`. `rev` is resolved once, and the tree of
 /// exactly that commit is listed: a concurrent commit cannot make the
 /// listing another commit's than the one found.
-pub(crate) fn commit_listing(root: &Path, rev: &str) -> Result<Listing, String> {
-    match resolve_commit(root, rev)? {
-        Some(id) => tree_listing(root, &id),
+pub(crate) fn commit_listing(repo: &Repository, rev: &str) -> Result<Listing, String> {
+    match resolve_commit(repo, rev)? {
+        Some(id) => tree_listing(repo, &id),
         None => Ok(Listing::empty()),
     }
 }
@@ -268,8 +268,8 @@ const REBASE_DIRS: [&str; 2] = ["rebase-merge", "rebase-apply"];
 /// known, and then nothing is repaired: a rebase or `git am` without a
 /// known commit, or sequencing state that is present but unreadable or
 /// malformed (never taken for "no commit is coming in").
-fn incoming(root: &Path) -> Result<Option<Listing>, String> {
-    let git_dir = git_dir(root);
+fn incoming(repo: &Repository) -> Result<Option<Listing>, String> {
+    let git_dir = repo.git_dir();
     let mut commits = Vec::new();
     match fs::read(git_dir.join("MERGE_HEAD")) {
         Ok(text) => for line in text.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
@@ -280,7 +280,7 @@ fn incoming(root: &Path) -> Result<Option<Listing>, String> {
         Err(_) => return Ok(None),
     }
     for name in SEQUENCER_HEADS {
-        match resolve_commit(root, name)? {
+        match resolve_commit(repo, name)? {
             Some(id) => commits.push(id),
             // Present, yet naming no commit.
             None if fs::symlink_metadata(git_dir.join(name)).is_ok() => return Ok(None),
@@ -290,7 +290,7 @@ fn incoming(root: &Path) -> Result<Option<Listing>, String> {
     if commits.is_empty() && REBASE_DIRS.iter().any(|dir| git_dir.join(dir).exists()) {
         return Ok(None);
     }
-    let trees = commits.iter().map(|commit| tree_listing(root, commit)).collect::<Result<Vec<_>, _>>()?;
+    let trees = commits.iter().map(|commit| tree_listing(repo, commit)).collect::<Result<Vec<_>, _>>()?;
     Ok(Some(Listing::merge(trees)?))
 }
 
@@ -311,19 +311,19 @@ fn configless(snapshot: &Snapshot) -> Result<bool, String> {
 /// hook, which first encrypts what ordinary Git commands stage without the
 /// filter (`seal_staged`). Locked, it checks the keyless envelopes, which
 /// still rejects any plaintext.
-fn verify(root: &Path, seal: bool) -> Result<(), String> {
-    let mut snapshot = Snapshot::read(root)?;
+fn verify(repo: &Repository, seal: bool) -> Result<(), String> {
+    let mut snapshot = Snapshot::read(repo)?;
     if configless(&snapshot)? { return Ok(()); }
-    let config = load_config(root)?;
-    let key = Key::load(root, &config)?;
-    let head = commit_listing(root, "HEAD")?;
+    let config = load_config(repo)?;
+    let key = Key::load(repo, &config)?;
+    let head = commit_listing(repo, "HEAD")?;
     if let Some(key) = key.as_ref().filter(|_| seal) {
         // Sealing replaced index entries: check the index it left.
-        if seal_snapshot(root, key, &[], &snapshot, &head)? > 0 {
-            snapshot = Snapshot::read(root)?;
+        if seal_snapshot(repo, key, &[], &snapshot, &head)? > 0 {
+            snapshot = Snapshot::read(repo)?;
         }
     }
-    check_staged(root, &config, snapshot, &head, key.as_ref(), seal)?;
+    check_staged(repo, &config, snapshot, &head, key.as_ref(), seal)?;
     if key.is_none() {
         eprintln!("transcrypt-rs: locked; checked staged record envelopes only");
     }
@@ -331,14 +331,14 @@ fn verify(root: &Path, seal: bool) -> Result<(), String> {
 }
 
 /// `verify-index`.
-pub(crate) fn verify_index_command(root: &Path) -> Result<(), String> {
-    verify(root, false)
+pub(crate) fn verify_index_command(repo: &Repository) -> Result<(), String> {
+    verify(repo, false)
 }
 
 /// The pre-commit hook.
-pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
-    verify(root, true)?;
-    if let Some(file) = crate::attributes::filter_overrides(root).first() {
+pub(crate) fn pre_commit(repo: &Repository) -> Result<(), String> {
+    verify(repo, true)?;
+    if let Some(file) = crate::attributes::filter_overrides(repo).first() {
         eprintln!("transcrypt-rs: warning: {file} sets `filter`, which can unprotect files that \
             .gitattributes protects; see `transcrypt-rs doctor`");
     }
@@ -365,11 +365,11 @@ pub(crate) fn pre_commit(root: &Path) -> Result<(), String> {
 /// plaintext is sealed even when unchanged from `HEAD` (`protect` selecting
 /// files committed before they were protected). Returns how many entries
 /// were sealed.
-pub(crate) fn seal_staged(root: &Path, key: &Key, force: &[Vec<u8>]) -> Result<usize, String> {
-    seal_snapshot(root, key, force, &Snapshot::read(root)?, &commit_listing(root, "HEAD")?)
+pub(crate) fn seal_staged(repo: &Repository, key: &Key, force: &[Vec<u8>]) -> Result<usize, String> {
+    seal_snapshot(repo, key, force, &Snapshot::read(repo)?, &commit_listing(repo, "HEAD")?)
 }
 
-fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot, head: &Listing)
+fn seal_snapshot(repo: &Repository, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot, head: &Listing)
     -> Result<usize, String>
 {
     let protected = snapshot.protected()?;
@@ -380,13 +380,13 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
     let in_head = snapshot.listing.held_in(&snapshot.flags, head)?;
     // Only a changed entry can be a local change: skip looking for commits
     // being brought in (three Git commands) on most commits.
-    let incoming = if protected.iter().any(|i| !in_head[*i]) { incoming(root)? } else { None };
+    let incoming = if protected.iter().any(|i| !in_head[*i]) { incoming(repo)? } else { None };
     let in_incoming = match &incoming {
         Some(files) => snapshot.listing.held_in(&snapshot.flags, files)?,
         None => vec![false; snapshot.flags.len()],
     };
     let force: HashSet<&[u8]> = force.iter().map(Vec::as_slice).collect();
-    let mut update = IndexUpdate::new(root, Blobs::Records);
+    let mut update = IndexUpdate::new(repo, Blobs::Records);
     // `HEAD` by object id, for move sources; only when a record moved.
     let mut head_ordered: Option<OrderedListing> = None;
     for i in protected {
@@ -402,7 +402,7 @@ fn seal_snapshot(root: &Path, key: &Key, force: &[Vec<u8>], snapshot: &Snapshot,
         // `seal_action` never repairs a non-local entry; skip decrypting it
         // here (`check_index` verifies it right after).
         if !evidence.local_change() && !evidence.forced { continue; }
-        let record = git_blob(root, &staged.oid).map_err(|e| format!("{}: {e}", staged.name()))?;
+        let record = git_blob(repo, &staged.oid).map_err(|e| format!("{}: {e}", staged.name()))?;
         let opens = key.open(&staged.path, &record).is_ok();
         evidence.envelope = parse_file_header(&record).is_ok();
         let (envelope, local) = (evidence.envelope, evidence.local_change());
@@ -463,14 +463,14 @@ fn open_moved<'a>(key: &Key, index: &Listing, i: usize, head: &OrderedListing<'a
 /// The plaintext of a staged protected record: opened at its own path, or,
 /// for a record moved there by a local `git mv`, at the `HEAD` path it came
 /// from (whose index entry is gone or replaced).
-pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zeroizing<Vec<u8>>, String> {
-    let record = git_blob(root, &staged.oid)?;
+pub(crate) fn open_staged(repo: &Repository, key: &Key, staged: &Staged) -> Result<Zeroizing<Vec<u8>>, String> {
+    let record = git_blob(repo, &staged.oid)?;
     let error = match key.open(&staged.path, &record) {
         Ok(plaintext) => return Ok(plaintext),
         Err(e) => e,
     };
-    let index = Listing::parse(index_listing(root)?)?;
-    let head = commit_listing(root, "HEAD")?;
+    let index = Listing::parse(index_listing(repo)?)?;
+    let head = commit_listing(repo, "HEAD")?;
     let head = head.ordered()?;
     index.entries().iter().position(|e| e.path == staged.path && e.oid == staged.oid)
         .and_then(|i| open_moved(key, &index, i, &head, &record)).map(|(_, plaintext)| plaintext)
@@ -480,9 +480,9 @@ pub(crate) fn open_staged(root: &Path, key: &Key, staged: &Staged) -> Result<Zer
 /// Run from the post-checkout, post-merge and post-rewrite hooks. Only the
 /// private mode needs it (its smudge filter leaves ciphertext when Git's
 /// umask would expose plaintext); it never fails the finished Git command.
-pub(crate) fn auto_hydrate(root: &Path) -> Result<(), String> {
-    let Ok(config) = load_config(root) else { return Ok(()) };
-    match Key::load(root, &config) {
+pub(crate) fn auto_hydrate(repo: &Repository) -> Result<(), String> {
+    let Ok(config) = load_config(repo) else { return Ok(()) };
+    match Key::load(repo, &config) {
         Ok(Some(key)) if key.private() => {},
         // Locked, or unlocked without the private mode: nothing to do.
         Ok(_) => return Ok(()),
@@ -492,7 +492,7 @@ pub(crate) fn auto_hydrate(root: &Path) -> Result<(), String> {
             return Ok(());
         },
     }
-    match hydrate(root) {
+    match hydrate(repo) {
         Ok(0) => {},
         Ok(n) => eprintln!("transcrypt-rs: decrypted {n} file(s) with mode {:04o}.", crate::modes::PRIVATE_FILE),
         Err(e) => eprintln!("transcrypt-rs: automatic decryption skipped: {e}\n\
@@ -508,14 +508,14 @@ pub(crate) fn auto_hydrate(root: &Path) -> Result<(), String> {
 /// private mode). Nothing but an authentic record is ever replaced, so no
 /// edit can be lost, and replacing a record by its plaintext loses nothing
 /// (clean seals it back to the same record).
-pub(crate) fn hydrate(root: &Path) -> Result<usize, String> {
-    hydrate_locked(root, &staging_dir(root)?)
+pub(crate) fn hydrate(repo: &Repository) -> Result<usize, String> {
+    hydrate_locked(repo, &staging_dir(repo)?)
 }
 
 /// The protected paths among `paths`, by the staged attributes.
-pub(crate) fn protected_paths(root: &Path, paths: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, String> {
+pub(crate) fn protected_paths(repo: &Repository, paths: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, String> {
     let refs: Vec<&[u8]> = paths.iter().map(Vec::as_slice).collect();
-    let flags = protected_flags(root, &refs, Attributes::Staged)?;
+    let flags = protected_flags(repo, &refs, Attributes::Staged)?;
     Ok(paths.iter().zip(flags).filter(|(_, p)| *p).map(|(p, _)| p.clone()).collect())
 }
 
@@ -530,21 +530,21 @@ struct Publish<'a> {
 }
 
 /// `hydrate` for a caller that already holds the staging lock.
-pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, String> {
-    let config = load_config(root)?;
-    let key = Key::require(root, &config)?;
-    let index = index_with_conflicts(root)?;
-    let conflicted = protected_paths(root, &index.conflicted)?;
+pub(crate) fn hydrate_locked(repo: &Repository, staging: &Staging) -> Result<usize, String> {
+    let config = load_config(repo)?;
+    let key = Key::require(repo, &config)?;
+    let index = index_with_conflicts(repo)?;
+    let conflicted = protected_paths(repo, &index.conflicted)?;
     let protected: Vec<Staged> = if conflicted.is_empty() {
         // Authenticate ALL staged protected objects and the staged config
         // before exposing any plaintext in the checkout.
-        let snapshot = Snapshot::of(root, Listing::parse(index.listing.clone())?)?;
-        check_staged(root, &config, snapshot, &commit_listing(root, "HEAD")?, Some(&key), false)?.protected
+        let snapshot = Snapshot::of(repo, Listing::parse(index.listing.clone())?)?;
+        check_staged(repo, &config, snapshot, &commit_listing(repo, "HEAD")?, Some(&key), false)?.protected
     } else {
         // A merge is in progress: the stages of an unmerged path are the
         // merge's inputs, not a snapshot to verify. Plaintext published here
         // is encrypted again by `git add`, since the paths are protected.
-        staged_protected(root, index.merged)?
+        staged_protected(repo, index.merged)?
     };
     let id = transcrypt_rs::config_id(&config);
     let mut pending = Vec::new();
@@ -560,9 +560,9 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
     for (path, oid) in targets {
         let relative = indexed_path(path)?;
         // A deleted (or sparse) file holds nothing to decrypt.
-        let Some(target) = find_protected(root, &relative)? else { continue };
+        let Some(target) = find_protected(repo.root(), &relative)? else { continue };
         let (worktree, stamp) = target.read()?;
-        let object = oid.map(|oid| git_blob(root, oid)).transpose()?;
+        let object = oid.map(|oid| git_blob(repo, oid)).transpose()?;
         // The record this file holds, if any: the staged one, or another
         // that authenticates at this path.
         let staged = object.as_ref().is_some_and(|object| *worktree == *object);
@@ -589,20 +589,20 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
     }
     // Detect a changed index or public configuration between validation and
     // publication.
-    if index_listing(root)? != index.listing || load_config(root)? != config {
+    if index_listing(repo)? != index.listing || load_config(repo)? != config {
         return Err("index or public configuration changed during hydration".into());
     }
     let published = pending.len();
     for Publish { path, relative, stamp, plaintext, staged } in pending {
         // `replace` refuses unless the file is still the record checked above.
-        open_protected(root, &relative)?.replace(staging, &plaintext, &stamp, key.private())?;
+        open_protected(repo.root(), &relative)?.replace(staging, &plaintext, &stamp, key.private())?;
         if staged { refresh.push(path.to_vec()); }
     }
     // Private mode: plaintext that Git's checkout wrote follows the umask
     // and may be readable by other users.
     if key.private() {
         for relative in &kept {
-            open_protected(root, relative)?.make_private()?;
+            open_protected(repo.root(), relative)?.make_private()?;
         }
     }
     // Git's index still caches the size/mtime of the encrypted checkout, and
@@ -612,27 +612,27 @@ pub(crate) fn hydrate_locked(root: &Path, staging: &Staging) -> Result<usize, St
     // `update-index -z --stdin` takes raw path bytes, never pathspecs, and
     // without `--add` cannot stage an untracked file. `reindex` verifies that
     // no staged blob or mode changed, even when index != HEAD.
-    reindex(root, &index.listing, &refresh)?;
+    reindex(repo, &index.listing, &refresh)?;
     Ok(published)
 }
 
 /// `lock`: replace the plaintext of every worktree of this repository by
 /// its committed records, then forget the key (the stored file, or the
 /// private agent). Any refusal keeps the key.
-pub(crate) fn lock(root: &Path) -> Result<(), String> {
-    let config = load_config(root)?;
-    let Some(key) = Key::load(root, &config)? else {
+pub(crate) fn lock(repo: &Repository) -> Result<(), String> {
+    let config = load_config(repo)?;
+    let Some(key) = Key::load(repo, &config)? else {
         // No usable key here: nothing can be flushed. Locked means no
         // plaintext is left in any worktree; another worktree on another
         // config may still need the stored key to lock.
-        worktree_encrypted(root, &config)
+        worktree_encrypted(repo, &config)
             .map_err(|e| format!("{e}, but there is no key to encrypt it: unlock, then lock"))?;
-        others_encrypted(root)?;
-        crate::credential::forget(root)?;
+        others_encrypted(repo)?;
+        crate::credential::forget(repo)?;
         eprintln!("Already locked.");
         return Ok(());
     };
-    for other in other_worktrees(root)? {
+    for other in other_worktrees(repo)? {
         let flushed = run_in(&other, "flush")
             .map_err(|e| format!("cannot lock worktree {}: {e}", other.display()))?.status.success();
         // A worktree on another config cannot be flushed with this key; it
@@ -642,11 +642,11 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
                 another config); the key is kept", other.display()));
         }
     }
-    flush(root)?;
+    flush(repo)?;
     if key.private() {
-        crate::session::stop(root, &config)?;
+        crate::session::stop(repo, &config)?;
     } else {
-        crate::credential::forget(root)?;
+        crate::credential::forget(repo)?;
     }
     eprintln!("Locked: protected files replaced by their ciphertext and the key forgotten. \
         This does not securely erase earlier plaintext copies.");
@@ -655,8 +655,8 @@ pub(crate) fn lock(root: &Path) -> Result<(), String> {
 
 /// Refuse unless every other worktree holds no plaintext (each checked in
 /// its own process, with its own config).
-pub(crate) fn others_encrypted(root: &Path) -> Result<(), String> {
-    for other in other_worktrees(root)? {
+pub(crate) fn others_encrypted(repo: &Repository) -> Result<(), String> {
+    for other in other_worktrees(repo)? {
         let Finished { status, errors, .. } = run_in(&other, "check-encrypted")
             .map_err(|e| format!("cannot check worktree {}: {e}", other.display()))?;
         if !status.success() {
@@ -678,10 +678,10 @@ fn run_in(dir: &Path, command: &str) -> Result<Finished, String> {
 /// those Git found gone (`prunable`). One that exists but cannot be
 /// resolved is an error, never skipped: `lock` must not forget the key
 /// while an unchecked worktree may still hold plaintext.
-fn other_worktrees(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let this = root.canonicalize().map_err(|_| "cannot resolve the repository root")?;
+fn other_worktrees(repo: &Repository) -> Result<Vec<PathBuf>, String> {
+    let this = repo.root().canonicalize().map_err(|_| "cannot resolve the repository root")?;
     let mut others = Vec::new();
-    for worktree in worktrees(root)? {
+    for worktree in worktrees(repo)? {
         if worktree.bare || worktree.prunable { continue; }
         let path = worktree.path.canonicalize()
             .map_err(|e| format!("cannot inspect worktree {}: {e}", worktree.path.display()))?;
@@ -692,24 +692,24 @@ fn other_worktrees(root: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// Replace this worktree's plaintext by the committed records, keeping the
 /// key (`lock` forgets it once every worktree is done).
-pub(crate) fn flush(root: &Path) -> Result<(), String> {
-    let staging = staging_dir(root)?;
-    let config = load_config(root)?;
-    let key = Key::require(root, &config)?;
+pub(crate) fn flush(repo: &Repository) -> Result<(), String> {
+    let staging = staging_dir(repo)?;
+    let config = load_config(repo)?;
+    let key = Key::require(repo, &config)?;
     // Every protected file must match the encrypted index BEFORE any
     // worktree rewrite. If anything is dirty or untracked, keep the key.
-    let verified = check_index(root, Some(&key))?;
-    untracked_protected(root)?;
+    let verified = check_index(repo, Some(&key))?;
+    untracked_protected(repo)?;
     let mut to_flush = Vec::new();
     let mut present = Vec::new();
     for staged in &verified.protected {
         let relative = indexed_path(&staged.path)?;
         // A deleted file holds no plaintext: nothing to flush.
-        let Some(target) = find_protected(root, &relative)? else { continue };
+        let Some(target) = find_protected(repo.root(), &relative)? else { continue };
         present.push(staged.path.clone());
         let (source, stamp) = target.read()?;
         // The object the index named when it was verified, by object id.
-        let object = git_blob(root, &staged.oid)?;
+        let object = git_blob(repo, &staged.oid)?;
         let resealed = if *source == object { Zeroizing::new(Vec::new()) } else {
             key.clean(&staged.path, &source)?
         };
@@ -732,12 +732,12 @@ pub(crate) fn flush(root: &Path) -> Result<(), String> {
     // (already-flushed files are `LockAction::Keep`). A file changed after it
     // was checked is refused, not overwritten. No secure erasure claim.
     for (relative, object, stamp) in &to_flush {
-        open_protected(root, relative)?.replace(&staging, object, stamp, false)?;
+        open_protected(repo.root(), relative)?.replace(&staging, object, stamp, false)?;
     }
     // Refresh Git's cached stat data for the ciphertext now in the worktree
     // (the clean filter returns an authentic record unchanged), so a locked
     // checkout is clean and `git commit -a` does not need the key.
-    reindex(root, &verified.listing, &present)?;
+    reindex(repo, &verified.listing, &present)?;
     Ok(())
 }
 
@@ -745,10 +745,10 @@ pub(crate) fn flush(root: &Path) -> Result<(), String> {
 /// behind by `lock`. Ignored files count too (no `--exclude-standard`, unlike
 /// `status`): an ignored protected file, such as a `.env`, holds plaintext all
 /// the same.
-fn untracked_protected(root: &Path) -> Result<(), String> {
-    let untracked = git(root, &["ls-files", "--others", "-z"])?;
+fn untracked_protected(repo: &Repository) -> Result<(), String> {
+    let untracked = git(repo, &["ls-files", "--others", "-z"])?;
     let paths = git_records(&untracked)?;
-    let flags = protected_flags(root, &paths, Attributes::Worktree)?;
+    let flags = protected_flags(repo, &paths, Attributes::Worktree)?;
     if let Some((path, _)) = paths.iter().zip(flags).find(|(_, p)| *p) {
         return Err(format!("untracked protected file {} holds plaintext; add or remove it first",
             String::from_utf8_lossy(path)));
@@ -759,15 +759,15 @@ fn untracked_protected(root: &Path) -> Result<(), String> {
 /// Whether the worktree holds no plaintext secret: every protected tracked
 /// file present has the v3 envelope of this config, and no untracked file
 /// is protected.
-pub(crate) fn worktree_encrypted(root: &Path, config: &[u8]) -> Result<(), String> {
+pub(crate) fn worktree_encrypted(repo: &Repository, config: &[u8]) -> Result<(), String> {
     let id = transcrypt_rs::config_id(config);
-    for staged in protected_entries(root, indexed_files(root)?, Attributes::Staged)? {
-        if let Some(target) = find_protected(root, &indexed_path(&staged.path)?)? {
+    for staged in protected_entries(repo, indexed_files(repo)?, Attributes::Staged)? {
+        if let Some(target) = find_protected(repo.root(), &indexed_path(&staged.path)?)? {
             let (contents, _) = target.read()?;
             if !record_envelope_ok(&contents, &id) {
                 return Err(format!("{} holds plaintext", staged.name()));
             }
         }
     }
-    untracked_protected(root)
+    untracked_protected(repo)
 }

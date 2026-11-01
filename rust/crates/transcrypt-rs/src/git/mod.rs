@@ -165,18 +165,24 @@ pub(crate) fn append_wiped(buffer: &mut Zeroizing<Vec<u8>>, data: &[u8]) {
     buffer.extend_from_slice(data);
 }
 
-/// Every Git subprocess. Pathspecs are literal, so a tracked file named
-/// `[a].secret` or `:(glob)*` can never select other files, and replace
-/// refs are ignored, so an object id names exactly the bytes hashed into it.
-pub(crate) fn git_command(root: Option<&Path>) -> Command {
+/// A Git subprocess in `repo`.
+pub(crate) fn git_command(repo: &Repository) -> Command {
+    git_command_in(Some(repo.root()))
+}
+
+/// Every Git subprocess, run in `dir` (or the current directory). Pathspecs
+/// are literal, so a tracked file named `[a].secret` or `:(glob)*` can never
+/// select other files, and replace refs are ignored, so an object id names
+/// exactly the bytes hashed into it.
+fn git_command_in(dir: Option<&Path>) -> Command {
     let mut command = Command::new("git");
-    if let Some(root) = root { command.current_dir(root); }
+    if let Some(dir) = dir { command.current_dir(dir); }
     command.env("GIT_LITERAL_PATHSPECS", "1").env("GIT_NO_REPLACE_OBJECTS", "1");
     command
 }
 
-pub(crate) fn git(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
-    let mut command = git_command(Some(root));
+pub(crate) fn git(repo: &Repository, arguments: &[&str]) -> Result<Vec<u8>, String> {
+    let mut command = git_command(repo);
     command.args(arguments);
     output(command)
 }
@@ -188,8 +194,8 @@ const NO_SUCH_REVISION: i32 = 1;
 /// The commit `rev` names: `None` if it names none (an unborn branch, an
 /// absent pseudo-ref); an error if Git fails in any other way, never a
 /// silent `None`.
-pub(crate) fn resolve_commit(root: &Path, rev: &str) -> Result<Option<String>, String> {
-    let mut command = git_command(Some(root));
+pub(crate) fn resolve_commit(repo: &Repository, rev: &str) -> Result<Option<String>, String> {
+    let mut command = git_command(repo);
     command.args(["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")]);
     let Finished { status, output, errors } = run_bounded_status(command, None, GIT_OUTPUT_LIMIT)?;
     match status.code() {
@@ -203,61 +209,81 @@ pub(crate) fn resolve_commit(root: &Path, rev: &str) -> Result<Option<String>, S
     }
 }
 
-pub(crate) fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
-    let mut command = git_command(Some(root));
+pub(crate) fn git_with_input(repo: &Repository, arguments: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
+    let mut command = git_command(repo);
     command.args(arguments);
     run_bounded(command, Some(input), GIT_OUTPUT_LIMIT)
 }
 
-/// This worktree's Git directory and the one shared by all worktrees of the
-/// repository (the same directory for an ordinary checkout).
-struct GitDirs {
+/// The repository a command works on, found once (`discover`) and passed to
+/// everything that touches it: where Git commands run, this worktree's Git
+/// directory and the one all worktrees share, and the object reader. Every
+/// path is absolute and was a directory when it was found.
+pub(crate) struct Repository {
+    /// The worktree's top-level directory, where every Git command runs and
+    /// Git paths are relative to (for the bare repository `audit` accepts,
+    /// the directory it was started in).
+    root: PathBuf,
+    /// This worktree's own Git directory (`.git`, or `.git/worktrees/<name>`
+    /// for a linked worktree): private staging and scratch files go here.
     git_dir: PathBuf,
+    /// The Git directory shared by all worktrees: hooks, `info/`, and the
+    /// key and its agent, so one `unlock` serves every worktree.
     common_dir: PathBuf,
+    /// The `git cat-file --batch` that reads this repository's objects,
+    /// started on the first read (`objects.rs`).
+    objects: std::cell::RefCell<Option<Objects>>,
 }
 
-/// The Git directories of each worktree root `repo_root` found.
-static GIT_DIRS: std::sync::Mutex<Vec<(PathBuf, GitDirs)>> = std::sync::Mutex::new(Vec::new());
-
-/// The recorded directory `pick` chooses for `root`, or `root/.git`.
-fn recorded_dir(root: &Path, pick: impl Fn(&GitDirs) -> &PathBuf) -> PathBuf {
-    let dirs = GIT_DIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    dirs.iter().find(|(r, _)| r == root).map_or_else(|| root.join(".git"), |(_, d)| pick(d).clone())
-}
-
-/// This worktree's own Git directory (`.git`, or `.git/worktrees/<name>`
-/// for a linked worktree): private staging and scratch files go here.
-/// `repo_root` records both directories for every command run in a
-/// worktree; the `root/.git` fallback serves only code run without it (unit
-/// tests; the bare-repository `audit` finds its own).
-pub(crate) fn git_dir(root: &Path) -> PathBuf {
-    recorded_dir(root, |d| &d.git_dir)
-}
-
-/// The Git directory shared by all worktrees: hooks, `info/`, and the key
-/// agent, so one `unlock` serves every worktree.
-pub(crate) fn common_dir(root: &Path) -> PathBuf {
-    recorded_dir(root, |d| &d.common_dir)
-}
-
-/// The worktree root, after recording its Git directories.
-pub(crate) fn repo_root() -> Result<PathBuf, String> {
-    // One path per command: a path may itself contain a newline, so only
-    // the one Git ends its answer with is taken off.
-    let path = |option: &str| -> Result<PathBuf, String> {
-        let mut command = git_command(None);
-        command.args(["rev-parse", "--path-format=absolute", option]);
-        let bytes = output(command)?;
-        let path = bytes.strip_suffix(b"\n").filter(|p| !p.is_empty()).ok_or("not inside a Git worktree")?;
-        Ok(PathBuf::from(crate::os::os_string(path)?))
-    };
-    let (root, git_dir, common_dir) = (path("--show-toplevel")?, path("--git-dir")?, path("--git-common-dir")?);
-    if !root.is_dir() || !git_dir.is_dir() || !common_dir.is_dir() {
-        return Err("Git repository directories are missing".into());
+impl Repository {
+    /// The repository of the worktree Git finds from the current directory.
+    pub(crate) fn discover() -> Result<Repository, String> {
+        let root = rev_parse_path("--show-toplevel")?;
+        Repository::checked(root, rev_parse_path("--git-dir")?, rev_parse_path("--git-common-dir")?)
     }
-    let mut dirs = GIT_DIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !dirs.iter().any(|(r, _)| *r == root) { dirs.push((root.clone(), GitDirs { git_dir, common_dir })); }
-    Ok(root)
+
+    /// The bare repository Git finds from the current directory (a server's
+    /// hook), where only the keyless `audit` runs: Git commands run in the
+    /// current directory, and the Git directory is also the common one.
+    pub(crate) fn discover_bare() -> Result<Repository, String> {
+        let root = std::env::current_dir().map_err(|_| "cannot read working directory")?;
+        let mut command = git_command_in(Some(&root));
+        command.args(["rev-parse", "--absolute-git-dir"]);
+        let git_dir = PathBuf::from(String::from_utf8(output(command)?)
+            .map_err(|_| "Git directory path is not UTF-8")?.trim_end());
+        Repository::checked(root, git_dir.clone(), git_dir)
+    }
+
+    /// The repository with these directories, each of which must exist.
+    pub(crate) fn checked(root: PathBuf, git_dir: PathBuf, common_dir: PathBuf) -> Result<Repository, String> {
+        if !root.is_dir() || !git_dir.is_dir() || !common_dir.is_dir() {
+            return Err("Git repository directories are missing".into());
+        }
+        Ok(Repository { root, git_dir, common_dir, objects: std::cell::RefCell::new(None) })
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn git_dir(&self) -> &Path {
+        &self.git_dir
+    }
+
+    pub(crate) fn common_dir(&self) -> &Path {
+        &self.common_dir
+    }
+}
+
+/// The absolute path `git rev-parse` prints for `option`, from the current
+/// directory. One path per command: a path may itself contain a newline,
+/// so only the one Git ends its answer with is taken off.
+fn rev_parse_path(option: &str) -> Result<PathBuf, String> {
+    let mut command = git_command_in(None);
+    command.args(["rev-parse", "--path-format=absolute", option]);
+    let bytes = output(command)?;
+    let path = bytes.strip_suffix(b"\n").filter(|p| !p.is_empty()).ok_or("not inside a Git worktree")?;
+    Ok(PathBuf::from(crate::os::os_string(path)?))
 }
 
 /// One entry of `git worktree list --porcelain`.
@@ -269,14 +295,14 @@ pub(crate) struct Worktree {
     pub(crate) prunable: bool,
 }
 
-/// The worktrees of the repository at `root`. With `-z` (Git 2.36 and
+/// The worktrees of `repo`. With `-z` (Git 2.36 and
 /// later) every path is exact; older Git prints a path containing a
 /// newline across two lines, which `parse_worktrees` refuses rather than
 /// mistakes for another worktree.
-pub(crate) fn worktrees(root: &Path) -> Result<Vec<Worktree>, String> {
-    match git(root, &["worktree", "list", "--porcelain", "-z"]) {
+pub(crate) fn worktrees(repo: &Repository) -> Result<Vec<Worktree>, String> {
+    match git(repo, &["worktree", "list", "--porcelain", "-z"]) {
         Ok(listing) => parse_worktrees(&listing, b'\0'),
-        Err(_) => parse_worktrees(&git(root, &["worktree", "list", "--porcelain"])?, b'\n'),
+        Err(_) => parse_worktrees(&git(repo, &["worktree", "list", "--porcelain"])?, b'\n'),
     }
 }
 

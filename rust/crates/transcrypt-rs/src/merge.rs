@@ -9,7 +9,7 @@ use transcrypt_v3_core::MAX_RECORD;
 use zeroize::Zeroizing;
 use crate::{
     credential::Key,
-    git::{git_command, read_record, run_bounded_status, Finished},
+    git::{git_command, read_record, run_bounded_status, Finished, Repository},
     worktree::Scratch,
     load_config,
 };
@@ -24,10 +24,10 @@ const MERGE_MAX_CONFLICTS: i32 = 127;
 /// Merge one protected file. `Ok(true)` for a clean merge, `Ok(false)` when
 /// the stored result has conflict markers. On any error `ours` is left as
 /// it was, which Git records as a conflict.
-pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_path: &[u8]) -> Result<bool, String> {
+pub(crate) fn merge(repo: &Repository, base: &Path, ours: &Path, theirs: &Path, git_path: &[u8]) -> Result<bool, String> {
     transcrypt_rs::validate_protected_path(git_path)?;
-    let config = load_config(root)?;
-    let key = Key::require(root, &config).map_err(|e| format!("{e} to merge protected files"))?;
+    let config = load_config(repo)?;
+    let key = Key::require(repo, &config).map_err(|e| format!("{e} to merge protected files"))?;
     let decrypt = |file: &Path, required: bool| -> Result<Zeroizing<Vec<u8>>, String> {
         let record = read_input(file, "merge")?;
         if record.is_empty() { return Ok(Zeroizing::new(Vec::new())); }
@@ -39,8 +39,8 @@ pub(crate) fn merge(root: &Path, base: &Path, ours: &Path, theirs: &Path, git_pa
         }
     };
     let inputs = [decrypt(ours, true)?, decrypt(base, false)?, decrypt(theirs, true)?];
-    let scratch = Scratch::create(root)?;
-    let mut command = git_command(Some(root));
+    let scratch = Scratch::create(repo)?;
+    let mut command = git_command(repo);
     command.args(["merge-file", "-p", "-L", "ours", "-L", "base", "-L", "theirs"]);
     for (name, plaintext) in ["ours", "base", "theirs"].iter().zip(&inputs) {
         command.arg(scratch.write(name, plaintext)?);

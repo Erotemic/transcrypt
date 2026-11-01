@@ -1,5 +1,5 @@
 //! Blob reads by verified object id, through one `git cat-file --batch` per
-//! thread and repository.
+//! `Repository`.
 
 use super::*;
 
@@ -14,59 +14,43 @@ pub(crate) fn read_record(mut read: impl Read) -> Result<Zeroizing<Vec<u8>>, Str
 /// The content of one Git blob, named by an id the verified core accepted
 /// (never revision syntax such as `:path`, which reads `:0:x.secret` as stage
 /// 0 of `x.secret`). Reads stop at the v3 size bound, so a hostile oversized
-/// blob is refused without being loaded. All reads of one process share a
-/// single `git cat-file --batch`.
-pub(crate) fn git_blob(root: &Path, oid: &str) -> Result<Vec<u8>, String> {
-    read_blob(root, oid, false)?.ok_or_else(too_large)
+/// blob is refused without being loaded. All reads of one `Repository`
+/// share a single `git cat-file --batch`.
+pub(crate) fn git_blob(repo: &Repository, oid: &str) -> Result<Vec<u8>, String> {
+    read_blob(repo, oid, false)?.ok_or_else(too_large)
 }
 
 /// Like `git_blob`, but `None` for a blob larger than any v3 record (an
 /// ordinary large file, which cannot be a record), skipped unread.
-pub(crate) fn git_blob_if_record_sized(root: &Path, oid: &str) -> Result<Option<Vec<u8>>, String> {
-    read_blob(root, oid, true)
+pub(crate) fn git_blob_if_record_sized(repo: &Repository, oid: &str) -> Result<Option<Vec<u8>>, String> {
+    read_blob(repo, oid, true)
 }
 
 /// Whether blob `oid` has the v3 record envelope of the config `id`. Only
 /// its size and first `ENVELOPE_PREFIX_LEN` bytes are read, which decide the
 /// envelope exactly as the whole blob would (`record_envelope_prefix_ok`);
 /// the rest is skipped unread.
-pub(crate) fn is_record(root: &Path, oid: &str, id: &[u8; transcrypt_v3_core::ID_LEN]) -> Result<bool, String> {
-    let prefix = with_objects(root, oid, |objects| objects.blob_prefix(oid))?;
+pub(crate) fn is_record(repo: &Repository, oid: &str, id: &[u8; transcrypt_v3_core::ID_LEN]) -> Result<bool, String> {
+    let prefix = with_objects(repo, oid, |objects| objects.blob_prefix(oid))?;
     Ok(prefix.is_some_and(|(size, prefix)| record_envelope_prefix_ok(size, &prefix, id)))
 }
 
-fn read_blob(root: &Path, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
-    with_objects(root, oid, |objects| objects.blob(oid, skip_large))
+fn read_blob(repo: &Repository, oid: &str, skip_large: bool) -> Result<Option<Vec<u8>>, String> {
+    with_objects(repo, oid, |objects| objects.blob(oid, skip_large))
 }
 
-/// Run `read` on this thread's object reader for the verified id `oid`.
-fn with_objects<T>(root: &Path, oid: &str, read: impl FnOnce(&mut Objects) -> Result<T, String>) -> Result<T, String> {
+/// Run `read` on the object reader of `repo` for the verified id `oid`.
+fn with_objects<T>(repo: &Repository, oid: &str, read: impl FnOnce(&mut Objects) -> Result<T, String>) -> Result<T, String> {
     if !is_object_id(oid.as_bytes()) {
         return Err("invalid Git object id".into());
     }
-    OBJECTS.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        // One reader per thread, for one repository at a time.
-        if slot.as_ref().is_some_and(|objects| objects.root != root) { *slot = None; }
-        let result = get_or_try_init(&mut slot, || Objects::open(root)).and_then(read);
-        if result.is_err() {
-            // The stream may be out of step; never reuse it.
-            *slot = None;
-        }
-        result
-    })
-}
-
-thread_local! {
-    static OBJECTS: std::cell::RefCell<Option<Objects>> = const { std::cell::RefCell::new(None) };
-}
-
-/// End this thread's object reader: a test removing its repository must
-/// first stop the `cat-file` running in it (Windows refuses to delete a
-/// directory a process works in).
-#[cfg(test)]
-pub(super) fn close_objects() {
-    OBJECTS.with(|cell| *cell.borrow_mut() = None);
+    let mut slot = repo.objects.borrow_mut();
+    let result = get_or_try_init(&mut slot, || Objects::open(&repo.root)).and_then(read);
+    if result.is_err() {
+        // The stream may be out of step; never reuse it.
+        *slot = None;
+    }
+    result
 }
 
 /// A `git cat-file --batch` reply that ended early.
@@ -79,9 +63,7 @@ const MALFORMED_REPLY: &str = "malformed git cat-file reply";
 /// `<size>` bytes and LF; anything else (a missing object, another type, a
 /// different id, a malformed or oversized header) is an error, so bytes can
 /// never be attributed to the wrong object.
-struct Objects {
-    /// The repository it reads.
-    root: PathBuf,
+pub(super) struct Objects {
     child: std::process::Child,
     input: Option<std::process::ChildStdin>,
     output: io::BufReader<std::process::ChildStdout>,
@@ -89,13 +71,13 @@ struct Objects {
 
 impl Objects {
     fn open(root: &Path) -> Result<Objects, String> {
-        let mut child = git_command(Some(root))
+        let mut child = git_command_in(Some(root))
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn().map_err(|e| format!("cannot run git cat-file: {e}"))?;
         let input = child.stdin.take().ok_or("git cat-file input pipe missing")?;
         let output = child.stdout.take().ok_or("git cat-file output pipe missing")?;
-        Ok(Objects { root: root.to_path_buf(), child, input: Some(input), output: io::BufReader::new(output) })
+        Ok(Objects { child, input: Some(input), output: io::BufReader::new(output) })
     }
 
     /// Ask for `oid` and read the header of the reply, which the verified

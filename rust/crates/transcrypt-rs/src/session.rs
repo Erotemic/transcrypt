@@ -26,7 +26,7 @@ use transcrypt_v3_core::{
     BE_U32_LEN, CONFIG_LEN, FRAME_HEADER_LEN,
 };
 use zeroize::Zeroizing;
-use crate::os::{self, sigpipe_blocked, Listener, Stream};
+use crate::{git::Repository, os::{self, sigpipe_blocked, Listener, Stream}};
 
 const SOCK: &str = "session.sock";
 /// The first byte of a reply: the rest is the result, or the refusal.
@@ -74,18 +74,24 @@ fn poll(mut done: impl FnMut() -> Result<bool, String>) -> Result<bool, String> 
     Ok(false)
 }
 
-fn directory(root: &Path) -> Result<PathBuf, String> {
-    existing_directory(root)?.ok_or_else(|| "no local v3 session directory; run unlock".into())
+/// The credential directory `credentials` (`credential_directory`), which
+/// must exist.
+fn directory(credentials: &Path) -> Result<PathBuf, String> {
+    checked_directory(credentials)?.ok_or_else(|| "no local v3 session directory; run unlock".into())
 }
 
 /// `.git/transcrypt-v3`, shared by all worktrees, if it exists: the stored
-/// key or the agent's socket. Anything but a real directory that only this
-/// user, who owns it, can enter is refused.
-pub(crate) fn existing_directory(root: &Path) -> Result<Option<PathBuf>, String> {
-    let path = credential_directory(root);
-    match os::private_directory(&path) {
+/// key or the agent's socket.
+pub(crate) fn existing_directory(repo: &Repository) -> Result<Option<PathBuf>, String> {
+    checked_directory(&credential_directory(repo))
+}
+
+/// The credential directory `path`, if it exists. Anything but a real
+/// directory that only this user, who owns it, can enter is refused.
+fn checked_directory(path: &Path) -> Result<Option<PathBuf>, String> {
+    match os::private_directory(path) {
         Ok(Privacy::Missing) => Ok(None),
-        Ok(Privacy::Private) => Ok(Some(path)),
+        Ok(Privacy::Private) => Ok(Some(path.to_path_buf())),
         Ok(Privacy::Exposed(why)) => Err(format!("unsafe local v3 credential directory .git/transcrypt-v3: {why}; \
             require a real {:04o} directory owned by this user", crate::modes::PRIVATE_DIR)),
         Err(_) => Err("cannot examine .git/transcrypt-v3".into()),
@@ -99,13 +105,14 @@ fn same_user(stream: &Stream) -> Result<(), String> {
     if os::peer_is_this_user(stream) { Ok(()) } else { Err("v3 credential socket peer is not this user".into()) }
 }
 
-/// `.git/transcrypt-v3`, whether or not it exists.
-fn credential_directory(root: &Path) -> PathBuf {
-    crate::git::common_dir(root).join("transcrypt-v3")
+/// `.git/transcrypt-v3` (in the Git directory all worktrees share), whether
+/// or not it exists.
+pub(crate) fn credential_directory(repo: &Repository) -> PathBuf {
+    repo.common_dir().join("transcrypt-v3")
 }
 
-pub(crate) fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
-    let path = credential_directory(root);
+pub(crate) fn prepare_directory(repo: &Repository) -> Result<PathBuf, String> {
+    let path = credential_directory(repo);
     match fs::symlink_metadata(&path) {
         Ok(_) => {},
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -114,7 +121,7 @@ pub(crate) fn prepare_directory(root: &Path) -> Result<PathBuf, String> {
         },
         Err(e) => return Err(format!("cannot examine the credential directory: {e}")),
     }
-    directory(root)
+    directory(&path)
 }
 
 /// Socket addresses are limited to ~104 (macOS) or 108 (Linux, Windows) bytes,
@@ -162,15 +169,18 @@ fn reply(stream: &mut Stream, response: Result<Vec<u8>, String>) -> io::Result<(
     stream.flush()
 }
 
-/// A single operation on the *live* agent. The caller sends the complete
-/// public config each time: a stale agent cannot authorize a newly changed
-/// configuration merely because the directory or socket still exists.
-pub(crate) fn request(root: &Path, config: &[u8], op: AgentOp, path_bytes: &[u8], body: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+/// A single operation on the *live* agent of the credential directory
+/// `credentials`. The caller sends the complete public config each time: a
+/// stale agent cannot authorize a newly changed configuration merely because
+/// the directory or socket still exists.
+pub(crate) fn request(credentials: &Path, config: &[u8], op: AgentOp, path_bytes: &[u8], body: &[u8])
+    -> Result<Zeroizing<Vec<u8>>, String>
+{
     let config: &[u8; CONFIG_LEN] = config.try_into().map_err(|_| "invalid v3 agent request length")?;
     if body.len() > MAX_RECORD || path_bytes.len() > MAX_PATH {
         return Err("invalid v3 agent request length".into());
     }
-    let dir = directory(root)?;
+    let dir = directory(credentials)?;
     check_socket(&dir.join(SOCK))?;
     let mut stream = connect(&dir)?.map_err(|_| "v3 credential agent is not running; run unlock")?;
     // Plaintext is about to be sent to, or accepted from, this peer.
@@ -202,8 +212,8 @@ pub(crate) fn request(root: &Path, config: &[u8], op: AgentOp, path_bytes: &[u8]
 /// arrives by pipe, and the parent does not persist it anywhere on disk. With
 /// `idle`, the agent forgets the key and exits after that long without a
 /// request (session expiration).
-pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
-    let dir = prepare_directory(root)?;
+pub(crate) fn start(repo: &Repository, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
+    let dir = prepare_directory(repo)?;
     let path = dir.join(SOCK);
     match os::is_socket(&path) {
         Ok(Some(socket)) => {
@@ -211,7 +221,7 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Du
             if connect(&dir)?.is_ok() {
                 // An agent whose worktree config has changed (a pulled rekey)
                 // stops when it refuses this request; give it a moment.
-                let _ = request(root, config, AgentOp::Ping, &[], &[]);
+                let _ = request(&dir, config, AgentOp::Ping, &[], &[]);
                 let stale = poll(|| Ok(fs::symlink_metadata(&path).is_err()
                     || connect(&dir).is_ok_and(|r| r.is_err())))?;
                 if !stale {
@@ -229,13 +239,16 @@ pub(crate) fn start(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Du
         Ok(None) => {},
         Err(_) => return Err("cannot examine session socket".into()),
     }
-    start_agent(root, config, key, idle)
+    start_agent(repo, &dir, config, key, idle)
 }
 
-fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
+/// Start the agent of `repo`, listening in its credential directory `dir`.
+fn start_agent(repo: &Repository, dir: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>)
+    -> Result<(), String>
+{
     let executable = std::env::current_exe().map_err(|_| "cannot locate executable for credential agent")?;
     let mut command = Command::new(executable);
-    command.arg("serve").current_dir(root).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    command.arg("serve").current_dir(repo.root()).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
     os::detach(&mut command);
     let mut child = command.spawn().map_err(|e| format!("cannot spawn credential agent: {e}"))?;
     // The key, then the idle limit in seconds (0: none), over the pipe.
@@ -249,7 +262,7 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
     }
     let mut last = "agent is not ready".to_owned();
     for _ in 0..polls(STARTUP_WAIT) {
-        match request(root, config, AgentOp::Ping, &[], &[]) {
+        match request(dir, config, AgentOp::Ping, &[], &[]) {
             Ok(_) => return Ok(()),
             Err(e) => last = e,
         }
@@ -265,11 +278,12 @@ fn start_agent(root: &Path, config: &[u8], key: &SecretKey, idle: Option<Duratio
     Err(format!("credential agent startup timed out: {last}"))
 }
 
-pub(crate) fn stop(root: &Path, config: &[u8]) -> Result<(), String> {
-    request(root, config, AgentOp::Stop, &[], &[])?;
+pub(crate) fn stop(repo: &Repository, config: &[u8]) -> Result<(), String> {
+    let credentials = credential_directory(repo);
+    request(&credentials, config, AgentOp::Stop, &[], &[])?;
     // The server unlinks its own socket on exit. The agent key is erased when
     // the process exits; we do not claim erasure of OS swap or crash dumps.
-    if poll(|| Ok(fs::symlink_metadata(directory(root)?.join(SOCK)).is_err()))? { return Ok(()); }
+    if poll(|| Ok(fs::symlink_metadata(directory(&credentials)?.join(SOCK)).is_err()))? { return Ok(()); }
     Err("agent acknowledged shutdown but socket still exists".into())
 }
 
@@ -305,7 +319,7 @@ fn transaction(stream: &mut Stream, config: &[u8; CONFIG_LEN], key: &SecretKey) 
 }
 
 /// Internal child entrypoint. Runs until explicit lock or a process shutdown.
-pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
+pub(crate) fn serve(repo: &Repository, config: &[u8]) -> Result<(), String> {
     os::close_inherited();
     let config = config_array(config)?;
     let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
@@ -320,7 +334,7 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
         seconds => Some(Duration::from_secs(seconds)),
     };
     authenticate_config(config, &key)?;
-    let dir = directory(root)?;
+    let dir = directory(&credential_directory(repo))?;
     let path = dir.join(SOCK);
     let listener = at_socket(&dir, |p| Listener::bind(p))?.map_err(|e| format!("cannot bind private credential socket: {e}"))?;
     os::secure_socket(&path).map_err(|_| "cannot secure session socket")?;
@@ -338,7 +352,7 @@ pub(crate) fn serve(root: &Path, config: &[u8]) -> Result<(), String> {
                 // A refused request may come from a checkout whose config has
                 // since changed (a pulled rekey). If this agent's own
                 // worktree no longer has its config, its key is obsolete.
-                if fs::read(root.join(crate::git::CONFIG_PATH)).ok().as_deref() != Some(&config[..]) {
+                if fs::read(repo.root().join(crate::git::CONFIG_PATH)).ok().as_deref() != Some(&config[..]) {
                     break;
                 }
             },

@@ -1,5 +1,4 @@
 use super::listings::{git_records, parse_diff_tree, tree_record};
-use super::objects::close_objects;
 use super::*;
 use transcrypt_v3_core::is_object_id;
 
@@ -12,6 +11,17 @@ const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 const SHIFTS: (u32, u32, u32) = (13, 7, 17);
 /// The most mutations applied to one fuzz input.
 const MAX_MUTATIONS: u64 = 3;
+/// A new repository at `root` (created, and emptied if it exists).
+fn new_repository(root: &Path) -> Repository {
+    let _ = std::fs::remove_dir_all(root);
+    std::fs::create_dir_all(root).unwrap();
+    let mut command = git_command_in(Some(root));
+    command.args(["init", "-q"]);
+    output(command).unwrap();
+    let git_dir = root.join(".git");
+    Repository::checked(root.to_path_buf(), git_dir.clone(), git_dir).unwrap()
+}
+
 /// The exit status of the test's early-exiting subprocess.
 const EARLY_EXIT: i32 = 3;
 /// Bound on a test that must not hang on an endless producer.
@@ -42,20 +52,16 @@ fn early_exit_of_a_subprocess_is_reported() {
 fn object_reads_follow_their_repository() {
     let base = std::env::temp_dir().join(format!("transcrypt-v3-two-repos-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    let repos: Vec<(PathBuf, &[u8])> = [("a", b"in a".as_slice()), ("b", b"in b")].into_iter()
-        .map(|(name, bytes)| (base.join(name), bytes)).collect();
-    let mut oids = Vec::new();
-    for (root, bytes) in &repos {
-        std::fs::create_dir_all(root).unwrap();
-        git(root, &["init", "-q"]).unwrap();
-        oids.push(hash_object(root, bytes).unwrap());
-    }
+    let repos: Vec<(Repository, &[u8])> = [("a", b"in a".as_slice()), ("b", b"in b")].into_iter()
+        .map(|(name, bytes)| (new_repository(&base.join(name)), bytes)).collect();
+    let oids: Vec<String> = repos.iter().map(|(repo, bytes)| hash_object(repo, bytes).unwrap()).collect();
     for _ in 0..2 {
-        for ((root, bytes), oid) in repos.iter().zip(&oids) {
-            assert_eq!(git_blob(root, oid).unwrap(), *bytes);
+        for ((repo, bytes), oid) in repos.iter().zip(&oids) {
+            assert_eq!(git_blob(repo, oid).unwrap(), *bytes);
         }
     }
-    close_objects();
+    // Each reader stops with its repository.
+    drop(repos);
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -64,9 +70,7 @@ fn object_reads_follow_their_repository() {
 #[test]
 fn index_updates_stage_exact_blobs() {
     let root = std::env::temp_dir().join(format!("transcrypt-v3-index-update-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    git(&root, &["init", "-q"]).unwrap();
+    let repo = new_repository(&root);
     let blobs: [(&[u8], &[u8]); 4] = [
         (b"empty", b""),
         (b"commands", b"done\nget-mark :1\nblob\nmark :9\ndata 3\n"),
@@ -75,31 +79,31 @@ fn index_updates_stage_exact_blobs() {
         (b"no newline", b"x"),
     ];
     for kind in [Blobs::Records, Blobs::Plaintext] {
-        git(&root, &["read-tree", "--empty"]).unwrap();
-        let mut update = IndexUpdate::new(&root, kind);
+        git(&repo, &["read-tree", "--empty"]).unwrap();
+        let mut update = IndexUpdate::new(&repo, kind);
         for (path, bytes) in blobs { update.add(REGULAR_FILE_MODE, path, bytes).unwrap(); }
         update.apply(&["--add"]).unwrap();
-        let listing = git(&root, &["ls-files", "--stage", "-z"]).unwrap();
+        let listing = git(&repo, &["ls-files", "--stage", "-z"]).unwrap();
         assert_eq!(listing.split(|b| *b == 0).filter(|r| !r.is_empty()).count(), blobs.len());
         for (path, bytes) in blobs {
-            let oid = git_with_input(&root, &["hash-object", "--stdin"], bytes).unwrap();
+            let oid = git_with_input(&repo, &["hash-object", "--stdin"], bytes).unwrap();
             let oid = String::from_utf8(oid).unwrap();
             let mut record = format!("100644 {} 0\t", oid.trim_end()).into_bytes();
             record.extend_from_slice(path);
             assert!(listing.split(|b| *b == 0).any(|r| r == &record[..]), "{}", String::from_utf8_lossy(path));
-            assert_eq!(git(&root, &["cat-file", "blob", oid.trim_end()]).unwrap(), bytes);
+            assert_eq!(git(&repo, &["cat-file", "blob", oid.trim_end()]).unwrap(), bytes);
         }
     }
     // More marks than a pipe buffer holds answers for: the import's
     // output is drained while the requests are still being written.
     const MANY: usize = 4096;
-    git(&root, &["read-tree", "--empty"]).unwrap();
-    let mut update = IndexUpdate::new(&root, Blobs::Records);
+    git(&repo, &["read-tree", "--empty"]).unwrap();
+    let mut update = IndexUpdate::new(&repo, Blobs::Records);
     for i in 0..MANY { update.add(REGULAR_FILE_MODE, format!("many/{i}").as_bytes(), i.to_string().as_bytes()).unwrap(); }
     update.apply(&["--add"]).unwrap();
-    assert_eq!(git_records(&git(&root, &["ls-files", "--stage", "-z"]).unwrap()).unwrap().len(), MANY);
+    assert_eq!(git_records(&git(&repo, &["ls-files", "--stage", "-z"]).unwrap()).unwrap().len(), MANY);
     // A path Git refuses to stage (it only warns, and succeeds) is an error.
-    let mut update = IndexUpdate::new(&root, Blobs::Records);
+    let mut update = IndexUpdate::new(&repo, Blobs::Records);
     update.add(REGULAR_FILE_MODE, b".git/hooks/pre-commit", b"x").unwrap();
     let err = update.apply(&["--add"]).unwrap_err();
     assert!(err.contains("did not stage .git/hooks/pre-commit"), "{err}");
@@ -113,9 +117,7 @@ fn index_updates_stage_exact_blobs() {
 fn header_only_record_checks_agree_with_whole_blobs() {
     use transcrypt_v3_core::{encode_file_header, record_envelope_ok, FILE_HEADER_LEN, FILE_MIN_LEN, ID_LEN};
     let root = std::env::temp_dir().join(format!("transcrypt-v3-is-record-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    git(&root, &["init", "-q"]).unwrap();
+    let repo = new_repository(&root);
     let id = [7u8; ID_LEN];
     let mut other = id;
     other[0] ^= 1;
@@ -135,18 +137,18 @@ fn header_only_record_checks_agree_with_whole_blobs() {
         record(MAX_RECORD + 1),
         vec![b'\n'; MAX_RECORD],
     ];
-    let oids: Vec<String> = blobs.iter().map(|bytes| hash_object(&root, bytes).unwrap()).collect();
+    let oids: Vec<String> = blobs.iter().map(|bytes| hash_object(&repo, bytes).unwrap()).collect();
     for (bytes, oid) in blobs.iter().zip(&oids) {
         for want in [&id, &other] {
-            assert_eq!(is_record(&root, oid, want).unwrap(), record_envelope_ok(bytes, want), "{} bytes", bytes.len());
+            assert_eq!(is_record(&repo, oid, want).unwrap(), record_envelope_ok(bytes, want), "{} bytes", bytes.len());
         }
         // The next full read on the same stream gets exactly its blob.
         if bytes.len() <= MAX_RECORD {
-            assert_eq!(&git_blob(&root, oid).unwrap(), bytes);
+            assert_eq!(&git_blob(&repo, oid).unwrap(), bytes);
         }
     }
-    assert!(is_record(&root, &oids[4], &id).unwrap() && is_record(&root, &oids[6], &id).unwrap());
-    close_objects();
+    assert!(is_record(&repo, &oids[4], &id).unwrap() && is_record(&repo, &oids[6], &id).unwrap());
+    drop(repo);
     std::fs::remove_dir_all(&root).unwrap();
 }
 

@@ -26,20 +26,20 @@ type Id = [u8; transcrypt_v3_core::ID_LEN];
 /// does the worktree config, written like a protected file (never through a
 /// symlink), and the credential switch to the new key. Commits made before
 /// keep their old records, readable with the old passphrase.
-pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
-    let old_config = load_config(root)?;
-    let old_key = Key::load(root, &old_config)?.ok_or("unlock with the current passphrase first")?;
+pub(crate) fn rekey(repo: &Repository, options: &Options) -> Result<(), String> {
+    let old_config = load_config(repo)?;
+    let old_key = Key::load(repo, &old_config)?.ok_or("unlock with the current passphrase first")?;
     let password = passphrase(options.password_stdin, true)?;
     // No hydrate or lock may run meanwhile.
-    let staging = staging_dir(root)?;
+    let staging = staging_dir(repo)?;
     // Decrypt everything first, then require that each file is exactly the
     // plaintext of its staged record.
-    hydrate_locked(root, &staging)?;
-    let verified = check_index(root, Some(&old_key))?;
+    hydrate_locked(repo, &staging)?;
+    let verified = check_index(repo, Some(&old_key))?;
     let mut plaintexts = Vec::new();
     for staged in &verified.protected {
-        let plaintext = old_key.open(&staged.path, &git_blob(root, &staged.oid)?)?;
-        let unchanged = find_protected(root, &indexed_path(&staged.path)?)?.map(|t| t.read()).transpose()?
+        let plaintext = old_key.open(&staged.path, &git_blob(repo, &staged.oid)?)?;
+        let unchanged = find_protected(repo.root(), &indexed_path(&staged.path)?)?.map(|t| t.read()).transpose()?
             .is_some_and(|(worktree, _)| *worktree == *plaintext);
         if !unchanged {
             return Err(format!("{} has uncommitted changes (or was deleted); commit or discard them before \
@@ -49,23 +49,23 @@ pub(crate) fn rekey(root: &Path, options: &Options) -> Result<(), String> {
     }
     let (config, key) = new_config(&password)?;
     // The new records, written as Git objects, and one index update.
-    let mut update = IndexUpdate::new(root, Blobs::Records);
+    let mut update = IndexUpdate::new(repo, Blobs::Records);
     for (staged, plaintext) in &plaintexts {
         update.add(staged.mode(), &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?)?;
     }
     update.add(REGULAR_FILE_MODE, CONFIG_PATH.as_bytes(), &config)?;
     update.apply(&[])?;
     let undo = "; run `git reset` to undo the staged rekey";
-    write_repository_file(root, &staging, Path::new(CONFIG_PATH), &config)
+    write_repository_file(repo.root(), &staging, Path::new(CONFIG_PATH), &config)
         .map_err(|e| format!("{e}{undo}"))?;
     if old_key.private() {
-        session::stop(root, &old_config)?;
+        session::stop(repo, &old_config)?;
     }
-    activate(root, &config, &key, old_key.private(), None)
+    activate(repo, &config, &key, old_key.private(), None)
         .map_err(|e| format!("{e}; the rekey is staged: run `transcrypt-rs unlock` with the NEW passphrase"))?;
     drop(staging);
     // The worktree plaintext now cleans to the new staged records.
-    reindex(root, &index_listing(root)?, &owned_paths(&verified.protected))?;
+    reindex(repo, &index_listing(repo)?, &owned_paths(&verified.protected))?;
     eprintln!("Rekeyed {} file(s); the new config and records are staged. Commit them now, e.g.\n  \
         git commit -m 'Rekey transcrypt-v3'\n\
         Earlier commits stay readable with the old passphrase: if it was exposed, change the secrets themselves.",
@@ -94,15 +94,15 @@ struct Earlier {
 /// records unchanged) are opened under that config, found in history and
 /// authenticated with its passphrase, at their own path, and re-sealed under
 /// the current config. Nothing else changes; the result is staged.
-pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
-    let config = load_config(root)?;
-    let key = Key::require(root, &config)?;
-    let stale = stale_files(root, &transcrypt_rs::config_id(&config))?;
+pub(crate) fn reencrypt(repo: &Repository, options: &Options) -> Result<(), String> {
+    let config = load_config(repo)?;
+    let key = Key::require(repo, &config)?;
+    let stale = stale_files(repo, &transcrypt_rs::config_id(&config))?;
     if stale.is_empty() {
         eprintln!("Every staged protected file is encrypted under the current config.");
         return Ok(());
     }
-    let configs = earlier_configs(root, &config)?;
+    let configs = earlier_configs(repo, &config)?;
     if let Some(file) = stale.iter().find(|f| !configs.iter().any(|c| c.id == f.config)) {
         return Err(format!("{} is encrypted under a config this branch never had before its current one \
             (from another branch, or newer); `reencrypt` only brings forward earlier configs of this branch",
@@ -113,9 +113,9 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
     // current config. Show where each one came from.
     eprintln!("These staged files are encrypted under an earlier config. Re-encrypting them makes their \
         content trusted under the current config:");
-    let head = commit_files(root, "HEAD")?;
+    let head = commit_files(repo, "HEAD")?;
     for file in &stale {
-        eprintln!("  {} (config {}; {})", file.staged.name(), crate::short_id(&file.config), origin(root, &head, &file.staged));
+        eprintln!("  {} (config {}; {})", file.staged.name(), crate::short_id(&file.config), origin(repo, &head, &file.staged));
     }
     if !options.yes {
         let confirmed = !options.password_stdin && rpassword::prompt_password("Type yes to continue: ")
@@ -146,11 +146,11 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
     // The worktree first: a file that still holds its old record gets the
     // plaintext. The index changes last, so after a failure it still names
     // the old records and rerunning `reencrypt` finishes the job.
-    let staging = staging_dir(root)?;
+    let staging = staging_dir(repo)?;
     for (staged, record, plaintext, _) in &resealed {
-        replace_if_holds(root, &staging, &staged.path, record, plaintext, key.private())?;
+        replace_if_holds(repo.root(), &staging, &staged.path, record, plaintext, key.private())?;
     }
-    let mut update = IndexUpdate::new(root, Blobs::Records);
+    let mut update = IndexUpdate::new(repo, Blobs::Records);
     for (staged, _, _, new_record) in &resealed {
         update.add(staged.mode(), &staged.path, new_record)?;
     }
@@ -160,10 +160,10 @@ pub(crate) fn reencrypt(root: &Path, options: &Options) -> Result<(), String> {
 }
 
 /// The staged protected files whose records name a config other than `id`.
-fn stale_files(root: &Path, id: &Id) -> Result<Vec<Stale>, String> {
+fn stale_files(repo: &Repository, id: &Id) -> Result<Vec<Stale>, String> {
     let mut stale = Vec::new();
-    for staged in staged_protected(root, indexed_files(root)?)? {
-        let record = git_blob(root, &staged.oid)?;
+    for staged in staged_protected(repo, indexed_files(repo)?)? {
+        let record = git_blob(repo, &staged.oid)?;
         if let Ok(found) = parse_file_header(&record) {
             if found != *id { stale.push(Stale { staged, record, config: found }); }
         }
@@ -177,13 +177,13 @@ fn stale_files(root: &Path, id: &Id) -> Result<Vec<Stale>, String> {
 /// Hex digits of a commit id shown to identify it to people.
 const SHORT_COMMIT_LEN: usize = 12;
 
-fn earlier_configs(root: &Path, current: &[u8]) -> Result<Vec<Earlier>, String> {
+fn earlier_configs(repo: &Repository, current: &[u8]) -> Result<Vec<Earlier>, String> {
     let mut configs: Vec<Earlier> = Vec::new();
-    let log = git(root, &["log", "--format=%H %s", "HEAD", "--", CONFIG_PATH])?;
+    let log = git(repo, &["log", "--format=%H %s", "HEAD", "--", CONFIG_PATH])?;
     for line in String::from_utf8_lossy(&log).lines() {
         let (commit, subject) = line.split_once(' ').unwrap_or((line, ""));
-        if let Some(oid) = config_blob(root, commit)? {
-            let bytes = git_blob(root, &oid)?;
+        if let Some(oid) = config_blob(repo, commit)? {
+            let bytes = git_blob(repo, &oid)?;
             if bytes != current && transcrypt_v3_core::parse_config(&bytes).is_ok()
                 && !configs.iter().any(|c| c.bytes == bytes) {
                 let id = transcrypt_rs::config_id(&bytes);
@@ -197,13 +197,13 @@ fn earlier_configs(root: &Path, current: &[u8]) -> Result<Vec<Earlier>, String> 
 /// Where the staged blob came from: `HEAD`'s last change to the path only
 /// if `HEAD` (whose files are `head`) has this very blob there; otherwise
 /// it is staged.
-fn origin(root: &Path, head: &[Staged], staged: &Staged) -> String {
+fn origin(repo: &Repository, head: &[Staged], staged: &Staged) -> String {
     if head.iter().any(|e| e.path == staged.path && e.oid == staged.oid) {
-        return git(root, &["log", "-1", "--format=%h by %an: %s", "HEAD", "--", &staged.name()])
+        return git(repo, &["log", "-1", "--format=%h by %an: %s", "HEAD", "--", &staged.name()])
             .map(|o| format!("committed in {}", String::from_utf8_lossy(&o).trim())).unwrap_or_default();
     }
     let pending: Vec<String> = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "REVERT_HEAD"].iter()
-        .filter_map(|r| git(root, &["log", "-1", "--format=%h by %an: %s", r]).ok()
+        .filter_map(|r| git(repo, &["log", "-1", "--format=%h by %an: %s", r]).ok()
             .map(|o| format!("{r} {}", String::from_utf8_lossy(&o).trim())))
         .collect();
     if pending.is_empty() { "staged, not committed: origin unknown".to_owned() }

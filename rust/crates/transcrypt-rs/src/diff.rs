@@ -11,7 +11,7 @@ use transcrypt_v3_core::{record_envelope_ok, MAX_RECORD};
 use zeroize::Zeroizing;
 use crate::{
     credential::Key,
-    git::run_bounded_status,
+    git::{run_bounded_status, Repository},
     load_config,
     merge::read_input,
     worktree::Scratch,
@@ -27,10 +27,10 @@ const DIFF_DIFFERENT: i32 = 1;
 
 /// Print the diff of one protected file between `old` (at `old_path`) and
 /// `new` (at `new_path`), as Git's external diff interface supplies them.
-pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], new: &Path) -> Result<(), String> {
-    let config = load_config(root)?;
+pub(crate) fn diff(repo: &Repository, old_path: &[u8], old: &Path, new_path: &[u8], new: &Path) -> Result<(), String> {
+    let config = load_config(repo)?;
     let id = transcrypt_rs::config_id(&config);
-    let key = Key::load(root, &config)?;
+    let key = Key::load(repo, &config)?;
     // `None`: an encrypted side that cannot be opened while locked.
     let side = |file: &Path, path: &[u8]| -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         let bytes = read_input(file, "diff")?;
@@ -47,10 +47,10 @@ pub(crate) fn diff(root: &Path, old_path: &[u8], old: &Path, new_path: &[u8], ne
         println!("Binary files {a_label} and {b_label} differ (unlock to see the decrypted diff)");
         return Ok(());
     };
-    let scratch = Scratch::create(root)?;
+    let scratch = Scratch::create(repo)?;
     let (a, b) = (scratch.write("a", &a)?, scratch.write("b", &b)?);
     let mut command = Command::new("diff");
-    command.args(["-u", "-L", &a_label, "-L", &b_label]).arg(&a).arg(&b).current_dir(root);
+    command.args(["-u", "-L", &a_label, "-L", &b_label]).arg(&a).arg(&b).current_dir(repo.root());
     let result = run_bounded_status(command, None, DIFF_OUTPUT_LIMIT);
     drop(scratch);
     let finished = result?;

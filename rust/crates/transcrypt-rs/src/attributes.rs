@@ -28,18 +28,18 @@ const DEL: u8 = 0x7f;
 const OCTAL_ESCAPE_DIGITS: usize = 3;
 const MACRO_COMMENT: &[u8] = b"# transcrypt-v3: files matching a pattern marked `transcrypt` are encrypted in Git";
 /// The top-level `.gitattributes` in the worktree, if any.
-pub(crate) fn worktree_attributes(root: &Path) -> Result<Option<Vec<u8>>, String> {
-    find_protected(root, Path::new(".gitattributes"))?.map(|f| f.read().map(|(bytes, _)| bytes.to_vec())).transpose()
+pub(crate) fn worktree_attributes(repo: &Repository) -> Result<Option<Vec<u8>>, String> {
+    find_protected(repo.root(), Path::new(".gitattributes"))?.map(|f| f.read().map(|(bytes, _)| bytes.to_vec())).transpose()
 }
 
 /// Put the worktree's top-level `.gitattributes` back as `before` (`None`:
 /// there was none); best effort.
-pub(crate) fn restore_worktree_attributes(root: &Path, before: Option<&[u8]>) {
+pub(crate) fn restore_worktree_attributes(repo: &Repository, before: Option<&[u8]>) {
     match before {
-        Some(bytes) => if let Ok(staging) = staging_dir(root) {
-            let _ = write_repository_file(root, &staging, Path::new(".gitattributes"), bytes);
+        Some(bytes) => if let Ok(staging) = staging_dir(repo) {
+            let _ = write_repository_file(repo.root(), &staging, Path::new(".gitattributes"), bytes);
         },
-        None => { let _ = fs::remove_file(root.join(".gitattributes")); },
+        None => { let _ = fs::remove_file(repo.root().join(".gitattributes")); },
     }
 }
 
@@ -51,27 +51,27 @@ struct AttributesUndo {
 }
 
 impl AttributesUndo {
-    fn capture(root: &Path) -> Result<AttributesUndo, String> {
+    fn capture(repo: &Repository) -> Result<AttributesUndo, String> {
         Ok(AttributesUndo {
-            worktree: worktree_attributes(root)?,
-            staged: indexed_files(root)?.into_iter().find(|e| e.path == b".gitattributes").map(|e| (e.mode().to_owned(), e.oid)),
+            worktree: worktree_attributes(repo)?,
+            staged: indexed_files(repo)?.into_iter().find(|e| e.path == b".gitattributes").map(|e| (e.mode().to_owned(), e.oid)),
         })
     }
 
-    fn restore(&self, root: &Path) {
-        restore_worktree_attributes(root, self.worktree.as_deref());
+    fn restore(&self, repo: &Repository) {
+        restore_worktree_attributes(repo, self.worktree.as_deref());
         let _ = match &self.staged {
-            Some((mode, oid)) => git_with_input(root, &["update-index", "-z", "--index-info"],
+            Some((mode, oid)) => git_with_input(repo, &["update-index", "-z", "--index-info"],
                 format!("{mode} {oid}\t.gitattributes\0").as_bytes()),
-            None => git(root, &["update-index", "--force-remove", "--", ".gitattributes"]),
+            None => git(repo, &["update-index", "--force-remove", "--", ".gitattributes"]),
         };
     }
 
     /// Run `edit` with `.gitattributes` captured, putting it back if `edit` fails.
-    fn guard<T>(root: &Path, edit: impl FnOnce(&AttributesUndo) -> Result<T, String>) -> Result<T, String> {
-        let undo = AttributesUndo::capture(root)?;
+    fn guard<T>(repo: &Repository, edit: impl FnOnce(&AttributesUndo) -> Result<T, String>) -> Result<T, String> {
+        let undo = AttributesUndo::capture(repo)?;
         let result = edit(&undo);
-        if result.is_err() { undo.restore(root); }
+        if result.is_err() { undo.restore(repo); }
         result
     }
 }
@@ -91,7 +91,7 @@ pub(crate) fn owned_paths(entries: &[Staged]) -> Vec<Vec<u8>> {
 /// `.gitattributes` patterns to files only, relative to the top-level
 /// directory, without `./`, and has no negation: refuse what would silently
 /// select nothing.
-fn check_pattern(root: &Path, submodules: &[Vec<u8>], pattern: &[u8]) -> Result<Vec<u8>, String> {
+fn check_pattern(repo: &Repository, submodules: &[Vec<u8>], pattern: &[u8]) -> Result<Vec<u8>, String> {
     let shown = String::from_utf8_lossy(pattern).into_owned();
     let mut pattern = pattern;
     while let Some(rest) = pattern.strip_prefix(b"./") { pattern = rest; }
@@ -105,7 +105,7 @@ fn check_pattern(root: &Path, submodules: &[Vec<u8>], pattern: &[u8]) -> Result<
         return Err(format!("{shown}: .gitattributes has no negative patterns; to exclude a file from a \
             protected pattern, add `PATH -filter -diff -merge` to .gitattributes"));
     }
-    if pattern.ends_with(b"/") || root.join(crate::os::os_string(pattern)?).is_dir() {
+    if pattern.ends_with(b"/") || repo.root().join(crate::os::os_string(pattern)?).is_dir() {
         let dir = String::from_utf8_lossy(pattern.strip_suffix(b"/").unwrap_or(pattern)).into_owned();
         return Err(format!("{shown}: attribute patterns select files, not directories; use '{dir}/**' \
             for everything below it"));
@@ -122,21 +122,21 @@ struct Checked {
 }
 
 /// The key, and each of `patterns` checked, with its `.gitattributes` line.
-fn checked_patterns(root: &Path, patterns: &[OsString]) -> Result<Checked, String> {
-    let config = load_config(root)?;
-    let key = Key::require(root, &config)?;
-    let submodules: Vec<Vec<u8>> = indexed_files(root)?.into_iter().filter(|e| e.mode() == GITLINK_MODE).map(|e| e.path).collect();
-    let patterns = patterns.iter().map(|p| check_pattern(root, &submodules, crate::os::os_bytes(p))).collect::<Result<Vec<_>, _>>()?;
+fn checked_patterns(repo: &Repository, patterns: &[OsString]) -> Result<Checked, String> {
+    let config = load_config(repo)?;
+    let key = Key::require(repo, &config)?;
+    let submodules: Vec<Vec<u8>> = indexed_files(repo)?.into_iter().filter(|e| e.mode() == GITLINK_MODE).map(|e| e.path).collect();
+    let patterns = patterns.iter().map(|p| check_pattern(repo, &submodules, crate::os::os_bytes(p))).collect::<Result<Vec<_>, _>>()?;
     let lines = patterns.iter().map(|p| protect_line(p)).collect::<Result<_, _>>()?;
     Ok(Checked { key, patterns, lines })
 }
 
 /// After `.gitattributes` was edited: a pattern that names an existing file
 /// must select it (a backslash or bracket in a name is a glob character).
-fn check_selects(root: &Path, patterns: &[Vec<u8>]) -> Result<(), String> {
+fn check_selects(repo: &Repository, patterns: &[Vec<u8>]) -> Result<(), String> {
     let files: Vec<&[u8]> = patterns.iter().map(Vec::as_slice)
-        .filter(|p| crate::os::os_string(p).is_ok_and(|p| root.join(p).is_file())).collect();
-    for (path, protected) in files.iter().zip(protected_flags(root, &files, Attributes::Worktree)?) {
+        .filter(|p| crate::os::os_string(p).is_ok_and(|p| repo.root().join(p).is_file())).collect();
+    for (path, protected) in files.iter().zip(protected_flags(repo, &files, Attributes::Worktree)?) {
         if !protected {
             return Err(format!("the pattern {} does not select the file of that name (Git reads `\\`, `*`, \
                 `?` and `[` in patterns as glob characters); escape them, e.g. `[[]` for `[`",
@@ -164,10 +164,10 @@ type Line = Vec<u8>;
 
 /// Rewrite the top-level `.gitattributes` through `edit` (after making
 /// sure it defines the `transcrypt` macro), write it safely and stage it.
-pub(crate) fn edit_attributes(root: &Path, staging: &Staging, stage: bool, edit: impl FnOnce(&mut Vec<Line>) -> Result<(), String>)
+pub(crate) fn edit_attributes(repo: &Repository, staging: &Staging, stage: bool, edit: impl FnOnce(&mut Vec<Line>) -> Result<(), String>)
     -> Result<(), String>
 {
-    let existing = worktree_attributes(root)?.unwrap_or_default();
+    let existing = worktree_attributes(repo)?.unwrap_or_default();
     let mut lines: Vec<Line> = split_lines(&existing).map(<[u8]>::to_vec).collect();
     if lines.last().is_some_and(Vec::is_empty) { lines.pop(); }
     // Another definition of the macro would silently replace ours (Git uses
@@ -184,23 +184,23 @@ pub(crate) fn edit_attributes(root: &Path, staging: &Staging, stage: bool, edit:
     let mut text = lines.join(&b'\n');
     text.push(b'\n');
     if text != existing {
-        write_repository_file(root, staging, Path::new(".gitattributes"), &text)?;
+        write_repository_file(repo.root(), staging, Path::new(".gitattributes"), &text)?;
         // Repository metadata must stay readable: refuse a pattern that
         // selects it (Git would then fail to stage .gitattributes itself).
         let reserved: [&[u8]; 3] = [b".gitattributes", CONFIG_PATH.as_bytes(), b".gitmodules"];
-        let selected = protected_flags(root, &reserved, Attributes::Worktree)?;
+        let selected = protected_flags(repo, &reserved, Attributes::Worktree)?;
         if let Some((path, _)) = reserved.iter().zip(selected).find(|(_, p)| *p) {
             if existing.is_empty() {
-                let _ = fs::remove_file(root.join(".gitattributes"));
+                let _ = fs::remove_file(repo.root().join(".gitattributes"));
             } else {
-                write_repository_file(root, staging, Path::new(".gitattributes"), &existing)?;
+                write_repository_file(repo.root(), staging, Path::new(".gitattributes"), &existing)?;
             }
             return Err(format!("that pattern would encrypt {}, which Git and v3 must read unencrypted; \
                 use a narrower pattern", String::from_utf8_lossy(path)));
         }
     }
     if !stage { return Ok(()); }
-    git(root, &["add", "--", ".gitattributes"]).map(|_| ())
+    git(repo, &["add", "--", ".gitattributes"]).map(|_| ())
 }
 
 /// A `.gitattributes` line protecting `pattern`. Git reads a pattern that
@@ -237,28 +237,28 @@ fn protect_line(pattern: &[u8]) -> Result<Line, String> {
 /// `.gitattributes`, and encrypt in the index every tracked file the
 /// patterns now select (the pre-commit hook would do it at the next commit
 /// anyway; doing it now makes `git status` and `git diff --cached` honest).
-pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
-    let Checked { key, patterns, lines } = checked_patterns(root, patterns)?;
-    AttributesUndo::guard(root, |_| {
-        let staging = staging_dir(root)?;
-        edit_attributes(root, &staging, true, |existing| {
+pub(crate) fn protect(repo: &Repository, patterns: &[OsString]) -> Result<(), String> {
+    let Checked { key, patterns, lines } = checked_patterns(repo, patterns)?;
+    AttributesUndo::guard(repo, |_| {
+        let staging = staging_dir(repo)?;
+        edit_attributes(repo, &staging, true, |existing| {
             for line in lines {
                 if !existing.contains(&line) { existing.push(line); }
             }
             Ok(())
         })?;
         drop(staging);
-        check_selects(root, &patterns)?;
+        check_selects(repo, &patterns)?;
         // Seal every selected file still staged in plaintext: newly selected
         // ones, and ones a hand-edited `.gitattributes` selected earlier.
-        let protected = staged_protected(root, indexed_files(root)?)?;
-        let sealed = seal_staged(root, &key, &owned_paths(&protected))?;
+        let protected = staged_protected(repo, indexed_files(repo)?)?;
+        let sealed = seal_staged(repo, &key, &owned_paths(&protected))?;
         match protected.len() {
             0 => eprintln!("Protected patterns added; no tracked file matches yet. `git add` encrypts matching files."),
             n => eprintln!("{n} tracked file(s) protected{}.",
                 if sealed > 0 { format!("; {sealed} of them encrypted in the index just now") } else { String::new() }),
         }
-        if sealed > 0 && git(root, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]).is_ok() {
+        if sealed > 0 && git(repo, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]).is_ok() {
             eprintln!("Files that were committed before they were protected stay readable in earlier commits: \
                 if the history is public, change those secrets.");
         }
@@ -271,15 +271,15 @@ pub(crate) fn protect(root: &Path, patterns: &[OsString]) -> Result<(), String> 
 /// commit publishes it unencrypted, which is the point). Every record to be
 /// released is decrypted first; on any error `.gitattributes` and the index
 /// are restored.
-pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String> {
-    let Checked { key, lines, .. } = checked_patterns(root, patterns)?;
-    let before = staged_protected(root, indexed_files(root)?)?;
-    let released = AttributesUndo::guard(root, |undo| {
-        let staging = staging_dir(root)?;
+pub(crate) fn unprotect(repo: &Repository, patterns: &[OsString]) -> Result<(), String> {
+    let Checked { key, lines, .. } = checked_patterns(repo, patterns)?;
+    let before = staged_protected(repo, indexed_files(repo)?)?;
+    let released = AttributesUndo::guard(repo, |undo| {
+        let staging = staging_dir(repo)?;
         // The staged rules: an interrupted `unprotect` already removed the
         // line from the worktree file but not from the index.
-        let staged_rules = undo.staged.as_ref().map(|(_, oid)| git_blob(root, oid)).transpose()?.unwrap_or_default();
-        edit_attributes(root, &staging, false, |existing| {
+        let staged_rules = undo.staged.as_ref().map(|(_, oid)| git_blob(repo, oid)).transpose()?.unwrap_or_default();
+        edit_attributes(repo, &staging, false, |existing| {
             for line in &lines {
                 let n = existing.len();
                 existing.retain(|l| l != line);
@@ -293,23 +293,23 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
         // The new rules are in the worktree only; the index (rules included)
         // changes in one update at the end, so an interruption never leaves
         // the rule removed while the records are still staged.
-        let still = protected_flags(root, &paths_of(&before), Attributes::Worktree)?;
+        let still = protected_flags(repo, &paths_of(&before), Attributes::Worktree)?;
         // Decrypt everything before changing any file or index entry.
         let mut released = Vec::new();
         for (staged, _) in before.iter().zip(still).filter(|(_, still)| !still) {
-            let plaintext = open_staged(root, &key, staged)?;
+            let plaintext = open_staged(repo, &key, staged)?;
             released.push((staged, plaintext));
         }
         // A worktree file that still holds the record gets its plaintext
         // (harmless if a later step fails); the index changes last.
         for (staged, plaintext) in &released {
-            replace_if_holds(root, &staging, &staged.path, &git_blob(root, &staged.oid)?, plaintext, key.private())?;
+            replace_if_holds(repo.root(), &staging, &staged.path, &git_blob(repo, &staged.oid)?, plaintext, key.private())?;
         }
-        let mut update = IndexUpdate::new(root, Blobs::Plaintext);
+        let mut update = IndexUpdate::new(repo, Blobs::Plaintext);
         for (staged, plaintext) in &released {
             update.add(staged.mode(), &staged.path, plaintext)?;
         }
-        let rules = worktree_attributes(root)?.ok_or("missing .gitattributes")?;
+        let rules = worktree_attributes(repo)?.ok_or("missing .gitattributes")?;
         update.add(REGULAR_FILE_MODE, b".gitattributes", &rules)?;
         update.apply(&["--add"])?;
         Ok(released.into_iter().map(|(staged, _)| staged.path.clone()).collect::<Vec<_>>())
@@ -324,10 +324,11 @@ pub(crate) fn unprotect(root: &Path, patterns: &[OsString]) -> Result<(), String
 /// The attribute files Git reads besides the repository's own
 /// `.gitattributes`: `info/attributes` and `core.attributesFile` (by default
 /// `$XDG_CONFIG_HOME/git/attributes`).
-fn local_attribute_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = vec![common_dir(root).join("info/attributes")];
-    match git(root, &["config", "--path", "core.attributesFile"]) {
-        Ok(path) => files.push(PathBuf::from(String::from_utf8_lossy(&path).trim_end())),
+fn local_attribute_files(repo: &Repository) -> Vec<PathBuf> {
+    let mut files = vec![repo.common_dir().join("info/attributes")];
+    match git(repo, &["config", "--path", "core.attributesFile"]) {
+        // Relative to the worktree root, where Git reads it from.
+        Ok(path) => files.push(repo.root().join(String::from_utf8_lossy(&path).trim_end())),
         Err(_) => {
             let base = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
                 .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
@@ -339,8 +340,8 @@ fn local_attribute_files(root: &Path) -> Vec<PathBuf> {
 
 /// The local attribute files that mention `filter` or redefine the
 /// `transcrypt` macro.
-pub(crate) fn filter_overrides(root: &Path) -> Vec<String> {
-    local_attribute_files(root).into_iter().filter(|file| fs::read(file)
+pub(crate) fn filter_overrides(repo: &Repository) -> Vec<String> {
+    local_attribute_files(repo).into_iter().filter(|file| fs::read(file)
         .is_ok_and(|text| split_lines(&text)
             .any(|line| line.windows(FILTER_ATTR.len()).any(|w| w == FILTER_ATTR) || defines_macro(line))))
         .map(|file| file.display().to_string()).collect()

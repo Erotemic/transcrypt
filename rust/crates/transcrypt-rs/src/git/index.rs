@@ -3,13 +3,13 @@
 use super::*;
 
 /// The object id Git gives `bytes` (nothing is written).
-pub(crate) fn blob_id(root: &Path, bytes: &[u8]) -> Result<String, String> {
-    object_id(git_with_input(root, &["hash-object", "--no-filters", "--stdin"], bytes)?)
+pub(crate) fn blob_id(repo: &Repository, bytes: &[u8]) -> Result<String, String> {
+    object_id(git_with_input(repo, &["hash-object", "--no-filters", "--stdin"], bytes)?)
 }
 
 /// Write `bytes` as a Git blob, unfiltered; its verified object id.
-pub(crate) fn hash_object(root: &Path, bytes: &[u8]) -> Result<String, String> {
-    object_id(git_with_input(root, &["hash-object", "-w", "--no-filters", "--stdin"], bytes)?)
+pub(crate) fn hash_object(repo: &Repository, bytes: &[u8]) -> Result<String, String> {
+    object_id(git_with_input(repo, &["hash-object", "-w", "--no-filters", "--stdin"], bytes)?)
 }
 
 /// What an `IndexUpdate` stages, which decides how its blobs are written.
@@ -26,17 +26,17 @@ pub(crate) enum Blobs {
 /// Blobs to stage at paths: written by one `git fast-import` (from stdin, so
 /// no content touches a temporary file), then staged by one `update-index -z
 /// --index-info`. One process each, however many files.
-pub(crate) struct IndexUpdate {
-    root: PathBuf,
+pub(crate) struct IndexUpdate<'a> {
+    repo: &'a Repository,
     blobs: Blobs,
     importer: Option<Importer>,
     held: Vec<Zeroizing<Vec<u8>>>,
     entries: Vec<(String, Vec<u8>)>,
 }
 
-impl IndexUpdate {
-    pub(crate) fn new(root: &Path, blobs: Blobs) -> IndexUpdate {
-        IndexUpdate { root: root.to_path_buf(), blobs, importer: None, held: Vec::new(), entries: Vec::new() }
+impl<'a> IndexUpdate<'a> {
+    pub(crate) fn new(repo: &'a Repository, blobs: Blobs) -> IndexUpdate<'a> {
+        IndexUpdate { repo, blobs, importer: None, held: Vec::new(), entries: Vec::new() }
     }
 
     /// Stage `bytes` (unfiltered) as a blob of `mode` at `path`.
@@ -57,8 +57,8 @@ impl IndexUpdate {
     pub(crate) fn len(&self) -> usize { self.entries.len() }
 
     fn importer(&mut self) -> Result<&mut Importer, String> {
-        let (root, blobs) = (&self.root, &self.blobs);
-        get_or_try_init(&mut self.importer, || Importer::spawn(root, blobs))
+        let (repo, blobs) = (self.repo, &self.blobs);
+        get_or_try_init(&mut self.importer, || Importer::spawn(repo, blobs))
     }
 
     /// Write the blobs and stage them, with `update-index` `options` (such as
@@ -72,15 +72,15 @@ impl IndexUpdate {
         }
         let marks = self.entries.len();
         let oids = self.importer()?.finish(marks)?;
-        let root = &self.root;
+        let repo = self.repo;
         let mut info = Vec::new();
         for ((mode, path), oid) in self.entries.iter().zip(&oids) {
             push_index_record(&mut info, mode, oid, path);
         }
         let arguments: Vec<&str> = ["update-index", "-z"].into_iter().chain(options.iter().copied())
             .chain(["--index-info"]).collect();
-        git_with_input(root, &arguments, &info)?;
-        let listing = index_listing(root)?;
+        git_with_input(repo, &arguments, &info)?;
+        let listing = index_listing(repo)?;
         let staged: std::collections::HashSet<&[u8]> = git_records(&listing)?.into_iter().collect();
         for ((mode, path), oid) in self.entries.iter().zip(oids) {
             let mut record = format!("{mode} {oid} 0\t").into_bytes();
@@ -112,8 +112,8 @@ struct Importer {
 }
 
 impl Importer {
-    fn spawn(root: &Path, blobs: &Blobs) -> Result<Importer, String> {
-        let mut command = git_command(Some(root));
+    fn spawn(repo: &Repository, blobs: &Blobs) -> Result<Importer, String> {
+        let mut command = git_command(repo);
         if matches!(blobs, Blobs::Records) { command.args(RECORD_STORAGE); }
         command.args(["fast-import", "--quiet", "--done"]);
         if matches!(blobs, Blobs::Records) { command.arg(NO_DELTAS); }

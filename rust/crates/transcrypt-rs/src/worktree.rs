@@ -8,7 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use zeroize::Zeroizing;
-use crate::{fsat, git::read_record, modes};
+use crate::{fsat, git::{read_record, Repository}, modes};
 
 /// A Git path as a relative OS path. Only a root and `..` are refused here:
 /// a Windows prefix (`C:`) or a leading `.` is not a plain name, which
@@ -199,10 +199,11 @@ impl Staging {
     }
 }
 
-/// `.git/<name>`, created if missing: a real directory (not a symlink)
-/// that only this user can enter. `what` names it in errors.
-fn private_git_dir(root: &Path, name: &str, what: &str) -> Result<fsat::Dir, String> {
-    let git_dir = fsat::Dir::open(&crate::git::git_dir(root)).map_err(|_| "cannot open the Git directory")?;
+/// `.git/<name>` (in this worktree's Git directory), created if missing: a
+/// real directory (not a symlink) that only this user can enter. `what`
+/// names it in errors.
+fn private_git_dir(repo: &Repository, name: &str, what: &str) -> Result<fsat::Dir, String> {
+    let git_dir = fsat::Dir::open(repo.git_dir()).map_err(|_| "cannot open the Git directory")?;
     let unsafe_dir = |why: &str| format!("unsafe .git/{name}: {why}; require a real {:04o} directory", modes::PRIVATE_DIR);
     git_dir.mkdir(OsStr::new(name), modes::PRIVATE_DIR).map_err(|e| format!("cannot create private {what} directory: {e}"))?;
     let dir = git_dir.subdir(OsStr::new(name)).map_err(|_| unsafe_dir("it is not a real directory"))?;
@@ -212,8 +213,8 @@ fn private_git_dir(root: &Path, name: &str, what: &str) -> Result<fsat::Dir, Str
     Ok(dir)
 }
 
-pub(crate) fn staging_dir(root: &Path) -> Result<Staging, String> {
-    let dir = private_git_dir(root, "transcrypt-v3-staging", "staging")?;
+pub(crate) fn staging_dir(repo: &Repository) -> Result<Staging, String> {
+    let dir = private_git_dir(repo, "transcrypt-v3-staging", "staging")?;
     dir.try_lock().map_err(|_| "another transcrypt-rs hydrate or lock is running in this repository")?;
     for entry in dir.entries().map_err(|_| "cannot list private staging directory")? {
         let (regular, _) = dir.entry_kind(&entry).map_err(|_| "cannot examine stale staged file")?;
@@ -240,9 +241,9 @@ pub(crate) struct Scratch {
 impl Scratch {
     const NAME: &'static str = "transcrypt-v3-scratch";
 
-    pub(crate) fn create(root: &Path) -> Result<Scratch, String> {
-        let path = crate::git::git_dir(root).join(Self::NAME);
-        let dir = private_git_dir(root, Self::NAME, "scratch")?;
+    pub(crate) fn create(repo: &Repository) -> Result<Scratch, String> {
+        let path = repo.git_dir().join(Self::NAME);
+        let dir = private_git_dir(repo, Self::NAME, "scratch")?;
         for entry in dir.entries().map_err(|_| "cannot list private scratch directory")? {
             let owner = entry.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<u32>().ok());
             if !owner.is_some_and(crate::os::process_running) {
@@ -302,14 +303,22 @@ mod tests {
         panic!("the file clock did not move");
     }
 
+    /// The repository of the worktree `root`, whose Git directory is
+    /// `root/.git` (created if missing).
+    fn repository(root: &Path) -> Repository {
+        let git_dir = root.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        Repository::checked(root.to_path_buf(), git_dir.clone(), git_dir).unwrap()
+    }
+
     /// `staging_dir`, retried briefly: another test thread may fork a child
     /// that holds a copy of a just-released lock descriptor until it execs.
-    fn staging(root: &Path) -> Staging {
+    fn staging(repo: &Repository) -> Staging {
         for _ in 0..STAGING_ATTEMPTS {
-            if let Ok(staging) = staging_dir(root) { return staging; }
+            if let Ok(staging) = staging_dir(repo) { return staging; }
             std::thread::sleep(STAGING_RETRY);
         }
-        staging_dir(root).unwrap()
+        staging_dir(repo).unwrap()
     }
 
     /// Whether only this user can open `path` (a file or a directory).
@@ -376,15 +385,15 @@ mod tests {
     fn replacement_is_private_and_leaves_no_worktree_temporaries() {
         let dir = TempDir::new("replace");
         let tmp = &dir.0;
-        fs::create_dir(tmp.join(".git")).unwrap();
+        let repo = repository(tmp);
         let sdir = tmp.join(".git/transcrypt-v3-staging");
-        drop(staging(tmp));
+        drop(staging(&repo));
         assert!(owner_only(&sdir));
         // A crash-leftover temporary is purged on the next use.
         fs::write(sdir.join("stale.tmp"), b"stale plaintext").unwrap();
-        let staging = staging(tmp);
+        let staging = staging(&repo);
         // A concurrent operation cannot enter (or purge) while it is held.
-        assert!(staging_dir(tmp).is_err());
+        assert!(staging_dir(&repo).is_err());
         assert_eq!(fs::read_dir(&sdir).unwrap().count(), 0);
         let path = tmp.join("item.secret");
         fs::write(&path, b"ciphertext placeholder").unwrap();
@@ -398,19 +407,18 @@ mod tests {
         // A symlinked or loosely permissioned staging directory is refused.
         fs::remove_dir(&sdir).unwrap();
         link_dir(tmp, &sdir);
-        assert!(staging_dir(tmp).is_err());
+        assert!(staging_dir(&repo).is_err());
         remove_link(&sdir);
         fs::create_dir(&sdir).unwrap();
         loosen(&sdir);
-        assert!(staging_dir(tmp).is_err());
+        assert!(staging_dir(&repo).is_err());
     }
 
     #[test]
     fn replacement_refuses_a_file_changed_since_it_was_checked() {
         let dir = TempDir::new("stamp");
         let tmp = &dir.0;
-        fs::create_dir(tmp.join(".git")).unwrap();
-        let staging = staging(tmp);
+        let staging = staging(&repository(tmp));
         let path = tmp.join("item.secret");
         fs::write(&path, b"checked contents").unwrap();
         let target = open_protected(tmp, Path::new("item.secret")).unwrap();
@@ -436,8 +444,7 @@ mod tests {
     fn new_repository_files_appear_whole_and_never_replace_one() {
         let dir = TempDir::new("create");
         let tmp = &dir.0;
-        fs::create_dir(tmp.join(".git")).unwrap();
-        let staging = staging(tmp);
+        let staging = staging(&repository(tmp));
         let config = Path::new(".transcrypt/config");
         write_repository_file(tmp, &staging, config, b"public configuration").unwrap();
         assert_eq!(fs::read(tmp.join(config)).unwrap(), b"public configuration");
@@ -461,7 +468,8 @@ mod tests {
         fs::create_dir(&external).unwrap();
         fs::write(external.join("item.secret"), b"test").unwrap();
         let checkout = tmp.join("checkout");
-        fs::create_dir_all(checkout.join(".git")).unwrap();
+        fs::create_dir(&checkout).unwrap();
+        let repo = repository(&checkout);
         link_dir(&external, &checkout.join("linked"));
         assert!(open_protected(&checkout, Path::new("linked/item.secret")).is_err());
         #[cfg(unix)]
@@ -477,7 +485,7 @@ mod tests {
         // Race: after resolution, the parent is swapped for a symlink (on
         // Windows, a junction) to an outside directory. The held directory
         // handle keeps the write inside.
-        let staging = staging(&checkout);
+        let staging = staging(&repo);
         fs::rename(checkout.join("regular"), checkout.join("moved")).unwrap();
         link_dir(&external, &checkout.join("regular"));
         target.replace(&staging, b"plaintext", &stamp, false).unwrap();
