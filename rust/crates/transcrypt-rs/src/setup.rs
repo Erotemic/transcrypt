@@ -19,7 +19,7 @@ use crate::{
     lifecycle::*,
     load_config, os, passphrase, session,
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
-    Options,
+    cli::{InitArgs, KeyMode, UnlockArgs},
 };
 
 const HOOKS_BYPASSED: &str = "core.hooksPath is set, so Git does not run the v3 pre-commit and \
@@ -215,19 +215,20 @@ fn remove_hook(repo: &Repository, name: &str, command: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Make `key` the credential of this checkout, in the requested mode, and
-/// remove the other mode's.
-pub(crate) fn activate(repo: &Repository, config: &[u8], key: &SecretKey, private: bool, idle: Option<std::time::Duration>)
-    -> Result<(), String>
-{
-    if private {
-        credential::forget(repo)?;
-        if Key::load(repo, config)?.is_none() {
-            session::start(repo, config, key, idle)?;
-        }
-    } else {
-        credential::store(repo, config, key)?;
-        let _ = session::stop(repo, config);
+/// Make `key` the credential of this checkout, in `mode`, and remove the
+/// other mode's.
+pub(crate) fn activate(repo: &Repository, config: &[u8], key: &SecretKey, mode: KeyMode) -> Result<(), String> {
+    match mode {
+        KeyMode::Private { idle } => {
+            credential::forget(repo)?;
+            if Key::load(repo, config)?.is_none() {
+                session::start(repo, config, key, idle)?;
+            }
+        },
+        KeyMode::Stored => {
+            credential::store(repo, config, key)?;
+            let _ = session::stop(repo, config);
+        },
     }
     Ok(())
 }
@@ -235,10 +236,10 @@ pub(crate) fn activate(repo: &Repository, config: &[u8], key: &SecretKey, privat
 /// `init [PATTERN...]`: a new config and key, the attribute macro in
 /// `.gitattributes`, filters and hooks, the key stored (or the private
 /// agent started), and then `protect` for each pattern.
-pub(crate) fn init(repo: &Repository, options: &Options) -> Result<(), String> {
-    let rollback = init_with_rollback(repo, options, None)?;
-    if !options.patterns.is_empty() {
-        if let Err(e) = protect(repo, &options.patterns) {
+pub(crate) fn init(repo: &Repository, args: &InitArgs) -> Result<(), String> {
+    let rollback = init_with_rollback(repo, args.mode, |new| passphrase(args.password_stdin, new))?;
+    if !args.patterns.is_empty() {
+        if let Err(e) = protect(repo, &args.patterns) {
             rollback.run(repo);
             return Err(format!("{e}; initialization rolled back"));
         }
@@ -295,10 +296,12 @@ pub(crate) fn uncommitted_setup(repo: &Repository, committed: &str) -> Result<bo
     Ok(true)
 }
 
-/// Initialize (without protecting anything yet); on failure everything is
-/// rolled back, on success the caller gets the rollback for later steps.
-pub(crate) fn init_with_rollback(repo: &Repository, options: &Options, password: Option<Zeroizing<Vec<u8>>>)
-    -> Result<Rollback, String>
+/// Initialize (without protecting anything yet), keeping the key in `mode`
+/// and taking the passphrase from `password` (told whether it is a new
+/// one); on failure everything is rolled back, on success the caller gets the
+/// rollback for later steps.
+pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode,
+    password: impl FnOnce(bool) -> Result<Zeroizing<Vec<u8>>, String>) -> Result<Rollback, String>
 {
     // An existing config not yet in `HEAD` is an interrupted `init`: rerunning
     // with the same passphrase completes it.
@@ -308,7 +311,7 @@ pub(crate) fn init_with_rollback(repo: &Repository, options: &Options, password:
     } else { None };
     check_hook_available(repo)?;
     // Asked before anything is written: an interrupted prompt changes nothing.
-    let password = match password { Some(p) => p, None => passphrase(options.password_stdin, interrupted.is_none())? };
+    let password = password(interrupted.is_none())?;
     let (config, key) = match &interrupted {
         Some(existing) => {
             let key = unlock_config(&password, existing).map_err(|e| format!("{e}: an interrupted init left \
@@ -329,7 +332,7 @@ pub(crate) fn init_with_rollback(repo: &Repository, options: &Options, password:
         }
         edit_attributes(repo, &staging, false, |_| Ok(()))?;
         install(repo)?;
-        activate(repo, &config, &key, options.private, options.timeout)?;
+        activate(repo, &config, &key, mode)?;
         git(repo, &["add", "--", CONFIG_PATH, ".gitattributes"])?;
         Ok(())
     })();
@@ -343,30 +346,30 @@ pub(crate) fn init_with_rollback(repo: &Repository, options: &Options, password:
         rollback.run(repo);
         return Err(format!("{e}; initialization rolled back"));
     }
-    eprintln!("Initialized v3 and unlocked this checkout{}.", if options.private { " (private mode)" } else { "" });
+    eprintln!("Initialized v3 and unlocked this checkout{}.", if mode.private() { " (private mode)" } else { "" });
     Ok(rollback)
 }
 
 /// `unlock`: authenticate the passphrase against the committed config
 /// before changing anything, install the filters and hooks, keep the key
 /// (stored, or in the private agent) and decrypt the worktree.
-pub(crate) fn unlock(repo: &Repository, options: &Options) -> Result<(), String> {
+pub(crate) fn unlock(repo: &Repository, args: &UnlockArgs) -> Result<(), String> {
     let config = load_config(repo)?;
     check_hook_available(repo)?;
     let current = credential::state_to_unlock(repo, &config)?;
-    if current.key().is_some_and(|key| key.private() == options.private) {
+    if current.key().is_some_and(|key| key.private() == args.mode.private()) {
         install(repo)?;
-        let n = if options.hydrate { hydrate(repo)? } else { 0 };
+        let n = if args.hydrate { hydrate(repo)? } else { 0 };
         eprintln!("Already unlocked; decrypted {n} file(s).");
         return Ok(());
     }
-    let password = passphrase(options.password_stdin, false)?;
+    let password = passphrase(args.password_stdin, false)?;
     let key = unlock_config(&password, &config)?; // Authenticate BEFORE any persistent writes.
     install(repo)?;
-    activate(repo, &config, &key, options.private, options.timeout)?;
-    let mode = if options.private { "private mode: key in memory until lock or logout" }
+    activate(repo, &config, &key, args.mode)?;
+    let mode = if args.mode.private() { "private mode: key in memory until lock or logout" }
         else { "key stored in .git/transcrypt-v3/key until lock" };
-    if !options.hydrate {
+    if !args.hydrate {
         eprintln!("Unlocked ({mode}). Run `transcrypt-rs hydrate` to decrypt the worktree.");
         return Ok(());
     }

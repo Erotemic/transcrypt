@@ -13,7 +13,7 @@ and [V3-ASSUMPTIONS](verification/V3-ASSUMPTIONS.md).
 | --- | --- |
 | `rust/crates/transcrypt-v3-core/src/lib.rs` | The verified core: `no_std`, no I/O. Parsers of Git's output, the wire format, and every decision. It is extracted to Lean by Aeneas, so it is written in a restricted style (no `?`, explicit loops); do not "modernize" it. Its unit tests are in `tests.rs` (not extracted). |
 | `rust/crates/transcrypt-rs/src/lib.rs` | `Keyed`: Argon2id and AES-256-SIV (RustCrypto) behind the primitive contract the core assumes (A5). |
-| `rust/crates/transcrypt-rs/src/main.rs` | The executable: command dispatch, options, the passphrase. |
+| `rust/crates/transcrypt-rs/src/main.rs` | The executable: command dispatch and the passphrase; `cli.rs` parses the command line into a `Command` holding exactly each command's arguments. |
 | `lifecycle.rs` | The pre-commit hook and `verify-index`, `hydrate`, `lock`. |
 | `filter.rs`, `process.rs` | Git's clean and smudge filters, per file or as one long-running process. |
 | `git/` | The `Repository` a command works on (its root and Git directories, found once by `Repository::discover` and passed to everything that needs them, and its object reader) and every Git subprocess, bounded (`mod.rs`), with replies parsed by the core: object reads (`objects.rs`), index and tree listings and diffs (`listings.rs`), index updates (`index.rs`), attribute queries (`checkattr.rs`). |

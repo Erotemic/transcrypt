@@ -1,7 +1,8 @@
 //! The `transcrypt-rs` command: the effectful adapter around the verified
 //! core (`transcrypt-v3-core`), outside the Aeneas proof boundary.
 //!
-//! - `main.rs`: command dispatch, the passphrase and the public config.
+//! - `main.rs`: command dispatch, the passphrase and the public config;
+//!   `cli.rs`: the command line, parsed into a `Command`.
 //! - `filter.rs`: the clean and smudge filters; `process.rs`: Git's
 //!   long-running filter protocol around them.
 //! - `lifecycle.rs`: `verify-index`, the pre-commit hook, `hydrate` and
@@ -33,6 +34,7 @@ use std::{
 use zeroize::Zeroizing;
 mod attributes;
 mod audit;
+mod cli;
 mod credential;
 mod diff;
 mod filter;
@@ -54,6 +56,7 @@ mod setup;
 mod worktree;
 use attributes::{protect, unprotect};
 use audit::*;
+use cli::{AuditArgs, Command, DiffArgs, MergeArgs, HELP, USAGE};
 use filter::Filters;
 use rekey::{reencrypt, rekey};
 use git::*;
@@ -69,18 +72,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Options of the commands that take a passphrase.
-pub(crate) struct Options {
-    pub(crate) password_stdin: bool,
-    pub(crate) private: bool,
-    pub(crate) hydrate: bool,
-    /// `reencrypt`: the user already reviewed what will be trusted.
-    pub(crate) yes: bool,
-    /// Private mode: forget the key after this long without use.
-    pub(crate) timeout: Option<std::time::Duration>,
-    pub(crate) patterns: Vec<OsString>,
 }
 
 fn run() -> Result<(), String> {
@@ -106,202 +97,68 @@ fn run() -> Result<(), String> {
         os::default_sigpipe();
     }
     if action == "audit" {
-        return run_audit(&args[1..]);
+        return run_audit(AuditArgs::parse(&args[1..])?);
     }
+    // A command's arguments are refused only once the repository is found.
+    let command = Command::parse(action, &args[1..]);
     // Found once, and passed to everything that needs it. The current
     // directory stays where Git ran us: Git commands run in the repository's
     // root, and the drivers' file arguments are relative to here.
     let repo = Repository::discover()?;
-    match action {
-        "status" | "doctor" | "filter-process" | "lock" | "flush" | "check-encrypted" | "verify-index"
-            | "pre-commit" | "serve" | "uninstall" if args.len() > 1 => Err(format!("{action} takes no arguments")),
-        "status" => status(&repo),
-        "doctor" => doctor(&repo),
-        "filter-process" => process::serve(&repo),
-        "lock" => lock(&repo),
-        "flush" => flush(&repo),
-        "check-encrypted" => worktree_encrypted(&repo, &load_config(&repo)?),
-        "verify-index" => verify_index_command(&repo),
-        "pre-commit" => pre_commit(&repo),
-        "serve" => session::serve(&repo, &load_config(&repo)?),
-        "uninstall" => uninstall(&repo),
-        "hydrate" => match &args[1..] {
-            [] => hydrate(&repo).map(|n| eprintln!("Decrypted {n} file(s).")),
-            [flag] if flag == "--auto" => auto_hydrate(&repo),
-            _ => Err("hydrate takes no arguments".into()),
+    match command? {
+        Command::Status => status(&repo),
+        Command::Doctor => doctor(&repo),
+        Command::FilterProcess => process::serve(&repo),
+        Command::Lock => lock(&repo),
+        Command::Flush => flush(&repo),
+        Command::CheckEncrypted => worktree_encrypted(&repo, &load_config(&repo)?),
+        Command::VerifyIndex => verify_index_command(&repo),
+        Command::PreCommit => pre_commit(&repo),
+        Command::Serve => session::serve(&repo, &load_config(&repo)?),
+        Command::Uninstall => uninstall(&repo),
+        Command::Hydrate { auto: false } => hydrate(&repo).map(|n| eprintln!("Decrypted {n} file(s).")),
+        Command::Hydrate { auto: true } => auto_hydrate(&repo),
+        Command::Init(args) => init(&repo, &args),
+        Command::Unlock(args) => unlock(&repo, &args),
+        Command::Rekey { password_stdin } => rekey(&repo, password_stdin),
+        Command::Migrate(args) => migrate::migrate(&repo, &args),
+        Command::Reencrypt(args) => reencrypt(&repo, &args),
+        Command::Protect(patterns) => protect(&repo, &patterns),
+        Command::Unprotect(patterns) => unprotect(&repo, &patterns),
+        Command::Diff(DiffArgs { old_path, old, new_path, new }) =>
+            diff::diff(&repo, os::os_bytes(&old_path), Path::new(&old), os::os_bytes(&new_path), Path::new(&new)),
+        Command::DiffUnmerged { path } => {
+            println!("* Unmerged path {}", path.to_string_lossy());
+            Ok(())
         },
-        "init" | "unlock" | "rekey" | "migrate" | "reencrypt" => {
-            let options = parse_options(action, &args[1..])?;
-            match action {
-                "init" => init(&repo, &options),
-                "rekey" => rekey(&repo, &options),
-                "migrate" => migrate::migrate(&repo, &options),
-                "reencrypt" => reencrypt(&repo, &options),
-                _ => unlock(&repo, &options),
-            }
-        },
-        "protect" | "unprotect" => {
-            if args[1..].is_empty() { return Err(format!("{action} takes one or more .gitattributes patterns")); }
-            if action == "protect" { protect(&repo, &args[1..]) } else { unprotect(&repo, &args[1..]) }
-        },
-        "diff" => {
-            // Git's external diff interface: path old-file old-hex old-mode
-            // new-file new-hex new-mode [new-path rename-message].
-            match &args[1..] {
-                [path, old, _, _, new, _, _] => diff::diff(&repo, os::os_bytes(path), Path::new(old), os::os_bytes(path), Path::new(new)),
-                [path, old, _, _, new, _, _, new_path, _] =>
-                    diff::diff(&repo, os::os_bytes(path), Path::new(old), os::os_bytes(new_path), Path::new(new)),
-                [path] => { println!("* Unmerged path {}", path.to_string_lossy()); Ok(()) },
-                _ => Err("unexpected external diff arguments".into()),
-            }
-        },
-        "merge" => {
-            let [_, base, ours, theirs, path] = &args[..] else {
-                return Err("merge driver takes %O %A %B %P".into());
-            };
-            if merge::merge(&repo, Path::new(base), Path::new(ours), Path::new(theirs), os::os_bytes(path))? {
+        Command::Merge(MergeArgs { base, ours, theirs, path }) => {
+            if merge::merge(&repo, Path::new(&base), Path::new(&ours), Path::new(&theirs), os::os_bytes(&path))? {
                 Ok(())
             } else {
                 Err(format!("merge conflict in {}: resolve it in the decrypted file", path.to_string_lossy()))
             }
         },
-        "clean" | "smudge" => {
-            let [_, path] = &args[..] else { return Err("Git filter requires exactly one %f pathname".into()) };
+        Command::Filter { clean, path } => {
             let input = read_record(io::stdin())?;
-            let output = Filters::new(&repo).convert(action == "clean", os::os_bytes(path), input)?;
+            let output = Filters::new(&repo).convert(clean, os::os_bytes(&path), input)?;
             io::stdout().write_all(&output).map_err(|_| "cannot write output".into())
         },
-        "pre-push" => {
-            // Git passes the remote's name and URL.
-            const PRE_PUSH_ARGUMENTS: usize = 2;
-            if args[1..].len() > PRE_PUSH_ARGUMENTS { return Err("pre-push takes the remote name and URL".into()); }
-            pre_push(&repo, args.get(1).map(OsString::as_os_str))
-        },
-        _ => Err(format!("unknown v3 operation; {USAGE}")),
+        Command::PrePush { remote } => pre_push(&repo, remote.as_deref()),
     }
 }
 
-/// `audit [--max-commits=N] [<rev-list args>]`. Also runs keyless in a bare
-/// repository (a server's pre-receive hook), where there is no worktree and
-/// no key.
-fn run_audit(args: &[OsString]) -> Result<(), String> {
-    let mut revs = args;
-    let mut max_commits = None;
-    if let Some(limit) = revs.first().and_then(|a| a.to_str()).and_then(|a| a.strip_prefix("--max-commits=")) {
-        max_commits = Some(limit.parse::<usize>().map_err(|_| "--max-commits takes a number")?);
-        revs = &revs[1..];
-    }
+/// `audit`. Also runs keyless in a bare repository (a server's pre-receive
+/// hook), where there is no worktree and no key.
+fn run_audit(AuditArgs { max_commits, revs }: AuditArgs) -> Result<(), String> {
     let (repo, keyed) = match Repository::discover() {
         Ok(repo) => (repo, true),
         Err(_) => (Repository::discover_bare()?, false),
     };
-    let audited = audit(&repo, revs, keyed, max_commits)?;
+    let audited = audit(&repo, &revs, keyed, max_commits)?;
     println!("audit: {} protected record(s) checked{}", audited.records,
         if audited.authenticated { ", all authenticated with the key" }
         else { " (envelopes only: unlock to authenticate them)" });
     Ok(())
-}
-
-/// The `Options` of `action` (`init`, `unlock`, `rekey`, `migrate` or
-/// `reencrypt`) from its arguments.
-fn parse_options(action: &str, args: &[OsString]) -> Result<Options, String> {
-    let mut options = Options { password_stdin: false, private: false, hydrate: true, timeout: None, yes: false,
-        patterns: Vec::new() };
-    for arg in args {
-        let flag = arg.to_str();
-        if let (Some(duration), "init" | "unlock") = (flag.and_then(|f| f.strip_prefix("--timeout=")), action) {
-            options.timeout = Some(parse_duration(duration)?);
-            continue;
-        }
-        match (flag, action) {
-            (Some("--password-stdin"), _) => options.password_stdin = true,
-            (Some("--private"), "init" | "unlock" | "migrate") => options.private = true,
-            (Some("--no-hydrate"), "unlock") => options.hydrate = false,
-            (Some("--yes"), "reencrypt") => options.yes = true,
-            (Some(flag), _) if flag.starts_with('-') => return Err(format!("{action}: unknown option {flag}")),
-            (_, "init") => options.patterns.push(arg.clone()),
-            _ => return Err(format!("{action}: unexpected argument {}", arg.to_string_lossy())),
-        }
-    }
-    if options.timeout.is_some() && !options.private {
-        return Err("--timeout applies to the private mode: use it with --private".into());
-    }
-    Ok(options)
-}
-
-const USAGE: &str ="usage: transcrypt-rs init|protect|unprotect|unlock|status|doctor|lock|rekey|hydrate|\
-    verify-index|audit|migrate|uninstall|help|version (clean, smudge, filter-process, diff, merge, pre-commit and \
-    pre-push are invoked by Git)";
-
-const HELP: &str = "\
-transcrypt-rs: authenticated encryption of the files you choose, in Git.
-
-Typical workflow
-  transcrypt-rs init [PATTERN...]
-                            create .transcrypt/config, set up .gitattributes, install the
-                            filters and hooks, unlock, and protect the given patterns
-  transcrypt-rs protect PATTERN...
-                            encrypt the files matching each .gitattributes pattern (for
-                            example .env, 'config/*.key', 'private/**'); stages the change
-  transcrypt-rs unprotect PATTERN...
-                            stop encrypting those files: their next commit is plaintext
-  transcrypt-rs unlock      authenticate the passphrase once; the derived key is stored in
-                            .git/transcrypt-v3/key and Git works normally from then on
-  transcrypt-rs status      show the unlock state and each protected file
-  transcrypt-rs doctor      check that filters, attributes, hooks and the staged index
-                            protect this checkout (non-zero exit if anything is missing)
-  transcrypt-rs lock        replace plaintext by the committed ciphertext and forget the key;
-                            refuses if any protected file has uncommitted changes
-  transcrypt-rs rekey       change the passphrase: a new config and every protected file
-                            re-encrypted, staged for you to commit
-  transcrypt-rs reencrypt [--yes]
-                            re-encrypt staged files still encrypted under an earlier config
-                            (cherry-picked or rebased across a rekey): lists them with the
-                            commits that brought them, asks for that config's passphrase
-  transcrypt-rs audit [<rev-list args>]
-                            check, without the key, that every protected file in the given
-                            commits (default HEAD) is v3 ciphertext; authenticates them when
-                            unlocked. The pre-push hook runs it on the commits being pushed;
-                            run it in CI or a server hook to enforce it for everyone
-  transcrypt-rs uninstall   lock, then remove the filters and hooks from this checkout
-  transcrypt-rs migrate     convert a repository protected by Bash transcrypt (v2): run it
-                            where Bash transcrypt has decrypted the files; keeps your patterns
-  transcrypt-rs version     print the version (and, for release builds, the source commit)
-
-Options
-  --password-stdin          (init, unlock, rekey, migrate, reencrypt) read the passphrase from stdin
-                            instead of the terminal (where a new one is asked for twice)
-  --private                 (init, unlock, migrate) keep the key only in memory (a background
-                            agent, until lock or logout) and decrypted files private (0600)
-  --timeout=DURATION        (init, unlock, with --private) forget the key after that long
-                            without use (90s, 15m, 2h); decrypted files stay until `lock`
-  --no-hydrate              (unlock) leave ciphertext in the worktree
-
-A file is protected when its .gitattributes pattern says `transcrypt` (or sets
-filter=transcrypt-v3). Each one is encrypted with AES-256-SIV under a key derived
-by Argon2id from the passphrase, bound to the repository config and its exact
-Git path. While unlocked, `git diff` shows decrypted changes, merges work like
-text, and `git mv` is re-encrypted for the new name when you commit. Equal
-plaintexts at the same path give equal ciphertexts. Filenames, sizes and
-history structure are public. See docs/verification/V3-USER-GUIDE.md.";
-
-/// Seconds in each unit `parse_duration` accepts.
-const SECOND: u64 = 1;
-const MINUTE: u64 = 60 * SECOND;
-const HOUR: u64 = 60 * MINUTE;
-
-/// A positive duration: a number with an optional unit `s`, `m` (the
-/// default) or `h`.
-fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
-    let (number, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
-        Some((i, _)) => text.split_at(i),
-        None => (text, "m"),
-    };
-    let scale = match unit { "s" => Some(SECOND), "m" => Some(MINUTE), "h" => Some(HOUR), _ => None };
-    match (number.parse::<u64>(), scale) {
-        (Ok(n), Some(scale)) if n > 0 => Ok(std::time::Duration::from_secs(n.saturating_mul(scale))),
-        _ => Err(format!("--timeout takes a positive duration such as 90s, 15m or 2h (got {text:?})")),
-    }
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

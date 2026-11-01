@@ -16,7 +16,7 @@ use crate::{
     passphrase,
     setup::{init_with_rollback, uncommitted_setup},
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
-    Options,
+    cli::MigrateArgs,
 };
 
 /// How a Bash transcrypt (v2) record starts: OpenSSL's `Salted__`, in
@@ -81,7 +81,7 @@ fn rewrite_attributes(text: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// `migrate`: see the module documentation.
-pub(crate) fn migrate(repo: &Repository, options: &Options) -> Result<(), String> {
+pub(crate) fn migrate(repo: &Repository, args: &MigrateArgs) -> Result<(), String> {
     // An uncommitted v3 config is an interrupted migration: rerunning it,
     // with the same v3 passphrase, completes it.
     let resuming = uncommitted_setup(repo, "this repository already uses v3")?;
@@ -131,7 +131,7 @@ pub(crate) fn migrate(repo: &Repository, options: &Options) -> Result<(), String
     let attribute_files: Vec<PathBuf> = entries.iter()
         .filter(|e| is_attributes_file(&e.path))
         .map(|e| indexed_path(&e.path)).collect::<Result<_, _>>()?;
-    let password = passphrase(options.password_stdin, true)?;
+    let password = passphrase(args.password_stdin, true)?;
     // Bash's own pre-commit hook checks only `filter=crypt` files, which will
     // no longer exist; it is set aside so the v3 hook can be installed.
     let hooks = repo.common_dir().join("hooks");
@@ -148,7 +148,7 @@ pub(crate) fn migrate(repo: &Repository, options: &Options) -> Result<(), String
         }
         let _ = git(repo, &["reset", "-q", "--", "."]);
     };
-    let rollback = match init_with_rollback(repo, options, Some(password)) {
+    let rollback = match init_with_rollback(repo, args.mode, |_| Ok(password)) {
         Ok(rollback) => rollback,
         Err(e) if resuming => return Err(format!("{e}; rerun `transcrypt-rs migrate` to complete the conversion")),
         Err(e) => { restore_bash(); return Err(format!("{e}; the conversion was rolled back")); },

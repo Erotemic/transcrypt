@@ -12,7 +12,7 @@ use crate::{
     load_config, passphrase, session,
     setup::{activate, new_config},
     worktree::{find_protected, indexed_path, replace_if_holds, staging_dir, write_repository_file},
-    Options,
+    cli::{KeyMode, ReencryptArgs},
 };
 use std::path::Path;
 
@@ -25,11 +25,12 @@ type Id = [u8; transcrypt_v3_core::ID_LEN];
 /// config are staged in one index update for the user to commit. Only then
 /// does the worktree config, written like a protected file (never through a
 /// symlink), and the credential switch to the new key. Commits made before
-/// keep their old records, readable with the old passphrase.
-pub(crate) fn rekey(repo: &Repository, options: &Options) -> Result<(), String> {
+/// keep their old records, readable with the old passphrase. The new one is
+/// read from stdin with `password_stdin`.
+pub(crate) fn rekey(repo: &Repository, password_stdin: bool) -> Result<(), String> {
     let old_config = load_config(repo)?;
     let old_key = Key::load(repo, &old_config)?.ok_or("unlock with the current passphrase first")?;
-    let password = passphrase(options.password_stdin, true)?;
+    let password = passphrase(password_stdin, true)?;
     // No hydrate or lock may run meanwhile.
     let staging = staging_dir(repo)?;
     // Decrypt everything first, then require that each file is exactly the
@@ -61,7 +62,8 @@ pub(crate) fn rekey(repo: &Repository, options: &Options) -> Result<(), String> 
     if old_key.private() {
         session::stop(repo, &old_config)?;
     }
-    activate(repo, &config, &key, old_key.private(), None)
+    let mode = if old_key.private() { KeyMode::Private { idle: None } } else { KeyMode::Stored };
+    activate(repo, &config, &key, mode)
         .map_err(|e| format!("{e}; the rekey is staged: run `transcrypt-rs unlock` with the NEW passphrase"))?;
     drop(staging);
     // The worktree plaintext now cleans to the new staged records.
@@ -94,7 +96,7 @@ struct Earlier {
 /// records unchanged) are opened under that config, found in history and
 /// authenticated with its passphrase, at their own path, and re-sealed under
 /// the current config. Nothing else changes; the result is staged.
-pub(crate) fn reencrypt(repo: &Repository, options: &Options) -> Result<(), String> {
+pub(crate) fn reencrypt(repo: &Repository, args: &ReencryptArgs) -> Result<(), String> {
     let config = load_config(repo)?;
     let key = Key::require(repo, &config)?;
     let stale = stale_files(repo, &transcrypt_rs::config_id(&config))?;
@@ -117,8 +119,8 @@ pub(crate) fn reencrypt(repo: &Repository, options: &Options) -> Result<(), Stri
     for file in &stale {
         eprintln!("  {} (config {}; {})", file.staged.name(), crate::short_id(&file.config), origin(repo, &head, &file.staged));
     }
-    if !options.yes {
-        let confirmed = !options.password_stdin && rpassword::prompt_password("Type yes to continue: ")
+    if !args.yes {
+        let confirmed = !args.password_stdin && rpassword::prompt_password("Type yes to continue: ")
             .is_ok_and(|answer| answer.trim() == "yes");
         if !confirmed {
             return Err("not confirmed; review those commits, then run `transcrypt-rs reencrypt --yes`".into());
@@ -130,7 +132,7 @@ pub(crate) fn reencrypt(repo: &Repository, options: &Options) -> Result<(), Stri
         let names: Vec<String> = stale.iter().filter(|f| f.config == old.id).map(|f| f.staged.name().into_owned()).collect();
         eprintln!("Passphrase of config {} (introduced by {}), for: {}",
             crate::short_id(&old.id), old.introduced, names.join(", "));
-        let password = passphrase(options.password_stdin, false)?;
+        let password = passphrase(args.password_stdin, false)?;
         keys.push((old, unlock_config(&password, &old.bytes)?));
     }
     // Decrypt and re-seal every file before writing any.
