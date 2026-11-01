@@ -48,7 +48,8 @@ theorem be32_decode (n : Nat) (h : n < 2^32) :
 /-- `be32` is injective below 2^32. -/
 theorem be32_injective {m n : Nat} (hm : m < 2^32) (hn : n < 2^32) (h : be32 m = be32 n) : m = n := by
   simp only [be32, List.cons.injEq, and_true] at h
-  rw [← be32_decode m hm, ← be32_decode n hn, h.1, h.2.1, h.2.2.1, h.2.2.2]
+  obtain ⟨h24, h16, h8, h0⟩ := h
+  rw [← be32_decode m hm, ← be32_decode n hn, h24, h16, h8, h0]
 
 /-! ## The stored key -/
 
@@ -73,6 +74,20 @@ theorem storedKeySpec_unlocked {present : Bool} {file current : List Nat} {authe
     (h : storedKeySpec present file current authentic = .unlocked) :
     present = true ∧ file.length = keyFileLen ∧ file.take configLen = current ∧ authentic = true := by
   unfold storedKeySpec at h
-  split at h <;> (try split at h) <;> (try split at h) <;> simp_all
+  -- No file or a bare key is `.absent`, another length `.damaged`; of a
+  -- file of the right length only the matching, authentic one is unlocked.
+  by_cases habsent : present = false ∨ file.length = keyLen
+  · rw [if_pos habsent] at h; cases h
+  rw [if_neg habsent] at h
+  by_cases hdamaged : file.length ≠ keyFileLen
+  · rw [if_pos hdamaged] at h; cases h
+  rw [if_neg hdamaged] at h
+  by_cases hmatch : file.take configLen = current ∧ authentic = true
+  · have hpresent : present = true := by
+      cases present
+      · exact absurd (Or.inl rfl) habsent
+      · rfl
+    exact ⟨hpresent, Decidable.of_not_not hdamaged, hmatch.1, hmatch.2⟩
+  · rw [if_neg hmatch] at h; cases h
 
 end Transcrypt.V3Policy

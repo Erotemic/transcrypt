@@ -52,8 +52,10 @@ def OpensTo (s : Suite) (config path record pt : List Nat) : Prop :=
 theorem opensTo_unique (s : Suite) {config path record pt pt' : List Nat}
     (h : OpensTo s config path record pt) (h' : OpensTo s config path record pt') :
     pt = pt' := by
+  obtain ⟨-, -, -, hrec⟩ := h
+  obtain ⟨-, -, -, hrec'⟩ := h'
   have heq : sealedRecord s config path pt = sealedRecord s config path pt' := by
-    rw [← h.2.2.2, ← h'.2.2.2]
+    rw [← hrec, ← hrec']
   simp only [sealedRecord, encodeFile, List.append_assoc, List.append_cancel_left_eq] at heq
   exact s.siv_injective _ _ _ heq
 
@@ -73,8 +75,8 @@ theorem sealed_shape (s : Suite) (config path pt : List Nat) :
 theorem seal_opens (s : Suite) {config path pt : List Nat}
     (h : MaySeal s config path pt) :
     OpensTo s config path (sealedRecord s config path pt) pt := by
-  refine ⟨h.1, h.2.1, ?_, rfl⟩
-  have := h.2.2.1
+  obtain ⟨hpath, hconfig, hsize, -⟩ := h
+  refine ⟨hpath, hconfig, ?_, rfl⟩
   rw [sealed_length]
   simp only [maxRecord]
   omega

@@ -40,9 +40,16 @@ theorem lock_flush_recoverable (s : Suite) {config path worktree record : List N
     (hseal : MaySeal s config path worktree)
     (hflush : lockSpec worktree record (sealedRecord s config path worktree) = some .flush) :
     OpensTo s config path record worktree := by
+  -- `.flush` is returned only when the worktree is not already the record
+  -- and resealing it gives exactly the record.
   have h : sealedRecord s config path worktree = record := by
     unfold lockSpec at hflush
-    split at hflush <;> (try split at hflush) <;> first | assumption | cases hflush
+    by_cases hkeep : worktree = record
+    · rw [if_pos hkeep] at hflush; cases hflush
+    · rw [if_neg hkeep] at hflush
+      by_cases hreseal : sealedRecord s config path worktree = record
+      · exact hreseal
+      · rw [if_neg hreseal] at hflush; cases hflush
   exact h ▸ seal_opens s hseal
 
 /-! ## Smudge -/
@@ -68,7 +75,13 @@ theorem smudgeSpec_keep_envelope {blob id : List Nat} {unlocked : Bool}
     (h : smudgeSpec blob id unlocked = some .keep) :
     ∃ found, decodeFileHeaderShape blob = some found ∧ blob.length ≤ maxRecord := by
   unfold smudgeSpec at h
-  cases hd : decodeFileHeaderShape blob <;> simp_all
+  -- An oversized blob and bytes without the header are refused (`none`).
+  by_cases hbig : blob.length > maxRecord
+  · rw [if_pos hbig] at h; cases h
+  rw [if_neg hbig] at h
+  cases hd : decodeFileHeaderShape blob with
+  | none => rw [hd] at h; cases h
+  | some found => exact ⟨found, rfl, Nat.le_of_not_gt hbig⟩
 
 /-! ## Pre-commit repair -/
 
