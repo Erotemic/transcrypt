@@ -187,8 +187,11 @@ stable, but reordering loops inside a proved function renames them.
   the spec's name (`OID_START_val : OID_START.val = oidStart`), and
   `scalar_tac` uses both (`scalar_tac_simps`) to discharge bounds. State
   theorems with the spec's names (`entryFixedLen`, `fileMinLen`, `tab`, ...);
-  `unfold_v3_bytes` (at the start of a proof, or inside a `by` argument)
-  turns them into numbers for `omega`, which treats a name as an unknown.
+  `unfold_v3_bytes` (at the start of a proof, or inside a `by` argument;
+  defined in `V3Wire/Verification/Tactics.lean`, outside the independent
+  spec) turns them into numbers for `omega`, which treats a name as an
+  unknown. The spec's own proofs do not use it; they state the numbers in a
+  focused lemma (`hexDigit_iff`).
   Beware `autoImplicit`: an unopened name such as `configLen` in a statement
   silently becomes a variable; qualify it (`Transcrypt.V3Wire.configLen`) or
   `open` it. `[MOD` is a token (`Nat.ModEq`): write `simp [ MODE_LEN_val]`.

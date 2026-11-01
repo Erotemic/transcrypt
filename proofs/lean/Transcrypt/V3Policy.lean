@@ -80,24 +80,6 @@ abbrev frameConfigStart : Nat := 1
 abbrev frameLenStart : Nat := frameConfigStart + configLen
 abbrev frameHeaderLen : Nat := frameLenStart + be32Len
 
-/-- Unfold these bytes and lengths (and the wire lengths) to their numbers
-    everywhere, for `omega`, which treats a named constant as an unknown. -/
-macro "unfold_v3_bytes" : tactic =>
-  `(tactic| try simp only [Transcrypt.V3Wire.configMagicLen, Transcrypt.V3Wire.fileMagicLen,
-    Transcrypt.V3Wire.saltLen, Transcrypt.V3Wire.tagLen, Transcrypt.V3Wire.idLen,
-    Transcrypt.V3Wire.configLen, Transcrypt.V3Wire.fileHeaderLen, Transcrypt.V3Wire.fileMinLen,
-    Transcrypt.V3Policy.tab, Transcrypt.V3Policy.lf,
-    Transcrypt.V3Policy.space, Transcrypt.V3Policy.digitZero, Transcrypt.V3Policy.digitNine,
-    Transcrypt.V3Policy.lowerA, Transcrypt.V3Policy.lowerF, Transcrypt.V3Policy.hexLetterValue,
-    Transcrypt.V3Policy.decimalRadix, Transcrypt.V3Policy.hexRadix, Transcrypt.V3Policy.opPing,
-    Transcrypt.V3Policy.opEncrypt, Transcrypt.V3Policy.opDecrypt, Transcrypt.V3Policy.opStop,
-    Transcrypt.V3Policy.keyLen, Transcrypt.V3Policy.keyFileLen, Transcrypt.V3Policy.sha1OidLen,
-    Transcrypt.V3Policy.sha256OidLen, Transcrypt.V3Policy.maxSizeDigits,
-    Transcrypt.V3Policy.pktHeaderLen, Transcrypt.V3Policy.modeLen, Transcrypt.V3Policy.oidStart,
-    Transcrypt.V3Policy.oidEndLen, Transcrypt.V3Policy.entryFixedLen, Transcrypt.V3Policy.be32Len,
-    Transcrypt.V3Policy.frameConfigStart, Transcrypt.V3Policy.frameLenStart,
-    Transcrypt.V3Policy.frameHeaderLen] at *)
-
 def configDomain : List Nat := ascii "transcrypt/v3/config"
 def fileDomain : List Nat := ascii "transcrypt/v3/file"
 /-- The Git attribute selecting protected files, and the value that does. -/
@@ -335,17 +317,24 @@ def HexDigit (c : Nat) : Prop := (digitZero ≤ c ∧ c ≤ digitNine) ∨ (lowe
 def ObjectId (oid : List Nat) : Prop :=
   (oid.length = sha1OidLen ∨ oid.length = sha256OidLen) ∧ ∀ c ∈ oid, HexDigit c
 
+/-- The two digit ranges as numbers: `0`-`9` are bytes 48-57, `a`-`f` are
+    97-102. -/
+theorem hexDigit_iff {c : Nat} : HexDigit c ↔ (48 ≤ c ∧ c ≤ 57) ∨ (97 ≤ c ∧ c ≤ 102) := Iff.rfl
+
 /-- An object name is neither revision syntax (no `:`, `^`, `~`, `@`, `{`)
-    nor an option (it does not start with `-`). -/
+    nor an option (it does not start with `-`): those bytes (58, 94, 126,
+    64, 123, 45) are not hexadecimal digits. -/
 theorem objectId_plain {oid : List Nat} (h : ObjectId oid) :
     ∀ c ∈ oid, c ∉ ascii ":^~@{-" := by
   intro c hc hbad
-  rcases h.2 c hc with ⟨h1, h2⟩ | ⟨h1, h2⟩ <;> simp [ascii] at hbad <;> unfold_v3_bytes <;> omega
+  simp [ascii] at hbad
+  rcases hexDigit_iff.mp (h.2 c hc) with ⟨_, _⟩ | ⟨_, _⟩ <;> omega
 
 /-- An object name has no byte below `0`: in particular no NUL or TAB. -/
 theorem ObjectId.not_mem_of_lt {oid : List Nat} (h : ObjectId oid) {c : Nat} (hc : c < digitZero) :
     c ∉ oid := fun hm => by
-  rcases h.2 c hm with ⟨_, _⟩ | ⟨_, _⟩ <;> unfold_v3_bytes <;> omega
+  have hc48 : c < 48 := hc
+  rcases hexDigit_iff.mp (h.2 c hm) with ⟨_, _⟩ | ⟨_, _⟩ <;> omega
 
 theorem objectId_no_tab {oid : List Nat} (h : ObjectId oid) : tab ∉ oid :=
   h.not_mem_of_lt (by decide)

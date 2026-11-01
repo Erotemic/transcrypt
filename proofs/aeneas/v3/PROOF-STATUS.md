@@ -20,7 +20,8 @@ axioms, which the audit did not report. The lemma `be32_bv` is now proved bit
 by bit without `bv_decide`, and the script parses complete reports (checked
 against a wrapped list containing a native axiom).
 
-Shared lemmas, loop rules and tactics are in `V3Wire/Verification/Basic.lean`;
+Shared lemmas, loop rules and tactics are in `V3Wire/Verification/Basic.lean`
+(`unfold_v3_bytes`, which unfolds the spec's named bytes, in `Tactics.lean`);
 the snapshot proofs are split into `Snapshot{Listing,Order,Attrs,Lookup,Moves}`
 (aggregated by `Snapshot.lean`).
 

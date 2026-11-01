@@ -17,7 +17,9 @@ def configMagic : List Nat := [84, 67, 70, 71, 51, 0, 1]
 def fileMagic : List Nat := [84, 86, 51, 70, 0, 1]
 
 /-! Field lengths, in bytes. They are reducible (definitional unfolding and
-`decide`); `simp only [..]` or `unfold` exposes the numbers to `omega`. -/
+`decide`); `simp only [..]` or `unfold` exposes the numbers to `omega`.
+The refinement proofs' tactic for that, `unfold_v3_bytes`, lives in the
+verification layer (`V3Wire/Verification/Tactics.lean`), not here. -/
 
 /-- The config magic `TCFG3\0\x01` and the record magic `TV3F\0\x01`. -/
 abbrev configMagicLen : Nat := 7
@@ -32,14 +34,6 @@ abbrev configLen : Nat := configMagicLen + saltLen + tagLen
     header and the tag of an empty plaintext). -/
 abbrev fileHeaderLen : Nat := fileMagicLen + idLen
 abbrev fileMinLen : Nat := fileHeaderLen + tagLen
-
-/-- Unfold the field lengths to their numbers everywhere, for `omega` (which
-    treats a named constant as an unknown) and for matching against the
-    production constants' numeric `_val` facts. -/
-macro "unfold_v3_lengths" : tactic =>
-  `(tactic| try simp only [Transcrypt.V3Wire.configMagicLen, Transcrypt.V3Wire.fileMagicLen,
-    Transcrypt.V3Wire.saltLen, Transcrypt.V3Wire.tagLen, Transcrypt.V3Wire.idLen,
-    Transcrypt.V3Wire.configLen, Transcrypt.V3Wire.fileHeaderLen, Transcrypt.V3Wire.fileMinLen] at *)
 
 theorem configMagic_length : configMagic.length = configMagicLen := rfl
 theorem fileMagic_length : fileMagic.length = fileMagicLen := rfl
