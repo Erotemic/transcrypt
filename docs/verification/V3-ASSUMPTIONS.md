@@ -49,7 +49,7 @@ one.
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
 | A17 | The stored key is local-only, used only for the config it authenticates, and mode-independent | Decision PROVED (`stored_key_state`, `stored_key_authenticates_current_config`); file I/O TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
-| A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`seal_action`, `held_entries`, `is_local_change`, `next_move_source`, `hook_repairs_only_local_changes`); TESTED (real Git) + REVIEWED |
+| A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`repair_plan`, `needs_record`, `entry_provenance`, `next_move_source`, `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`); TESTED (real Git) + REVIEWED |
 | A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK |
 | A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record), in byte order of paths, each path once | TESTED; parsing and order PROVED (`parse_listing_spec`: anything else is refused) |
 | A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
@@ -137,15 +137,29 @@ one.
     `verify-index` compute every input of their decisions with verified
     functions over the exact Git listings: `parse_listing`,
     `listing_fields`, `parse_listing_attrs`, `first_unselectable`,
-    `held_entries`, `is_local_change`, `next_move_source`, `blob_elsewhere`;
+    `held_entries`, `entry_provenance`, `needs_record`, `repair_plan`,
+    `next_move_source`, `blob_elsewhere`;
     object replies are framed by `parse_batch_header` and `blob_read`; the
     stored key by `stored_key_state`. The end-to-end theorems
     (`hook_accepts_only_authenticated_ciphertext`,
-    `hook_repairs_only_local_changes`,
+    `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`,
     `stored_key_authenticates_current_config`) take the adapter's observed
     results of these calls as hypotheses (`HookEvidence`; for the repairs,
     `RepairInputs` with `RepairContracts`), so what remains of A4
     on this path is listed below. See [the security argument](V3-SECURITY-ARGUMENT.md).
+  - **PROVED (typed repair plan, 2026-11-01).** The pre-commit repair is
+    decided by the core on typed values, not four positional booleans from
+    different domains. The core derives each entry's `Provenance`
+    (`Committed`, `Local`, `Forced`, `Unknown`) from the snapshot bytes in
+    one call (`entry_provenance` = spec `ProvenanceIs`), says whether its
+    blob is read at all (`needs_record`; `hook_skips_only_unrepairable`: a
+    skipped entry is neither the user's change nor forced), and decides
+    `repair_plan(Provenance, RecordClass)` = spec `repairSpec` (a complete
+    result, `Rebind` naming the `HEAD` record it re-seals from). So the
+    adapter no longer computes the local-change input from its own arrays,
+    nor orders booleans for the decision (a swapped argument does not
+    typecheck); the end-to-end statement reasons about the generated
+    `entry_provenance`, `needs_record` and `repair_plan` directly.
 - **Residual:** the adapter Rust itself is not proved. On the pre-commit
   path what remains reviewed and tested, not proved, is:
   - that the adapter acts on the verified results as `HookEvidence` and the
@@ -171,7 +185,17 @@ one.
   - finding the commits being brought in (A23);
   - the extra refusals for unprotected entries (a record moved to an
     unprotected name, a file that lost its protection), which look up old
-    blobs by path in adapter code; they only refuse, and match `audit`.
+    blobs by path in adapter code; they only refuse, and match `audit`;
+  - for the repairs, the evidence about each blob: that the `RecordClass`
+    `classify` reports is what `RecordEvidence` states (it tries the key at
+    the entry's own path, then reads the header, then tries the move
+    sources `next_move_source` yields, in order: `OpensHere`, `Plaintext`,
+    `MovedFrom(j)` with the plaintext opened at `HEAD` record `j`, or
+    `Unusable`), that it reads the blob only when `needs_record` says so,
+    and that it executes exactly the plan (`Seal`: the staged plaintext;
+    `Rebind(j)`: that plaintext; `Keep`/`Leave`: nothing); and that it
+    lists the incoming commits whenever a protected entry is not in `HEAD`
+    (`RepairContracts.lazy`).
 - **Next reduction:** a verified `ls-tree` record parser (removing the
   `tree_record` rewrite), and moving the unprotected-entry checks onto
   `held_entries`.
@@ -560,17 +584,23 @@ one.
   - Git's content-based rename detection cannot pair path-bound records, so
     a rename on one branch and an edit on another merge as modify/delete
     (recoverable in plaintext; tested).
-- **Proof:** the decision itself is the verified `seal_action`
-  (`seal_action_spec`, `sealSpec_repairs_only_local`: only a local change
-  that does not already open is ever repaired). Its inputs are verified
-  too: membership in `HEAD` and the incoming commits (`held_entries`), the
-  local-change input (`is_local_change` = spec `LocalChange`) and the move
-  sources (`next_move_source` = spec `MoveSource`, first at or after an
-  offset, tried in `HEAD` order). `hook_repairs_only_local_changes`
-  composes them: whatever the hook seals or rebinds is a `LocalChange`, and
-  a rebind re-encrypts only a record that authenticates at a `HEAD` path it
-  was moved from. Remaining: the sequencing state (A23), Git's listings
-  (A20), and the adapter's call sequence (A4).
+- **Proof:** the decision itself is the verified `repair_plan` on a
+  `Provenance` and a `RecordClass` (`repair_plan_spec` = spec `repairSpec`,
+  `repairSpec_repairs_only_local`: only the user's content, or plaintext
+  `protect` forced, that does not already open is ever repaired; only
+  plaintext is sealed; only a record the user moved is re-sealed). The
+  provenance is verified too: `entry_provenance` looks the entry up in
+  `HEAD` and the incoming commits (= spec `ProvenanceIs`), and
+  `needs_record` decides which blobs are read; the move sources are
+  `next_move_source` (= spec `MoveSource`, first at or after an offset,
+  tried in `HEAD` order). `hook_repairs_only_local_changes` composes them:
+  whatever the hook seals or rebinds is the user's change (or forced
+  plaintext, sealed), a `LocalChange`, and a rebind from `HEAD` record `j`
+  re-encrypts only a record that authenticates at exactly that record's
+  path, a place it was moved from; `hook_skips_only_unrepairable`: an entry
+  whose blob is skipped is neither the user's change nor forced.
+  Remaining: the sequencing state (A23), Git's listings (A20), and the
+  adapter's evidence and execution of the plan (A4).
 - **Status:** decision and inputs PROVED; TESTED + REVIEWED.
 
 ### A19 — Git's attribute evaluation (new)
@@ -807,7 +837,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Agent authorization and framing | `authorize_agent_request_spec`, `decode_frame_header_encode` |
 | Parsing Git's attribute answers (what is protected) | `parse_attr_record_spec` (both directions), `parse_attr_response_spec`, `parse_attr_response_complete` |
 | Smudge keeps only genuine envelopes; opens only its own config | `smudge_action_spec`, `smudgeSpec_keep_envelope`, `smudgeModel_spec` |
-| The pre-commit hook repairs only local changes | `seal_action_spec`, `sealSpec_repairs_only_local`; inputs: `held_entries_spec`, `is_local_change_spec`, `next_move_source_spec`; composed in `hook_repairs_only_local_changes` |
+| The pre-commit hook repairs only local changes | `repair_plan_spec`, `repairSpec_repairs_only_local`, `needs_record_spec`, `needs_record_skip`; inputs: `entry_provenance_spec`, `provenance_of_spec`, `next_move_source_spec`; composed in `hook_provenance`, `hook_skips_only_unrepairable`, `hook_repairs_only_local_changes` |
 | Git listings are parsed exactly; each entry's fields | `parse_listing_spec` (both directions), `listing_fields_spec` |
 | Selection checked against the listing's own paths; selectability | `parse_listing_attrs_spec` (both directions), `first_unselectable_spec` |
 | Keyless move check | `blob_elsewhere_spec` |
@@ -833,7 +863,7 @@ verified decision that gates it:
 | `clean` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
 | Key loading | `stored_key_state` (with `authenticate_config` under the stored key), or agent `Ping` | stored key file (config ‖ 64-byte key); current config | `Unlocked`; `unlock` replaces a `Damaged` file |
 | Protected-file selection | `parse_attr_response` over the whole answer (one record per requested path, in order, nothing else); `is_reserved_path` | raw paths sent to `check-attr -z --stdin filter` (`--cached`, worktree, or a commit's temporary index) | `protected = true` |
-| Pre-commit re-encryption (`seal_staged`) | `seal_action` on (`open_record` at its path, `is_local_change` over `held_entries` in `HEAD` and the incoming commits, `parse_file_header`, `open_record` at a `next_move_source` path), then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` and incoming listings (`parse_listing`); sequencing state | `Seal` or `Rebind` only |
+| Pre-commit re-encryption (`seal_staged`) | `entry_provenance` over the index, `HEAD` and incoming listings, then `needs_record`; only then the blob's `RecordClass` (`open_record` at its path, `parse_file_header`, `open_record` at each `next_move_source` path), and `repair_plan` on the two; then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` and incoming listings (`parse_listing`); sequencing state | `Seal` or `Rebind(j)` only |
 | Agent framing | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, lengths | proved roundtrip |
 | Git filter-process framing | `decode_pkt_len` for every packet; then the same conversion as the per-file filters | 4-byte pkt-line headers from Git; `command=`/`pathname=` values | `Ok` (else the process ends and Git fails) |
 | Agent dispatch | `authorize_agent_request` before the body is read; peer UID check | opcode, supplied config, startup config, path, length | `Ok(op)` from a same-UID peer |

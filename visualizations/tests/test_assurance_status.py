@@ -36,7 +36,7 @@ class AssuranceStatusTests(unittest.TestCase):
             'adapter': 'tested',
             'gate': 'source-proof',
         })
-        self.assertEqual(plan.node_map()['gate'].evidence.basis, 'seal_action_spec')
+        self.assertEqual(plan.node_map()['gate'].evidence.basis, 'repair_plan_spec')
         stages = {b.key: b for b in plan.beats}
         self.assertEqual(stages['provenance'].status, 'tested')
         self.assertEqual(stages['decision'].status, 'proved')

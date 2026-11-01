@@ -191,7 +191,7 @@ beat = "target"
 title = "The remaining A4 input problem"
 kicker = "SOURCE PROOF / NATIVE ADAPTER"
 subtitle = "Follow Git facts to a proved decision; the origin and effects of those facts remain separately trusted."
-points = ["Git selection and cat-file framing: A7 / A19 / A4.", "seal_action_spec proves what to do with supplied move facts.", "Stored-key selection and stamp-checked effects are tested, not source-proved."]
+points = ["Git selection and cat-file framing: A7 / A19 / A4.", "repair_plan_spec proves what to do with supplied move facts.", "Stored-key selection and stamp-checked effects are tested, not source-proved."]
 
 [[slide]]
 id = "trust-boundary"

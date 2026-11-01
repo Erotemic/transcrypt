@@ -141,30 +141,37 @@ matches it is part of A4 (reviewed, tested).
 
 `hook_repairs_only_local_changes`, in prose:
 
-> For a protected index entry, suppose the hook computed the inputs of the
-> verified decision `seal_action` with the verified core: membership in
-> `HEAD` and in the commits being merged, picked, reverted or rebased
-> (`held_entries`; those commits are consulted only when some protected
-> entry changed), the local-change input (`is_local_change`), whether the
-> blob opens at its own path (`open_record`), whether it has the v3 header
-> (`parse_file_header`) and, for a move, a source from `next_move_source` at
-> which it opens. Assume Git's listings are exact (**A20**) and the
-> sequencing state names the commits being brought in (**A23**). If
-> `seal_action` decided to seal or re-seal the entry, then:
+> For a protected index entry, suppose the hook asked the verified core
+> where its content came from (`entry_provenance`: a `Provenance`, from
+> `HEAD` and the commits being merged, picked, reverted or rebased, which
+> are consulted only when some protected entry changed), read the blob and
+> found what it is (a `RecordClass`: it opens at its own path
+> (`open_record`); it has no v3 header (`parse_file_header`); it opens at
+> the path of `HEAD` record `j`, a move source from `next_move_source`; or
+> none of these), and the verified `repair_plan` decided on the two. Assume
+> Git's listings are exact (**A20**) and the sequencing state names the
+> commits being brought in (**A23**). If `repair_plan` decided to seal or
+> re-seal the entry, then:
 >
-> * it is a **local change** (`LocalChange`): neither `HEAD` nor any
->   incoming commit holds that blob at that path (and the incoming commits
->   are known), unless `protect` forced sealing a plaintext;
+> * its provenance is exactly where its content came from (`ProvenanceIs`),
+>   and it is **the user's change** (`UserStaged`: neither `HEAD` nor any
+>   incoming commit holds that blob at that path, and the incoming commits
+>   are known), unless `protect` forced it and it is sealed; so it is a
+>   `LocalChange`;
 > * it did not already authenticate at its path;
 > * only plaintext (no v3 header) is sealed;
-> * a rebind re-encrypts exactly the plaintext of a record that
->   authenticates at a `HEAD` path it was moved from (`MoveSource`: same
->   blob, another path, whose own entry has left the index).
+> * a rebind from `HEAD` record `j` re-encrypts exactly the plaintext of a
+>   record that authenticates at the path of that record (`MoveSource`:
+>   same blob, another path, whose own entry has left the index).
+
+`hook_skips_only_unrepairable`: an entry whose blob the hook does not read
+(the verified `needs_record` says it cannot be repaired) is neither the
+user's change nor forced, so skipping it misses no repair.
 
 So content that arrives in a commit is only ever checked by Theorem 1,
 never repaired: a hostile commit that moves a record or adds plaintext is
-refused, not laundered (`sealSpec_repairs_only_local`, now with the inputs
-proved).
+refused, not laundered (`repairSpec_repairs_only_local`, with the
+provenance and the decision proved about the generated code).
 
 ## Theorem 3: the key is the one for this configuration
 
@@ -185,7 +192,7 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 | `Realizes inst prims σ` | the primitives compute AES-SIV / SHA-256 | A5 (with A9) | TESTED (vectors, differential) |
 | `hid : wireBytes id = σ.digest16 config` | the configuration id is the suite's digest | A5 | TESTED (vectors) |
 | `hcfg : ConfigCommitted g config` | the configuration used is the staged `.transcrypt/config` | A4 | REVIEWED + TESTED (`check_staged` compares the staged blob with it) |
-| `run : HookEvidence g`, `hookPlan … = ok true`; `RepairContracts` (Theorem 2, the core-call fields) | the adapter called the verified functions on these inputs and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
+| `run : HookEvidence g`, `hookPlan … = ok true`; `RepairContracts` (Theorem 2: `provenance`, `decision`, and `record`, what each reported `RecordClass` means, `RecordEvidence`) | the adapter called the verified functions on these inputs, reports its evidence about each blob truthfully and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
 | `RepairContracts.incoming`, `.lazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | `HeadAuthentic` (corollary) | the history the incremental hook trusts was checked | A24 | REVIEWED + TESTED (induction above; `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`) |
@@ -195,7 +202,7 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 103 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 115 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the composition `hookPlan_spec` and the end-to-end

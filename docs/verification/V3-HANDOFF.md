@@ -77,14 +77,19 @@ semantics silently or import legacy CBC into the proved core.
   listings (`Snapshot*.lean`: `parse_listing`, which also checks Git's byte
   order of paths with `bytes_lt`, each path once; `listing_fields`,
   `parse_listing_attrs`, `first_unselectable`, `held_entries` (binary
-  search), `is_local_change`, `object_order_ok`, `next_move_source`,
+  search), `entry_provenance`, `object_order_ok`, `next_move_source`,
   `blob_elsewhere` (through object orders)), as are the stored-key decision
   and `cat-file --batch` framing (`Objects.lean`). `EndToEnd.lean` states
   what an accepted commit guarantees, with every Git/crypto/adapter
   contract a named hypothesis (`hook_accepts_only_authenticated_ciphertext`,
   `hook_accepts_only_authenticated_ciphertext_given_history` with A24,
-  `hook_repairs_only_local_changes`,
+  `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`,
   `stored_key_authenticates_current_config`).
+- The pre-commit repair is a typed plan: the core derives each entry's
+  `Provenance` from the snapshots (`entry_provenance`), decides whether its
+  blob is read (`needs_record`), and decides `repair_plan(Provenance,
+  RecordClass)`; the adapter only gathers the blob's `RecordClass`
+  (`lifecycle::classify`) and executes the `RepairPlan`.
 - `bash proofs/aeneas/build-v3-tracked.sh` builds everything;
   `bash proofs/aeneas/check-v3-axioms.sh` shows only standard axioms.
 - Rust: `cargo test --workspace` (lifecycle, adversarial incl. SIGKILL fault
@@ -154,7 +159,10 @@ stable, but reordering loops inside a proved function renames them.
   keyword (name binders `to_`).
 - A new core function whose name equals a parameter name elsewhere renames
   that parameter in the generated code (`local_change1`): pick distinct
-  names (`is_local_change`).
+  names (`provenance_of` for the function, `Provenance` for the type).
+- `cases x` on a function argument of an extracted enum (or `Bool`) can
+  fail with "dependent elimination failed" when the goal is a `⦃ ⦄`
+  triple; `rcases x with _ | _ | …` works.
 - Listings are sorted (the parse proves it), so lookups are binary
   searches: `find_path`/`find_object` keep `low ≤ high` with "everything
   before `low` is before the target, nothing from `high` on is" and use
@@ -331,9 +339,11 @@ Pushes are the owner's.
    fresh round on any substantial change. The external human review
    (R-01) is deliberately the **final** step; it is not a blocker for
    ongoing work.
-2. **Done:** the rebind decision is the verified `seal_action`
-   (`sealSpec_repairs_only_local`), and its inputs are verified functions
-   of Git's listings (`hook_repairs_only_local_changes`). Remaining on the
+2. **Done:** the rebind decision is the verified `repair_plan` on a typed
+   `Provenance` and `RecordClass` (`repairSpec_repairs_only_local`), the
+   provenance a verified function of Git's listings (`entry_provenance`,
+   `hook_provenance`), and the composition `hook_repairs_only_local_changes`
+   with `hook_skips_only_unrepairable`. Remaining on the
    hook path (A4 residual, see the assumption register): a verified
    `ls-tree` record parser instead of the `tree_record` rewrite, and the
    unprotected-entry checks on `held_entries`.

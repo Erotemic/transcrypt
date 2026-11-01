@@ -34,10 +34,14 @@ and [V3-ASSUMPTIONS](verification/V3-ASSUMPTIONS.md).
    `HEAD`'s listing (`commit_listing`) and the commits a merge or rebase is
    bringing in (`incoming`; "unknown" whenever Git's sequencing state is not
    certain).
-3. **Decision.** For each protected entry, `seal_snapshot` builds its
-   `RepairEvidence` and asks the core: `is_local_change`, then
-   `seal_action` (keep, seal plaintext the user staged, or re-encrypt a
-   renamed record).
+3. **Decision.** For each protected entry, `seal_snapshot` asks the core
+   where its content came from (`entry_provenance`: a `Provenance`,
+   committed, local, forced by `protect`, or unknown) and whether its blob
+   matters (`needs_record`); only then does it read the blob and find what
+   it is (`classify`: a `RecordClass`, opens here, plaintext, moved from a
+   `HEAD` record, or unusable). The core's `repair_plan` decides from the
+   two (keep, seal plaintext the user staged, re-encrypt a renamed record,
+   or leave it to the check).
 4. **Effect.** The new records go into the index in one `IndexUpdate`, which
    reads the index back to confirm every entry was staged exactly.
 5. **Check.** `check_index` re-reads the final index and requires every
@@ -66,7 +70,9 @@ What kind of evidence each step has (column **Kind**):
   adapter's sequencing (`hookPlan`, `hydratePlan`, `lockEntry`,
   `verifyPlan`, and the end-to-end theorems over `HookEvidence` and
   `RepairInputs`). The model calls the generated functions, but that the
-  Rust loop matches it is assumption A4.
+  Rust loop matches it is assumption A4. For the repairs the model is only
+  the evidence: what each `RecordClass` the adapter reports means
+  (`RecordEvidence`); the decisions are the generated functions.
 * **T, adapter, tests only:** Rust in `transcrypt-rs` with no Lean
   statement; covered by the tests in `rust/crates/transcrypt-rs/tests`
   and review.
@@ -76,8 +82,9 @@ What kind of evidence each step has (column **Kind**):
 | Parse the index or a tree listing | S | `parse_listing`, `listing_fields` | `parse_listing_spec`, `listing_fields_spec` (SnapshotOrder, SnapshotListing) |
 | Parse the attributes Git reports | S | `parse_listing_attrs` | `parse_listing_attrs_spec` (SnapshotAttrs) |
 | Is an entry held by `HEAD` or an incoming commit | S | `held_entries` | `held_entries_spec` (SnapshotLookup) |
-| Is a staged entry the user's own change | S | `is_local_change` | `is_local_change_spec` (SnapshotAttrs) |
-| Keep, seal or re-encrypt it | S | `seal_action` | `seal_action_spec`, `sealSpec_repairs_only_local` (Bytes) |
+| Where a staged entry's content came from (`Provenance`) | S | `entry_provenance`, `provenance_of` | `entry_provenance_spec`, `provenance_of_spec` (SnapshotLookup) |
+| Whether its blob is read at all | S | `needs_record` | `needs_record_spec`, `needs_record_skip` (Bytes) |
+| Keep, seal, re-encrypt or leave it (`RepairPlan`) | S | `repair_plan` | `repair_plan_spec`, `repair_plan_repairs_only_local`, `repairSpec_repairs_only_local` (Bytes) |
 | Check it: authenticate, or (keyless or settled) the envelope | S | `entry_check` | `entry_check_spec` (Bytes) |
 | Where a renamed record came from | S | `next_move_source` | `next_move_source_spec` (SnapshotMoves) |
 | Encrypt, decrypt | S | `seal_record`, `open_record` | `seal_record_spec`, `open_record_spec` (Protocol) |
@@ -88,7 +95,7 @@ What kind of evidence each step has (column **Kind**):
 | Hydrate or lock a file | S | `hydrate_action`, `lock_action` | `hydrate_action_spec`, `lock_action_spec` (Bytes) |
 | Hydrate, lock and `verify-index` over all protected files | M | the rows above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` (Lifecycle) |
 | The hook's final check, as a whole | M | the rows above | `hookPlan_spec`, `hook_accepts_only_authenticated_ciphertext` (EndToEnd) |
-| The hook's repairs, as a whole | M | the rows above | `hook_repairs_only_local_changes` (EndToEnd) |
+| The hook's repairs, as a whole | M | the rows above | `hook_provenance`, `hook_skips_only_unrepairable`, `hook_repairs_only_local_changes` (EndToEnd) |
 | Unprotected staged entries: no record under an unprotected name, no record handed to another filter (`check_unprotected`) | T | `record_envelope_prefix_ok` (S) per blob | none; tests in `workflows.rs` (F2 rename, `git lfs track`) |
 | Enumerate and flush or check the other worktrees in `lock` (`other_worktrees`, `others_encrypted`) | T | none | none; tests in `workflows.rs`, `adversarial.rs` (linked worktrees) |
 | Settled only while no attribute file and not the config changed (A24) | T | none | none (the model's `settled` is weaker); `newly_protected_files_are_authenticated_by_the_hook` (`adversarial.rs`) |

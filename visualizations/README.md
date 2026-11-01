@@ -211,7 +211,7 @@ that an operation is insecure. It indicates a required external premise.
 | `clean` | local plaintext -> filter -> core -> Git index | adapter A4 and conditional seal |
 | `crypto` | seal preconditions -> AES-SIV -> header/record | trusted RustCrypto versus Lean codec |
 | `record` | public record 22-byte header, tag and encrypted body | codec proof versus crypto assumption |
-| `rename` | old path -> decision -> resealed new-path record | proved `seal_action` versus tested Git move A18 |
+| `rename` | old path -> decision -> resealed new-path record | proved `repair_plan` versus tested Git move A18 |
 | `audit` | committed bytes -> keyless shape -> auditor -> remote | no keyless authenticity; deployment A13/A14 |
 | `clone` | public ciphertext -> authenticated open -> local plaintext | conditional core versus native writer |
 | `lock` | local plaintext -> checked flush -> ciphertext -> forget key | `lock_action` proof versus filesystem/key deletion |
@@ -247,7 +247,7 @@ make html SCENE=status
 The milestones slide distinguishes V0-V5 achieved, V6 internally reviewed with
 R-01 still open, V7 deferred, and product P0-P5 done/P6 pending. The adapter
 scene shows why proving `parse_attr_response_spec`, `is_object_id_spec` or
-`seal_action_spec` does **not** discharge Git input provenance, stored-key
+`repair_plan_spec` does **not** discharge Git input provenance, stored-key
 loading, or native OS effects. Optional remote enforcement is a deployment
 choice, not an uncompleted local core proof.
 

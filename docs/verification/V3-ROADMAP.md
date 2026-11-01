@@ -145,7 +145,7 @@ verified" or "cryptographic security has been proved from first principles."
 
 1. Continued adversarial agent review of each change; the external human
    review (R-01) comes last, once everything else is done.
-2. Done: the rebind decision is the verified `seal_action`, and its inputs are verified functions of Git's listings (`hook_repairs_only_local_changes`).
+2. Done: the rebind decision is the verified `repair_plan` on a typed `Provenance` (computed by the verified `entry_provenance` from Git's listings) and `RecordClass`; `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`.
 3. A hint for cross-branch rename conflicts (Git cannot pair path-bound records; documented limitation).
 4. Done: A4 narrowing for selection (`parse_listing_attrs`), the stored-key load (`stored_key_state`) and object replies; the end-to-end hook statement names the remaining contracts (A19–A23). Next: an `ls-tree` record parser, the audit's per-commit loop, the smudge/hydrate inputs.
 5. Done: private-agent idle timeout (`unlock --private --timeout=15m`).

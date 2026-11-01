@@ -26,7 +26,7 @@ nodes = row4((
     ('review', 'Release qualification', 'P6 / R-01 outstanding', 'open', 'document'),
 ))
 nodes = mark(nodes,
-    core=('source-proof', 'seal_action_spec',
+    core=('source-proof', 'repair_plan_spec',
           'Example proved Rust decision; protocol functions require Realizes'),
     models=('model-proof', 'hydratePlan_spec',
             'Lean plan theorem; real effectful adapter remains A4'),
