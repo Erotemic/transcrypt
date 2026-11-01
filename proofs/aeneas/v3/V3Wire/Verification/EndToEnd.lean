@@ -672,7 +672,7 @@ theorem hook_repairs_only_local_changes (g : GitState) (run : RepairInputs)
     obtain ⟨horder, from_, j, src, buf, pt, hfrom, hord, hnext, hj, hsrc, hopen⟩ := hmoved hm
     have hHo := (spec_result (object_order_ok_spec hH horder) hord).mp rfl
     have hfirst := spec_result (next_move_source_spec hL hLs.pathOrdered hH hHo i hi from_ hfrom) hnext
-    obtain ⟨h, hhj, hms⟩ := hfirst.2.2.2 hj
+    obtain ⟨h, hhj, hms⟩ := hfirst.found hj
     have hor := spec_result (open_record_spec hR config src record buf) hopen
     rw [hhj] at hsrc
     simp only [Option.elim] at hsrc

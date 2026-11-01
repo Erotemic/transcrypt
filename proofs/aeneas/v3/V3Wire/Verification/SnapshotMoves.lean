@@ -258,7 +258,7 @@ theorem find_object_spec {listing : Slice U8} {ends : Slice Usize} {es : List En
       step as ⟨ d2, hd2 ⟩
       step as ⟨ mid, hmid ⟩
       obtain ⟨hm1, hm2⟩ := bisect_midpoint (by scalar_tac) hd (by scalar_tac) hmid
-      have hmo : mid.val < order.val.length := by have := hI.2.1; omega
+      have hmo : mid.val < order.val.length := by have := hI.high_le; omega
       step as ⟨ hml, j, hj ⟩
       step with object_before_spec hL j oid at_ as ⟨ b, hb ⟩
       have hjv : j.val = order.val[mid.val].val := by rw [hj]
@@ -267,10 +267,10 @@ theorem find_object_spec {listing : Slice U8} {ends : Slice Usize} {es : List En
       split
       · rename_i hbt
         step as ⟨ low1, hlow1 ⟩
-        exact hI.above ho.lt_of_le hm1 hm2 hmo (hb.mp hbt).2 hlow1
+        exact Bisects.above hI ho.lt_of_le hm1 hm2 hmo (hb.mp hbt).2 hlow1
       · rename_i hbt
         simp only [WP.spec_ok]
-        exact hI.below ho.lt_of_le hm1 hm2 hmo fun hlt => hbt (hb.mpr ⟨hjn, hlt⟩)
+        exact Bisects.below hI ho.lt_of_le hm1 hm2 hmo fun hlt => hbt (hb.mpr ⟨hjn, hlt⟩)
     · simp only [WP.spec_ok]
       exact hI.done (by scalar_tac)
   · simpa using Bisects.start
@@ -313,7 +313,7 @@ theorem move_source_at_spec {index head : Slice U8} {index_ends head_ends : Slic
   obtain ⟨hdrop, hend, hok⟩ := hH.record hj
   have hel := hH.ends_length
   have hiel := hI.ends_length
-  have hm := hok.1
+  have hm := hok.mode_len
   have hrl := entryRecord_length _ hm
   have hin := hH.off_le (Nat.succ_le_of_lt hj)
   rw [off_succ hs _ hj] at hin
@@ -411,7 +411,7 @@ theorem move_source_from_spec {index head : Slice U8} {index_ends head_ends : Sl
       FirstFrom hs (MovedFrom es (sliceBytes oid) (sliceBytes path)) from_ hs.length r.val ⦄ := by
   have hel := hH.ends_length
   have hol : order.val.length = hs.length := by have := ho.1; simpa [Slice.length] using this
-  unfold move_source_from move_source_from_loop FirstFrom
+  unfold move_source_from move_source_from_loop
   apply loop.spec_decr_nat (fun t : Usize => order.val.length - t.val)
     (fun t : Usize => t0.val ≤ t.val ∧ t.val ≤ order.val.length ∧
       ∀ s (h : s < order.val.length), t0.val ≤ s → s < t.val → ∀ e, hs[(order.val[s]).val]? = some e →
@@ -536,7 +536,7 @@ theorem next_move_source_spec {index head : Slice U8} {index_ends head_ends : Sl
     step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
     rw [hi1, hoid] at hso
     rw [hpath] at hsp
-    have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+    have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.oid_ok
     step with find_object_spec hH ho so from_ as ⟨ t, ht1, ht2, ht3 ⟩
     apply WP.spec_mono (move_source_from_spec hI hIo hH ho so sp h9 from_.val hf t ht1 ht2 ht3)
     intro r hr
@@ -701,7 +701,7 @@ theorem blob_elsewhere_spec {index head parent : Slice U8} {index_ends head_ends
     step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
     rw [hi1, hoid] at hso
     rw [hpath] at hsp
-    have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+    have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.oid_ok
     step with elsewhere_in_spec hI hIs hIo so sp h9 as ⟨ b, hb ⟩
     step with elsewhere_in_spec hH hHs hHo so sp h9 as ⟨ b1, hb1 ⟩
     step with elsewhere_in_spec hP hPs hPo so sp h9 as ⟨ b2, hb2 ⟩

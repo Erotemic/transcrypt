@@ -74,11 +74,14 @@ theorem attrRecordAt_unique {R P v v' : List Nat} {s n n' : Nat}
   obtain ⟨h0, hp, hn⟩ := h
   obtain ⟨h0', hp', hn'⟩ := h'
   rw [attrRecord_prefix_iff] at hp hp'
+  obtain ⟨-, -, -, -, hval, hnul⟩ := hp
+  obtain ⟨-, -, -, -, hval', hnul'⟩ := hp'
+  -- Both values start at the same offset and end at their first NUL.
   have hz : (R.drop (s + P.length + 8))[v.length]? = some 0 := by
-    rw [List.getElem?_drop]; exact hp.2.2.2.2.2
+    rw [List.getElem?_drop]; exact hnul
   have hz' : (R.drop (s + P.length + 8))[v'.length]? = some 0 := by
-    rw [List.getElem?_drop]; exact hp'.2.2.2.2.2
-  have hv := nul_free_prefix_unique hp.2.2.2.2.1 hp'.2.2.2.2.1 h0 h0' hz hz'
+    rw [List.getElem?_drop]; exact hnul'
+  have hv := nul_free_prefix_unique hval hval' h0 h0' hz hz'
   subst hv
   exact ⟨rfl, by rw [hn, hn']⟩
 
@@ -121,8 +124,10 @@ theorem attrRecordAt_facts {R P v : List Nat} {s n : Nat}
   rw [attrRecord_prefix_iff, getElem?_eq_some_iff', getElem?_eq_some_iff',
     getElem?_eq_some_iff'] at hp
   rw [attrRecord_length] at hn
-  exact ⟨hp.2.2.2.2.2.1, hp.1, hp.2.1.2, hp.2.2.1, hp.2.2.2.1.2, h0, hp.2.2.2.2.1,
-    hp.2.2.2.2.2.2, by rw [hn]; omega⟩
+  obtain ⟨hpath, ⟨-, hnulPath⟩, hfilter, ⟨-, hnulFilter⟩, hvalue, ⟨hbound, hnulValue⟩⟩ := hp
+  exact { bound := hbound, path := hpath, nul_path := hnulPath, filter := hfilter,
+          nul_filter := hnulFilter, value_nul_free := h0, value := hvalue,
+          nul_value := hnulValue, next := by rw [hn]; omega }
 
 /-- No record lies at `s` if none of the facts of one can hold. -/
 theorem no_attrRecordAt {R P : List Nat} {s : Nat} (h : ∀ v n, AttrFacts R s P v n → False) :
@@ -383,11 +388,13 @@ end Response
 
 /-- The completeness hypothesis: `request` is the `-z --stdin` request for
     the paths of `qs` and `response` is Git's answer `attrResponse qs`. -/
-def AttrHyp (request response : Slice U8) (flags : Slice Bool)
-    (qs : List (List Nat × List Nat)) : Prop :=
-  (∀ q ∈ qs, 0 ∉ q.1) ∧ (∀ q ∈ qs, 0 ∉ q.2) ∧
-  sliceBytes request = (qs.map (·.1)).flatMap (· ++ [0]) ∧
-  sliceBytes response = Transcrypt.V3Policy.attrResponse qs ∧ flags.length = qs.length
+structure AttrHyp (request response : Slice U8) (flags : Slice Bool)
+    (qs : List (List Nat × List Nat)) : Prop where
+  paths_nul_free : ∀ q ∈ qs, 0 ∉ q.1
+  values_nul_free : ∀ q ∈ qs, 0 ∉ q.2
+  request_eq : sliceBytes request = (qs.map (·.1)).flatMap (· ++ [0])
+  response_eq : sliceBytes response = Transcrypt.V3Policy.attrResponse qs
+  flags_len : flags.length = qs.length
 
 /-- Loop invariant of `parse_attr_response` at request offset `k`: while
     `ok`, the request up to `st` is the first `i` paths (each NUL-terminated),
@@ -437,8 +444,8 @@ theorem resp_body_spec (request response : Slice U8) (flags : Slice Bool)
             (sliceBytes request).take st.val = ((qs.map (·.1)).take i.val).flatMap (· ++ [0]) ∧
             (sliceBytes response).take at_.val = Transcrypt.V3Policy.attrResponse (qs.take i.val) := by
           intro hy
-          have hq1 := hy.1
-          have hyR := hy.2.2.1
+          have hq1 := hy.paths_nul_free
+          have hyR := hy.request_eq
           have hz := hH hy
           have hps := (zip_eq_split (by omega) hz).1
           have htk : (sliceBytes request).take st.val =
@@ -496,7 +503,7 @@ theorem resp_body_spec (request response : Slice U8) (flags : Slice Bool)
               simp
             · intro hy
               obtain ⟨hiq, hext, -, hat'⟩ := hhi hy
-              have rec2 := hyp_record hy.2.1 hy.2.2.2.1 (by rw [sliceBytes_length]; exact hat) hat' hiq
+              have rec2 := hyp_record hy.values_nul_free hy.response_eq (by rw [sliceBytes_length]; exact hat) hat' hiq
               rw [hseg, hext] at hrec
               obtain ⟨hvq, -⟩ := attrRecordAt_unique hrec rec2
               rw [hzip, hH hy, hi5, List.take_add_one, List.getElem?_eq_getElem hiq, hseg, hext, hvq]
@@ -508,14 +515,14 @@ theorem resp_body_spec (request response : Slice U8) (flags : Slice Bool)
             obtain ⟨hiq, hext, -, hat'⟩ := hhi hy
             apply hr.2
             rw [hseg, hext]
-            exact ⟨_, _, hyp_record hy.2.1 hy.2.2.2.1 (by rw [sliceBytes_length]; exact hat) hat' hiq⟩
+            exact ⟨_, _, hyp_record hy.values_nul_free hy.response_eq (by rw [sliceBytes_length]; exact hat) hat' hiq⟩
         · rename_i hif
           step*
           refine ⟨⟨by omega, hfl, fun h => absurd h (by simp), fun hy => ?_⟩, by omega⟩
           exfalso
           obtain ⟨hiq, -⟩ := hhi hy
           apply hif
-          have := hy.2.2.2.2
+          have := hy.flags_len
           scalar_tac
       · rename_i hz
         have hk0 : (sliceBytes request)[k.val]? ≠ some 0 := by
@@ -582,7 +589,7 @@ theorem parse_attr_response_gen (request response : Slice U8) (flags : Slice Boo
     have htk : (sliceBytes request).take st.val =
         ((qs.map (·.1)).take i.val).flatMap (· ++ [0]) := by
       rw [hR, hps, List.map_take]
-    obtain ⟨hQ, hstR⟩ := hyp_final (Q := qs.map (·.1)) hy.2.2.1 (by omega) htk
+    obtain ⟨hQ, hstR⟩ := hyp_final (Q := qs.map (·.1)) hy.request_eq (by omega) htk
       (by rw [hRl]; exact hno)
     simp only [List.length_map] at hQ
     have hpl' := congrArg List.length hps
@@ -590,12 +597,12 @@ theorem parse_attr_response_gen (request response : Slice U8) (flags : Slice Boo
     have hiq : i.val = qs.length := by omega
     rw [hiq, List.take_of_length_le (le_refl _)] at hz
     have hat' : at_.val = response.length := by
-      have := congrArg List.length (hS.trans (hz ▸ hy.2.2.2.1.symm))
+      have := congrArg List.length (hS.trans (hz ▸ hy.response_eq.symm))
       simp only [List.length_take, hSl] at this
       omega
     refine ⟨by omega, hiq, hat', ?_⟩
     have hfl' : fl.val.length = i.val := by
-      have := hy.2.2.2.2; simp only [Slice.length] at hflen this ⊢; omega
+      have := hy.flags_len; simp only [Slice.length] at hflen this ⊢; omega
     rw [← List.take_of_length_le (le_of_eq hfl'), hF, hvs, hiq, List.take_of_length_le (le_refl _)]
     simp
   split
@@ -626,7 +633,7 @@ theorem parse_attr_response_gen (request response : Slice U8) (flags : Slice Boo
         obtain ⟨_, hiq, _, _⟩ := hfin hokt hy
         apply hil
         apply UScalar.eq_of_val_eq
-        have := hy.2.2.2.2
+        have := hy.flags_len
         simp only [Slice.length] at hflen this
         simp; omega
     · rename_i hstl

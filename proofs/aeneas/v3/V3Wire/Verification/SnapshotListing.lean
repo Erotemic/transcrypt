@@ -109,14 +109,16 @@ end Pure
 
 /-- `listing` is exactly the listing of the well-formed entries `es`, and
     `ends[i]` is where record `i` ends (the position of its NUL). -/
-def ListingOf (listing : Slice U8) (ends : Slice Usize) (es : List Transcrypt.V3Policy.Entry) : Prop :=
-  (∀ e ∈ es, EntryOk e) ∧ sliceBytes listing = listingBytes es ∧ ends.length = es.length ∧
-  ∀ i (h : i < es.length), ends.val[i]!.val = off es i + (entryRecord es[i]).length
+structure ListingOf (listing : Slice U8) (ends : Slice Usize) (es : List Transcrypt.V3Policy.Entry) : Prop where
+  entries_ok : ∀ e ∈ es, EntryOk e
+  bytes_eq : sliceBytes listing = listingBytes es
+  ends_len : ends.length = es.length
+  ends_eq : ∀ i (h : i < es.length), ends.val[i]!.val = off es i + (entryRecord es[i]).length
 
 theorem ListingOf.off_le {listing : Slice U8} {ends : Slice Usize} {es : List Transcrypt.V3Policy.Entry}
     (hL : ListingOf listing ends es) {i : Nat} (hi : i ≤ es.length) : off es i ≤ listing.length := by
   have := off_mono es hi
-  rw [off_length, ← hL.2.1, sliceBytes_length] at this
+  rw [off_length, ← hL.bytes_eq, sliceBytes_length] at this
   exact this
 
 @[step]
@@ -135,9 +137,9 @@ theorem record_start_spec {listing : Slice U8} {ends : Slice Usize} {es : List T
     have hmax := listing.property
     have hle := hL.off_le hi
     have hk : (ends.val[i.val - 1]!).val + 1 = off es i.val := by
-      rw [hL.2.2.2 (i.val - 1) (by omega), ← off_succ es _ (by omega)]
+      rw [hL.ends_eq (i.val - 1) (by omega), ← off_succ es _ (by omega)]
       congr 1; omega
-    have hlen : ends.length = es.length := hL.2.2.1
+    have hlen : ends.length = es.length := hL.ends_len
     step as ⟨ i1, hi1 ⟩
     step as ⟨ hi1l, x, hx ⟩
     have hxv : x.val + 1 = off es i.val := by
@@ -253,17 +255,19 @@ theorem ListingOf.record {listing : Slice U8} {ends : Slice Usize} {es : List En
     (hL : ListingOf listing ends es) {j : Nat} (hj : j < es.length) :
     (sliceBytes listing).drop (off es j) = entryRecord es[j] ++ 0 :: listingBytes (es.drop (j + 1)) ∧
     ends.val[j]!.val = off es j + (entryRecord es[j]).length ∧ EntryOk es[j] := by
-  refine ⟨?_, hL.2.2.2 j hj, hL.1 _ (List.getElem_mem hj)⟩
-  rw [hL.2.1]; exact listingBytes_drop es j hj
+  refine ⟨?_, hL.ends_eq j hj, hL.entries_ok _ (List.getElem_mem hj)⟩
+  rw [hL.bytes_eq]; exact listingBytes_drop es j hj
 
 theorem ListingOf.ends_length {listing : Slice U8} {ends : Slice Usize} {es : List Entry}
-    (hL : ListingOf listing ends es) : ends.val.length = es.length := hL.2.2.1
+    (hL : ListingOf listing ends es) : ends.val.length = es.length := hL.ends_len
 
 /-- `r` is the first position in `[from, to)` whose entry satisfies `P`, or
     `to` if there is none. -/
-def FirstFrom (es : List Entry) (P : Entry → Prop) (from_ to_ r : Nat) : Prop :=
-  from_ ≤ r ∧ r ≤ to_ ∧ (∀ k e, from_ ≤ k → k < r → es[k]? = some e → ¬ P e) ∧
-    (r < to_ → ∃ e, es[r]? = some e ∧ P e)
+structure FirstFrom (es : List Entry) (P : Entry → Prop) (from_ to_ r : Nat) : Prop where
+  from_le : from_ ≤ r
+  le_to : r ≤ to_
+  none_before : ∀ k e, from_ ≤ k → k < r → es[k]? = some e → ¬ P e
+  found : r < to_ → ∃ e, es[r]? = some e ∧ P e
 
 /-! ## `listing_fields` -/
 
@@ -326,8 +330,8 @@ theorem listing_fields_spec {listing : Slice U8} {ends : Slice Usize} {es : List
     have hi : i.val < es.length := by scalar_tac
     obtain ⟨hdrop, hend, hok⟩ := hL.record hi
     obtain ⟨tl, tv, tno⟩ := record_tab hok hdrop
-    have hm := hok.1
-    have hoidl : 40 ≤ es[i.val].oid.length := by rcases hok.2.2.2.1.1 with h | h <;> unfold_v3_bytes <;> omega
+    have hm := hok.mode_len
+    have hoidl : 40 ≤ es[i.val].oid.length := by rcases hok.oid_ok.1 with h | h <;> unfold_v3_bytes <;> omega
     have hLl := sliceBytes_length listing
     have hin := hL.off_le (Nat.succ_le_of_lt hi)
     rw [off_succ es _ hi] at hin
@@ -402,7 +406,7 @@ theorem FieldsOf.slices {listing : Slice U8} {ends : Slice Usize} {es : List Ent
   have hei : es[i] = e := (List.getElem?_eq_some_iff.mp he).2
   obtain ⟨hdrop, _, hok⟩ := hL.record hi
   rw [hei] at hdrop hok
-  have hm := hok.1
+  have hm := hok.mode_len
   have hrl := entryRecord_length e hm
   have hin := hL.off_le (Nat.succ_le_of_lt hi)
   rw [off_succ es _ hi, hei] at hin

@@ -121,8 +121,13 @@ def entryRecord (e : Entry) : List Nat := e.mode ++ [space] ++ e.oid ++ [space, 
 /-- An entry as Git prints it: a six-digit mode, an object name and a
     nonempty path. NUL ends records, so no field contains one; the mode
     contains no TAB. -/
-def EntryOk (e : Entry) : Prop :=
-  e.mode.length = modeLen ∧ tab ∉ e.mode ∧ 0 ∉ e.mode ∧ ObjectId e.oid ∧ e.path ≠ [] ∧ 0 ∉ e.path
+structure EntryOk (e : Entry) : Prop where
+  mode_len : e.mode.length = modeLen
+  mode_no_tab : tab ∉ e.mode
+  mode_no_nul : 0 ∉ e.mode
+  oid_ok : ObjectId e.oid
+  path_ne : e.path ≠ []
+  path_no_nul : 0 ∉ e.path
 
 /-- A regular file (non-executable or executable): the only kind of entry
     whose content Git passes through filters. -/

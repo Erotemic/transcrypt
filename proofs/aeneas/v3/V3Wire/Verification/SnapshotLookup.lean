@@ -68,8 +68,11 @@ it too). Each spec proof supplies only its own ordering as `P`. -/
 
 /-- The bisection invariant: `low ≤ high ≤ n`, every slot before `low`
     satisfies `P` and none from `high` on does. -/
-def Bisects (n : Nat) (P : (k : Nat) → k < n → Prop) (low high : Nat) : Prop :=
-  low ≤ high ∧ high ≤ n ∧ (∀ k (h : k < n), k < low → P k h) ∧ (∀ k (h : k < n), high ≤ k → ¬ P k h)
+structure Bisects (n : Nat) (P : (k : Nat) → k < n → Prop) (low high : Nat) : Prop where
+  low_le : low ≤ high
+  high_le : high ≤ n
+  holds_below : ∀ k (h : k < n), k < low → P k h
+  fails_from : ∀ k (h : k < n), high ≤ k → ¬ P k h
 
 /-- The midpoint `low + (high - low) / 2` of a nonempty interval lies in it. -/
 theorem bisect_midpoint {low high d d2 mid : Nat} (hlh : low < high)
@@ -84,20 +87,20 @@ theorem Bisects.above {n : Nat} {P : (k : Nat) → k < n → Prop} {low high mid
     (hI : Bisects n P low high) (hP : ∀ {k m} (hkm : k ≤ m) (hm : m < n), P m hm → P k (by omega))
     (hm1 : low ≤ mid) (hm2 : mid < high) (hmn : mid < n) (hmid : P mid hmn) (hlow1 : low1 = mid + 1) :
     Bisects n P low1 high ∧ high - low1 < high - low :=
-  ⟨⟨by omega, hI.2.1, fun _ _ hk => hP (by omega) hmn hmid, hI.2.2.2⟩, by omega⟩
+  ⟨⟨by omega, hI.high_le, fun _ _ hk => hP (by omega) hmn hmid, hI.fails_from⟩, by omega⟩
 
 /-- `P` fails at the midpoint, so the search continues below it, on a shorter interval. -/
 theorem Bisects.below {n : Nat} {P : (k : Nat) → k < n → Prop} {low high mid : Nat}
     (hI : Bisects n P low high) (hP : ∀ {k m} (hkm : k ≤ m) (hm : m < n), P m hm → P k (by omega))
     (hm1 : low ≤ mid) (hm2 : mid < high) (hmn : mid < n) (hmid : ¬ P mid hmn) :
     Bisects n P low mid ∧ mid - low < high - low :=
-  ⟨⟨hm1, by omega, hI.2.2.1, fun _ hk hkm hk' => hmid (hP hkm hk hk')⟩, by omega⟩
+  ⟨⟨hm1, by omega, hI.holds_below, fun _ hk hkm hk' => hmid (hP hkm hk hk')⟩, by omega⟩
 
 /-- An empty interval: `low` is the first slot where `P` fails. -/
 theorem Bisects.done {n : Nat} {P : (k : Nat) → k < n → Prop} {low high : Nat}
     (hI : Bisects n P low high) (hhl : high ≤ low) :
     low ≤ n ∧ (∀ k (h : k < n), k < low → P k h) ∧ (∀ k (h : k < n), low ≤ k → ¬ P k h) :=
-  ⟨by have := hI.1; have := hI.2.1; omega, hI.2.2.1, fun k hk hkl => hI.2.2.2 k hk (by omega)⟩
+  ⟨by have := hI.low_le; have := hI.high_le; omega, hI.holds_below, fun k hk hkl => hI.fails_from k hk (by omega)⟩
 
 /-- `find_path` is the first record whose path is not before `P`; all
     earlier paths are before it, no later one is. -/
@@ -119,7 +122,7 @@ theorem find_path_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entr
       step as ⟨ d2, hd2 ⟩
       step as ⟨ mid, hmid ⟩
       obtain ⟨hm1, hm2⟩ := bisect_midpoint (by scalar_tac) hd (by scalar_tac) hmid
-      have hmes : mid.val < es.length := by have := hI.2.1; omega
+      have hmes : mid.val < es.length := by have := hI.high_le; omega
       step with path_before_spec hL mid path as ⟨ b, hb ⟩
       split
       · rename_i hbt
@@ -127,10 +130,10 @@ theorem find_path_spec {listing : Slice U8} {ends : Slice Usize} {es : List Entr
         rw [List.getElem?_eq_getElem hmes, Option.some.injEq] at he
         subst he
         step as ⟨ low1, hlow1 ⟩
-        exact hI.above (PathOrdered.lt_of_le hO) hm1 hm2 hmes hlt hlow1
+        exact Bisects.above hI (PathOrdered.lt_of_le hO) hm1 hm2 hmes hlt hlow1
       · rename_i hbt
         simp only [WP.spec_ok]
-        exact hI.below (PathOrdered.lt_of_le hO) hm1 hm2 hmes
+        exact Bisects.below hI (PathOrdered.lt_of_le hO) hm1 hm2 hmes
           fun hlt => hbt (hb.mpr ⟨_, List.getElem?_eq_getElem hmes, hlt⟩)
     · simp only [WP.spec_ok]
       exact hI.done (by scalar_tac)
@@ -283,7 +286,7 @@ theorem held_entries_spec {index other : Slice U8} {index_ends other_ends : Slic
           step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
           rw [hi2, hoid] at hso
           rw [hpath] at hsp
-          have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.2.2.2.1
+          have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.oid_ok
           step with find_entry_spec hO hOrd so sp h9 as ⟨ j, hj1, hj2, hj3 ⟩
           step as ⟨ s, hil', hs ⟩
           step*
