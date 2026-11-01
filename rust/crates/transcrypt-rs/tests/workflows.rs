@@ -5,7 +5,9 @@
 mod common;
 use common::*;
 #[cfg(unix)]
-use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::{io::Write, process::{Command, Stdio}};

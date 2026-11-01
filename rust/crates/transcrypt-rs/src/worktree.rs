@@ -142,9 +142,10 @@ pub(crate) fn replace_if_holds(root: &Path, staging: &Staging, path: &[u8], expe
 }
 
 /// Write a repository file that v3 maintains (`.gitattributes`,
-/// `.transcrypt/config`): replace it if it exists, else create it, with the
-/// same symlink- and reparse-point-refusing resolution and staged atomic
-/// rename as protected files. A committed symlink at the path or in a
+/// `.transcrypt/config`): replace it if it exists, else create it, either
+/// way staged and published whole by an atomic rename (a new file never
+/// replaces one created meanwhile), with the same symlink- and reparse-
+/// point-refusing resolution as protected files. A committed symlink at the path or in a
 /// parent is refused, never followed, so the write cannot land outside the
 /// repository.
 pub(crate) fn write_repository_file(root: &Path, staging: &Staging, relative: &Path, contents: &[u8]) -> Result<(), String> {
@@ -161,9 +162,18 @@ pub(crate) fn write_repository_file(root: &Path, staging: &Staging, relative: &P
         dir.mkdir(name, modes::NEW_DIR).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
         dir = dir.subdir(name).map_err(|_| format!("{} has a parent that is a symlink or not a directory", relative.display()))?;
     }
-    let mut file = dir.create_new(leaf, modes::NEW_FILE).map_err(|e| format!("cannot create {}: {e}", relative.display()))?;
-    file.write_all(contents).and_then(|_| file.sync_all())
-        .map_err(|e| format!("cannot write {}: {e}", relative.display()))?;
+    // Staged like a replacement, then moved to a name that must still be
+    // free, so the file appears whole or not at all and never replaces one
+    // created meanwhile.
+    let temp = staging.temporary();
+    let mut file = staging.dir.create_new(&temp, modes::NEW_FILE)
+        .map_err(|e| format!("cannot create staged {}: {e}", relative.display()))?;
+    let result = file.write_all(contents).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(e) = result.and_then(|_| staging.dir.move_new(&temp, &dir, leaf)) {
+        let _ = staging.dir.unlink(&temp);
+        return Err(format!("cannot create {}: {e}", relative.display()));
+    }
     dir.sync().map_err(|e| format!("cannot sync {}: {e}", relative.display()))
 }
 
@@ -420,6 +430,27 @@ mod tests {
         });
         assert!(target.replace(&staging, b"replacement", &stamp, false).is_err());
         assert_eq!(fs::read_dir(tmp.join(".git/transcrypt-v3-staging")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn new_repository_files_appear_whole_and_never_replace_one() {
+        let dir = TempDir::new("create");
+        let tmp = &dir.0;
+        fs::create_dir(tmp.join(".git")).unwrap();
+        let staging = staging(tmp);
+        let config = Path::new(".transcrypt/config");
+        write_repository_file(tmp, &staging, config, b"public configuration").unwrap();
+        assert_eq!(fs::read(tmp.join(config)).unwrap(), b"public configuration");
+        assert_eq!(fs::read_dir(tmp.join(".git/transcrypt-v3-staging")).unwrap().count(), 0);
+        // A file created between the check and the move is never replaced.
+        let raced = Path::new(".gitattributes");
+        let temp = staging.temporary();
+        drop(staging.dir.create_new(&temp, modes::NEW_FILE).unwrap());
+        fs::write(tmp.join(raced), b"created meanwhile").unwrap();
+        let root = fsat::Dir::open(tmp).unwrap();
+        let moved = staging.dir.move_new(&temp, &root, raced.as_os_str());
+        assert_eq!(moved.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(tmp.join(raced)).unwrap(), b"created meanwhile");
     }
 
     #[test]

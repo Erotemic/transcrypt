@@ -159,6 +159,32 @@ impl Dir {
         check(unsafe { libc::renameat(self.0.as_raw_fd(), f.as_ptr(), to_dir.0.as_raw_fd(), t.as_ptr()) }).map(|_| ())
     }
 
+    /// Atomically move `from` in this directory to the new name `to` in
+    /// `to_dir`, failing if `to` exists: a hard link (which never replaces
+    /// an entry), then removal of `from`. On a file system without hard
+    /// links (FAT), a rename after checking that `to` is free, which a
+    /// concurrent creation of `to` can race. The file keeps the permissions
+    /// it was created with.
+    pub(crate) fn move_new(&self, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
+        let (f, t) = (component(from)?, component(to)?);
+        // SAFETY: open directory descriptors and NUL-terminated names.
+        let linked = check(unsafe { libc::linkat(self.0.as_raw_fd(), f.as_ptr(), to_dir.0.as_raw_fd(), t.as_ptr(), 0) });
+        if let Err(e) = linked {
+            if !matches!(e.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP | libc::ENOSYS)) {
+                return Err(e);
+            }
+            return match to_dir.lstat(to) {
+                Err(missing) if missing.kind() == io::ErrorKind::NotFound => self.rename_to(from, to_dir, to),
+                Err(other) => Err(other),
+                Ok(_) => Err(io::ErrorKind::AlreadyExists.into()),
+            };
+        }
+        // Published; a leftover link in the staging directory is removed
+        // with the rest of an interrupted run's files.
+        let _ = self.unlink(from);
+        Ok(())
+    }
+
     pub(crate) fn unlink(&self, name: &OsStr) -> io::Result<()> {
         let c = component(name)?;
         // SAFETY: an open directory descriptor and a NUL-terminated name.

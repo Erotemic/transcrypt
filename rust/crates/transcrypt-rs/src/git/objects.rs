@@ -3,15 +3,11 @@
 
 use super::*;
 
-/// The refusal of anything larger than a v3 record.
-pub(crate) const TOO_LARGE: &str = "input exceeds the 16 MiB v3 size limit";
-const _: () = assert!(states_mib_limit(TOO_LARGE, MAX_FILE));
-
 /// Read at most a v3 record's worth of bytes, into wiped memory.
 pub(crate) fn read_record(mut read: impl Read) -> Result<Zeroizing<Vec<u8>>, String> {
     read_wiped(&mut read, MAX_RECORD).map_err(|e| match e {
         ReadError::Failed => "cannot read input".into(),
-        ReadError::TooLarge => TOO_LARGE.into(),
+        ReadError::TooLarge => too_large(),
     })
 }
 
@@ -21,7 +17,7 @@ pub(crate) fn read_record(mut read: impl Read) -> Result<Zeroizing<Vec<u8>>, Str
 /// blob is refused without being loaded. All reads of one process share a
 /// single `git cat-file --batch`.
 pub(crate) fn git_blob(root: &Path, oid: &str) -> Result<Vec<u8>, String> {
-    read_blob(root, oid, false)?.ok_or_else(|| TOO_LARGE.into())
+    read_blob(root, oid, false)?.ok_or_else(too_large)
 }
 
 /// Like `git_blob`, but `None` for a blob larger than any v3 record (an
@@ -135,14 +131,14 @@ impl Objects {
         let size = self.request(oid)?;
         match blob_read(size, skip_large) {
             BlobRead::Read => {},
-            BlobRead::TooLarge => return Err(TOO_LARGE.into()),
+            BlobRead::TooLarge => return Err(too_large()),
             BlobRead::Skip => {
                 self.skip(size)?;
                 return Ok(None);
             },
         }
         // `blob_read` decided `Read`, so `size` is at most `MAX_RECORD`.
-        let size = usize::try_from(size).map_err(|_| TOO_LARGE)?;
+        let size = usize::try_from(size).map_err(|_| too_large())?;
         let mut data = vec![0u8; size + 1];
         self.output.read_exact(&mut data).map_err(|_| TRUNCATED_REPLY)?;
         if data.pop() != Some(b'\n') {
@@ -158,14 +154,14 @@ impl Objects {
         let announced = self.request(oid)?;
         match blob_read(announced, true) {
             BlobRead::Read => {},
-            BlobRead::TooLarge => return Err(TOO_LARGE.into()),
+            BlobRead::TooLarge => return Err(too_large()),
             BlobRead::Skip => {
                 self.skip(announced)?;
                 return Ok(None);
             },
         }
         // `blob_read` decided `Read`, so the size is at most `MAX_RECORD`.
-        let size = usize::try_from(announced).map_err(|_| TOO_LARGE)?;
+        let size = usize::try_from(announced).map_err(|_| too_large())?;
         let mut prefix = vec![0u8; size.min(ENVELOPE_PREFIX_LEN)];
         self.output.read_exact(&mut prefix).map_err(|_| TRUNCATED_REPLY)?;
         self.skip(announced - prefix.len() as u64)?;

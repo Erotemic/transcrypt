@@ -25,10 +25,10 @@ pub(crate) use crate::os::sigpipe_blocked;
 pub(crate) use crate::listing::{paths_of, Listing, OrderedListing, Staged};
 use transcrypt_v3_core::{
     blob_read, is_object_id, parse_attr_response, parse_batch_header, parse_index_entry, record_envelope_prefix_ok,
-    BlobRead, ATTRIBUTES_NAME, ATTRIBUTES_SUFFIX, ENVELOPE_PREFIX_LEN, FILTER_DRIVER, MAX_FILE, MAX_RECORD, OID_START,
+    BlobRead, ATTRIBUTES_NAME, ATTRIBUTES_SUFFIX, ENVELOPE_PREFIX_LEN, FILTER_DRIVER, MAX_RECORD, OID_START,
     REGULAR_MODE,
 };
-use transcrypt_rs::{states_mib_limit, KIB, MIB};
+use transcrypt_rs::{too_large, KIB, MIB};
 
 /// The Git mode of a non-executable regular file (the core's `REGULAR_MODE`).
 pub(crate) const REGULAR_FILE_MODE: &str = match std::str::from_utf8(&REGULAR_MODE) {

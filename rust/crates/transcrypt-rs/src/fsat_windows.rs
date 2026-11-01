@@ -63,6 +63,7 @@ const LISTING_BUFFER: usize = 64 * transcrypt_rs::KIB;
 const WORD: usize = size_of::<u64>();
 /// A Win32 `BOOLEAN` true (here `ReplaceIfExists`).
 const BOOLEAN_TRUE: u32 = 1;
+const BOOLEAN_FALSE: u32 = 0;
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.to_owned())
@@ -248,6 +249,18 @@ impl Dir {
     /// ntdll: kernel32's `SetFileInformationByHandle` refuses a rename
     /// relative to a directory handle.
     pub(crate) fn rename_to(&self, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
+        self.rename(from, to_dir, to, true)
+    }
+
+    /// Atomically move `from` in this directory to the new name `to` in
+    /// `to_dir`, failing if `to` exists, and give it the access `to_dir`
+    /// passes on.
+    pub(crate) fn move_new(&self, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
+        self.rename(from, to_dir, to, false)?;
+        set_inherited(to_dir.open_dac(to)?.as_raw_handle())
+    }
+
+    fn rename(&self, from: &OsStr, to_dir: &Dir, to: &OsStr, replace: bool) -> io::Result<()> {
         let source = self.entry(from, DELETE, FILE_OPEN, 0, null())?;
         let target = component(to)?;
         let offset = offset_of!(FILE_RENAME_INFO, FileName);
@@ -268,10 +281,15 @@ impl Dir {
                 nt(NtSetInformationFile(source.as_raw_handle(), &mut status, buffer.as_ptr().cast(), size as u32, class))
             }
         };
-        rename(FileRenameInformationEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS)
+        let (flags, replace_if_exists) = if replace {
+            (FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS, BOOLEAN_TRUE)
+        } else {
+            (FILE_RENAME_FLAG_POSIX_SEMANTICS, BOOLEAN_FALSE)
+        };
+        rename(FileRenameInformationEx, flags)
             // `ReplaceIfExists` (a BOOLEAN in the same place) where the
             // extended rename is unsupported (older Windows, FAT).
-            .or_else(|_| rename(FileRenameInformation, BOOLEAN_TRUE))
+            .or_else(|_| rename(FileRenameInformation, replace_if_exists))
     }
 
     pub(crate) fn unlink(&self, name: &OsStr) -> io::Result<()> {

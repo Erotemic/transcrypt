@@ -12,7 +12,7 @@ use std::{
 };
 use transcrypt_v3_core::{decode_pkt_len, MAX_PKT_LEN, MAX_RECORD, PKT_HEADER_LEN};
 use zeroize::Zeroizing;
-use crate::{filter::Filters, git::{append_wiped, TOO_LARGE}};
+use crate::{filter::Filters, git::append_wiped};
 
 /// The flush packet: a header of length 0.
 const FLUSH_PKT: &[u8; PKT_HEADER_LEN] = b"0000";
@@ -113,7 +113,7 @@ pub(crate) fn serve(root: &Path) -> Result<(), String> {
             if !too_large { append_wiped(&mut content, &data); }
         }
         let result = match (command, path) {
-            _ if too_large => Err(TOO_LARGE.into()),
+            _ if too_large => Err(transcrypt_rs::too_large()),
             (Some(b"clean"), Some(path)) => filters.convert(true, path, content),
             (Some(b"smudge"), Some(path)) => filters.convert(false, path, content),
             _ => Err("unsupported filter request".to_owned()),

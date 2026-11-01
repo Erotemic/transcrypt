@@ -4,6 +4,7 @@
 use std::{fs, path::Path};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{parse_file_header, record_envelope_ok, smudge_action, Refusal, SmudgeAction, ID_LEN};
+use transcrypt_rs::too_large;
 use crate::{credential::Key, git::*, load_config, worktree::{find_protected, indexed_path}};
 
 /// The clean and smudge filters of one Git process (one file, or every file
@@ -170,7 +171,7 @@ impl File<'_> {
             },
             (Err(Refusal::Foreign), _) => Err("the committed file is not v3 ciphertext (it was stored without the \
                 filter); refusing to present it as a protected file".into()),
-            (Err(_), _) => Err(TOO_LARGE.into()),
+            (Err(_), _) => Err(too_large()),
         }
     }
 }
