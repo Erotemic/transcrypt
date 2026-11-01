@@ -133,7 +133,7 @@ fn at_socket<T>(dir: &Path, f: impl FnOnce(&Path) -> io::Result<T>) -> Result<io
     let previous = std::env::current_dir().map_err(|_| "cannot read working directory")?;
     std::env::set_current_dir(dir).map_err(|_| "cannot enter the session directory")?;
     let result = f(Path::new(SOCK));
-    std::env::set_current_dir(&previous).map_err(|_| "cannot return to the repository root")?;
+    std::env::set_current_dir(&previous).map_err(|_| "cannot return to the working directory")?;
     Ok(result)
 }
 
