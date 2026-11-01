@@ -1,10 +1,11 @@
 import Transcrypt.V3Policy.Paths
+import Transcrypt.V3Policy.Lifecycle
 
 /-!
 # What Git reports, as data
 
 Index and tree records, object names, snapshots (`Entry`, `Sorted`) and the
-pre-commit facts about them (`LocalChange`, `Settled`, ...), the pkt-line
+pre-commit facts about them (`ProvenanceIs`, `LocalChange`, `Settled`, ...), the pkt-line
 framing of Git's long-running filter protocol, and `git cat-file --batch`
 replies.
 -/
@@ -279,16 +280,77 @@ theorem PathOrdered.ne_of_gt {es : List Entry} (hO : PathOrdered es) {P : List N
     metadata. -/
 def Selectable (e : Entry) : Prop := e.Regular ∧ ¬ Reserved e.path
 
-/-- The `isLocal` input of `sealSpec` for the staged entry `s`: the user
-    staged it, i.e. `HEAD` does not hold its blob at its path and the
+/-- The user staged `s`: `HEAD` does not hold its blob at its path, and the
     commits being merged, picked, reverted or rebased (`incoming`) are known
     and do not hold it either (`none`: a rebase or `am` without a known
-    commit, where nothing counts as local); or `protect` selected it
+    commit, where nothing counts as the user's). -/
+def UserStaged (head : List Entry) (incoming : Option (List Entry)) (s : Entry) : Prop :=
+  ¬ Holds head s.oid s.path ∧ ∃ m, incoming = some m ∧ ¬ Holds m s.oid s.path
+
+/-- `p` is where the content of the staged entry `s` came from: the user
+    staged it (`local_`); otherwise `protect` selected it (`forced`);
+    otherwise `HEAD` does not hold it and the commits being brought in are
+    not known (`unknown`); otherwise `HEAD` or one of those commits holds
+    its blob at its path (`committed`). -/
+def ProvenanceIs (head : List Entry) (incoming : Option (List Entry)) (forced : Bool) (s : Entry) :
+    Provenance → Prop
+  | .local_ => UserStaged head incoming s
+  | .forced => ¬ UserStaged head incoming s ∧ forced = true
+  | .unknown => forced = false ∧ ¬ Holds head s.oid s.path ∧ incoming = none
+  | .committed => forced = false ∧
+      (Holds head s.oid s.path ∨ ∃ m, incoming = some m ∧ Holds m s.oid s.path)
+
+/-- The user's change is not content of a commit. -/
+theorem UserStaged.not_committed {head : List Entry} {incoming : Option (List Entry)} {s : Entry}
+    (h : UserStaged head incoming s) :
+    ¬ (Holds head s.oid s.path ∨ ∃ m, incoming = some m ∧ Holds m s.oid s.path) := by
+  obtain ⟨hh, m, rfl, hmh⟩ := h
+  rintro (h | ⟨m', hm', h'⟩)
+  · exact hh h
+  · cases hm'; exact hmh h'
+
+/-- An entry has one provenance. -/
+theorem provenanceIs_unique {head : List Entry} {incoming : Option (List Entry)} {forced : Bool} {s : Entry}
+    {p q : Provenance} (hp : ProvenanceIs head incoming forced s p) (hq : ProvenanceIs head incoming forced s q) :
+    p = q := by
+  cases p <;> cases q <;> simp only [ProvenanceIs] at hp hq <;> first | rfl | exfalso
+  all_goals first
+    | exact hp.not_committed hq.2
+    | exact hq.not_committed hp.2
+    | exact hp.1 hq
+    | exact hq.1 hp
+    | simp_all [UserStaged]
+
+/-- Content `HEAD` holds at its path has the same provenance whatever the
+    commits being brought in are: the hook need not list them. -/
+theorem provenanceIs_held {head : List Entry} {incoming incoming' : Option (List Entry)} {forced : Bool}
+    {s : Entry} {p : Provenance} (h : Holds head s.oid s.path) :
+    ProvenanceIs head incoming forced s p ↔ ProvenanceIs head incoming' forced s p := by
+  have hu : ∀ inc, ¬ UserStaged head inc s := fun _ hu => hu.1 h
+  cases p <;> simp only [ProvenanceIs, h, not_true_eq_false, false_and, and_false, true_or, and_true]
+  · exact ⟨fun hl => absurd hl (hu _), fun hl => absurd hl (hu _)⟩
+  · simp [hu]
+
+/-- The local-change test: the user staged `s`, or `protect` selected it
     (`forced`) and it is plaintext (no `envelope`). -/
 def LocalChange (head : List Entry) (incoming : Option (List Entry)) (forced envelope : Bool)
     (s : Entry) : Prop :=
-  (¬ Holds head s.oid s.path ∧ ∃ m, incoming = some m ∧ ¬ Holds m s.oid s.path) ∨
-    (forced = true ∧ envelope = false)
+  UserStaged head incoming s ∨ (forced = true ∧ envelope = false)
+
+/-- A local change is content of `local_` provenance, or `forced`
+    plaintext: what `repairSpec` may repair. -/
+theorem localChange_iff_provenance {head : List Entry} {incoming : Option (List Entry)} {forced : Bool}
+    {s : Entry} {p : Provenance} (hp : ProvenanceIs head incoming forced s p) (envelope : Bool) :
+    LocalChange head incoming forced envelope s ↔ p = .local_ ∨ (p = .forced ∧ envelope = false) := by
+  unfold LocalChange
+  cases p <;> simp only [ProvenanceIs] at hp <;> simp
+  · obtain ⟨hf, hh⟩ := hp
+    exact ⟨fun hu => hu.not_committed hh, fun h => by rw [hf] at h; cases h⟩
+  · exact Or.inl hp
+  · obtain ⟨hn, rfl⟩ := hp
+    simp [hn]
+  · obtain ⟨rfl, -, hi⟩ := hp
+    simp [UserStaged, hi]
 
 /-- `h`, an entry of `HEAD`, is where the staged entry `s` may have been
     moved from: the same blob at another path, whose own entry has left the

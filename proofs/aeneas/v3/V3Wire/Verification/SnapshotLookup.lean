@@ -5,6 +5,8 @@ Git snapshot listings, part 4: path lookups. In a listing in path order,
 `find_path` and `find_entry` are binary searches (`find_entry_spec`: a
 record naming the blob at the path exactly when `Holds`), and
 `held_entries` computes `Holds` for every wanted entry of the index.
+`provenance_of` and `entry_provenance` decide where a staged entry's content
+came from (`ProvenanceIs`) from the same lookups.
 -/
 
 open CoreModels Aeneas
@@ -315,5 +317,83 @@ theorem held_entries_spec {index other : Slice U8} {index_ends other_ends : Slic
       exact ⟨h2, this ▸ h3⟩
   · exact ⟨by simp, by simp [hh], fun k e hk => absurd hk (by simp)⟩
   · exact ⟨hr1, hr2⟩
+
+/-! ## Provenance: `provenance_of`, `entry_provenance` -/
+
+/-- `provenance_of` is the specification's `ProvenanceIs`, given whether
+    `HEAD` and the incoming commits hold the entry. The adapter passes
+    `incoming_known` = whether the incoming commits are known. -/
+@[step]
+theorem provenance_of_spec (head : List Entry) (incoming : Option (List Entry)) (s : Entry)
+    (inHead inIncoming forced : Bool)
+    (hh : inHead = true ↔ Holds head s.oid s.path)
+    (hi : ∀ m, incoming = some m → (inIncoming = true ↔ Holds m s.oid s.path)) :
+    provenance_of inHead incoming.isSome inIncoming forced ⦃ p =>
+      ProvenanceIs head incoming forced s (provenanceSpecOf p) ⦄ := by
+  rcases incoming with _ | m
+  · rcases inHead with _ | _ <;> rcases inIncoming with _ | _ <;> rcases forced with _ | _ <;>
+      simp_all [provenance_of, ProvenanceIs, UserStaged, provenanceSpecOf]
+  · have him := hi m rfl
+    rcases inHead with _ | _ <;> rcases inIncoming with _ | _ <;> rcases forced with _ | _ <;>
+      simp_all [provenance_of, ProvenanceIs, UserStaged, provenanceSpecOf]
+
+/-- **Provenance.** For an entry of the index, `entry_provenance` computes
+    where its content came from: `HEAD` (in path order) and, when known, the
+    commits being brought in (one listing in path order) are looked up by
+    binary search. When `incoming` is `none` the incoming listing is not
+    read. -/
+theorem entry_provenance_spec {index head incoming : Slice U8} {index_ends head_ends incoming_ends : Slice Usize}
+    {es hs : List Entry} {ms : Option (List Entry)}
+    (hI : ListingOf index index_ends es) (hH : ListingOf head head_ends hs) (hHo : PathOrdered hs)
+    (hM : ∀ m, ms = some m → ListingOf incoming incoming_ends m ∧ PathOrdered m)
+    (i : Usize) (hi : i.val < es.length) (forced : Bool) :
+    entry_provenance index index_ends i head head_ends incoming incoming_ends ms.isSome forced ⦃ p =>
+      ProvenanceIs hs ms forced es[i.val] (provenanceSpecOf p) ⦄ := by
+  unfold entry_provenance
+  step with listing_fields_spec hI i as ⟨ o, ho ⟩
+  rcases o with _ | f
+  · exfalso; simp only at ho; omega
+  · obtain ⟨_, hf⟩ := ho
+    obtain ⟨e, he, hok, hoid, hpath, hf1, hf2, hf3, hf4⟩ := FieldsOf.slices hI hf
+    have hei : es[i.val] = e := (List.getElem?_eq_some_iff.mp he).2
+    rw [hei]
+    simp only
+    step as ⟨ i2, hi2 ⟩
+    rw [OID_START_val] at hi2
+    step with index_range_spec index i2 f.oid_end (by omega) (by omega) as ⟨ so, hso ⟩
+    step with index_range_spec index f.path_start f.end hf3 hf4 as ⟨ sp, hsp ⟩
+    rw [hi2, hoid] at hso
+    rw [hpath] at hsp
+    have h9 : tab ∉ sliceBytes so := by rw [hso]; exact objectId_no_tab hok.oid_ok
+    step with find_entry_spec hH hHo so sp h9 as ⟨ j, hj1, hj2, hj3 ⟩
+    have hhl := hH.ends_length
+    have hh : decide (j < head_ends.len) = true ↔ Holds hs e.oid e.path := by
+      rw [← hso, ← hsp, decide_eq_true_iff]
+      constructor
+      · intro hjl
+        obtain ⟨e', he', ho', hp'⟩ := hj2 (by scalar_tac)
+        exact ⟨e', List.mem_of_getElem? he', ho', hp'⟩
+      · intro hho
+        by_contra hjl
+        exact hj3 (by scalar_tac) hho
+    rcases ms with _ | m
+    · simp only [Option.isSome_none, Bool.false_eq_true, if_false]
+      step*
+      exact provenance_of_spec hs none e _ false forced hh (fun m hm => by cases hm)
+    · simp only [Option.isSome_some, if_true]
+      obtain ⟨hM', hMo⟩ := hM m rfl
+      simp_len [bind_tc_ok]
+      step with find_entry_spec hM' hMo so sp h9 as ⟨ k, hk1, hk2, hk3 ⟩
+      have hml := hM'.ends_length
+      have hm : decide (k < incoming_ends.len) = true ↔ Holds m e.oid e.path := by
+        rw [← hso, ← hsp, decide_eq_true_iff]
+        constructor
+        · intro hkl
+          obtain ⟨e', he', ho', hp'⟩ := hk2 (by scalar_tac)
+          exact ⟨e', List.mem_of_getElem? he', ho', hp'⟩
+        · intro hho
+          by_contra hkl
+          exact hk3 (by scalar_tac) hho
+      exact provenance_of_spec hs (some m) e _ _ forced hh (fun m' hm' => by cases hm'; exact hm)
 
 end Transcrypt.V3Verification

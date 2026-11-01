@@ -83,36 +83,94 @@ theorem smudgeSpec_keep_envelope {blob id : List Nat} {unlocked : Bool}
   | none => rw [hd] at h; cases h
   | some found => exact ⟨found, rfl, Nat.le_of_not_gt hbig⟩
 
-/-! ## Pre-commit repair -/
+/-! ## Pre-commit repair
 
-inductive SealAction | keep | seal | rebind | leave
+The pre-commit hook may re-encrypt a staged protected entry before checking
+the index. Two independent facts decide it: where the content came from
+(`Provenance`, defined from Git's snapshots by `ProvenanceIs` in `Git`) and
+what its blob is (`RecordClass`). The policy: a blob that already opens is
+kept, and only the user's own content is repaired. Content that came from a
+commit is checked, never re-encrypted, so a hostile commit's moved or
+plaintext content cannot be laundered into a genuine record. -/
+
+/-- Where the content of a staged protected entry came from: a commit
+    (`HEAD` or a commit being brought in), the user (`local_`), `protect`
+    selecting it (`forced`), or not known (the commits being brought in are
+    not known). -/
+inductive Provenance | committed | local_ | forced | unknown
   deriving DecidableEq
 
-/-- The pre-commit decision for one staged protected entry. `opens`: the
-    staged blob opens at its own path. `isLocal`: the user staged it (not
-    content of a commit being merged, picked or already committed).
-    `envelope`: it has the v3 file header. `moved`: it opens at a path the
-    user moved it from. Only local content that does not already open is
-    repaired: plaintext is sealed, a moved record is re-sealed. -/
-def sealSpec (opens isLocal envelope moved : Bool) : SealAction :=
-  if opens then .keep
-  else if !isLocal then .leave
-  else if !envelope then .seal
-  else if moved then .rebind
-  else .leave
+/-- What a staged protected blob is: it opens at the entry's own path; it
+    has no v3 file header (`plaintext`); it is a record that does not open
+    there but opens at the path of record `source` of `HEAD`, a place it was
+    moved from; or a record that opens at neither (`unusable`). -/
+inductive RecordClass | opensHere | plaintext | movedFrom (source : Nat) | unusable
+  deriving DecidableEq
 
-/-- Content from a commit is never re-encrypted (no laundering of a hostile
-    move), and neither is a record that already opens at its path. -/
-theorem sealSpec_repairs_only_local {o l e m : Bool}
-    (h : sealSpec o l e m = .seal ∨ sealSpec o l e m = .rebind) : l = true ∧ o = false := by
-  cases o <;> cases l <;> cases e <;> cases m <;> simp_all [sealSpec]
+/-- Why an entry is left to verification: not the user's change, or the
+    user's record that opens nowhere it could be re-encrypted from. -/
+inductive LeaveReason | notLocal | opensNowhere
+  deriving DecidableEq
 
-/-- Only plaintext (no envelope) is sealed; only a moved record is re-sealed. -/
-theorem sealSpec_seal_plain {o l e m : Bool} (h : sealSpec o l e m = .seal) : e = false := by
-  cases o <;> cases l <;> cases e <;> cases m <;> simp_all [sealSpec]
+/-- The repair of one entry: keep it, seal its plaintext, re-seal the
+    plaintext of a record moved from `HEAD` record `source`, or leave it to
+    verification. -/
+inductive RepairPlan | keep | seal | rebind (source : Nat) | leave (reason : LeaveReason)
+  deriving DecidableEq
 
-theorem sealSpec_rebind_moved {o l e m : Bool} (h : sealSpec o l e m = .rebind) :
-    e = true ∧ m = true := by
-  cases o <;> cases l <;> cases e <;> cases m <;> simp_all [sealSpec]
+/-- Content the hook may change: the user's own, or plaintext `protect`
+    selected. -/
+def Repairable (p : Provenance) : Prop := p = .local_ ∨ p = .forced
+
+instance : DecidablePred Repairable := fun p => inferInstanceAs (Decidable (p = .local_ ∨ p = .forced))
+
+/-- The pre-commit decision. Plaintext is sealed when the user staged it or
+    `protect` forced it; a record is re-sealed only when the user moved it
+    (`protect` never re-encrypts a record); anything else that does not open
+    is left to verification. -/
+def repairSpec (p : Provenance) (c : RecordClass) : RepairPlan :=
+  match c with
+  | .opensHere => .keep
+  | .plaintext => if Repairable p then .seal else .leave .notLocal
+  | .movedFrom source => if p = .local_ then .rebind source else .leave .notLocal
+  | .unusable => if p = .local_ then .leave .opensNowhere else .leave .notLocal
+
+/-- Whether the decision depends on the blob at all: only for content the
+    hook may change. -/
+def needsRecordSpec (p : Provenance) : Bool := decide (Repairable p)
+
+/-- Only plaintext is sealed, and only the user's or forced content. -/
+theorem repairSpec_seal {p : Provenance} {c : RecordClass} :
+    repairSpec p c = .seal ↔ c = .plaintext ∧ Repairable p := by
+  cases p <;> cases c <;> simp [repairSpec, Repairable]
+
+/-- Only a record the user moved is re-sealed, from where it was moved. -/
+theorem repairSpec_rebind {p : Provenance} {c : RecordClass} {source : Nat} :
+    repairSpec p c = .rebind source ↔ c = .movedFrom source ∧ p = .local_ := by
+  cases p <;> cases c <;> simp [repairSpec, Repairable, eq_comm]
+
+/-- A blob is kept exactly when it opens at its own path. -/
+theorem repairSpec_keep {p : Provenance} {c : RecordClass} :
+    repairSpec p c = .keep ↔ c = .opensHere := by
+  cases p <;> cases c <;> simp [repairSpec, Repairable]
+
+/-- **No laundering.** Every repair is of the user's own content, or of
+    plaintext `protect` selected; never of a blob that already opens. -/
+theorem repairSpec_repairs_only_local {p : Provenance} {c : RecordClass}
+    (h : repairSpec p c = .seal ∨ ∃ source, repairSpec p c = .rebind source) :
+    (p = .local_ ∨ (p = .forced ∧ c = .plaintext)) ∧ c ≠ .opensHere := by
+  rcases h with h | ⟨source, h⟩
+  · obtain ⟨rfl, hp⟩ := repairSpec_seal.mp h
+    rcases hp with rfl | rfl <;> simp
+  · obtain ⟨rfl, rfl⟩ := repairSpec_rebind.mp h
+    simp
+
+/-- An entry whose blob the hook does not read is never repaired, whatever
+    its blob is. -/
+theorem repairSpec_unread {p : Provenance} (h : needsRecordSpec p = false) (c : RecordClass) :
+    repairSpec p c = .keep ∨ ∃ reason, repairSpec p c = .leave reason := by
+  have hp : p = .committed ∨ p = .unknown := by
+    cases p <;> simp_all [needsRecordSpec, Repairable]
+  rcases hp with rfl | rfl <;> cases c <;> simp [repairSpec, Repairable]
 
 end Transcrypt.V3Policy

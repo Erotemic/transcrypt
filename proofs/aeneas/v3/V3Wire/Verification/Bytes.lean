@@ -3,7 +3,7 @@ import V3Wire.Verification.Refinement
 /-!
 Functional refinement of the production v3 byte-comparison decisions: byte
 equality, prefix matching at an offset (`matches_at`), byte search
-(`find_byte`) and the hydrate/lock/seal lifecycle decisions. Each theorem names the
+(`find_byte`) and the hydrate/lock/repair lifecycle decisions. Each theorem names the
 Aeneas-generated translation and relates its complete result to the
 independent specification in `Transcrypt.V3Policy`; as `WP.spec` triples
 they also exclude panics and divergence.
@@ -216,23 +216,92 @@ theorem lock_action_spec (w r s : Slice U8) :
   step*
   all_goals simp_all [Transcrypt.V3Policy.lockSpec, lockResult, sliceBytes_inj]
 
-/-- Rust encoding of the specification's pre-commit repair decision. -/
-def sealResult : Transcrypt.V3Policy.SealAction → SealAction
-  | .keep => .Keep
-  | .seal => .Seal
-  | .rebind => .Rebind
-  | .leave => .Leave
+/-! ## The pre-commit repair plan -/
 
-/-- `seal_action` makes exactly the spec's repair decision, so the adapter's
-    pre-commit hook re-encrypts only local changes
-    (`sealSpec_repairs_only_local`). -/
+/-- The specification's name for a production `Provenance`. -/
+def provenanceSpecOf : Provenance → Transcrypt.V3Policy.Provenance
+  | .Committed => .committed
+  | .Local => .local_
+  | .Forced => .forced
+  | .Unknown => .unknown
+
+/-- The specification's name for a production `RecordClass`; a move source
+    is a position in `HEAD`. -/
+def recordClassSpecOf : RecordClass → Transcrypt.V3Policy.RecordClass
+  | .OpensHere => .opensHere
+  | .Plaintext => .plaintext
+  | .MovedFrom source => .movedFrom source.val
+  | .Unusable => .unusable
+
+def leaveReasonSpecOf : LeaveReason → Transcrypt.V3Policy.LeaveReason
+  | .NotLocal => .notLocal
+  | .OpensNowhere => .opensNowhere
+
+/-- The specification's name for a production `RepairPlan`. -/
+def repairPlanSpecOf : RepairPlan → Transcrypt.V3Policy.RepairPlan
+  | .Keep => .keep
+  | .Seal => .seal
+  | .Rebind source => .rebind source.val
+  | .Leave reason => .leave (leaveReasonSpecOf reason)
+
+/-- Distinct production plans have distinct specification names, so
+    `repair_plan_spec` determines the result completely. -/
+theorem repairPlanSpecOf_injective {a b : RepairPlan} (h : repairPlanSpecOf a = repairPlanSpecOf b) :
+    a = b := by
+  rcases a with _ | _ | _ | _ <;> rcases b with _ | _ | _ | _ <;> simp only [repairPlanSpecOf, reduceCtorEq] at h ⊢
+  · exact congrArg _ (UScalar.eq_of_val_eq (Transcrypt.V3Policy.RepairPlan.rebind.inj h))
+  · rename_i r r'
+    cases r <;> cases r' <;> simp_all [leaveReasonSpecOf]
+
+/-- `needs_record` is the specification's `needsRecordSpec`: the blob is
+    read only for content the hook may repair. -/
 @[step]
-theorem seal_action_spec (opens isLocal envelope moved : Bool) :
-    seal_action opens isLocal envelope moved ⦃ r =>
-      r = sealResult (Transcrypt.V3Policy.sealSpec opens isLocal envelope moved) ⦄ := by
-  rcases opens with _ | _ <;> rcases isLocal with _ | _ <;> rcases envelope with _ | _ <;>
-    rcases moved with _ | _ <;>
-    simp [seal_action, Transcrypt.V3Policy.sealSpec, sealResult]
+theorem needs_record_spec (p : Provenance) :
+    needs_record p ⦃ b => b = Transcrypt.V3Policy.needsRecordSpec (provenanceSpecOf p) ⦄ := by
+  rcases p with _ | _ | _ | _ <;> simp [needs_record, provenanceSpecOf, Transcrypt.V3Policy.needsRecordSpec,
+    Transcrypt.V3Policy.Repairable]
+
+/-- `repair_plan` makes exactly the specification's repair decision, so the
+    adapter's pre-commit hook re-encrypts only local changes
+    (`repairSpec_repairs_only_local`). -/
+@[step]
+theorem repair_plan_spec (p : Provenance) (c : RecordClass) :
+    repair_plan p c ⦃ r =>
+      repairPlanSpecOf r = Transcrypt.V3Policy.repairSpec (provenanceSpecOf p) (recordClassSpecOf c) ⦄ := by
+  rcases p with _ | _ | _ | _ <;> rcases c with _ | _ | _ | _ <;>
+    simp [repair_plan, provenanceSpecOf, recordClassSpecOf, repairPlanSpecOf, leaveReasonSpecOf,
+      Transcrypt.V3Policy.repairSpec, Transcrypt.V3Policy.Repairable]
+
+/-- **No laundering, in production terms.** If `repair_plan` decides to
+    seal or re-seal, the provenance is `Local`, or `Forced` and the blob is
+    plaintext; a `Rebind` re-seals from the `HEAD` record the class names. -/
+theorem repair_plan_repairs_only_local {p : Provenance} {c : RecordClass} {r : RepairPlan}
+    (h : repair_plan p c = ok r) :
+    (r = .Seal → c = .Plaintext ∧ (p = .Local ∨ p = .Forced)) ∧
+      (∀ source, r = .Rebind source → c = .MovedFrom source ∧ p = .Local) := by
+  have hr := spec_result (repair_plan_spec p c) h
+  refine ⟨fun hs => ?_, fun source hs => ?_⟩
+  · subst hs
+    obtain ⟨hc, hp⟩ := Transcrypt.V3Policy.repairSpec_seal.mp hr.symm
+    rcases c with _ | _ | _ | _ <;> simp only [recordClassSpecOf, reduceCtorEq] at hc
+    refine ⟨rfl, ?_⟩
+    rcases p with _ | _ | _ | _ <;> simp_all [provenanceSpecOf, Transcrypt.V3Policy.Repairable]
+  · subst hs
+    obtain ⟨hc, hp⟩ := Transcrypt.V3Policy.repairSpec_rebind.mp hr.symm
+    rcases c with _ | _ | _ | _ <;> simp only [recordClassSpecOf, reduceCtorEq] at hc
+    rcases p with _ | _ | _ | _ <;> simp only [provenanceSpecOf, reduceCtorEq] at hp
+    exact ⟨by rw [UScalar.eq_of_val_eq (Transcrypt.V3Policy.RecordClass.movedFrom.inj hc).symm], rfl⟩
+
+/-- An entry whose blob the hook skips (`needs_record` false) is never
+    sealed or re-sealed, whatever its blob would have been. -/
+theorem needs_record_skip {p : Provenance} (h : needs_record p = ok false) (c : RecordClass) :
+    repair_plan p c ⦃ r => r = .Keep ∨ ∃ reason, r = .Leave reason ⦄ := by
+  have hn := spec_result (needs_record_spec p) h
+  have hu := Transcrypt.V3Policy.repairSpec_unread hn.symm (recordClassSpecOf c)
+  apply WP.spec_mono (repair_plan_spec p c)
+  intro r hr
+  rw [← hr] at hu
+  rcases r with _ | _ | _ | _ <;> simp_all [repairPlanSpecOf]
 
 /-- `entry_check` authenticates exactly when the key is available and the
     entry is not a settled one in the incremental hook; otherwise it checks

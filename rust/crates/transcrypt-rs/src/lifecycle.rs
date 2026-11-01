@@ -5,9 +5,9 @@
 use std::{collections::{HashMap, HashSet}, env, fs, io, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    entry_check, hydrate_action, is_local_change, is_reserved_path, lock_action, parse_file_header,
-    record_envelope_ok, seal_action,
-    EntryCheck, HydrateAction, LockAction, SealAction, ATTRIBUTES_NAME,
+    entry_check, hydrate_action, is_reserved_path, lock_action, needs_record, parse_file_header,
+    record_envelope_ok, repair_plan,
+    EntryCheck, HydrateAction, LockAction, RecordClass, RepairPlan, ATTRIBUTES_NAME,
 };
 use crate::{
     credential::Key,
@@ -357,14 +357,14 @@ pub(crate) fn pre_commit(repo: &Repository) -> Result<(), String> {
 ///   gone or replaced (a move, or a move and a new file in its place) and
 ///   opens there, its plaintext is sealed for the new path.
 ///
-/// Only local changes are repaired (the verified `seal_action` decides): an
-/// entry equal to `HEAD`'s, or equal to a file of a commit being merged,
-/// picked, reverted or rebased, came from a commit, and re-encrypting it
-/// would turn a hostile commit's moved or plaintext content into genuine
-/// records; `check_index` refuses those instead. `force` lists paths whose
-/// plaintext is sealed even when unchanged from `HEAD` (`protect` selecting
-/// files committed before they were protected). Returns how many entries
-/// were sealed.
+/// Only local changes are repaired (the verified `repair_plan` decides from
+/// the entry's `Provenance` and its `RecordClass`): an entry equal to
+/// `HEAD`'s, or equal to a file of a commit being merged, picked, reverted
+/// or rebased, came from a commit, and re-encrypting it would turn a hostile
+/// commit's moved or plaintext content into genuine records; `check_index`
+/// refuses those instead. `force` lists paths whose plaintext is sealed even
+/// when unchanged from `HEAD` (`protect` selecting files committed before
+/// they were protected). Returns how many entries were sealed.
 pub(crate) fn seal_staged(repo: &Repository, key: &Key, force: &[Vec<u8>]) -> Result<usize, String> {
     seal_snapshot(repo, key, force, &Snapshot::read(repo)?, &commit_listing(repo, "HEAD")?)
 }
@@ -373,55 +373,38 @@ fn seal_snapshot(repo: &Repository, key: &Key, force: &[Vec<u8>], snapshot: &Sna
     -> Result<usize, String>
 {
     let protected = snapshot.protected()?;
-    // The decision's inputs are verified functions of the snapshots:
-    // whether `HEAD` and the incoming commits hold each protected entry
-    // (`held_entries`), local changes (`is_local_change`) and move sources
-    // (`next_move_source`).
+    // Only an entry `HEAD` does not hold can be the user's change: skip
+    // looking for commits being brought in (three Git commands) on most
+    // commits. `None` (not known) is safe: nothing it would decide is local.
     let in_head = snapshot.listing.held_in(&snapshot.flags, head)?;
-    // Only a changed entry can be a local change: skip looking for commits
-    // being brought in (three Git commands) on most commits.
     let incoming = if protected.iter().any(|i| !in_head[*i]) { incoming(repo)? } else { None };
-    let in_incoming = match &incoming {
-        Some(files) => snapshot.listing.held_in(&snapshot.flags, files)?,
-        None => vec![false; snapshot.flags.len()],
-    };
     let force: HashSet<&[u8]> = force.iter().map(Vec::as_slice).collect();
     let mut update = IndexUpdate::new(repo, Blobs::Records);
     // `HEAD` by object id, for move sources; only when a record moved.
     let mut head_ordered: Option<OrderedListing> = None;
     for i in protected {
         let staged = &snapshot.entries()[i];
-        let mut evidence = RepairEvidence {
-            in_head: in_head[i],
-            incoming_known: incoming.is_some(),
-            in_incoming: in_incoming[i],
-            forced: force.contains(staged.path.as_slice()),
-            // Until the blob is read: assume a record, which forcing never repairs.
-            envelope: true,
-        };
-        // `seal_action` never repairs a non-local entry; skip decrypting it
-        // here (`check_index` verifies it right after).
-        if !evidence.local_change() && !evidence.forced { continue; }
+        // The verified core decides where the content came from, and whether
+        // anything about its blob could make it repaired; the blob of an
+        // entry that cannot be is not read (`check_index` verifies it right
+        // after).
+        let provenance = snapshot.listing.provenance(i, head, incoming.as_ref(),
+            force.contains(staged.path.as_slice()));
+        if !needs_record(provenance) { continue; }
         let record = git_blob(repo, &staged.oid).map_err(|e| format!("{}: {e}", staged.name()))?;
-        let opens = key.open(&staged.path, &record).is_ok();
-        evidence.envelope = parse_file_header(&record).is_ok();
-        let (envelope, local) = (evidence.envelope, evidence.local_change());
-        let moved = if opens || !envelope { None } else {
-            let head = get_or_try_init(&mut head_ordered, || head.ordered())?;
-            open_moved(key, &snapshot.listing, i, head, &record)
-        };
+        let Classified { class, moved } = classify(key, &snapshot.listing, i, head, &mut head_ordered, staged, &record)?;
         let name = staged.name().into_owned();
         // The verified core decides.
-        let plaintext: Zeroizing<Vec<u8>> = match seal_action(opens, local, envelope, moved.is_some()) {
-            SealAction::Keep | SealAction::Leave => continue,
-            SealAction::Seal => {
+        let plaintext: Zeroizing<Vec<u8>> = match repair_plan(provenance, class) {
+            RepairPlan::Keep | RepairPlan::Leave(_) => continue,
+            RepairPlan::Seal => {
                 eprintln!("transcrypt-rs: encrypting {name}, which was staged unencrypted");
                 Zeroizing::new(record)
             },
-            SealAction::Rebind => {
-                let Some((source, plaintext)) = moved else { continue };
+            RepairPlan::Rebind(source) => {
+                let (Some(plaintext), Some(source)) = (moved, head.entries().get(source)) else { continue };
                 eprintln!("transcrypt-rs: re-encrypting {name} for its new name (it was {})",
-                    String::from_utf8_lossy(source));
+                    String::from_utf8_lossy(&source.path));
                 plaintext
             },
         };
@@ -432,32 +415,44 @@ fn seal_snapshot(repo: &Repository, key: &Key, force: &[Vec<u8>], snapshot: &Sna
     Ok(count)
 }
 
-/// What the pre-commit hook knows about one staged protected entry, for the
-/// verified `is_local_change`: a change the user made (not in `HEAD` at its
-/// path, the commits being brought in known and not holding it either), or
-/// plaintext (no `envelope`) that `protect` `forced`.
-struct RepairEvidence {
-    in_head: bool,
-    incoming_known: bool,
-    in_incoming: bool,
-    forced: bool,
-    envelope: bool,
+/// A staged blob's `RecordClass`, with the plaintext of a record moved
+/// here (`MovedFrom`).
+struct Classified {
+    class: RecordClass,
+    moved: Option<Zeroizing<Vec<u8>>>,
 }
 
-impl RepairEvidence {
-    fn local_change(&self) -> bool {
-        is_local_change(self.in_head, self.incoming_known, self.in_incoming, self.forced, self.envelope)
+/// What the staged blob `record` of protected entry `i` of `index` is, for
+/// the verified `repair_plan`: it opens at its own path; it has no v3
+/// envelope; it opens at the first `HEAD` path it may have been moved from
+/// (`open_moved`), returned with that plaintext; or none of these. `HEAD`'s
+/// object order is computed into `head_ordered` the first time it is needed.
+fn classify<'h>(key: &Key, index: &Listing, i: usize, head: &'h Listing,
+    head_ordered: &mut Option<OrderedListing<'h>>, staged: &Staged, record: &[u8])
+    -> Result<Classified, String>
+{
+    let only = |class| Ok(Classified { class, moved: None });
+    if key.open(&staged.path, record).is_ok() {
+        return only(RecordClass::OpensHere);
+    }
+    if parse_file_header(record).is_err() {
+        return only(RecordClass::Plaintext);
+    }
+    let head = get_or_try_init(head_ordered, || head.ordered())?;
+    match open_moved(key, index, i, head, record) {
+        Some((source, plaintext)) => Ok(Classified { class: RecordClass::MovedFrom(source), moved: Some(plaintext) }),
+        None => only(RecordClass::Unusable),
     }
 }
 
-/// The first `HEAD` path that entry `i` of `index` may have been moved from
-/// (`OrderedListing::move_sources`) at which `record` opens, with its
-/// plaintext.
-fn open_moved<'a>(key: &Key, index: &Listing, i: usize, head: &OrderedListing<'a>, record: &[u8])
-    -> Option<(&'a [u8], Zeroizing<Vec<u8>>)>
+/// The first `HEAD` entry that entry `i` of `index` may have been moved from
+/// (`OrderedListing::move_sources`) at whose path `record` opens: its
+/// position in `HEAD`, and the plaintext.
+fn open_moved(key: &Key, index: &Listing, i: usize, head: &OrderedListing, record: &[u8])
+    -> Option<(usize, Zeroizing<Vec<u8>>)>
 {
     head.move_sources(index, i)
-        .find_map(|source| key.open(&source.path, record).ok().map(|plaintext| (source.path.as_slice(), plaintext)))
+        .find_map(|(j, source)| key.open(&source.path, record).ok().map(|plaintext| (j, plaintext)))
 }
 
 /// The plaintext of a staged protected record: opened at its own path, or,

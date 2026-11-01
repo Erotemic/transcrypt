@@ -370,14 +370,45 @@ fn envelope_prefix_decides_as_the_whole_record() {
 
 #[test]
 fn only_local_changes_are_repaired() {
-    use SealAction::*;
-    for (opens, local, envelope, moved, expected) in [
-        (true, true, true, true, Keep), (true, false, false, false, Keep),
-        (false, false, false, false, Leave), (false, false, true, true, Leave),
-        (false, true, false, false, Seal), (false, true, false, true, Seal),
-        (false, true, true, true, Rebind), (false, true, true, false, Leave),
-    ] {
-        assert_eq!(seal_action(opens, local, envelope, moved), expected);
+    use Provenance::*;
+    use RecordClass::*;
+    use RepairPlan::*;
+    let records = [OpensHere, Plaintext, MovedFrom(7), Unusable];
+    for provenance in [Committed, Local, Forced, Unknown] {
+        for record in records {
+            let plan = repair_plan(provenance, record);
+            let expected = match (provenance, record) {
+                (_, OpensHere) => Keep,
+                (Local | Forced, Plaintext) => Seal,
+                (Local, MovedFrom(source)) => Rebind(source),
+                (Local, Unusable) => Leave(LeaveReason::OpensNowhere),
+                _ => Leave(LeaveReason::NotLocal),
+            };
+            assert_eq!(plan, expected, "{provenance:?} {record:?}");
+            // An entry whose blob is not read is never repaired, whatever it is.
+            if !needs_record(provenance) {
+                assert!(matches!(plan, Keep | Leave(_)), "{provenance:?} {record:?}");
+            }
+        }
+    }
+    assert!(needs_record(Local) && needs_record(Forced));
+    assert!(!needs_record(Committed) && !needs_record(Unknown));
+}
+
+/// `provenance_of` refines the boolean local-change test it replaced: an
+/// entry is repaired as the user's change exactly when it is `Local`, or
+/// `Forced` and plaintext.
+#[test]
+fn provenance_is_the_local_change_test() {
+    for bits in 0..16u8 {
+        let [in_head, known, in_incoming, forced] = [0, 1, 2, 3].map(|k| bits & (1 << k) != 0);
+        let p = provenance_of(in_head, known, in_incoming, forced);
+        let user = !in_head && known && !in_incoming;
+        for envelope in [false, true] {
+            let local = user || (forced && !envelope);
+            assert_eq!(p == Provenance::Local || (p == Provenance::Forced && !envelope), local, "{bits} {envelope}");
+        }
+        assert_eq!(p == Provenance::Unknown, !in_head && !known && !forced, "{bits}");
     }
 }
 
@@ -562,14 +593,20 @@ fn snapshot_queries_compare_object_and_path() {
     assert!(elsewhere(&index, 3, &empty, &head));
     assert!(!elsewhere(&index, 0, &head, &head));
     assert!(elsewhere(&kept, 1, &empty, &empty));
-    // `local_change`: changed and known not to come from a commit, or forced plaintext.
-    for (in_head, known, in_incoming, forced, envelope, expected) in [
-        (false, true, false, false, true, true), (true, true, false, false, false, false),
-        (false, false, false, false, true, false), (false, true, true, false, false, false),
-        (true, true, true, true, false, true), (true, true, true, true, true, false),
-    ] {
-        assert_eq!(is_local_change(in_head, known, in_incoming, forced, envelope), expected);
-    }
+    // Provenance: `HEAD` holds `a` (entry 0) but not `c` (entry 2), which
+    // the incoming commits hold.
+    let incoming = listing(&[("100644", b'3', b"c")]);
+    let prov = |i, inc: &Listing, known, forced| entry_provenance(&index.0, &index.1, i,
+        &head.0, &head.1, &inc.0, &inc.1, known, forced);
+    assert_eq!(prov(0, &incoming, true, false), Provenance::Committed);
+    assert_eq!(prov(0, &incoming, true, true), Provenance::Forced);
+    assert_eq!(prov(2, &incoming, true, false), Provenance::Committed);
+    assert_eq!(prov(2, &incoming, true, true), Provenance::Forced);
+    assert_eq!(prov(2, &empty, true, false), Provenance::Local);
+    assert_eq!(prov(2, &empty, true, true), Provenance::Local);
+    assert_eq!(prov(2, &incoming, false, false), Provenance::Unknown);
+    assert_eq!(prov(2, &incoming, false, true), Provenance::Forced);
+    assert_eq!(prov(9, &empty, true, true), Provenance::Committed);
 }
 
 /// The queries agree with their definitions on random listings: held

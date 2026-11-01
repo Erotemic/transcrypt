@@ -2,10 +2,9 @@ import V3Wire.Verification.SnapshotListing
 
 /-!
 Git snapshot listings, part 3: per-entry decisions over a listing.
-`is_local_change` is exactly `LocalChange`, `parse_listing_attrs` accepts
-exactly Git's attribute answer `attrResponse` for the listing's own paths,
-and `first_unselectable` finds the first protected entry that is not
-`Selectable`.
+`parse_listing_attrs` accepts exactly Git's attribute answer `attrResponse`
+for the listing's own paths, and `first_unselectable` finds the first
+protected entry that is not `Selectable`.
 -/
 
 open CoreModels Aeneas
@@ -16,24 +15,6 @@ namespace Transcrypt.V3Verification
 
 open transcrypt_v3_core
 open Transcrypt.V3Policy
-
-/-! ## `is_local_change` -/
-
-/-- `is_local_change` is exactly the spec's `LocalChange`, given whether
-    `HEAD` and the incoming commits hold the entry (from `held_entries`). The
-    adapter passes `incoming_known` = whether the incoming commits are known. -/
-theorem is_local_change_spec (head : List Entry) (incoming : Option (List Entry)) (s : Entry)
-    (inHead inIncoming forced envelope : Bool)
-    (hh : inHead = true ↔ Holds head s.oid s.path)
-    (hi : ∀ m, incoming = some m → (inIncoming = true ↔ Holds m s.oid s.path)) :
-    is_local_change inHead incoming.isSome inIncoming forced envelope ⦃ r =>
-      r = true ↔ LocalChange head incoming forced envelope s ⦄ := by
-  unfold is_local_change LocalChange
-  simp only [WP.spec_ok]
-  rcases incoming with _ | m
-  · simp
-  · have him := hi m rfl
-    cases inHead <;> cases inIncoming <;> cases forced <;> cases envelope <;> simp_all
 
 /-! ## `parse_listing_attrs` -/
 

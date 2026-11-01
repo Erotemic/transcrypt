@@ -818,38 +818,103 @@ pub fn smudge_action(blob: &[u8], id: &[u8; ID_LEN], unlocked: bool) -> Result<S
     }
 }
 
+/// Where the content of one staged protected entry came from. The
+/// pre-commit hook repairs only what the user staged: content that came
+/// from a commit is checked, never re-encrypted, so a hostile commit's moved
+/// or plaintext content cannot be laundered into a genuine record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provenance {
+    /// From history: `HEAD` holds its blob at its path, or one of the
+    /// commits being merged, picked, reverted or rebased does.
+    Committed,
+    /// The user staged it: neither `HEAD` nor the commits being brought in
+    /// (which are known) hold its blob at its path.
+    Local,
+    /// Not shown to be the user's change, but `protect` selected it: its
+    /// plaintext is sealed; a record is left to verification.
+    Forced,
+    /// Not in `HEAD`, and the commits being brought in are not known (a
+    /// rebase or `git am` without a known commit): nothing is repaired.
+    Unknown,
+}
+
+/// What a staged protected blob is, as the adapter finds it with the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordClass {
+    /// It opens at the entry's own path (`open_record`).
+    OpensHere,
+    /// It has no v3 file header (`parse_file_header` refuses it).
+    Plaintext,
+    /// It has the header, does not open at its own path, and opens at the
+    /// path of record `source` of `HEAD`, a place it was moved from
+    /// (`next_move_source`).
+    MovedFrom(usize),
+    /// It has the header but opens neither at its own path nor at any
+    /// place it was moved from.
+    Unusable,
+}
+
+/// Why the pre-commit hook leaves an entry to verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaveReason {
+    /// Not the user's change (or a record that `protect` selected, which it
+    /// never re-encrypts): checked, never repaired.
+    NotLocal,
+    /// The user's record, which opens nowhere it could be re-encrypted from.
+    OpensNowhere,
+}
+
 /// What the pre-commit hook does with one staged protected entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SealAction {
+pub enum RepairPlan {
     /// The staged blob already opens at its own path.
     Keep,
     /// Seal the staged blob, which is plaintext, at its path.
     Seal,
-    /// Re-seal, for this path, the plaintext of a record moved here.
-    Rebind,
+    /// Re-seal, for this path, the plaintext of the record as it opens at
+    /// the path of record `source` of `HEAD`, which it was moved from.
+    Rebind(usize),
     /// Change nothing; verification decides (and refuses a bad record).
-    Leave,
+    Leave(LeaveReason),
 }
 
-/// The pre-commit repair decision. `opens`: the staged blob opens at its
-/// own path. `local_change`: the user staged it (it differs from `HEAD`'s
-/// blob there and no merge, cherry-pick, revert or rebase is in progress),
-/// or `protect` selected it. `envelope`: it has the v3 file header.
-/// `moved`: it opens at a `HEAD` path that is no longer in the index. Only a
-/// local change is ever sealed or re-sealed: content that came from a
-/// commit is checked, never repaired, so a hostile move cannot be laundered
-/// into a genuine record.
-pub fn seal_action(opens: bool, local_change: bool, envelope: bool, moved: bool) -> SealAction {
-    if opens {
-        SealAction::Keep
-    } else if !local_change {
-        SealAction::Leave
-    } else if !envelope {
-        SealAction::Seal
-    } else if moved {
-        SealAction::Rebind
-    } else {
-        SealAction::Leave
+/// Whether the hook must read and classify an entry's blob: only for an
+/// entry it may repair. Every other entry is `Keep` or `Leave` whatever its
+/// blob is, and is verified right after.
+pub fn needs_record(provenance: Provenance) -> bool {
+    match provenance {
+        Provenance::Local => true,
+        Provenance::Forced => true,
+        Provenance::Committed => false,
+        Provenance::Unknown => false,
+    }
+}
+
+/// The pre-commit repair decision for an entry of `provenance` whose blob is
+/// `record`. A blob that opens is kept; only the user's own content is
+/// repaired: plaintext is sealed (also when `protect` forced it), and a
+/// record the user moved is re-sealed from where it was moved from.
+pub fn repair_plan(provenance: Provenance, record: RecordClass) -> RepairPlan {
+    match record {
+        RecordClass::OpensHere => RepairPlan::Keep,
+        RecordClass::Plaintext => match provenance {
+            Provenance::Local => RepairPlan::Seal,
+            Provenance::Forced => RepairPlan::Seal,
+            Provenance::Committed => RepairPlan::Leave(LeaveReason::NotLocal),
+            Provenance::Unknown => RepairPlan::Leave(LeaveReason::NotLocal),
+        },
+        RecordClass::MovedFrom(source) => match provenance {
+            Provenance::Local => RepairPlan::Rebind(source),
+            Provenance::Forced => RepairPlan::Leave(LeaveReason::NotLocal),
+            Provenance::Committed => RepairPlan::Leave(LeaveReason::NotLocal),
+            Provenance::Unknown => RepairPlan::Leave(LeaveReason::NotLocal),
+        },
+        RecordClass::Unusable => match provenance {
+            Provenance::Local => RepairPlan::Leave(LeaveReason::OpensNowhere),
+            Provenance::Forced => RepairPlan::Leave(LeaveReason::NotLocal),
+            Provenance::Committed => RepairPlan::Leave(LeaveReason::NotLocal),
+            Provenance::Unknown => RepairPlan::Leave(LeaveReason::NotLocal),
+        },
     }
 }
 
@@ -1145,14 +1210,56 @@ pub fn held_entries(
     true
 }
 
-/// The pre-commit hook's `local_change` input of `seal_action` for one
-/// staged protected entry: the user staged it (`HEAD` does not hold its blob
-/// at its path, the commits being merged, picked, reverted or rebased are
-/// known and do not hold it either), or `protect` forced it and it is
-/// plaintext (no `envelope`). `in_head` and `in_incoming` come from
-/// `held_entries`.
-pub fn is_local_change(in_head: bool, incoming_known: bool, in_incoming: bool, forced: bool, envelope: bool) -> bool {
-    (!in_head & incoming_known & !in_incoming) | (forced & !envelope)
+/// The provenance of a staged protected entry: `in_head`, `HEAD` holds its
+/// blob at its path; `incoming_known`, the commits being merged, picked,
+/// reverted or rebased are known, and `in_incoming`, one of them holds it;
+/// `forced`, `protect` selected it. The user's change takes precedence over
+/// `forced`, which can only add sealing plaintext.
+pub fn provenance_of(in_head: bool, incoming_known: bool, in_incoming: bool, forced: bool) -> Provenance {
+    if !in_head && incoming_known && !in_incoming {
+        Provenance::Local
+    } else if forced {
+        Provenance::Forced
+    } else if !in_head && !incoming_known {
+        Provenance::Unknown
+    } else {
+        Provenance::Committed
+    }
+}
+
+/// The provenance (`provenance_of`) of entry `i` of the listing `index`:
+/// whether the listing `head` holds its blob at its path and, when
+/// `incoming_known`, whether the listing `incoming` (the commits being
+/// brought in, as one listing) does; `forced`, `protect` selected it. Both
+/// listings must be in path order (`parse_listing`, possibly not `unique`);
+/// `incoming` is not read unless `incoming_known`. An `i` past the end is
+/// `Committed`, which is never repaired.
+#[allow(clippy::too_many_arguments)]
+pub fn entry_provenance(
+    index: &[u8],
+    index_ends: &[usize],
+    i: usize,
+    head: &[u8],
+    head_ends: &[usize],
+    incoming: &[u8],
+    incoming_ends: &[usize],
+    incoming_known: bool,
+    forced: bool,
+) -> Provenance {
+    match listing_fields(index, index_ends, i) {
+        Some(f) => {
+            let oid = &index[f.start + OID_START..f.oid_end];
+            let path = &index[f.path_start..f.end];
+            let in_head = find_entry(head, head_ends, oid, path) < head_ends.len();
+            let in_incoming = if incoming_known {
+                find_entry(incoming, incoming_ends, oid, path) < incoming_ends.len()
+            } else {
+                false
+            };
+            provenance_of(in_head, incoming_known, in_incoming, forced)
+        }
+        None => Provenance::Committed,
+    }
 }
 
 /// Whether record `j` exists and its key, its object id and then its

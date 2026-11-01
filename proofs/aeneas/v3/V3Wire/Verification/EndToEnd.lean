@@ -30,7 +30,9 @@ and names every assumption it rests on.
   and keyless move check), on which `hookPlan` (a model of the loop in
   `check_staged`, like `verifyPlan`) runs. The adapter acts only on these
   results (A4). For the repairs, `RepairInputs` are the values the adapter
-  computed for one entry and `RepairContracts` what they are.
+  computed for one entry (its `Provenance` and its blob's `RecordClass`, on
+  which the verified `repair_plan` decides) and `RepairContracts` what they
+  are.
 
 `hook_accepts_only_authenticated_ciphertext`: if the run accepted, the
 index is an `AcceptedIndex`: every path the committed attributes select is
@@ -47,7 +49,11 @@ check of its own blob at its own path (`hook_checks_selected`,
 (`EntryAccepted.accepted`).
 `hook_repairs_only_local_changes`: everything the hook re-encrypts before
 that check was a local change of the user, and a rebind re-encrypts only a
-record that authenticates at a `HEAD` path it was moved from.
+record that authenticates at the path of the `HEAD` record it names, a place
+it was moved from. `hook_provenance`: the provenance the verified
+`entry_provenance` computes is where the content came from;
+`hook_skips_only_unrepairable`: an entry whose blob the hook does not read
+(`needs_record`) is neither the user's change nor forced.
 
 The listings are sorted by path (the verified parse checks it), so lookups
 are binary searches, and lookups by object id go through object orders that
@@ -604,53 +610,86 @@ theorem stored_key_authenticates_current_config (hR : Realizes inst prims σ)
   have := spec_result (authenticate_config_spec hR config) hc
   exact ⟨hp, hl, ht.trans hcur, this.1⟩
 
-/-! ## The hook's repairs: no laundering -/
+/-! ## The hook's repairs: no laundering
 
-theorem sealResult_eq_seal {a : Transcrypt.V3Policy.SealAction} :
-    sealResult a = transcrypt_v3_core.SealAction.Seal ↔ a = .seal := by
-  cases a <;> simp [sealResult]
+The hook decides each protected entry's repair in the verified core, from
+two typed facts: where its content came from (`entry_provenance`, from the
+snapshots) and what its blob is (`RecordClass`, which the adapter finds with
+the key). `needs_record` decides whether the blob is read at all, and
+`repair_plan` decides the repair. The adapter gathers the evidence and
+executes the plan (A4); `RepairContracts` states what its evidence is. -/
 
-theorem sealResult_eq_rebind {a : Transcrypt.V3Policy.SealAction} :
-    sealResult a = transcrypt_v3_core.SealAction.Rebind ↔ a = .rebind := by
-  cases a <;> simp [sealResult]
-
-/-- What the adapter computed for one protected index entry before
-    `seal_action` (in `seal_snapshot` and `open_moved`): the snapshots it
-    parsed, the entry, and the results of the verified core it passes on.
+/-- What the adapter computed for one protected index entry in
+    `seal_snapshot` and `classify`: the snapshots it parsed, the entry, the
+    evidence it gathered and the results of the verified core it acts on.
     `RepairContracts` says what these values are. -/
 structure RepairInputs where
   /-- The index and `HEAD`, each path once. -/
   index : ParsedListing true
   head : ParsedListing true
-  /-- The protected flags, and membership in `HEAD` and in the incoming
-      commits (`held_entries`; `known`: the incoming commits were listed). -/
+  /-- The protected flags and `HEAD` membership (`held_entries`), from
+      which the adapter decides whether to list the incoming commits. -/
   flags : Slice Bool
   inHead0 : Slice Bool
   inHead : Slice Bool
-  inInc0 : Slice Bool
-  inInc : Slice Bool
+  /-- The commits being brought in, as one listing, and whether they are
+      known (`known`; when not, the adapter passes an empty listing, which
+      the core does not read). -/
+  incomingBytes : Slice U8
+  incomingEnds : Slice Usize
   known : Bool
-  /-- The entry, its path and blob, and the configuration. -/
+  /-- The entry, and whether `protect` forced it. -/
   i : Usize
+  forced : Bool
+  /-- Its provenance (`entry_provenance`). -/
+  prov : transcrypt_v3_core.Provenance
+  /-- Its path and blob, the configuration, and what the blob is. -/
   config : Std.Array U8 55#usize
   path : Slice U8
   record : Slice U8
   openBuf : Slice U8
-  /-- `protect` forced sealing a plaintext. -/
-  forced : Bool
-  /-- The inputs of `seal_action`, and its decision. -/
-  opens : Bool
-  envelope : Bool
-  moved : Bool
-  localc : Bool
-  act : transcrypt_v3_core.SealAction
+  cls : transcrypt_v3_core.RecordClass
+  /-- The decision (`repair_plan`). -/
+  plan : transcrypt_v3_core.RepairPlan
 
-/-- What the values of a `RepairInputs` are: Git's snapshots (A20) and
-    sequencing state (A23), and the results of the verified core on them
-    (A4): membership, the local-change input, whether the blob opens at its
-    path, whether it has the envelope, a move source at which it opens, and
-    the decision. -/
-structure RepairContracts (inst : V3Primitives P) (prims : P) (g : GitState) (run : RepairInputs) : Prop where
+/-- The staged blob does not open at the entry's own path. -/
+def NotOpensHere (inst : V3Primitives P) (prims : P) (run : RepairInputs) : Prop :=
+  ∀ r pt, open_record inst prims run.config run.path run.record run.openBuf = ok (r, pt) →
+    r ≠ core.result.Result.Ok ()
+
+/-- The staged blob has the v3 file header (`parse_file_header`). -/
+def HasHeader (record : Slice U8) : Prop :=
+  ∃ id, parse_file_header record = ok (core.result.Result.Ok id)
+
+/-- The staged blob has no v3 file header. -/
+def NoHeader (record : Slice U8) : Prop :=
+  ∃ e, parse_file_header record = ok (core.result.Result.Err e)
+
+/-- The staged blob opens at the path of record `j` of `HEAD`, which the
+    verified `next_move_source` found over a checked object order of
+    `HEAD`, from some offset: a place the entry may have been moved from. -/
+def MovedFromAt (inst : V3Primitives P) (prims : P) (g : GitState) (run : RepairInputs) (j : Usize) : Prop :=
+  ∃ (horder : Slice Usize) (from_ : Usize) (src buf pt : Slice U8),
+    from_.val ≤ g.head.length ∧ object_order_ok run.head.bytes run.head.ends horder = ok true ∧
+    next_move_source run.index.bytes run.index.ends run.i run.head.bytes run.head.ends horder from_ = ok j ∧
+    j.val < g.head.length ∧ sliceBytes src = (g.head[j.val]?).elim [] (·.path) ∧
+    open_record inst prims run.config src run.record buf = ok (core.result.Result.Ok (), pt)
+
+/-- What each `RecordClass` the adapter reports means: it tried the key at
+    the entry's path first, then read the header, then tried the move
+    sources in order (`classify`). -/
+def RecordEvidence (inst : V3Primitives P) (prims : P) (g : GitState) (run : RepairInputs) :
+    transcrypt_v3_core.RecordClass → Prop
+  | .OpensHere => ∃ pt, open_record inst prims run.config run.path run.record run.openBuf =
+      ok (core.result.Result.Ok (), pt)
+  | .Plaintext => NotOpensHere inst prims run ∧ NoHeader run.record
+  | .MovedFrom j => NotOpensHere inst prims run ∧ HasHeader run.record ∧ MovedFromAt inst prims g run j
+  | .Unusable => NotOpensHere inst prims run ∧ HasHeader run.record
+
+/-- What the provenance of a `RepairInputs` is computed from: Git's
+    snapshots (A20) and sequencing state (A23), and the verified core on
+    them (A4). -/
+structure ProvenanceContracts (g : GitState) (run : RepairInputs) : Prop where
   /-- **A20.** Git's index and `HEAD`, listed exactly. -/
   index : GitListing run.index.bytes g.index
   head : GitListing run.head.bytes g.head
@@ -663,121 +702,176 @@ structure RepairContracts (inst : V3Primitives P) (prims : P) (g : GitState) (ru
   in_head : held_entries run.index.bytes run.index.ends run.flags run.head.bytes run.head.ends run.inHead0 =
     ok (true, run.inHead)
   /-- **A20, A23.** When `known`, the incoming commits the sequencing state
-      names, listed exactly, and membership in them; otherwise they are
-      not consulted, which happens only when there are none or `HEAD`
-      holds the entry. -/
-  incoming : run.known = true → ∃ m, ∃ incoming : ParsedListing false, g.incoming = some m ∧
-    GitListing incoming.bytes m ∧ run.inInc0.length = g.index.length ∧
-    held_entries run.index.bytes run.index.ends run.flags incoming.bytes incoming.ends run.inInc0 =
-      ok (true, run.inInc)
+      names, listed exactly; otherwise they are not consulted, which
+      happens only when there are none or `HEAD` holds the entry. -/
+  incoming : run.known = true → ∃ m, ∃ l : ParsedListing false, g.incoming = some m ∧
+    GitListing l.bytes m ∧ l.bytes = run.incomingBytes ∧ l.ends = run.incomingEnds
   lazy : run.known = false → g.incoming = none ∨ run.inHead.val[run.i.val]! = true
-  /-- The local-change input (`is_local_change`). -/
-  local_change : is_local_change run.inHead.val[run.i.val]! run.known (run.known && run.inInc.val[run.i.val]!)
-    run.forced run.envelope = ok run.localc
-  /-- `opens`: the blob authenticates at its own path (`open_record`). -/
-  opens : ∀ pt r, open_record inst prims run.config run.path run.record run.openBuf = ok (r, pt) →
-    (run.opens = true ↔ r = core.result.Result.Ok ())
-  /-- `envelope`: it has the v3 file header (`parse_file_header`). -/
-  envelope : ∀ r, parse_file_header run.record = ok r → (run.envelope = true ↔ ∃ x, r = core.result.Result.Ok x)
-  /-- `moved`: a move source from `next_move_source`, over a checked object
-      order of `HEAD`, whose path is that of the `HEAD` entry it names and
-      at which the blob authenticates. -/
-  moved : run.moved = true → ∃ (horder : Slice Usize) (from_ j : Usize) (src buf pt : Slice U8),
-    from_.val ≤ g.head.length ∧ object_order_ok run.head.bytes run.head.ends horder = ok true ∧
-    next_move_source run.index.bytes run.index.ends run.i run.head.bytes run.head.ends horder from_ = ok j ∧
-    j.val < g.head.length ∧ sliceBytes src = (g.head[j.val]?).elim [] (·.path) ∧
-    open_record inst prims run.config src run.record buf = ok (core.result.Result.Ok (), pt)
-  /-- The decision (`seal_action`). -/
-  decision : seal_action run.opens run.localc run.envelope run.moved = ok run.act
+  /-- The provenance (`entry_provenance`). -/
+  provenance : entry_provenance run.index.bytes run.index.ends run.i run.head.bytes run.head.ends
+    run.incomingBytes run.incomingEnds run.known run.forced = ok run.prov
+
+/-- `ProvenanceContracts`, and the evidence about the blob and the decision
+    (A4): what the blob is, and `repair_plan` on the two. -/
+structure RepairContracts (inst : V3Primitives P) (prims : P) (g : GitState) (run : RepairInputs) : Prop
+    extends ProvenanceContracts g run where
+  /-- What the blob is (`RecordEvidence`). -/
+  record : RecordEvidence inst prims g run run.cls
+  /-- The decision (`repair_plan`). -/
+  decision : repair_plan run.prov run.cls = ok run.plan
+
+/-- **Provenance, end to end.** The provenance the hook computed is where
+    the entry's content came from, by Git's index, `HEAD` and the commits
+    being brought in (`ProvenanceIs`), even when the hook did not list
+    those commits. -/
+theorem hook_provenance {g : GitState} {run : RepairInputs} (hc : ProvenanceContracts g run) :
+    ProvenanceIs g.head g.incoming run.forced (g.index[run.i.val]'hc.entry) (provenanceSpecOf run.prov) := by
+  obtain ⟨hL, hLs⟩ := run.index.of_git hc.index
+  obtain ⟨hH, hHs⟩ := run.head.of_git hc.head
+  have hi := hc.entry
+  cases hk : run.known
+  · -- Not listed: the core computed the provenance without incoming commits.
+    have hp := spec_result (entry_provenance_spec (ms := none) hL hH hHs.pathOrdered (fun m hm => by cases hm)
+      run.i hi run.forced) (by have := hc.provenance; rw [hk] at this; exact this)
+    rcases hc.lazy hk with hn | hin
+    · rw [hn]; exact hp
+    · have hheld := spec_result (held_entries_spec hL hH hHs.pathOrdered run.flags run.inHead0 hc.flags_len
+        hc.inHead0_len) hc.in_head
+      have hh : Holds g.head g.index[run.i.val].oid g.index[run.i.val].path := by
+        have := (hheld.2.2 run.i.val _ hi (List.getElem?_eq_getElem hi)).mp hin
+        exact this.2
+      exact (provenanceIs_held hh).mp hp
+  · obtain ⟨m, l, hm, hgm, hb, he⟩ := hc.incoming hk
+    obtain ⟨hM, hMo⟩ := l.of_git_merged hgm
+    rw [hb, he] at hM
+    have hp := spec_result (entry_provenance_spec (ms := some m) hL hH hHs.pathOrdered
+      (fun m' hm' => by cases hm'; exact ⟨hM, hMo⟩) run.i hi run.forced)
+      (by have := hc.provenance; rw [hk] at this; exact this)
+    rw [hm]; exact hp
+
+/-- **The hook skips only what it may not repair.** If `needs_record` tells
+    the hook not to read an entry's blob, the entry is not the user's change
+    and `protect` did not force it: no repair is missed. -/
+theorem hook_skips_only_unrepairable (g : GitState) (run : RepairInputs) (hc : ProvenanceContracts g run)
+    (hskip : needs_record run.prov = ok false) :
+    ¬ UserStaged g.head g.incoming (g.index[run.i.val]'hc.entry) ∧ run.forced = false := by
+  have hp := hook_provenance hc
+  have hn := spec_result (needs_record_spec run.prov) hskip
+  cases hq : run.prov <;> rw [hq] at hp hn <;>
+    simp [provenanceSpecOf, Transcrypt.V3Policy.needsRecordSpec, Transcrypt.V3Policy.Repairable,
+      ProvenanceIs] at hp hn
+  · obtain ⟨hf, hh⟩ := hp
+    exact ⟨fun hu => hu.not_committed hh, hf⟩
+  · obtain ⟨hf, hh, hi⟩ := hp
+    refine ⟨fun hu => ?_, hf⟩
+    obtain ⟨-, m, hm, -⟩ := hu
+    rw [hi] at hm
+    cases hm
 
 /-- **The pre-commit hook repairs only local changes.** For a protected
-    entry `i` of Git's index (A20), with `HEAD` and the commits being brought
+    entry `x` of Git's index (A20), with `HEAD` and the commits being brought
     in parsed exactly (A20, A23: the sequencing state names those commits),
-    suppose the hook computed its inputs (`RepairInputs`) with the verified
-    core (`RepairContracts`): membership in `HEAD` and the incoming commits
-    (`held_entries`; the incoming commits are only consulted when some
-    protected entry changed, `known`), the local-change input
-    (`is_local_change`), whether the blob opens at its own path
-    (`open_record`), whether it has the v3 envelope (`parse_file_header`),
-    and, for `moved`, a move source (`next_move_source`) at which it opens;
-    and `seal_action` decided to seal or re-seal it. Then the entry is a
-    local change of the user (`LocalChange`: never content of `HEAD` or of
-    an incoming commit unless `protect` forced plaintext), it did not
-    already open at its path, only plaintext is sealed, and a rebind
-    re-encrypts exactly the plaintext of a record that authenticates at a
-    `HEAD` path it was moved from (`MoveSource`). -/
+    suppose the hook computed the entry's provenance with the verified
+    `entry_provenance`, classified its blob as the adapter's evidence shows
+    (`RecordEvidence`), and `repair_plan` decided to seal or re-seal it
+    (`RepairContracts`). Then
+
+    * the provenance is exactly where `x`'s content came from
+      (`ProvenanceIs`), and `x` is the user's change (`UserStaged`: never
+      content of `HEAD` or of an incoming commit), unless `protect` forced
+      it and it is sealed;
+    * it is a local change in the sense of the local-change test
+      (`LocalChange`, with the envelope as the header parse reports it);
+    * the blob did not already open at its path;
+    * a seal seals only plaintext (no v3 header);
+    * a rebind from `HEAD` record `j` re-encrypts the plaintext of a record
+      with the header, of the user's change, that authenticates at the path
+      of exactly that record of `HEAD`, a place it was moved from
+      (`MoveSource`). -/
 theorem hook_repairs_only_local_changes (g : GitState) (run : RepairInputs)
     (hR : Realizes inst prims σ) (hc : RepairContracts inst prims g run)
-    (hrepair : run.act = transcrypt_v3_core.SealAction.Seal ∨ run.act = transcrypt_v3_core.SealAction.Rebind) :
-    LocalChange g.head g.incoming run.forced run.envelope (g.index[run.i.val]'hc.entry) ∧
-      (∀ r pt, open_record inst prims run.config run.path run.record run.openBuf = ok (r, pt) →
-        r ≠ core.result.Result.Ok ()) ∧
-      (run.act = transcrypt_v3_core.SealAction.Seal →
+    (hrepair : run.plan = transcrypt_v3_core.RepairPlan.Seal ∨
+      ∃ j, run.plan = transcrypt_v3_core.RepairPlan.Rebind j) :
+    ProvenanceIs g.head g.incoming run.forced (g.index[run.i.val]'hc.entry) (provenanceSpecOf run.prov) ∧
+      (UserStaged g.head g.incoming (g.index[run.i.val]'hc.entry) ∨
+        (run.forced = true ∧ run.plan = transcrypt_v3_core.RepairPlan.Seal)) ∧
+      (∀ envelope : Bool, (envelope = true ↔ HasHeader run.record) →
+        LocalChange g.head g.incoming run.forced envelope (g.index[run.i.val]'hc.entry)) ∧
+      NotOpensHere inst prims run ∧
+      (run.plan = transcrypt_v3_core.RepairPlan.Seal →
         ∀ r, parse_file_header run.record = ok r → ∀ x, r ≠ core.result.Result.Ok x) ∧
-      (run.act = transcrypt_v3_core.SealAction.Rebind → run.envelope = true ∧ ∃ h ∈ g.head,
-        MoveSource g.index (g.index[run.i.val]'hc.entry) h ∧
+      (∀ j, run.plan = transcrypt_v3_core.RepairPlan.Rebind j →
+        UserStaged g.head g.incoming (g.index[run.i.val]'hc.entry) ∧ HasHeader run.record ∧
+        ∃ h, g.head[j.val]? = some h ∧ MoveSource g.index (g.index[run.i.val]'hc.entry) h ∧
           ∃ pt, OpensTo σ (wireBytes run.config) h.path (sliceBytes run.record) pt) := by
-  rcases run with ⟨index, head, flags, inHead0, inHead, inInc0, inInc, known, i, config, path, record, openBuf,
-    forced, opens, envelope, moved, localc, act⟩
-  obtain ⟨hindex, hhead, hi, hflen, hfi, hInHead0, hinH, hknown, hlazy, hlocal, hopens, henvelope, hmoved,
-    hseal⟩ := hc
-  dsimp only at *
-  have hact := spec_result (seal_action_spec opens localc envelope moved) hseal
-  -- What `seal_action` decided, in the spec's terms.
-  have hspec : sealSpec opens localc envelope moved = .seal ∨ sealSpec opens localc envelope moved = .rebind := by
-    rcases hrepair with h | h <;> rw [h] at hact
-    · exact Or.inl (sealResult_eq_seal.mp hact.symm)
-    · exact Or.inr (sealResult_eq_rebind.mp hact.symm)
-  obtain ⟨hloc, hop⟩ := sealSpec_repairs_only_local hspec
-  -- The verified parses give exactly Git's snapshots, each path once.
-  obtain ⟨hL, hLs⟩ := index.of_git hindex
-  obtain ⟨hH, hHs⟩ := head.of_git hhead
-  -- `HEAD` membership.
-  have hheld := spec_result (held_entries_spec hL hH hHs.pathOrdered flags inHead0 hflen hInHead0) hinH
-  have hh : inHead.val[i.val]! = true ↔ Holds g.head g.index[i.val].oid g.index[i.val].path := by
-    rw [hheld.2.2 i.val _ hi (List.getElem?_eq_getElem hi), hfi]; simp
-  -- The local-change input is `LocalChange`.
-  have hlc : localc = true ↔ LocalChange g.head g.incoming forced envelope g.index[i.val] := by
-    cases hk : known
-    · rw [hk, Bool.false_and] at hlocal
-      have := spec_result (is_local_change_spec g.head none g.index[i.val] inHead.val[i.val]! false forced
-        envelope hh (fun m hm => by cases hm)) hlocal
-      rw [this, localChange_unknown]
-      rcases hlazy hk with hn | hin
-      · rw [hn, localChange_unknown]
-      · rw [localChange_held (hh.mp hin)]
-    · obtain ⟨m, incoming, hm, hgm, hlen, hinc⟩ := hknown hk
-      obtain ⟨hM, hMo⟩ := incoming.of_git_merged hgm
-      have hheldM := spec_result (held_entries_spec hL hM hMo flags inInc0 hflen hlen) hinc
-      have hii : inInc.val[i.val]! = true ↔ Holds m g.index[i.val].oid g.index[i.val].path := by
-        rw [hheldM.2.2 i.val _ hi (List.getElem?_eq_getElem hi), hfi]; simp
-      rw [hk, Bool.true_and] at hlocal
-      have hl' : is_local_change inHead.val[i.val]! g.incoming.isSome inInc.val[i.val]! forced envelope =
-          ok localc := by rw [hm]; exact hlocal
-      have hres := spec_result (is_local_change_spec g.head g.incoming g.index[i.val] inHead.val[i.val]!
-        inInc.val[i.val]! forced envelope hh (fun m' hm' => by rw [hm] at hm'; cases hm'; exact hii)) hl'
-      exact hres
-  refine ⟨hlc.mp hloc, fun r pt hr hok => ?_, fun hs => ?_, fun hrb => ?_⟩
-  · have := (hopens pt r hr).mpr hok
-    rw [hop] at this; cases this
-  · rw [hs] at hact
-    have : sealSpec opens localc envelope moved = .seal := sealResult_eq_seal.mp hact.symm
-    have hpl := sealSpec_seal_plain this
-    intro r hr x hx
-    have := (henvelope r hr).mpr ⟨x, hx⟩
-    rw [hpl] at this; cases this
-  · rw [hrb] at hact
-    have hsr : sealSpec opens localc envelope moved = .rebind := sealResult_eq_rebind.mp hact.symm
-    obtain ⟨he, hm⟩ := sealSpec_rebind_moved hsr
-    refine ⟨he, ?_⟩
-    obtain ⟨horder, from_, j, src, buf, pt, hfrom, hord, hnext, hj, hsrc, hopen⟩ := hmoved hm
-    have hHo := (spec_result (object_order_ok_spec hH horder) hord).mp rfl
-    have hfirst := spec_result (next_move_source_spec hL hLs.pathOrdered hH hHo i hi from_ hfrom) hnext
-    obtain ⟨h, hhj, hms⟩ := hfirst.found hj
-    have hor := spec_result (open_record_spec hR config src record buf) hopen
-    rw [hhj] at hsrc
-    simp only [Option.elim] at hsrc
-    rw [hsrc] at hor
-    exact ⟨h, List.mem_of_getElem? hhj, hms, _, hor⟩
+  have hprov := hook_provenance hc.toProvenanceContracts
+  have hdec := repair_plan_repairs_only_local hc.decision
+  -- The two repairs, with what the decision says about their inputs.
+  have hcases : (run.plan = .Seal ∧ run.cls = .Plaintext ∧
+        (run.prov = .Local ∨ run.prov = .Forced)) ∨
+      (∃ j, run.plan = .Rebind j ∧ run.cls = .MovedFrom j ∧ run.prov = .Local) := by
+    rcases hrepair with h | ⟨j, h⟩
+    · exact Or.inl ⟨h, hdec.1 h⟩
+    · exact Or.inr ⟨j, h, hdec.2 j h⟩
+  -- The blob's evidence.
+  have hnot : NotOpensHere inst prims run := by
+    have hrec := hc.record
+    rcases hcases with ⟨-, hcl, -⟩ | ⟨j, -, hcl, -⟩ <;> rw [hcl] at hrec
+    · exact hrec.1
+    · exact hrec.1
+  -- Seal and rebind are of the user's change, or of forced plaintext.
+  have huser : run.prov = .Local → UserStaged g.head g.incoming (g.index[run.i.val]'hc.entry) := by
+    intro hl; rw [hl] at hprov; exact hprov
+  -- The header, as the evidence gives it.
+  have hdet : ∀ {r r' : core.result.Result (Std.Array U8 16#usize) FormatError},
+      parse_file_header run.record = ok r → parse_file_header run.record = ok r' → r = r' := by
+    intro r r' h h'; rw [h] at h'; cases h'; rfl
+  refine ⟨hprov, ?_, ?_, hnot, ?_, ?_⟩
+  · rcases hcases with ⟨hs, -, hl | hf⟩ | ⟨j, -, -, hl⟩
+    · exact Or.inl (huser hl)
+    · rw [hf] at hprov
+      exact Or.inr ⟨hprov.2, hs⟩
+    · exact Or.inl (huser hl)
+  · intro envelope henv
+    rcases hcases with ⟨-, hcl, hl | hf⟩ | ⟨j, -, -, hl⟩
+    · exact Or.inl (huser hl)
+    · rw [hf] at hprov
+      refine Or.inr ⟨hprov.2, ?_⟩
+      have hrec := hc.record
+      rw [hcl] at hrec
+      obtain ⟨e, he⟩ := hrec.2
+      cases envelope
+      · rfl
+      · obtain ⟨id, hid⟩ := henv.mp rfl
+        cases hdet he hid
+    · exact Or.inl (huser hl)
+  · intro hs r hr v hv
+    rcases hcases with ⟨-, hcl, -⟩ | ⟨j, hj, -, -⟩
+    · have hrec := hc.record
+      rw [hcl] at hrec
+      obtain ⟨e, he⟩ := hrec.2
+      subst hv
+      cases hdet hr he
+    · rw [hj] at hs; cases hs
+  · intro j hj
+    rcases hcases with ⟨hs, -, -⟩ | ⟨j', hj', hcl, hl⟩
+    · rw [hj] at hs; cases hs
+    · rw [hj] at hj'
+      cases hj'
+      have hrec := hc.record
+      rw [hcl] at hrec
+      obtain ⟨-, hhead, hmoved⟩ := hrec
+      refine ⟨huser hl, hhead, ?_⟩
+      obtain ⟨hL, hLs⟩ := run.index.of_git hc.index
+      obtain ⟨hH, hHs⟩ := run.head.of_git hc.head
+      obtain ⟨horder, from_, src, buf, pt, hfrom, hord, hnext, hjl, hsrc, hopen⟩ := hmoved
+      have hHo := (spec_result (object_order_ok_spec hH horder) hord).mp rfl
+      have hfirst := spec_result (next_move_source_spec hL hLs.pathOrdered hH hHo run.i hc.entry from_ hfrom) hnext
+      obtain ⟨h, hhj, hms⟩ := hfirst.found hjl
+      have hor := spec_result (open_record_spec hR run.config src run.record buf) hopen
+      rw [hhj] at hsrc
+      simp only [Option.elim] at hsrc
+      rw [hsrc] at hor
+      exact ⟨h, hhj, hms, _, hor⟩
 
 end Transcrypt.V3Verification

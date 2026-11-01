@@ -6,8 +6,9 @@
 
 use std::fmt;
 use transcrypt_v3_core::{
-    blob_elsewhere, first_unselectable, held_entries, listing_fields, next_move_source, object_order_ok,
-    parse_listing as parse_listing_ends, parse_listing_attrs, EXECUTABLE_MODE, OID_START, REGULAR_MODE,
+    blob_elsewhere, entry_provenance, first_unselectable, held_entries, listing_fields, next_move_source,
+    object_order_ok, parse_listing as parse_listing_ends, parse_listing_attrs, Provenance, EXECUTABLE_MODE,
+    OID_START, REGULAR_MODE,
 };
 use crate::git::{git_records, ObjectId, MODE_LEN};
 
@@ -164,6 +165,18 @@ impl Listing {
         Ok(held)
     }
 
+    /// Where the content of entry `i` came from (the verified
+    /// `entry_provenance`): whether `head` holds its blob at its path, and
+    /// whether the commits being brought in do (`None`: not known), and
+    /// whether `protect` `forced` it.
+    pub(crate) fn provenance(&self, i: usize, head: &Listing, incoming: Option<&Listing>, forced: bool) -> Provenance {
+        let (bytes, ends): (&[u8], &[usize]) = match incoming {
+            Some(l) => (&l.bytes, &l.ends),
+            None => (&[], &[]),
+        };
+        entry_provenance(&self.bytes, &self.ends, i, &head.bytes, &head.ends, bytes, ends, incoming.is_some(), forced)
+    }
+
     /// This listing with its object order: its positions sorted by object
     /// id, then position, which the verified `object_order_ok` checks.
     pub(crate) fn ordered(&self) -> Result<OrderedListing<'_>, String> {
@@ -194,17 +207,19 @@ impl<'a> OrderedListing<'a> {
     }
 
     /// The entries of this listing (`HEAD`) that entry `i` of `index` may
-    /// have been moved from, in object order (the verified
-    /// `next_move_source`: the same blob at another path, whose own entry
-    /// has left the index).
-    pub(crate) fn move_sources<'s>(&'s self, index: &'s Listing, i: usize) -> impl Iterator<Item = &'a Staged> + 's {
+    /// have been moved from, with their positions, in listing order (the
+    /// verified `next_move_source`: the same blob at another path, whose
+    /// own entry has left the index).
+    pub(crate) fn move_sources<'s>(&'s self, index: &'s Listing, i: usize)
+        -> impl Iterator<Item = (usize, &'a Staged)> + 's
+    {
         let head = self.listing;
         let mut from = 0;
         std::iter::from_fn(move || {
             let j = next_move_source(&index.bytes, &index.ends, i, &head.bytes, &head.ends, &self.order, from);
             let source = head.entries.get(j)?;
             from = j + 1;
-            Some(source)
+            Some((j, source))
         })
     }
 }

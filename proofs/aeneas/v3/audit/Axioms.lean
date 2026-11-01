@@ -52,10 +52,16 @@ open Transcrypt.V3Verification
 #print axioms decode_frame_header_spec
 #print axioms decode_frame_header_encode
 -- Bytes (repair)
-#print axioms seal_action_spec
-#print axioms Transcrypt.V3Policy.sealSpec_repairs_only_local
-#print axioms Transcrypt.V3Policy.sealSpec_seal_plain
-#print axioms Transcrypt.V3Policy.sealSpec_rebind_moved
+#print axioms needs_record_spec
+#print axioms repair_plan_spec
+#print axioms repairPlanSpecOf_injective
+#print axioms repair_plan_repairs_only_local
+#print axioms needs_record_skip
+#print axioms Transcrypt.V3Policy.repairSpec_seal
+#print axioms Transcrypt.V3Policy.repairSpec_rebind
+#print axioms Transcrypt.V3Policy.repairSpec_keep
+#print axioms Transcrypt.V3Policy.repairSpec_repairs_only_local
+#print axioms Transcrypt.V3Policy.repairSpec_unread
 #print axioms entry_check_spec
 -- Envelope
 #print axioms is_object_id_spec
@@ -100,8 +106,9 @@ open Transcrypt.V3Verification
 #print axioms record_is_spec
 -- SnapshotLookup
 #print axioms held_entries_spec
--- SnapshotAttrs
-#print axioms is_local_change_spec
+-- SnapshotLookup
+#print axioms provenance_of_spec
+#print axioms entry_provenance_spec
 -- SnapshotMoves
 #print axioms object_order_ok_spec
 #print axioms ObjectOrder.surj
@@ -127,6 +134,8 @@ open Transcrypt.V3Verification
 #print axioms hookPlan_spec
 #print axioms hook_accepts_only_authenticated_ciphertext
 #print axioms hook_accepts_only_authenticated_ciphertext_given_history
+#print axioms hook_provenance
+#print axioms hook_skips_only_unrepairable
 #print axioms hook_repairs_only_local_changes
 #print axioms stored_key_authenticates_current_config
 -- spec (V3Policy)
@@ -140,6 +149,9 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.entryOk_indexRecord
 #print axioms Transcrypt.V3Policy.localChange_held
 #print axioms Transcrypt.V3Policy.localChange_unknown
+#print axioms Transcrypt.V3Policy.provenanceIs_unique
+#print axioms Transcrypt.V3Policy.provenanceIs_held
+#print axioms Transcrypt.V3Policy.localChange_iff_provenance
 #print axioms Transcrypt.V3Policy.bytesLt_irrefl
 #print axioms Transcrypt.V3Policy.bytesLt_trans
 #print axioms Transcrypt.V3Policy.bytesLt_total
