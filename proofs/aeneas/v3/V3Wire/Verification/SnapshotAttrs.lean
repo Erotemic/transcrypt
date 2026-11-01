@@ -38,9 +38,11 @@ theorem is_local_change_spec (head : List Entry) (incoming : Option (List Entry)
 /-! ## `parse_listing_attrs` -/
 
 /-- Git's complete answer naming the listing's paths with these values. -/
-def AttrsHyp (es : List Entry) (response : Slice U8) (flags : Slice Bool) (values : List (List Nat)) : Prop :=
-  values.length = es.length ∧ (∀ v ∈ values, 0 ∉ v) ∧ flags.length = es.length ∧
-    sliceBytes response = attrResponse ((es.map (·.path)).zip values)
+structure AttrsHyp (es : List Entry) (response : Slice U8) (flags : Slice Bool) (values : List (List Nat)) : Prop where
+  values_len : values.length = es.length
+  values_nul_free : ∀ v ∈ values, 0 ∉ v
+  flags_len : flags.length = es.length
+  response_eq : sliceBytes response = attrResponse ((es.map (·.path)).zip values)
 
 /-- Loop invariant of `parse_listing_attrs` after `i` records. -/
 def AttrsInv (es : List Entry) (response : Slice U8) (flags : Slice Bool)
@@ -135,8 +137,8 @@ theorem parse_listing_attrs_spec {listing : Slice U8} {ends : Slice Usize} {es :
             · intro values hy
               have hv := hnext values hy
               obtain ⟨hvq, -⟩ := attrRecordAt_unique hrec hv
-              rw [hi5, hH values hy, List.take_add_one, List.getElem?_eq_getElem (by rw [hy.1]; exact hi), hvq,
-                getElem!_pos values i.val (by rw [hy.1]; exact hi)]
+              rw [hi5, hH values hy, List.take_add_one, List.getElem?_eq_getElem (by rw [hy.values_len]; exact hi), hvq,
+                getElem!_pos values i.val (by rw [hy.values_len]; exact hi)]
               rfl
           · simp only
             refine ⟨⟨h1, h2, fun h => absurd h (by simp), fun values hy => ?_⟩, by simp only [if_false, Bool.false_eq_true]; omega⟩
@@ -160,7 +162,7 @@ theorem parse_listing_attrs_spec {listing : Slice U8} {ends : Slice Usize} {es :
       refine ⟨hfe, by simp, [], rfl, by simp, by simp [attrResponse], by simp, fun _ _ => by simp⟩
     · apply decide_eq_true
       apply UScalar.eq_of_val_eq
-      simp [hel, hy.2.2.1]
+      simp [hel, hy.flags_len]
   · obtain ⟨h1, h2, h3, h4⟩ := hinv
     split
     · rename_i hok
@@ -175,11 +177,11 @@ theorem parse_listing_attrs_spec {listing : Slice U8} {ends : Slice Usize} {es :
           have := of_decide_eq_true hatr; rw [this]; simp
         rw [← hR, this, ← hRl, List.take_length]
       · have hvs := hH values hy
-        rw [hfe, List.take_of_length_le (by rw [hy.1])] at hvs
+        rw [hfe, List.take_of_length_le (by rw [hy.values_len])] at hvs
         subst hvs
         refine ⟨decide_eq_true ?_, hF⟩
         apply UScalar.eq_of_val_eq
-        have hS := hy.2.2.2
+        have hS := hy.response_eq
         have := congrArg List.length (hR.trans hS.symm)
         rw [List.length_take, hRl] at this
         have hat' : atr.val = response.length := by omega

@@ -32,12 +32,19 @@ and names every assumption it rests on.
   results (A4). For the repairs, `RepairInputs` are the values the adapter
   computed for one entry and `RepairContracts` what they are.
 
-`hook_accepts_only_authenticated_ciphertext`: if the run accepted, every
-path the committed attributes select is a regular, non-reserved entry whose
-blob, when unlocked, authenticates at exactly that path under the committed
+`hook_accepts_only_authenticated_ciphertext`: if the run accepted, the
+index is an `AcceptedIndex`: every path the committed attributes select is
+a regular, non-reserved entry (`AcceptedProtectedEntry`) whose blob, when
+unlocked, authenticates at exactly that path under the committed
 configuration (or, in the incremental hook, is unchanged since `HEAD` and
-`HEAD^1` and has the v3 envelope); when locked, it has the envelope of this
-configuration and is not a blob moved from another path.
+`HEAD^1` and has the v3 envelope; `KeyedEntryOk`); when locked, it has the
+envelope of this configuration and is not a blob moved from another path
+(`KeylessEnvelopeOk`). The proof goes through named steps: the snapshots
+are sorted (`hook_snapshots_sorted`), the flags are Git's selection
+(`hook_flags`), a selected entry is selectable (`hook_selectable`) and has a
+check of its own blob at its own path (`hook_checks_selected`,
+`ChecksEntry`), and an accepted check gives the conclusion
+(`EntryAccepted.accepted`).
 `hook_repairs_only_local_changes`: everything the hook re-encrypts before
 that check was a local change of the user, and a rebind re-encrypts only a
 record that authenticates at a `HEAD` path it was moved from.
@@ -47,7 +54,7 @@ are binary searches, and lookups by object id go through object orders that
 the adapter sorts and `object_order_ok` checks.
 `hook_accepts_only_authenticated_ciphertext_given_history` adds A24 (the
 history the incremental hook trusts was checked) and concludes that every
-selected entry authenticates.
+selected entry authenticates (`AuthenticatedIndex`).
 -/
 
 open CoreModels Aeneas
@@ -320,6 +327,172 @@ structure HookContracts (g : GitState) (run : HookEvidence g) : Prop where
   attributes : GitAttributes g run.response
   objects : ∀ e ∈ run.entries, ∃ x, g.index[e.index.val]? = some x ∧ GitObject g x.oid e.record
 
+/-! ## What an accepted commit is
+
+The conclusion of the end-to-end theorem, in named parts. `config` is the
+committed configuration's bytes; its id is `σ.digest16 config`. -/
+
+/-- The index stages `config` as the regular file `.transcrypt/config`. -/
+def ConfigCommitted (g : GitState) (config : List Nat) : Prop :=
+  ∃ c ∈ g.index, c.path = ascii ".transcrypt/config" ∧ c.Regular ∧ g.blob c.oid = some config
+
+/-- The index, `HEAD` and `HEAD^1` each list every path once, in Git's
+    byte order. -/
+def SnapshotsSorted (g : GitState) : Prop :=
+  Sorted g.index ∧ Sorted g.head ∧ Sorted g.parent
+
+/-- `content` is a record that authenticates at exactly `x`'s path under
+    `config`. -/
+def AuthenticatedAt (σ : Suite) (config : List Nat) (x : Entry) (content : List Nat) : Prop :=
+  ∃ pt, OpensTo σ config x.path content pt
+
+/-- The keyless check: `content` has this configuration's v3 envelope, and
+    `x` is unchanged since `HEAD` and `HEAD^1` or its blob is not another
+    path's (no record moved without the key). -/
+def KeylessEnvelopeOk (σ : Suite) (config : List Nat) (g : GitState) (x : Entry) (content : List Nat) :
+    Prop :=
+  EnvelopeOk content (σ.digest16 config) ∧
+    (Settled g.head g.parent x ∨ ¬ BlobElsewhere [g.index, g.head, g.parent] x)
+
+/-- The keyed check: `content` authenticates at `x`'s path or, in the
+    incremental hook, `x` is unchanged since `HEAD` and `HEAD^1` and has this
+    configuration's envelope. -/
+def KeyedEntryOk (σ : Suite) (config : List Nat) (incremental : Bool) (g : GitState) (x : Entry)
+    (content : List Nat) : Prop :=
+  AuthenticatedAt σ config x content ∨
+    (incremental = true ∧ Settled g.head g.parent x ∧ EnvelopeOk content (σ.digest16 config))
+
+/-- A selected index entry as an accepted commit has it: a regular,
+    non-reserved file whose blob passes the keyed check with the key and the
+    keyless check without it. -/
+def AcceptedProtectedEntry (σ : Suite) (config : List Nat) (keyed incremental : Bool) (g : GitState)
+    (x : Entry) : Prop :=
+  Selectable x ∧ ∃ content, g.blob x.oid = some content ∧
+    (keyed = true → KeyedEntryOk σ config incremental g x content) ∧
+    (keyed = false → KeylessEnvelopeOk σ config g x content)
+
+/-- An accepted index: every entry the committed attributes select is an
+    `AcceptedProtectedEntry`. -/
+def AcceptedIndex (σ : Suite) (config : List Nat) (keyed incremental : Bool) (g : GitState) : Prop :=
+  ∀ x ∈ g.index, Selected (g.filter x.path) → AcceptedProtectedEntry σ config keyed incremental g x
+
+/-- An authenticated index: every entry the committed attributes select is a
+    regular, non-reserved file whose blob authenticates at its path. -/
+def AuthenticatedIndex (σ : Suite) (config : List Nat) (g : GitState) : Prop :=
+  ∀ x ∈ g.index, Selected (g.filter x.path) →
+    Selectable x ∧ ∃ content, g.blob x.oid = some content ∧ AuthenticatedAt σ config x content
+
+/-! ## The steps of the hook's final check -/
+
+/-- The verified parses give exactly Git's snapshots, each path once. -/
+theorem hook_snapshots_sorted {g : GitState} {run : HookEvidence g} (hgit : HookContracts g run) :
+    SnapshotsSorted g :=
+  ⟨(run.index.of_git hgit.index).2.1, (run.head.of_git hgit.head).2.1, (run.parent.of_git hgit.parent).2.1⟩
+
+/-- The protected flags are Git's selection of each index entry. -/
+theorem hook_flags {g : GitState} {run : HookEvidence g} (hgit : HookContracts g run) :
+    run.flags.val = g.index.map (fun e => decide (Selected (g.filter e.path))) := by
+  obtain ⟨hL, -, -⟩ := run.index.of_git hgit.index
+  have hflags := (spec_result (parse_listing_attrs_spec hL run.response run.flags0) run.attrs).2
+    (g.index.map (fun e => g.filter e.path)) ⟨by simp, by
+      intro v hv; obtain ⟨e, he, rfl⟩ := List.mem_map.1 hv; exact hgit.attributes.1 e he,
+      run.flags0_len, hgit.attributes.2⟩
+  rw [hflags.2, List.map_map]; rfl
+
+/-- A selected entry is protected: its flag is set. -/
+theorem hook_flag_of_selected {g : GitState} {run : HookEvidence g} (hgit : HookContracts g run)
+    {k : Nat} (hk : k < g.index.length) (hsx : Selected (g.filter g.index[k].path)) :
+    run.flags.val[k]! = true := by
+  rw [hook_flags hgit, getElem!_pos _ k (by simp; omega)]; simp [hsx]
+
+/-- `first_unselectable` found no protected entry that is not selectable. -/
+theorem hook_selectable {g : GitState} {run : HookEvidence g} (hgit : HookContracts g run)
+    {x : Entry} (hx : x ∈ g.index) (hsx : Selected (g.filter x.path)) : Selectable x := by
+  obtain ⟨hL, -, -⟩ := run.index.of_git hgit.index
+  obtain ⟨sel, hsel0, hsel_none⟩ := run.selectable
+  have hsel := spec_result (first_unselectable_spec hL run.flags (by
+    rw [Slice.length, hook_flags hgit, List.length_map])) hsel0
+  obtain ⟨k, hk, rfl⟩ := List.getElem_of_mem hx
+  exact hsel.2.1 k _ (by rw [hsel_none]; exact hk) (List.getElem?_eq_getElem hk)
+    (hook_flag_of_selected hgit hk hsx)
+
+/-- The hook's check `e` is a check of the index entry `x`: of its blob, at
+    its path, settled only if `x` is unchanged since `HEAD` and `HEAD^1`, and
+    `elsewhere` exactly when its blob is at another path. -/
+structure ChecksEntry (g : GitState) (x : Entry) (e : HookEntry) : Prop where
+  blob : g.blob x.oid = some (sliceBytes e.record)
+  path : sliceBytes e.path = x.path
+  settled : e.settled = true → Settled g.head g.parent x
+  elsewhere : e.elsewhere = true ↔ BlobElsewhere [g.index, g.head, g.parent] x
+
+/-- Every selected index entry has a check among the hook's checks. -/
+theorem hook_checks_selected {g : GitState} {run : HookEvidence g} (hgit : HookContracts g run)
+    {x : Entry} (hx : x ∈ g.index) (hsx : Selected (g.filter x.path)) :
+    ∃ e ∈ run.entries, ChecksEntry g x e := by
+  obtain ⟨hL, hLs, hIo⟩ := run.index.of_git hgit.index
+  obtain ⟨hH, hHs, hHo⟩ := run.head.of_git hgit.head
+  obtain ⟨hP, hPs, hPo⟩ := run.parent.of_git hgit.parent
+  obtain ⟨k, hk, rfl⟩ := List.getElem_of_mem hx
+  have hfk := hook_flag_of_selected hgit hk hsx
+  -- The protected entry `k` has a check.
+  have hmem : k ∈ run.entries.map (fun e => e.index.val) := by
+    rw [run.positions]; exact List.mem_filter.mpr ⟨List.mem_range.mpr hk, hfk⟩
+  obtain ⟨e, he, hek⟩ := List.mem_map.1 hmem
+  refine ⟨e, he, ?_, ?_, ?_, ?_⟩
+  -- Its blob is the entry's object (A11, A21).
+  · obtain ⟨x', hx', hobj'⟩ := hgit.objects e he
+    rw [hek, List.getElem?_eq_getElem hk, Option.some.injEq] at hx'
+    subst hx'
+    exact hobj'
+  -- Its path is the entry's path.
+  · obtain ⟨f, hf, hpath⟩ := run.fields e he
+    have hfs := spec_result (listing_fields_spec hL e.index) hf
+    obtain ⟨y, hy, -, -, hyp, -⟩ := FieldsOf.slices hL hfs.2
+    rw [hek, List.getElem?_eq_getElem hk, Option.some.injEq] at hy
+    subst hy
+    rw [hyp] at hpath
+    exact hpath
+  -- Settled only if `HEAD` and `HEAD^1` hold it (`held_entries`).
+  · intro hs
+    have hinH := spec_result (held_entries_spec hL hH hHs.pathOrdered run.all run.inHead0 (by
+      rw [Slice.length, run.all_true, List.length_replicate]) run.inHead0_len) run.in_head
+    have hinP := spec_result (held_entries_spec hL hP hPs.pathOrdered run.flags run.inParent0 (by
+      rw [Slice.length, hook_flags hgit, List.length_map]) run.inParent0_len) run.in_parent
+    have hall : run.all.val[k]! = true := by
+      rw [run.all_true, getElem!_pos _ k (by simp; omega)]; simp
+    have := run.settled e he hs
+    rw [hek, Bool.and_eq_true, hinH.2.2 k _ hk (List.getElem?_eq_getElem hk),
+      hinP.2.2 k _ hk (List.getElem?_eq_getElem hk)] at this
+    simp only [hall, hfk, true_and] at this
+    exact this
+  -- `elsewhere` is exactly `BlobElsewhere` (`blob_elsewhere`).
+  · have := spec_result (blob_elsewhere_spec hL hLs hIo hH hHs hHo hP hPs hPo e.index (by omega))
+      (run.elsewhere e he)
+    simp only [hek] at this
+    exact this
+
+/-- A check that accepted a selected, selectable entry's blob makes it an
+    `AcceptedProtectedEntry`. -/
+theorem EntryAccepted.accepted {config : List Nat} {keyed incremental : Bool} {g : GitState}
+    {x : Entry} {e : HookEntry} (hc : ChecksEntry g x e) (hsel : Selectable x)
+    (hacc : EntryAccepted σ config (σ.digest16 config) keyed incremental e) :
+    AcceptedProtectedEntry σ config keyed incremental g x := by
+  refine ⟨hsel, _, hc.blob, fun hkey => ?_, fun hkey => ?_⟩
+  · -- With the key: authenticated, unless settled in the incremental hook.
+    by_cases hs : incremental = true ∧ e.settled = true
+    · exact Or.inr ⟨hs.1, hc.settled hs.2, (hacc.2 (fun h => h.2 hs)).1⟩
+    · obtain ⟨pt, hpt⟩ := hacc.1 ⟨hkey, hs⟩
+      rw [hc.path] at hpt
+      exact Or.inl ⟨pt, hpt⟩
+  · -- Without the key: the envelope, and settled or not moved.
+    obtain ⟨henv, hse⟩ := hacc.2 (fun h => by rw [hkey] at h; exact absurd h.1 (by simp))
+    refine ⟨henv, ?_⟩
+    rcases hse with hs | hs
+    · exact Or.inl (hc.settled hs)
+    · exact Or.inr (fun hb => by rw [← hc.elsewhere, hs] at hb; exact absurd hb (by simp))
+
+/-! ## End to end -/
+
 /-- **End-to-end security of the pre-commit hook.** Assume the adapter
     contracts: Git reports the index, `HEAD` and `HEAD^1` exactly (A20) and
     the committed attributes' `filter` values (A19); every blob the hook
@@ -327,20 +500,22 @@ structure HookContracts (g : GitState) (run : HookEvidence g) : Prop where
     primitives realize the suite `σ` (A5), whose digest gives the
     configuration id (A5); and the configuration is the one committed as
     `.transcrypt/config` (checked by the adapter, A4). If the hook's final
-    check accepted (`HookEvidence`, `hookPlan` returned `true`), then every
-    entry of the index Git commits (A22) that the committed attributes select
-    is a regular, non-reserved file whose blob
+    check accepted (`HookEvidence`, `hookPlan` returned `true`), then the
+    index Git commits (A22) is an `AcceptedIndex`: every entry that the
+    committed attributes select is a regular, non-reserved file whose blob
 
     * with the key, authenticates at exactly its own path under the
       committed configuration — or, in the incremental hook, is unchanged
       since `HEAD` and `HEAD^1` and has the v3 envelope of that
-      configuration (checked when it was committed, and by the audit);
+      configuration (checked when it was committed, and by the audit)
+      (`KeyedEntryOk`);
     * without the key, has that envelope (A14: keyless checks cannot detect
       a forgery) and is unchanged since `HEAD` and `HEAD^1` or is not a blob
-      of another path (no record moved without the key).
+      of another path (no record moved without the key)
+      (`KeylessEnvelopeOk`).
 
-    The three snapshots are sorted (`Sorted`: each path once, as Git lists
-    them; the parse refuses a crafted tree that repeats a path), so
+    The three snapshots are sorted (`SnapshotsSorted`: each path once, as
+    Git lists them; the parse refuses a crafted tree that repeats a path), so
     "unchanged since `HEAD`" names the one entry `HEAD` has at that path.
     With A24 the settled case authenticates too
     (`hook_accepts_only_authenticated_ciphertext_given_history`). -/
@@ -349,92 +524,17 @@ theorem hook_accepts_only_authenticated_ciphertext (g : GitState) (run : HookEvi
     (hR : Realizes inst prims σ)
     (hid : wireBytes id = σ.digest16 (wireBytes config))
     (hgit : HookContracts g run)
-    (hcfg : ∃ c ∈ g.index, c.path = ascii ".transcrypt/config" ∧ c.Regular ∧ g.blob c.oid = some (wireBytes config))
+    (hcfg : ConfigCommitted g (wireBytes config))
     (hcheck : hookPlan inst prims config id keyed incremental run.entries = ok true) :
-    (∃ c ∈ g.index, c.path = ascii ".transcrypt/config" ∧ g.blob c.oid = some (wireBytes config)) ∧
-    (Sorted g.index ∧ Sorted g.head ∧ Sorted g.parent) ∧
-    ∀ x ∈ g.index, Selected (g.filter x.path) →
-      Selectable x ∧ ∃ content, g.blob x.oid = some content ∧
-        (keyed = true → (∃ pt, OpensTo σ (wireBytes config) x.path content pt) ∨
-          (incremental = true ∧ Settled g.head g.parent x ∧ EnvelopeOk content (σ.digest16 (wireBytes config)))) ∧
-        (keyed = false → EnvelopeOk content (σ.digest16 (wireBytes config)) ∧
-          (Settled g.head g.parent x ∨ ¬ BlobElsewhere [g.index, g.head, g.parent] x)) := by
-  -- The verified parses give exactly Git's snapshots, each path once.
-  obtain ⟨hL, hLs, hIo⟩ := run.index.of_git hgit.index
-  obtain ⟨hH, hHs, hHo⟩ := run.head.of_git hgit.head
-  obtain ⟨hP, hPs, hPo⟩ := run.parent.of_git hgit.parent
-  refine ⟨by obtain ⟨c, hc, hp, _, hb⟩ := hcfg; exact ⟨c, hc, hp, hb⟩, ⟨hLs, hHs, hPs⟩, ?_⟩
-  -- The flags are Git's selection of each entry.
-  have hflags := (spec_result (parse_listing_attrs_spec hL run.response run.flags0) run.attrs).2
-    (g.index.map (fun e => g.filter e.path)) ⟨by simp, by
-      intro v hv; obtain ⟨e, he, rfl⟩ := List.mem_map.1 hv; exact hgit.attributes.1 e he,
-      run.flags0_len, hgit.attributes.2⟩
-  have hfl : run.flags.val = g.index.map (fun e => decide (Selected (g.filter e.path))) := by
-    rw [hflags.2, List.map_map]; rfl
-  -- No protected entry is unselectable.
-  obtain ⟨sel, hsel0, hsel_none⟩ := run.selectable
-  have hsel := spec_result (first_unselectable_spec hL run.flags (by
-    rw [Slice.length, hfl, List.length_map])) hsel0
-  -- Membership in `HEAD` and `HEAD^1`.
-  have hinH := spec_result (held_entries_spec hL hH hHs.pathOrdered run.all run.inHead0 (by
-    rw [Slice.length, run.all_true, List.length_replicate]) run.inHead0_len) run.in_head
-  have hinP := spec_result (held_entries_spec hL hP hPs.pathOrdered run.flags run.inParent0 (by
-    rw [Slice.length, hfl, List.length_map]) run.inParent0_len) run.in_parent
+    ConfigCommitted g (wireBytes config) ∧ SnapshotsSorted g ∧
+      AcceptedIndex σ (wireBytes config) keyed incremental g := by
+  refine ⟨hcfg, hook_snapshots_sorted hgit, fun x hx hsx => ?_⟩
+  -- Every check accepted (`hookPlan_spec`); the selected `x` has one.
   have hplan := spec_result (hookPlan_spec hR config id keyed incremental run.entries) hcheck rfl
-  intro x hx hsx
-  obtain ⟨k, hk, rfl⟩ := List.getElem_of_mem hx
-  have hfk : run.flags.val[k]! = true := by
-    rw [hfl, getElem!_pos _ k (by simp; omega)]; simp [hsx]
-  refine ⟨hsel.2.1 k _ (by rw [hsel_none]; exact hk) (List.getElem?_eq_getElem hk) hfk, ?_⟩
-  -- The entry's check.
-  have hmem : k ∈ run.entries.map (fun e => e.index.val) := by
-    rw [run.positions]; exact List.mem_filter.mpr ⟨List.mem_range.mpr hk, hfk⟩
-  obtain ⟨e, he, hek⟩ := List.mem_map.1 hmem
+  obtain ⟨e, he, hce⟩ := hook_checks_selected hgit hx hsx
   have hacc := hplan e he
-  obtain ⟨x', hx', hobj'⟩ := hgit.objects e he
-  rw [hek, List.getElem?_eq_getElem hk, Option.some.injEq] at hx'
-  subst hx'
-  -- Its path is the entry's path.
-  obtain ⟨f, hf, hpath⟩ := run.fields e he
-  have hfs := spec_result (listing_fields_spec hL e.index) hf
-  obtain ⟨y, hy, -, -, hyp, -⟩ := FieldsOf.slices hL hfs.2
-  rw [hek, List.getElem?_eq_getElem hk, Option.some.injEq] at hy
-  subst hy
-  rw [hyp] at hpath
-  -- A settled entry is `Settled`.
-  have hall : run.all.val[k]! = true := by
-    rw [run.all_true, getElem!_pos _ k (by simp; omega)]; simp
-  have hsett : e.settled = true → Settled g.head g.parent g.index[k] := by
-    intro hs
-    have := run.settled e he hs
-    rw [hek, Bool.and_eq_true, hinH.2.2 k _ hk (List.getElem?_eq_getElem hk),
-      hinP.2.2 k _ hk (List.getElem?_eq_getElem hk)] at this
-    simp only [hall, hfk, true_and] at this
-    exact this
-  -- `elsewhere` is exactly `BlobElsewhere`.
-  have hels : e.elsewhere = true ↔ BlobElsewhere [g.index, g.head, g.parent] g.index[k] := by
-    have := spec_result (blob_elsewhere_spec hL hLs hIo hH hHs hHo hP hPs hPo e.index (by omega))
-      (run.elsewhere e he)
-    simp only [hek] at this
-    exact this
-  refine ⟨_, hobj', ?_, ?_⟩
-  · intro hkey
-    by_cases hs : incremental = true ∧ e.settled = true
-    · right
-      have := (hacc.2 (fun h => h.2 hs)).1
-      rw [hid] at this
-      exact ⟨hs.1, hsett hs.2, this⟩
-    · left
-      obtain ⟨pt, hpt⟩ := hacc.1 ⟨hkey, hs⟩
-      rw [hpath] at hpt
-      exact ⟨pt, hpt⟩
-  · intro hkey
-    obtain ⟨henv, hse⟩ := hacc.2 (fun h => by rw [hkey] at h; exact absurd h.1 (by simp))
-    rw [hid] at henv
-    refine ⟨henv, ?_⟩
-    rcases hse with hs | hs
-    · exact Or.inl (hsett hs)
-    · exact Or.inr (fun hb => by rw [← hels] at hb; rw [hs] at hb; exact absurd hb (by simp))
+  rw [hid] at hacc
+  exact hacc.accepted hce (hook_selectable hgit hx hsx)
 
 /-! ## Settled entries and the checked history -/
 
@@ -448,23 +548,23 @@ theorem hook_accepts_only_authenticated_ciphertext (g : GitState) (run : HookEvi
     is the only one at that path (`Sorted.holds_oid`). -/
 def HeadAuthentic (σ : Suite) (config : List Nat) (g : GitState) : Prop :=
   ∀ y ∈ g.head, Selected (g.filter y.path) →
-    ∃ content, g.blob y.oid = some content ∧ ∃ pt, OpensTo σ config y.path content pt
+    ∃ content, g.blob y.oid = some content ∧ AuthenticatedAt σ config y content
 
 /-- **With the key and a checked history, every selected entry
     authenticates.** Under the hypotheses of
     `hook_accepts_only_authenticated_ciphertext` and A24, an accepted commit
     made with the key, incremental or not, stores at every path the
-    committed attributes select a record that authenticates at that path. -/
+    committed attributes select a record that authenticates at that path
+    (`AuthenticatedIndex`). -/
 theorem hook_accepts_only_authenticated_ciphertext_given_history (g : GitState) (run : HookEvidence g)
     (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (incremental : Bool)
     (hR : Realizes inst prims σ)
     (hid : wireBytes id = σ.digest16 (wireBytes config))
     (hgit : HookContracts g run)
-    (hcfg : ∃ c ∈ g.index, c.path = ascii ".transcrypt/config" ∧ c.Regular ∧ g.blob c.oid = some (wireBytes config))
+    (hcfg : ConfigCommitted g (wireBytes config))
     (hcheck : hookPlan inst prims config id true incremental run.entries = ok true)
     (hhist : HeadAuthentic σ (wireBytes config) g) :
-    ∀ x ∈ g.index, Selected (g.filter x.path) →
-      Selectable x ∧ ∃ content, g.blob x.oid = some content ∧ ∃ pt, OpensTo σ (wireBytes config) x.path content pt := by
+    AuthenticatedIndex σ (wireBytes config) g := by
   obtain ⟨-, -, h⟩ := hook_accepts_only_authenticated_ciphertext g run config id true incremental hR hid hgit
     hcfg hcheck
   intro x hx hsx
@@ -472,7 +572,8 @@ theorem hook_accepts_only_authenticated_ciphertext_given_history (g : GitState) 
   refine ⟨hsel, content, hc, ?_⟩
   rcases hk rfl with hop | ⟨-, ⟨⟨y, hy, hyo, hyp⟩, -⟩, -⟩
   · exact hop
-  · obtain ⟨c', hc', pt, hpt⟩ := hhist y hy (hyp ▸ hsx)
+  · -- Settled: `HEAD` holds the same blob at the same path, and A24 says it authenticates.
+    obtain ⟨c', hc', pt, hpt⟩ := hhist y hy (hyp ▸ hsx)
     rw [hyo, hc, Option.some.injEq] at hc'
     subst hc'
     rw [hyp] at hpt
@@ -672,7 +773,7 @@ theorem hook_repairs_only_local_changes (g : GitState) (run : RepairInputs)
     obtain ⟨horder, from_, j, src, buf, pt, hfrom, hord, hnext, hj, hsrc, hopen⟩ := hmoved hm
     have hHo := (spec_result (object_order_ok_spec hH horder) hord).mp rfl
     have hfirst := spec_result (next_move_source_spec hL hLs.pathOrdered hH hHo i hi from_ hfrom) hnext
-    obtain ⟨h, hhj, hms⟩ := hfirst.2.2.2 hj
+    obtain ⟨h, hhj, hms⟩ := hfirst.found hj
     have hor := spec_result (open_record_spec hR config src record buf) hopen
     rw [hhj] at hsrc
     simp only [Option.elim] at hsrc

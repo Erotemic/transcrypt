@@ -226,14 +226,24 @@ def save_manifest(root: Path) -> None:
     (snap / MANIFEST).write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
 
 
+SPEC_DIR = Path('proofs/lean/Transcrypt')
+# The specification's modules: these three and every module of the
+# `Transcrypt.V3Policy` umbrella (`V3Policy/*.lean`).
+SPEC_FILES = ('V3Wire.lean', 'V3WireCodec.lean', 'V3Policy.lean')
+
+
+def spec_sources(root: Path) -> tuple[str, ...]:
+    """The independent specification's files, relative to `SPEC_DIR`."""
+    parts = root / SPEC_DIR / 'V3Policy'
+    found = sorted(p.relative_to(root / SPEC_DIR).as_posix() for p in parts.glob('*.lean'))
+    return SPEC_FILES + tuple(found)
+
+
 def stage_spec(root: Path) -> None:
     verify(root)
     target = root / SNAP
-    sources = (
-        ('proofs/lean/Transcrypt/V3Wire.lean', 'Transcrypt/V3Wire.lean'),
-        ('proofs/lean/Transcrypt/V3WireCodec.lean', 'Transcrypt/V3WireCodec.lean'),
-        ('proofs/lean/Transcrypt/V3Policy.lean', 'Transcrypt/V3Policy.lean'),
-    )
+    sources = tuple((f'{SPEC_DIR.as_posix()}/{name}', f'Transcrypt/{name}')
+                    for name in spec_sources(root))
     for name, dst in sources:
         data = safe_file(root, name)
         destination = target / dst
@@ -241,6 +251,11 @@ def stage_spec(root: Path) -> None:
         if destination.is_symlink():
             raise SnapshotError(f'Refusing symlink for staged spec: {destination}')
         destination.write_bytes(data)
+    # A module removed from the specification must not survive as a stale copy.
+    staged = {dst for _, dst in sources}
+    for path in (target / 'Transcrypt').rglob('*.lean'):
+        if path.relative_to(target).as_posix() not in staged:
+            path.unlink()
     (target / 'Transcrypt.lean').write_text('import Transcrypt.V3WireCodec\nimport Transcrypt.V3Policy\n')
     # This is a copy of the exact independent spec, never a second authority.
     for name, dst in sources:

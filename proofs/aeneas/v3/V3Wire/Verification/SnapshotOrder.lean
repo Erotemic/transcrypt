@@ -427,8 +427,8 @@ theorem parse_listing_spec (listing : Slice U8) (ends : Slice Usize) (unique : B
                 simp
               have hes : e = es[i.val] := by
                 have hok2 := hy.1 _ (List.getElem_mem hi')
-                exact entryRecord_inj hm hok2.1 h9m hok2.2.1 (objectId_no_tab hoid)
-                  (objectId_no_tab hok2.2.2.2.1) (he.symm.trans hrec')
+                exact entryRecord_inj hm hok2.mode_len h9m hok2.mode_no_tab (objectId_no_tab hoid)
+                  (objectId_no_tab hok2.oid_ok) (he.symm.trans hrec')
               rw [hph es hy, hes, hi3, List.take_add_one, List.getElem?_eq_getElem hi']
               rfl
           · rename_i hbt
@@ -440,7 +440,7 @@ theorem parse_listing_spec (listing : Slice U8) (ends : Slice Usize) (unique : B
             apply hbt
             apply hb.mpr
             have hok2 := hy.1 _ (List.getElem_mem hi')
-            refine ⟨es[i.val], ?_, hok2.1, hok2.2.1, hok2.2.2.2.1, hok2.2.2.2.2.1⟩
+            refine ⟨es[i.val], ?_, hok2.mode_len, hok2.mode_no_tab, hok2.oid_ok, hok2.path_ne⟩
             rw [hrec]
             have hd := listingBytes_drop es i.val hi'
             rw [← hy.2.1, (hyend es hy).2.1] at hd

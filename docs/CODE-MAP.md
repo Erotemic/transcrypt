@@ -23,7 +23,7 @@ and [V3-ASSUMPTIONS](verification/V3-ASSUMPTIONS.md).
 | `setup.rs`, `attributes.rs`, `rekey.rs`, `migrate.rs`, `audit.rs`, `merge.rs`, `diff.rs` | Everything else the commands do. |
 | `proofs/aeneas/v3/V3Wire/Extraction/` | The core translated to Lean (generated; never edited). |
 | `proofs/aeneas/v3/V3Wire/Verification/` | Proofs that the generated code meets the specification, and the end-to-end theorems. |
-| `proofs/lean/Transcrypt/V3Policy.lean` | The independent specification. |
+| `proofs/lean/Transcrypt/V3Policy.lean` | The independent specification: an umbrella over `V3Policy/` (`Constants`, `Paths`, `Authentication`, `Lifecycle`, `Git`, `Credentials`), with the wire format in `V3Wire.lean` and `V3WireCodec.lean`. |
 
 ## One commit, start to finish
 

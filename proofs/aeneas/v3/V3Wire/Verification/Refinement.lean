@@ -1,5 +1,5 @@
 import V3Wire.Verification.Basic
-import Transcrypt.V3Policy
+import V3Wire.Verification.Tactics
 
 /-!
 The production constants of `transcrypt_v3_core`, as committed in the

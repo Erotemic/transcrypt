@@ -66,6 +66,14 @@ hook. The argument therefore has three parts:
 >
 > Git then commits that index (**A22**).
 
+Formally the conclusion is `ConfigCommitted g config ∧ SnapshotsSorted g ∧
+AcceptedIndex σ config keyed incremental g`, where `AcceptedIndex` says each
+selected entry is an `AcceptedProtectedEntry`: `Selectable`, with a blob that
+satisfies `KeyedEntryOk` (unlocked) or `KeylessEnvelopeOk` (locked). These
+are named definitions in `EndToEnd.lean`, next to the intermediate lemmas
+(`hook_snapshots_sorted`, `hook_flags`, `hook_selectable`,
+`hook_checks_selected`, `EntryAccepted.accepted`) the proof is built from.
+
 Together with AES-SIV unforgeability (**A10**), "authenticates at that path
 under the committed configuration" means the blob is ciphertext produced
 with the repository key for that path; `opensTo_unique` makes the plaintext
@@ -176,7 +184,7 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 | `GitObject g oid record` | bytes read by id are that object | A11, A21 | header and size decision PROVED; reading exactly the size and the LF TESTED; object identity ASSUMED (Git's hash) |
 | `Realizes inst prims σ` | the primitives compute AES-SIV / SHA-256 | A5 (with A9) | TESTED (vectors, differential) |
 | `hid : wireBytes id = σ.digest16 config` | the configuration id is the suite's digest | A5 | TESTED (vectors) |
-| `hcfg` | the configuration used is the staged `.transcrypt/config` | A4 | REVIEWED + TESTED (`check_staged` compares the staged blob with it) |
+| `hcfg : ConfigCommitted g config` | the configuration used is the staged `.transcrypt/config` | A4 | REVIEWED + TESTED (`check_staged` compares the staged blob with it) |
 | `run : HookEvidence g`, `hookPlan … = ok true`; `RepairContracts` (Theorem 2, the core-call fields) | the adapter called the verified functions on these inputs and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
 | `RepairContracts.incoming`, `.lazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |

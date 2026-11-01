@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'proofs/aeneas'))
 from v3_snapshot import (
     SnapshotError, SOURCE, HAX_OWNED, ASSUMPTIONS, PROJECT_CONFIG,
-    GENERATED, SNAP, verify, compare, stage_spec, refresh,
+    GENERATED, SNAP, SPEC_DIR, verify, compare, stage_spec, refresh, spec_sources,
 )
 
 
@@ -22,11 +22,7 @@ class TrackedV3Tests(unittest.TestCase):
         self.addCleanup(context.cleanup)
         self.root = Path(context.name)
         # Copy only the public source/snapshot inputs actually used by the gate.
-        paths = list(SOURCE) + [
-            'proofs/lean/Transcrypt/V3Wire.lean',
-            'proofs/lean/Transcrypt/V3WireCodec.lean',
-            'proofs/lean/Transcrypt/V3Policy.lean',
-        ]
+        paths = list(SOURCE) + [f'{SPEC_DIR.as_posix()}/{name}' for name in spec_sources(ROOT)]
         for name in paths:
             dest = self.root / name
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -47,7 +43,9 @@ class TrackedV3Tests(unittest.TestCase):
     def test_real_uploaded_source_and_snapshot_bound_together(self) -> None:
         verify(self.root)
         stage_spec(self.root)
-        for name in ('V3Wire.lean', 'V3WireCodec.lean', 'V3Policy.lean'):
+        names = spec_sources(self.root)
+        self.assertIn('V3Policy/Authentication.lean', names)
+        for name in names:
             self.assertEqual((self.root / SNAP / 'Transcrypt' / name).read_bytes(),
                              (self.root / 'proofs/lean/Transcrypt' / name).read_bytes())
         self.assertEqual((self.root / SNAP / 'Transcrypt.lean').read_text(),
@@ -143,6 +141,13 @@ class TrackedV3Tests(unittest.TestCase):
         stage_spec(self.root)
         self.assertEqual(file.read_bytes(),
                          (self.root / 'proofs/lean/Transcrypt/V3WireCodec.lean').read_bytes())
+
+    def test_removed_spec_module_leaves_no_stale_copy(self) -> None:
+        stale = self.root / SNAP / 'Transcrypt/V3Policy/Removed.lean'
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text('def unintendedFork := 1\n')
+        stage_spec(self.root)
+        self.assertFalse(stale.exists())
 
     def test_no_symlinks_accepted_from_generated_source(self) -> None:
         file = self.root / SNAP / HAX_OWNED[0]
