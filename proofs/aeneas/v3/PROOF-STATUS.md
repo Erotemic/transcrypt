@@ -3,7 +3,7 @@
 **Reconciled 2026-10-26.** Every theorem below is about the Charon/Aeneas
 translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 (pinned by `SNAPSHOT.json`), stated against the independent specification in
-`proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. All but the
+`proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` and `V3Policy/*.lean`. All but the
 program equality `record_envelope_prefix_ok_record` are `WP.spec` triples,
 so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;

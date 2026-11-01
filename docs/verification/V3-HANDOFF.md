@@ -59,7 +59,7 @@ semantics silently or import legacy CBC into the proved core.
 | Verified pure core (codec + every decision) | `rust/crates/transcrypt-v3-core/src/lib.rs` |
 | Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-rs/src/lib.rs` |
 | Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-rs/src/*.rs`: filters, lifecycle, credentials, Git, worktree, setup, attributes, rekey, audit, migrate, agent, fd-relative FS (module map in `main.rs`) |
-| Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` |
+| Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` and `V3Policy/*.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
 | Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle,Snapshot,Objects,EndToEnd}.lean` |
 | Theorem ledger | `proofs/aeneas/v3/PROOF-STATUS.md` |

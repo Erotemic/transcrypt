@@ -9,7 +9,7 @@ sources are bound by `SNAPSHOT.json`. No `.lake` dependencies or compiled files
 are tracked.
 
 The one authoritative independent specification remains in
-`proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean`. The build script
+`proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` and `V3Policy/*.lean`. The build script
 stages byte-for-byte copies as *ignored* build inputs under `Transcrypt/`; it
 cannot silently fork the specification.
 
