@@ -194,12 +194,13 @@ one.
     whether the blob is read (`reads_blob`), and whether the entry passes
     (`staged_verdict`, `staged_verdict_ok` = `VerdictOk`). The verdict asks
     the adapter three questions through the trait `StagedEvidence`, each only
-    when its check needs it (proved by the extracted code's shape and
-    checked by `staged_verdicts_accept_only_what_their_check_requires`):
-    `is_record`, `opens`, `elsewhere`. The handwritten `hookEntry` with its
-    own `open_record` call, the adapter's conjunction `settled = same_policy
-    && in_head[i] && in_parent[i]`, and the adapter's refusal of a record
-    staged at an unprotected name are gone (all three are the core's now).
+    when its check needs it (visible in the extracted code, not a theorem;
+    tested by `staged_verdicts_accept_only_what_their_check_requires`):
+    `is_record`, `opens`, `elsewhere`. The earlier handwritten acceptance
+    model (`hookEntry` with its own `open_record` call and `EntryAccepted`),
+    the adapter's conjunction `settled = same_policy && in_head[i] &&
+    in_parent[i]`, and the adapter's refusal of a record staged at an
+    unprotected name are gone: all three are the core's now.
 - **Residual:** the adapter Rust itself is not proved. On the pre-commit
   path what remains reviewed and tested, not proved, is:
   - the loop of `check_staged` (`HookEvidence`, `HookChecks`): for every

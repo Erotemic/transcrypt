@@ -306,6 +306,13 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
   in this checkout only. `doctor` reports it, the pre-commit hook warns, and
   a server-side audit (which uses the committed rules) still refuses the
   plaintext.
+- **Records at unprotected names.** With the key, `verify-index`, `lock`,
+  `rekey`, `doctor` and any commit that changes a `.gitattributes` file or
+  `.transcrypt/config` refuse a record of this repository at a name nothing
+  protects unless it opens there (a record moved without re-encryption, or
+  a forgery): a local attribute file could otherwise protect it later
+  without it ever being authenticated. Remove it, or stage its plaintext.
+  Ordinary commits do not read unchanged unprotected files.
 - **Old history.** Checking out a commit encrypted under an earlier config
   (before a `rekey`) leaves its protected files encrypted, unless you unlock
   with that config's passphrase.
