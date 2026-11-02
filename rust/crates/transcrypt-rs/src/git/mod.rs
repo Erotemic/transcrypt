@@ -25,10 +25,13 @@ pub(crate) use crate::os::sigpipe_blocked;
 pub(crate) use crate::listing::{paths_of, Listing, Mode, OrderedListing, Staged};
 use transcrypt_v3_core::{
     blob_read, is_object_id, parse_attr_response, parse_batch_header, parse_index_entry, record_envelope_prefix_ok,
-    BlobRead, ATTRIBUTES_NAME, ATTRIBUTES_SUFFIX, ENVELOPE_PREFIX_LEN, FILTER_DRIVER, MAX_RECORD, OID_START,
+    BlobRead, ATTRIBUTES_NAME, ENVELOPE_PREFIX_LEN, FILTER_DRIVER, MAX_RECORD, OID_START,
     REGULAR_MODE,
 };
 use transcrypt_rs::{too_large, KIB, MIB};
+/// Whether a path is a `.gitattributes` file (at the top or nested): the
+/// verified core's test.
+pub(crate) use transcrypt_v3_core::is_attributes_path;
 
 /// Bytes in the mode field that starts every index record.
 pub(crate) const MODE_LEN: usize = REGULAR_MODE.len();
@@ -54,8 +57,12 @@ const BATCH_HEADER_LIMIT: u64 = 160;
 /// How much a wiped buffer at least grows when it is full.
 const GROWTH_FACTOR: usize = 2;
 
-/// The repository's public v3 configuration, relative to the worktree root.
-pub(crate) const CONFIG_PATH: &str = ".transcrypt/config";
+/// The repository's public v3 configuration, relative to the worktree root
+/// (the verified core's `CONFIG_PATH`, which `policy_unchanged` compares).
+pub(crate) const CONFIG_PATH: &str = match std::str::from_utf8(&transcrypt_v3_core::CONFIG_PATH) {
+    Ok(path) => path,
+    Err(_) => panic!("CONFIG_PATH is ASCII"),
+};
 
 /// The value in `slot`, computed by `init` (and kept) if there is none yet.
 pub(crate) fn get_or_try_init<T, E>(slot: &mut Option<T>, init: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {

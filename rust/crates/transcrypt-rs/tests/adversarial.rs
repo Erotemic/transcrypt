@@ -1356,3 +1356,191 @@ fn newly_protected_files_are_authenticated_by_the_hook() {
     let err = run_fails(&repo, bin(), &["pre-commit"], None);
     assert!(err.contains("c.data") && err.contains("authentication failed"), "{err}");
 }
+
+/// A record that has this configuration's header but no valid tag: its
+/// envelope passes every keyless check, and only authentication refuses it.
+fn forged_envelope(repo: &Path) -> String {
+    let mut forged = staged(repo, "a.secret")[..transcrypt_v3_core::FILE_HEADER_LEN].to_vec();
+    forged.extend_from_slice(&[0u8; transcrypt_v3_core::TAG_LEN]);
+    forged.extend_from_slice(b"forged ciphertext");
+    String::from_utf8(run(repo, "git", &["hash-object", "-w", "--stdin"], Some(&forged))).unwrap().trim().to_owned()
+}
+
+/// The commit `rev` names.
+fn rev(repo: &Path, rev: &str) -> String {
+    String::from_utf8(run(repo, "git", &["rev-parse", rev], None)).unwrap().trim().to_owned()
+}
+
+/// Commit the blob `oid` at `path` without the hook, then an unrelated
+/// change: `HEAD` and `HEAD^1` both hold it, as they hold an entry the
+/// incremental hook counts as settled.
+fn commit_twice_unchecked(repo: &Path, path: &str, oid: &str) {
+    run(repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{oid},{path}")], None);
+    run(repo, "git", &["commit", "-q", "--no-verify", "-m", "hostile"], None);
+    let mut readme = fs::read(repo.join("README")).unwrap();
+    readme.extend_from_slice(b"hostile\n");
+    fs::write(repo.join("README"), readme).unwrap();
+    run(repo, "git", &["commit", "-q", "--no-verify", "-m", "hostile again", "README"], None);
+}
+
+/// Run `f` without the stored key (locked), then put it back.
+fn without_key<T>(repo: &Path, f: impl FnOnce() -> T) -> T {
+    let (key, aside) = (repo.join(".git/transcrypt-v3/key"), repo.join(".git/transcrypt-v3/key.aside"));
+    fs::rename(&key, &aside).unwrap();
+    let result = f();
+    fs::rename(&aside, &key).unwrap();
+    result
+}
+
+/// The incremental pre-commit hook does not authenticate an entry that
+/// `HEAD` and `HEAD^1` hold (settled: history the audit checks, A24), but
+/// only while every attribute file and the config are the same in the
+/// index, `HEAD` and `HEAD^1` (the verified `policy_unchanged`). A forged
+/// record with this configuration's header and id is refused as soon as an
+/// attribute file differs, top-level or nested, from `HEAD` or `HEAD^1`.
+/// Full keyed verification refuses it regardless; without the key every
+/// check reports that it checked envelopes only.
+#[test]
+fn settled_entries_are_authenticated_after_an_attribute_change() {
+    let mut scratch = Scratch::new("settledattrs");
+    let repo = scratch.repo("repo");
+    let forged = forged_envelope(&repo);
+    commit_twice_unchecked(&repo, "f.secret", &forged);
+    // Full keyed verification authenticates every entry.
+    let err = run_fails(&repo, bin(), &["verify-index"], None);
+    assert!(err.contains("f.secret") && err.contains("authentication failed"), "{err}");
+    let err = run_fails(&repo, bin(), &["audit", "HEAD"], None);
+    assert!(err.contains("f.secret"), "{err}");
+    // Without the key only envelopes are checked, and the output says so.
+    without_key(&repo, || {
+        let out = exec(&repo, bin(), &["verify-index"], None);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && err.contains("envelopes only, which does not authenticate"), "{err}");
+        let out = String::from_utf8(run(&repo, bin(), &["audit", "HEAD"], None)).unwrap();
+        assert!(out.contains("envelopes only: unlock to authenticate"), "{out}");
+    });
+    // The hook trusts the settled entry (A24: the audit refuses it)...
+    let before = rev(&repo, "HEAD");
+    fs::write(repo.join("z"), b"z\n").unwrap();
+    commit(&repo, &["z"], "unrelated");
+    // ...but not once an attribute file differs from HEAD's and HEAD^1's.
+    let attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    fs::create_dir(repo.join("d")).unwrap();
+    for (file, content) in [(".gitattributes", [&attributes[..], b"# a comment\n"].concat()),
+                            ("d/.gitattributes", b"*.txt -diff\n".to_vec())] {
+        fs::write(repo.join(file), &content).unwrap();
+        run(&repo, "git", &["add", file], None);
+        let head = rev(&repo, "HEAD");
+        let err = run_fails(&repo, "git", &["commit", "-qm", "policy change"], None);
+        assert!(err.contains("f.secret") && err.contains("authentication failed"), "{file}: {err}");
+        assert_eq!(rev(&repo, "HEAD"), head, "{file}");
+        // Committed without the hook, it is in HEAD but not in HEAD^1:
+        // still nothing is settled.
+        run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "policy change"], None);
+        fs::write(repo.join("z"), &content).unwrap();
+        run(&repo, "git", &["add", "z"], None);
+        let err = run_fails(&repo, "git", &["commit", "-qm", "after the policy change"], None);
+        assert!(err.contains("f.secret") && err.contains("authentication failed"), "{file}: {err}");
+        run(&repo, "git", &["reset", "-q", "--soft", &head], None);
+        run(&repo, "git", &["reset", "-q", "HEAD", "--", file, "z"], None);
+        if file == ".gitattributes" { fs::write(repo.join(file), &attributes).unwrap() } else { fs::remove_file(repo.join(file)).unwrap() }
+    }
+    assert_ne!(rev(&repo, "HEAD"), before);
+    // Ordinary keyed commits keep their entries authenticated.
+    run(&repo, "git", &["rm", "-q", "--cached", "f.secret"], None);
+    run(&repo, "git", &["commit", "-qm", "drop the forged record"], None);
+    for text in [&b"alpha v2\n"[..], b"alpha v3\n"] {
+        fs::write(repo.join("a.secret"), text).unwrap();
+        commit(&repo, &["a.secret"], "edit");
+        let record = committed(&repo, "a.secret");
+        assert_eq!(run(&repo, bin(), &["smudge", "a.secret"], Some(&record)), text);
+    }
+    run(&repo, bin(), &["verify-index"], None);
+}
+
+/// A config change unsettles every entry too: a record forged for the new
+/// config, held by `HEAD` and `HEAD^1` (under the old config), is
+/// authenticated when the rekey is committed, and refused.
+#[test]
+fn settled_entries_are_authenticated_after_a_config_change() {
+    const NEW: &[u8] = b"a completely different long passphrase\n";
+    let mut scratch = Scratch::new("settledconfig");
+    let repo = scratch.repo("repo");
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    // The staged records carry the new config's id: so does the forgery.
+    let forged = forged_envelope(&repo);
+    let mut tree = String::from_utf8(run(&repo, "git", &["ls-tree", "HEAD"], None)).unwrap();
+    tree.push_str(&format!("{REGULAR_FILE_MODE} blob {forged}\tf.secret\n"));
+    let tree = String::from_utf8(run(&repo, "git", &["mktree"], Some(tree.as_bytes()))).unwrap();
+    let first = String::from_utf8(run(&repo, "git", &["commit-tree", tree.trim(), "-p", "HEAD", "-m", "hostile"], None)).unwrap();
+    let second = String::from_utf8(run(&repo, "git", &["commit-tree", tree.trim(), "-p", first.trim(), "-m", "again"], None)).unwrap();
+    run(&repo, "git", &["reset", "-q", "--soft", second.trim()], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{forged},f.secret")], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "rekey"], None);
+    assert!(err.contains("f.secret") && err.contains("authentication failed"), "{err}");
+    assert_eq!(rev(&repo, "HEAD"), second.trim());
+    // Without it the rekey commits.
+    run(&repo, "git", &["rm", "-q", "--cached", "f.secret"], None);
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    run(&repo, bin(), &["verify-index"], None);
+}
+
+/// `--amend`, merges and rebases bring no forged record past the checks:
+/// an amended commit's parent is `HEAD^1`, which does not hold the record;
+/// a merge's checkout cannot decrypt it, and locked the next keyed commit
+/// authenticates it (the merge's first parent does not hold it); a rebase,
+/// which runs no pre-commit hook, is refused by the keyed audit and the
+/// pre-push hook.
+#[test]
+fn amend_merge_and_rebase_accept_no_forged_record() {
+    let mut scratch = Scratch::new("settledhistory");
+    let repo = scratch.repo("repo");
+    run(&scratch.root, "git", &["init", "-q", "--bare", "remote.git"], None);
+    run(&repo, "git", &["remote", "add", "origin", "../remote.git"], None);
+    run(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    let main = rev(&repo, "HEAD");
+    let forged = forged_envelope(&repo);
+    // --amend: HEAD holds the record, the amended commit's parent does not.
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{forged},f.secret")], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "hostile"], None);
+    let hostile = rev(&repo, "HEAD");
+    let err = run_fails(&repo, "git", &["commit", "-q", "--amend", "-m", "amended"], None);
+    assert!(err.contains("f.secret") && err.contains("authentication failed"), "{err}");
+    assert_eq!(rev(&repo, "HEAD"), hostile);
+    run(&repo, "git", &["reset", "-q", "--hard", &main], None);
+    // A side branch holds the record in two commits (settled there).
+    run(&repo, "git", &["checkout", "-q", "-b", "side"], None);
+    commit_twice_unchecked(&repo, "f.secret", &forged);
+    run(&repo, "git", &["checkout", "-q", "-f", "main"], None);
+    fs::write(repo.join("main.txt"), b"main moves on\n").unwrap();
+    commit(&repo, &["main.txt"], "diverge");
+    let diverged = rev(&repo, "HEAD");
+    // Unlocked, the merge's checkout refuses the record.
+    run_fails(&repo, "git", &["merge", "-q", "--no-edit", "side"], None);
+    let _ = exec(&repo, "git", &["merge", "--abort"], None);
+    run(&repo, "git", &["reset", "-q", "--hard", &diverged], None);
+    // Locked, the merge checks envelopes only; with the key, the next
+    // commit authenticates the record: the merge's first parent lacks it.
+    without_key(&repo, || run(&repo, "git", &["merge", "-q", "--no-edit", "side"], None));
+    let merged = rev(&repo, "HEAD");
+    assert_ne!(merged, diverged);
+    // (The hook Git runs: with the key, `git add` would already refuse the
+    // checked-out record, which does not open.)
+    let err = run_fails(&repo, bin(), &["pre-commit"], None);
+    assert!(err.contains("f.secret") && err.contains("authentication failed"), "{err}");
+    let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    assert!(err.contains("f.secret") && err.contains("refusing to push"), "{err}");
+    run(&repo, "git", &["reset", "-q", "--hard", &diverged], None);
+    // A rebase replays the record without the pre-commit hook (locked, so
+    // its checkout passes records through): the keyed audit and the
+    // pre-push hook refuse the result.
+    without_key(&repo, || {
+        run(&repo, "git", &["checkout", "-q", "side"], None);
+        run(&repo, "git", &["rebase", "-q", "main"], None)
+    });
+    assert_eq!(rev(&repo, "HEAD^^"), diverged);
+    let err = run_fails(&repo, bin(), &["audit", "main..HEAD"], None);
+    assert!(err.contains("f.secret"), "{err}");
+    let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/side"], None);
+    assert!(err.contains("f.secret") && err.contains("refusing to push"), "{err}");
+}

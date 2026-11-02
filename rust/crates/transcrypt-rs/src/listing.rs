@@ -7,7 +7,7 @@
 use std::fmt;
 use transcrypt_v3_core::{
     blob_elsewhere, entry_provenance, first_unselectable, held_entries, listing_fields, next_move_source,
-    object_order_ok, parse_listing as parse_listing_ends, parse_listing_attrs, Provenance, EXECUTABLE_MODE,
+    object_order_ok, parse_listing as parse_listing_ends, parse_listing_attrs, policy_unchanged, Provenance, EXECUTABLE_MODE,
     OID_START, REGULAR_MODE,
 };
 use crate::git::{git_records, ObjectId, MODE_LEN};
@@ -163,6 +163,13 @@ impl Listing {
             return Err("internal error: snapshot sizes differ".into());
         }
         Ok(held)
+    }
+
+    /// Whether this listing (the index), `head` and `parent` have exactly
+    /// the same attribute files and configuration, each with its mode and
+    /// object id (the verified `policy_unchanged`).
+    pub(crate) fn policy_unchanged(&self, head: &Listing, parent: &Listing) -> bool {
+        policy_unchanged(&self.bytes, &self.ends, &head.bytes, &head.ends, &parent.bytes, &parent.ends)
     }
 
     /// Where the content of entry `i` came from (the verified

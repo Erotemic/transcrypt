@@ -199,6 +199,8 @@ pub const ATTRIBUTES_NAME: [u8; 14] = *b".gitattributes";
 pub const ATTRIBUTES_SUFFIX: [u8; 15] = *b"/.gitattributes";
 /// The submodule map.
 pub const MODULES_NAME: [u8; 11] = *b".gitmodules";
+/// The committed public configuration (in `METADATA_DIR`).
+pub const CONFIG_PATH: [u8; 18] = *b".transcrypt/config";
 
 /// Every reason the protocol core refuses an operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,16 +304,25 @@ fn ends_with(bytes: &[u8], suffix: &[u8]) -> bool {
     bytes.len() >= suffix.len() && matches_at(bytes, bytes.len() - suffix.len(), suffix)
 }
 
+/// Whether `path` is an attribute file: the top-level `.gitattributes` or
+/// one in any subdirectory.
+pub fn is_attributes_path(path: &[u8]) -> bool {
+    bytes_eq(path, &ATTRIBUTES_NAME) || ends_with(path, &ATTRIBUTES_SUFFIX)
+}
+
 /// Paths that are never protected, whatever the attributes say: anything in
 /// `.transcrypt/` (the public configuration), every `.gitattributes` (Git
 /// reads the staged blob to decide what is protected) and `.gitmodules`.
 /// Which other paths are protected is the user's choice, made with Git
 /// attributes (`filter=transcrypt-v3`); see `parse_attr_record`.
 pub fn is_reserved_path(path: &[u8]) -> bool {
-    matches_at(path, 0, &METADATA_DIR)
-        || bytes_eq(path, &ATTRIBUTES_NAME)
-        || ends_with(path, &ATTRIBUTES_SUFFIX)
-        || bytes_eq(path, &MODULES_NAME)
+    matches_at(path, 0, &METADATA_DIR) || is_attributes_path(path) || bytes_eq(path, &MODULES_NAME)
+}
+
+/// Whether `path` is committed protection policy: an attribute file (which
+/// paths are protected) or the public configuration (under which key).
+pub fn is_policy_path(path: &[u8]) -> bool {
+    is_attributes_path(path) || bytes_eq(path, &CONFIG_PATH)
 }
 
 /// A path component `path[start..end]` is acceptable iff it is nonempty and
@@ -1489,6 +1500,70 @@ pub fn first_unselectable(listing: &[u8], ends: &[usize], flags: &[bool]) -> usi
         }
     }
     i
+}
+
+/// Whether record `j` exists and is at a policy path (`is_policy_path`).
+fn policy_at(listing: &[u8], ends: &[usize], j: usize) -> bool {
+    match listing_fields(listing, ends, j) {
+        Some(f) => is_policy_path(&listing[f.path_start..f.end]),
+        None => false,
+    }
+}
+
+/// The first record at a policy path from position `from` on, or
+/// `ends.len()` if there is none.
+fn next_policy(listing: &[u8], ends: &[usize], from: usize) -> usize {
+    let mut j = from;
+    while j < ends.len() && !policy_at(listing, ends, j) {
+        j += 1;
+    }
+    j
+}
+
+/// Whether record `i` of `a` and record `j` of `b` exist and are the same
+/// record: the same mode, object id and path.
+fn same_record(a: &[u8], a_ends: &[usize], i: usize, b: &[u8], b_ends: &[usize], j: usize) -> bool {
+    match listing_fields(a, a_ends, i) {
+        Some(f) => match listing_fields(b, b_ends, j) {
+            Some(g) => bytes_eq(&a[f.start..f.end], &b[g.start..g.end]),
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// Whether the listings `a` and `b` have the same records at policy paths,
+/// in the same order.
+fn same_policy(a: &[u8], a_ends: &[usize], b: &[u8], b_ends: &[usize]) -> bool {
+    let mut i = next_policy(a, a_ends, 0);
+    let mut j = next_policy(b, b_ends, 0);
+    while i < a_ends.len() && j < b_ends.len() {
+        if !same_record(a, a_ends, i, b, b_ends, j) {
+            return false;
+        }
+        i = next_policy(a, a_ends, i + 1);
+        j = next_policy(b, b_ends, j + 1);
+    }
+    i == a_ends.len() && j == b_ends.len()
+}
+
+/// Whether the index, `HEAD` and `HEAD^1` (`parent`) have exactly the same
+/// records at policy paths (`is_policy_path`: every attribute file and the
+/// configuration, each with its mode and object id). The pre-commit hook
+/// counts an entry unchanged since `HEAD` and `HEAD^1` as settled, and does
+/// not authenticate it again, only while this holds: the entry was checked
+/// when it was committed only if what selected it, and the configuration it
+/// was checked under, were the same then. This compares committed bytes;
+/// it does not interpret the attributes.
+pub fn policy_unchanged(
+    index: &[u8],
+    index_ends: &[usize],
+    head: &[u8],
+    head_ends: &[usize],
+    parent: &[u8],
+    parent_ends: &[usize],
+) -> bool {
+    same_policy(index, index_ends, head, head_ends) & same_policy(index, index_ends, parent, parent_ends)
 }
 
 // ---------------------------------------------------------------------------

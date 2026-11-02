@@ -164,6 +164,11 @@ theorem MODULES_NAME_bytes :
   unfold MODULES_NAME Transcrypt.V3Policy.modulesName Transcrypt.V3Policy.ascii sliceBytes
   decide
 
+theorem CONFIG_PATH_bytes :
+    sliceBytes (Array.to_slice CONFIG_PATH) = Transcrypt.V3Policy.configPath := by
+  unfold CONFIG_PATH Transcrypt.V3Policy.configPath Transcrypt.V3Policy.ascii sliceBytes
+  decide
+
 theorem FILTER_ATTR_bytes :
     sliceBytes (Array.to_slice FILTER_ATTR) = Transcrypt.V3Policy.filterAttr := by
   unfold FILTER_ATTR Transcrypt.V3Policy.filterAttr Transcrypt.V3Policy.ascii sliceBytes

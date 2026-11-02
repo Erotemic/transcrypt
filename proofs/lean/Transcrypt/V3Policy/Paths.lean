@@ -18,6 +18,8 @@ def filterDriver : List Nat := ascii "transcrypt-v3"
 def metadataDir : List Nat := ascii ".transcrypt/"
 def attributesName : List Nat := ascii ".gitattributes"
 def modulesName : List Nat := ascii ".gitmodules"
+/-- The committed public configuration. -/
+def configPath : List Nat := ascii ".transcrypt/config"
 
 /-! ## Path policy -/
 
@@ -28,6 +30,31 @@ def modulesName : List Nat := ascii ".gitmodules"
 def Reserved (path : List Nat) : Prop :=
   metadataDir <+: path ∨ path = attributesName ∨ (slash :: attributesName) <:+ path ∨
     path = modulesName
+
+/-- An attribute file: the top-level `.gitattributes`, or one in any
+    subdirectory. -/
+def AttributesPath (path : List Nat) : Prop :=
+  path = attributesName ∨ (slash :: attributesName) <:+ path
+
+instance (path : List Nat) : Decidable (AttributesPath path) :=
+  inferInstanceAs (Decidable (_ ∨ _))
+
+/-- Committed protection policy: an attribute file (which paths are
+    protected) or the public configuration (under which key). -/
+def PolicyPath (path : List Nat) : Prop := AttributesPath path ∨ path = configPath
+
+instance (path : List Nat) : Decidable (PolicyPath path) :=
+  inferInstanceAs (Decidable (_ ∨ _))
+
+/-- Every attribute file is reserved metadata. -/
+theorem AttributesPath.reserved {path : List Nat} (h : AttributesPath path) : Reserved path := by
+  unfold Reserved; rcases h with h | h <;> simp [h]
+
+/-- So is every policy path: it is never a protected file. -/
+theorem PolicyPath.reserved {path : List Nat} (h : PolicyPath path) : Reserved path := by
+  rcases h with h | rfl
+  · exact h.reserved
+  · exact Or.inl ⟨ascii "config", by decide⟩
 
 /-- A component is acceptable iff nonempty and neither `.` nor `..`. -/
 def ComponentOk (c : List Nat) : Prop := c ≠ [] ∧ c ≠ [dot] ∧ c ≠ [dot, dot]

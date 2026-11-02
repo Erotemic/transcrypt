@@ -131,7 +131,11 @@ fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Lis
     let protected = snapshot.protected()?;
     let id = transcrypt_rs::config_id(config);
     check_unprotected(repo, &id, &snapshot, &in_head, head, &parent)?;
-    let same_policy = policy_unchanged(entries, head, &parent);
+    // Nothing is settled unless the attribute files and the config are the
+    // same in the index, `HEAD` and `HEAD^1` (the verified
+    // `policy_unchanged`): what selected an entry, and the config it was
+    // checked under, must be what they were when it was committed.
+    let same_policy = snapshot.listing.policy_unchanged(head, &parent);
     // The keyless move check looks blobs up by object id (`blob_elsewhere`).
     let mut ordered: Option<[OrderedListing; 3]> = None;
     for i in protected {
@@ -220,19 +224,6 @@ fn check_unprotected(repo: &Repository, id: &[u8; transcrypt_v3_core::ID_LEN], s
             String::from_utf8_lossy(&value)));
     }
     Ok(())
-}
-
-/// Whether the index, `HEAD` and `HEAD^1` (`parent`) have the same attribute
-/// files and config. An entry unchanged since `HEAD` and `HEAD^1` was
-/// checked when it was committed only if the selection and the config were
-/// the same then: entries count as settled only while this holds.
-fn policy_unchanged(entries: &[Staged], head: &Listing, parent: &Listing) -> bool {
-    let policy = |entries: &[Staged]| -> Vec<(Vec<u8>, ObjectId)> {
-        entries.iter().filter(|e| is_attributes_file(&e.path) || e.path == CONFIG_PATH.as_bytes())
-            .map(|e| (e.path.clone(), e.oid.clone())).collect()
-    };
-    let staged = policy(entries);
-    staged == policy(head.entries()) && staged == policy(parent.entries())
 }
 
 /// Each entry's object id, by path.
@@ -325,7 +316,8 @@ fn verify(repo: &Repository, seal: bool) -> Result<(), String> {
     }
     check_staged(repo, &config, snapshot, &head, key.as_ref(), seal)?;
     if key.is_none() {
-        eprintln!("transcrypt-rs: locked; checked staged record envelopes only");
+        eprintln!("transcrypt-rs: locked; checked staged record envelopes only, which does not authenticate \
+            them (unlock to authenticate)");
     }
     Ok(())
 }
