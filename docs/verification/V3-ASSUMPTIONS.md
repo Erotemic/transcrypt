@@ -10,7 +10,9 @@ with attribute-based selection. A20–A23 name the Git contracts of the
 [end-to-end security argument](V3-SECURITY-ARGUMENT.md), which now that the
 hook's inputs are computed by the verified core are the remaining
 assumptions of the pre-commit path. A24 (2026-10-26) names what the
-incremental hook trusts about history. A25 (2026-10-28) names the per-platform
+incremental hook trusts about history; on 2026-11-01 its induction over
+keyed commits was proved, leaving the commit-step and policy contracts and
+the start of history assumed. A25 (2026-10-28) names the per-platform
 OS adapters (Unix and Windows). Older security-hardening priorities are
 superseded by the charter where they conflict (for example, private worktree
 permissions are now an optional mode); the source-derived proof status and
@@ -55,7 +57,7 @@ one.
 | A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
-| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); discharged by the hook/audit of `HEAD` (REVIEWED + TESTED) |
+| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Narrowed: use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); the induction over keyed commits PROVED (model) (`hook_full_check_authenticates`, `head_authentic_of_checked_commit`, `keyed_history_stays_authenticated`); remaining: the commit-step and policy contracts (A22, A11, A19 + the hook's guard) and the start of history (full check, or audit of imported history, A13) |
 | A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS not yet run (its CI jobs have not been seen passing); REVIEWED |
 
 ## Detailed register
@@ -695,7 +697,7 @@ one.
   for one lookup (`parse_listing` with `unique = false`).
 - **Status:** TESTED.
 
-### A24 — The history the incremental hook trusts (new)
+### A24 — The history the incremental hook trusts
 
 - **Claim:** every entry of `HEAD` whose path the committed attributes
   select is a record that authenticates at its path under the committed
@@ -705,23 +707,51 @@ one.
   (*settled*, H-74: a commit of 10 000 files takes 0.24 s); it checks only
   the envelope. Theorem 1 states exactly that. With A24 the settled case
   authenticates too (`hook_accepts_only_authenticated_ciphertext_given_history`).
-- **Discharge:** by induction over the hook's own runs. An entry is
-  settled only while no attribute file and not the config changed since
-  `HEAD` and `HEAD^1` (adapter rule, stricter than the model), so its
-  selection and configuration are those of the commit that introduced it,
-  whose hook (or a later full check: `verify-index` before merge commits,
-  `audit` at push) authenticated it. `HEAD` and `HEAD^1` are parsed as
-  sorted listings, so the entry that holds the blob is the only one at its
-  path (`Sorted.holds_oid`): a crafted tree cannot show one checked entry
-  and commit another (review H-76).
+- **Proved (2026-11-01, `ProductSecurity.lean`, PROVED (model)):**
+  - *Bootstrap.* A keyed check that authenticated every protected entry
+    (`FullCheck`: `incremental = false`, or no entry counted as settled)
+    gives `AuthenticatedIndex` with **no** history hypothesis
+    (`hook_full_check_authenticates`). The three modes are stated
+    separately in `pre_commit_check_modes`.
+  - *One transition.* If the checked index authenticates under `config`,
+    the next commit's `HEAD` was made from it (`CommitStep`: each entry of
+    the next `HEAD` is a checked index entry, objects keep their content)
+    and the policy is unchanged (`PolicyUnchanged`: no path newly selected,
+    same committed configuration), then the next check may trust `HEAD`
+    (`head_authentic_of_checked_commit`).
+  - *Induction.* For commits `h 0 … h n`, each accepted by a keyed check
+    (`KeyedCommit`), each made from the index checked before it, checked
+    incrementally only when the policy is unchanged (`HistoryStep`), and the
+    first checked in full or after an authentic `HEAD`: every commit's
+    selected entries authenticate (`keyed_history_stays_authenticated`).
+- **Still assumed (the exact remaining obligation):**
+  1. `CommitStep`: Git commits the index the hook checked (A22) and an
+     object id names one content (A11).
+  2. `PolicyUnchanged` before each incremental check: the adapter counts
+     an entry as settled only while the committed attribute files and
+     `.transcrypt/config` equal those of `HEAD` and `HEAD^1` (otherwise
+     nothing is settled, which is a `FullCheck`). That this guard implies
+     `PolicyUnchanged` rests on A19 (Git evaluates `filter` from the
+     committed attribute files) and on the guard's own refinement (a
+     separate core function, not yet part of this statement).
+  3. The start of the history: the first commit after a clone, pull or
+     any commit made without the keyed hook (`--no-verify`, cherry-pick
+     and rebase, which do not run `pre-commit`, a locked checkout, another
+     party's commits) is not covered by the induction; its `HEAD` is
+     trusted on the evidence of the keyed `audit` (pre-push, A13) or
+     `verify-index`, or the commit is checked in full.
+  4. One key across the history (`Realizes inst prims σ` fixed); a rekey
+     changes the configuration, so the next check is full by (2).
 - **Consequence if false:** a commit made without the hook
   (`--no-verify`, a pulled commit) can hold a record that does not open at
   its path; the next incremental commit keeps it without authenticating it.
   `verify-index`, merge commits and the keyed `audit` (pre-push, A13)
   authenticate every entry and refuse it.
-- **Evidence:** TESTED (`newly_protected_files_are_authenticated_by_the_hook`,
+- **Evidence:** PROVED (model) as above; TESTED
+  (`newly_protected_files_are_authenticated_by_the_hook`,
   `trees_listing_a_path_twice_are_refused`, the H-74 suites); REVIEWED.
-- **Status:** use PROVED (model); discharge REVIEWED + TESTED.
+- **Status:** narrowed: use and induction PROVED (model); contracts 1–4
+  ASSUMED (1 TESTED; 2 TESTED + REVIEWED; 3 deployment, A13).
 
 ### A25 — Platform adapters (new)
 

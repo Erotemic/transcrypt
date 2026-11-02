@@ -1,7 +1,8 @@
 # Transcrypt v3: the end-to-end security argument
 
 **Written 2026-10-26; settled entries and A24 added the same day (review
-round 9).** This document states, in one place, what the
+round 9); the product theorems and the A24 induction added 2026-11-01
+(`ProductSecurity.lean`).** This document states, in one place, what the
 machine-checked proofs say about the product's main promise and exactly
 which assumptions that statement rests on. It is the readable companion of
 [`EndToEnd.lean`](../../proofs/aeneas/v3/V3Wire/Verification/EndToEnd.lean).
@@ -83,7 +84,7 @@ unique.
 
 The incremental hook trusts history for settled entries, so that an
 ordinary commit does not decrypt every protected file (0.24 s for 10 000
-files). What it trusts is now a named assumption:
+files). What it trusts is a named assumption:
 
 > **A24.** Every entry of `HEAD` whose path the committed attributes select
 > authenticates at its path under the committed configuration
@@ -93,23 +94,49 @@ files). What it trusts is now a named assumption:
 with A24, a commit the hook accepted with the key stores at **every**
 selected path a record that authenticates there, settled or not.
 
-A24 is discharged by the history itself, by induction over accepted
-commits:
-* An entry counts as settled only if `HEAD` and `HEAD^1` both hold its blob
-  at its path **and** no attribute file and not the configuration changed
-  since `HEAD` and `HEAD^1` (adapter rule, stricter than the model; review
-  H-77). So a settled entry was selected, under the same configuration,
-  when it was committed, and the hook (or `verify-index` before a merge
-  commit) authenticated it then.
-* `HEAD` and `HEAD^1` are sorted (each path once; checked by the verified
-  parse, review H-76), so the entry that holds the blob is *the* entry at
-  that path (`Sorted.holds_oid`). A crafted tree that lists a path twice is
-  refused instead of letting one checked entry stand for another.
-* Commits made without the hook (`--no-verify`, pulled commits) break the
-  induction; for them A24 rests on the keyed `audit` (pre-push, A13), which
-  authenticates every changed entry and, when the attributes or the
-  configuration change, the whole tree. `verify-index` authenticates
-  everything, settled or not.
+The induction that discharges A24 is now proved
+(`ProductSecurity.lean`, PROVED (model)), in three steps:
+
+1. **Bootstrap** (`hook_full_check_authenticates`). A keyed check that
+   authenticated every protected entry (`FullCheck`: not incremental, or
+   no entry counted as settled) gives `AuthenticatedIndex` with no
+   hypothesis about history. `pre_commit_check_modes` states the three
+   modes side by side: full keyed (authenticated, no history), incremental
+   keyed (`AcceptedIndex`; authenticated given `HeadAuthentic`), keyless
+   (the envelope only, A14).
+2. **One transition** (`head_authentic_of_checked_commit`). If the checked
+   index authenticates under `config`, the next commit's `HEAD` was made
+   from it (`CommitStep`: every entry of the next `HEAD` is a checked index
+   entry, A22; objects keep their content, A11), and the policy is
+   unchanged (`PolicyUnchanged`: no path newly selected, the same committed
+   configuration), then the next `HEAD` is authentic (`HeadAuthentic`).
+3. **Induction** (`keyed_history_stays_authenticated`). In a history of
+   keyed commits under one key, each made from the index checked before it,
+   checked incrementally only when the policy is unchanged (otherwise in
+   full), and starting with a full check (or an authentic `HEAD`), every
+   commit's selected entries authenticate.
+
+`HEAD` and `HEAD^1` are sorted (each path once; checked by the verified
+parse, review H-76), so the entry that holds a settled blob is *the* entry
+at that path (`Sorted.holds_oid`): a crafted tree that lists a path twice
+is refused instead of letting one checked entry stand for another.
+
+What remains assumed:
+
+* **`CommitStep`**: Git commits the index the hook checked (A22), and an
+  object id names one content (A11).
+* **`PolicyUnchanged`** before an incremental check: the adapter counts an
+  entry as settled only while no attribute file and not the configuration
+  changed since `HEAD` and `HEAD^1` (review H-77); otherwise nothing is
+  settled, which is a `FullCheck`. That the guard gives `PolicyUnchanged`
+  rests on A19 and on the guard's own refinement, which is separate work
+  and plugs in as this hypothesis.
+* **The start of history.** Commits made without the keyed hook
+  (`--no-verify`, cherry-pick and rebase, a locked checkout, pulled
+  commits, other parties) are outside the induction. For them A24 rests
+  on the keyed `audit` (pre-push, A13), which authenticates every changed
+  entry and, when the attributes or the configuration change, the whole
+  tree, or on a full check (`verify-index` authenticates everything).
 
 ### How the proof goes
 
@@ -182,6 +209,24 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 **A5**). The adapter builds the primitives from the file's key bytes
 (**A17**).
 
+## The product theorems (`ProductSecurity.lean`)
+
+The theorems above are restated, and composed, as a short portfolio over
+named predicates; each keeps its external hypotheses visible.
+
+| Guarantee | Theorem | What it composes |
+| --- | --- | --- |
+| A. Authenticated publication | `keyed_publication_authenticates`: `HookContracts`, `Realizes`, `ConfigCommitted` and an accepted keyed check (`KeyedCheckAccepted` in a `CheckMode`) give `AuthenticatedIndex`; `HeadAuthentic` is needed only for an incremental check | `hook_full_check_authenticates` (new), `hook_accepts_only_authenticated_ciphertext_given_history` |
+| Check modes | `pre_commit_check_modes` | Theorem 1 in each mode |
+| A24 history | `head_authentic_of_checked_commit`, `keyed_history_stays_authenticated` | the above, by induction (new) |
+| B. Authenticated recovery | `checkout_releases_only_authenticated_plaintext`: smudge's output either differs from the stored record and is exactly the plaintext it authenticates to at that path and configuration, or is the record itself, unchanged, with the v3 envelope (locked, another configuration, private mode); a record it decided to open that does not authenticate is refused. `checkout_opens_genuine_records`: a genuine record of this configuration opens to its plaintext | `smudgeModel_spec`, `smudge_action_spec`, `open_record_complete`, `opensTo_envelopeOk`, `sealed_length` |
+| C. No laundering | `repair_never_launders`: seals only the user's change or forced plaintext (no v3 header); rebinds only the user's record that authenticates at its move source; content imported from `HEAD` or an incoming commit is never rebound, and sealed only when `protect` forced it; the user's change is never skipped | `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`, `repair_plan_repairs_only_local`, `UserStaged.not_committed` |
+| D. Configuration-bound key | `stored_key_binds_file_operations`: when the stored key is used, its file holds the current configuration, the key authenticates it, and every record it opens or seals is bound to that configuration and path | `stored_key_authenticates_current_config`, `open_record_spec`, `seal_record_spec`, `seal_opens` |
+
+Not claimed: that every successful smudge yields plaintext (a kept record
+is a success), Argon2id security or where a key came from (A10, A17), or
+anything about commits outside a keyed history (A13).
+
 ## Hypotheses and where they are discharged
 
 | Hypothesis in Lean | Meaning | Assumption | Evidence |
@@ -195,18 +240,21 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 | `run : HookEvidence g`, `hookPlan … = ok true`; `RepairContracts` (Theorem 2: `provenance`, `decision`, and `record`, what each reported `RecordClass` means, `RecordEvidence`) | the adapter called the verified functions on these inputs, reports its evidence about each blob truthfully and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
 | `RepairContracts.incoming`, `.lazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
-| `HeadAuthentic` (corollary) | the history the incremental hook trusts was checked | A24 | REVIEWED + TESTED (induction above; `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`) |
+| `HeadAuthentic` (corollary; only for an incremental check) | the history the incremental hook trusts was checked | A24 | induction PROVED (model) (`keyed_history_stays_authenticated`); its start REVIEWED + TESTED (audit, A13; `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`) |
+| `CommitStep` (history) | the next `HEAD` is the checked index; objects keep their content | A22, A11 | TESTED; ASSUMED |
+| `PolicyUnchanged` (history, before an incremental check) | no path newly selected; same committed configuration | A19 + the hook's policy guard | TESTED + REVIEWED; the guard's refinement is separate work |
 | Unforgeability | only the key holder makes records that authenticate | A10 | ASSUMED (standard) |
 
 ## What is proved, tested and trusted
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 115 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 124 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the composition `hookPlan_spec` and the end-to-end
-  theorems (with the A24 corollary), about Lean models that call the
+  theorems (with the A24 corollary), the product theorems and the A24
+  induction (`ProductSecurity.lean`), about Lean models that call the
   generated functions.
 * **TESTED:** that the Rust adapter matches the models and contracts
   (A4), Git's behavior (A7, A19–A23), the primitives (A5, A9); the

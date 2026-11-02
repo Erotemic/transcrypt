@@ -96,9 +96,10 @@ What kind of evidence each step has (column **Kind**):
 | Hydrate, lock and `verify-index` over all protected files | M | the rows above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` (Lifecycle) |
 | The hook's final check, as a whole | M | the rows above | `hookPlan_spec`, `hook_accepts_only_authenticated_ciphertext` (EndToEnd) |
 | The hook's repairs, as a whole | M | the rows above | `hook_provenance`, `hook_skips_only_unrepairable`, `hook_repairs_only_local_changes` (EndToEnd) |
+| The product statements and the A24 history over keyed commits | M | the rows above | `keyed_publication_authenticates`, `pre_commit_check_modes`, `keyed_history_stays_authenticated`, `checkout_releases_only_authenticated_plaintext`, `repair_never_launders`, `stored_key_binds_file_operations` (ProductSecurity) |
 | Unprotected staged entries: no record under an unprotected name, no record handed to another filter (`check_unprotected`) | T | `record_envelope_prefix_ok` (S) per blob | none; tests in `workflows.rs` (F2 rename, `git lfs track`) |
 | Enumerate and flush or check the other worktrees in `lock` (`other_worktrees`, `others_encrypted`) | T | none | none; tests in `workflows.rs`, `adversarial.rs` (linked worktrees) |
-| Settled only while no attribute file and not the config changed (A24) | T | none | none (the model's `settled` is weaker); `newly_protected_files_are_authenticated_by_the_hook` (`adversarial.rs`) |
+| Settled only while no attribute file and not the config changed (A24) | T | none | none (the model's `settled` is weaker; the history theorem takes the guard's result as `PolicyUnchanged`); `newly_protected_files_are_authenticated_by_the_hook` (`adversarial.rs`) |
 
 An S or M row means the adapter calls those functions and acts on their answers. The
 adapter code itself is not proved: its correspondence to the Lean models is

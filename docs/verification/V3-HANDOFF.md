@@ -84,7 +84,17 @@ semantics silently or import legacy CBC into the proved core.
   contract a named hypothesis (`hook_accepts_only_authenticated_ciphertext`,
   `hook_accepts_only_authenticated_ciphertext_given_history` with A24,
   `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`,
-  `stored_key_authenticates_current_config`).
+  `stored_key_authenticates_current_config`). `ProductSecurity.lean`
+  (2026-11-01) restates them as the public portfolio
+  (`keyed_publication_authenticates`, `pre_commit_check_modes`,
+  `checkout_releases_only_authenticated_plaintext`,
+  `checkout_opens_genuine_records`, `repair_never_launders`,
+  `stored_key_binds_file_operations`) and proves the A24 induction: a full
+  keyed check needs no history (`hook_full_check_authenticates`), an
+  authenticated index makes the next `HEAD` authentic under `CommitStep`
+  and `PolicyUnchanged` (`head_authentic_of_checked_commit`), and a history
+  of keyed commits stays authenticated (`keyed_history_stays_authenticated`).
+  The hook's policy guard plugs in as `PolicyUnchanged`.
 - The pre-commit repair is a typed plan: the core derives each entry's
   `Provenance` from the snapshots (`entry_provenance`), decides whether its
   blob is read (`needs_record`), and decides `repair_plan(Provenance,
