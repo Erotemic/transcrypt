@@ -29,7 +29,12 @@ The implementation now follows it:
   `$GIT_COMMON_DIR/transcrypt-v3/key` (0600, not in `git config`). Every
   use authenticates the current config with it, so a pulled rekey makes it
   stale. `unlock --private` is the old memory-only agent plus 0600
-  plaintext.
+  plaintext. Since 2026-11-02 every file operation goes through
+  `transcrypt_rs::ValidatedKey` (private fields; built only by the verified
+  `authenticate_key` or `unlock_stored_key`, which selects the file's own
+  key bytes; `KeyUse.lean`); the agent holds one too. Open finding (A17):
+  config authentication checks only the S2V half of the key, so a stored
+  key with a damaged CTR half is not detected.
 - **Renames.** The pre-commit hook re-encrypts local `git mv`s (and seals
   plaintext staged around the filter). It never re-encrypts content that
   came from a commit (no laundering), and keyless checks refuse moved

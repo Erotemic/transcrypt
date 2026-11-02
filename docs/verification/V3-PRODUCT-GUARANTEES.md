@@ -160,28 +160,43 @@ incremental keyed and keyless results separately.
 ## D. Configuration-bound key use
 
 - **Claim:** A persisted derived key is accepted only for the configuration
-  it authenticates. Every file sealed or opened with it is bound to that
+  it authenticates, and the primitives used are built from exactly that
+  file's key bytes. Every file sealed or opened with them is bound to that
   configuration and to the exact path.
 - **Why it matters:** A stale key, or a key for another repository or for
   the configuration before a rekey, is refused as "locked" or "stale". It is
-  never used to produce or accept records.
-- **Lean theorem:** `stored_key_binds_file_operations`. It composes
-  `stored_key_authenticates_current_config`, `open_record_spec`,
-  `seal_record_spec` and `seal_opens`.
-- **Source connection:** The extracted `stored_key_state` and
-  `authenticate_config`, then `seal_record` and `open_record`. Production
-  Rust: `credential.rs`.
+  never used to produce or accept records, and no other key can be paired
+  with the configuration afterwards.
+- **Lean theorem:** `stored_key_binds_file_operations`. Its premise is the
+  output of the verified `unlock_stored_key` (the primitives and the
+  configuration the adapter keeps), not an arbitrary primitive instance. It
+  composes `unlock_stored_key_spec` (with `authenticate_key_spec` and
+  `stored_key_state_spec`), `open_record_spec`, `seal_record_spec` and
+  `seal_opens`.
+- **Source connection:** The extracted `unlock_stored_key`,
+  `authenticate_key`, `stored_key_state` and `authenticate_config`, then
+  `seal_record` and `open_record`. Production Rust: `ValidatedKey` in
+  `lib.rs` (private fields; built only from those two core functions) and
+  `credential.rs`.
 - **Assumptions:**
-  - A17 (the key file is read as stored and kept local);
-  - A5, A9 and A10.
+  - `KeyScheduleRealizes` (A5, A17): `Keyed::from_key(k)` realizes the
+    suite of exactly the bytes `k`;
+  - A17 (the key file is read as stored and kept local; the CTR half of the
+    key is intact, since config authentication checks only the S2V half);
+  - A9 and A10.
 - **Limitations:**
   - The theorem does not prove that Argon2id resists offline guessing.
   - It does not prove that a persisted key came from a particular `init`
-    or `unlock`.
+    or `unlock`, or from a passphrase at all.
   - It does not prove anything about how the key is protected at rest.
+  - A stored key with an altered CTR half (bytes 32..64) still
+    authenticates the config; its records do not open under the genuine
+    key (tested, A17).
 - **Status:**
-  - The decision: source-derived proof.
-  - The file I/O: tested and reviewed.
+  - Key selection and pairing: source-derived proof, relative to the key
+    schedule contract.
+  - The interface: structural (`ValidatedKey`), with a source scan test.
+  - The file I/O and the key schedule: tested and reviewed.
 
 ## Checked history (A24)
 

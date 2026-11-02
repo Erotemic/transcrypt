@@ -50,7 +50,7 @@ one.
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
-| A17 | The stored key is local-only, used only for the config it authenticates, and mode-independent | Decision PROVED (`stored_key_state`, `stored_key_authenticates_current_config`); file I/O TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
+| A17 | The stored key is local-only, used only for the config it authenticates, with primitives built from exactly its bytes, and mode-independent | Selection and pairing PROVED relative to the key-schedule contract (`unlock_stored_key_spec`, `authenticate_key_spec`, `stored_key_binds_file_operations`; `ValidatedKey` is the only file-operation interface); key schedule TESTED (A5); file I/O TESTED + REVIEWED; integrity of the key's CTR half ASSUMED (A8: config authentication checks only the S2V half); local-account exposure ACCEPTED RISK (by charter) |
 | A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`repair_plan`, `needs_record`, `entry_provenance`, `next_move_source`, `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`); TESTED (real Git) + REVIEWED |
 | A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files; for the history argument, as one fixed function of the committed policy entries (`SelectionByPolicy`) | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK (excluded from `SelectionByPolicy`: assumed unchanged during a history) |
 | A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record), in byte order of paths, each path once | TESTED; parsing and order PROVED (`parse_listing_spec`: anything else is refused) |
@@ -226,7 +226,10 @@ one.
 - **Claim:** `Keyed` computes RFC 5297 AES-256-SIV with AD vector
   `[domain, config, path]` (three S2V components, not a concatenation),
   SHA-256 truncation, exact output lengths, and never reports false success.
-  These are the clauses of Lean's `Realizes`.
+  These are the clauses of Lean's `Realizes`. Since 2026-11-02 the
+  stored-key and key-use theorems take it per key: `KeyScheduleRealizes`
+  states that `Keyed::from_key(k)` (the core's `V3KeySchedule`) realizes the
+  suite of exactly the bytes `k` (A17).
 - **Trust boundary:** `transcrypt-rs/src/lib.rs` plus A9.
 - **Consequence:** the C-02 theorems would be about a different primitive.
 - **Evidence:**
@@ -535,20 +538,54 @@ one.
   and authenticates with it; otherwise (a pulled rekey) the worktree counts
   as locked. Smudge also opens records that name the stored config (a
   checkout writes files before the config). The ciphertext does not depend
-  on the mode.
-- **Trust boundary:** our `credential.rs`; the local file system; Git's
-  common directory for worktrees.
+  on the mode. Every file operation uses primitives built from exactly the
+  key bytes that authenticated the configuration it is paired with.
+- **Trust boundary:** our `credential.rs` and `ValidatedKey`/`Keyed` in
+  `lib.rs`; the local file system; Git's common directory for worktrees.
 - **Consequence if false:** a key in public or shared state; a key used for
   another config (records under the wrong config, refused later by
   verification); different ciphertext per mode.
 - **Evidence:**
-  - PROVED: the decision is the verified `stored_key_state`
-    (`stored_key_state_spec` = `storedKeySpec`: `Unlocked` only for a
-    119-byte file holding exactly the current config whose key
-    authenticates it, `storedKeySpec_unlocked`); composed with
-    `authenticate_config` in `stored_key_authenticates_current_config`. A
+  - PROVED (relative to the key-schedule contract `KeyScheduleRealizes`,
+    below): which key a configuration is used with is decided by the
+    verified core. `authenticate_key` (`authenticate_key_spec`) builds the
+    primitives from the given key bytes and returns them only if the
+    configuration authenticates under them. `unlock_stored_key`
+    (`unlock_stored_key_spec`, `StoredUnlock`) returns primitives only for a
+    present 119-byte file whose first 55 bytes are the current config; the
+    primitives are those of exactly the file's last 64 bytes
+    (`storedKeyBytes`), returned together with the config they
+    authenticated (the current config's bytes); otherwise the
+    `storedKeySpec` state, never `Unlocked`. `stored_key_binds_file_operations`
+    takes that output as its premise (no longer an arbitrary `Realizes`
+    instance plus an independent `authentic` flag) and concludes that every
+    record opened or sealed with those primitives is bound to that config
+    and path under the suite of the file's key bytes. The older decision
+    theorems remain (`stored_key_state_spec` = `storedKeySpec`,
+    `storedKeySpec_unlocked`, `stored_key_authenticates_current_config`). A
     damaged file is refused by every command except `unlock`, which
     replaces it (fixed 2026-10-26; it used to refuse as well).
+  - Structural (2026-11-02): files are sealed and opened only through
+    `transcrypt_rs::ValidatedKey`, whose fields are private (a
+    `compile_fail` doc test) and whose constructors are only the verified
+    `authenticate_key` (`authenticate`, `unlock`, `initialize`) and
+    `unlock_stored_key` (`from_stored`). The stored key, `unlock`, `init`,
+    `migrate`, `rekey`, `reencrypt` and the private agent hold that type;
+    the free functions taking a config and a key separately are gone.
+    `tests/key_boundary.rs` fails if adapter code outside `lib.rs` names
+    `Keyed`, the primitive traits, `derive_key` or the core's sealing,
+    opening or key functions.
+  - TESTED: key files of another repository, a file naming this config
+    with another repository's key, and one naming another config with this
+    key are all stale; nothing is encrypted with them, nothing is decrypted
+    (also by a checkout, which uses the config the file names), and the
+    private agent refuses to start with another repository's key
+    (`stored_keys_of_other_configs_are_never_used`); the stored-key choice
+    against `stored_key_state` with a toy key schedule, including a file
+    naming one config with a key that also authenticates the current one
+    (`stored_keys_select_the_file_key_for_the_config_it_authenticates`);
+    `ValidatedKey::from_stored` returns exactly the file's key bytes
+    (`stored_keys_validate_only_their_own_authentic_config`).
   - Written via an exclusive 0600 temporary, `fsync` and `renameat` in the
     held, checked directory; read with `O_NOFOLLOW`, exact size required.
   - `assert_unlocked` (git_lifecycle): exactly one private 64-byte key file,
@@ -557,13 +594,40 @@ one.
     `unlock` (`pulled_rekey_makes_the_stored_key_stale_until_unlock`).
   - Mode independence (`stored_and_private_modes_encrypt_identically`).
   - `lock` deletes it; `uninstall` deletes it.
+- **Remaining assumptions (narrowed 2026-11-02):**
+  - *Key schedule* (`KeyScheduleRealizes`, a visible hypothesis of the
+    theorems above; A5 for every key): `Keyed::from_key(k)` holds exactly
+    the bytes `k` (refusing any other length) and realizes the suite `σ k`
+    of those bytes; `ValidatedKey::secret` returns the bytes the held
+    `Keyed` was built from. TESTED (`Keyed::from_key` length refusals; the
+    returned secret equals the file's key slice; A5's tests for the
+    primitive under one key).
+  - *File I/O*: the bytes `from_stored` receives are the key file's bytes
+    and `store` writes exactly `config ‖ secret` (REVIEWED, TESTED as above).
+  - *Integrity of the CTR half* (found 2026-11-02): config authentication is
+    the AES-SIV encryption of the empty plaintext, so it depends only on the
+    S2V (CMAC) half of the key, bytes 0..32 (RFC 5297). The CTR half, bytes
+    32..64 of the stored key, is checked by nothing: a stored key whose CTR
+    half was altered is `Unlocked`, and the records it seals do not open
+    under the genuine key (tested). Its integrity rests on the file system
+    (A8). Not reachable from public Git; a local writer of the key file is
+    inside the trust boundary anyway.
+  - *Provenance*: nothing proves that the stored key was derived by Argon2id
+    from a passphrase (A9 tested by vectors, A10 assumed) or written by a
+    particular `unlock`; the theorems are about whatever key bytes the file
+    holds.
 - **Residual (ACCEPTED, by the charter):** anything that can read the
   user's files (other same-UID programs, backups, copies of `.git`) can use
   the key, as it can read the unlocked plaintext. Deleting the file is not a
   secure erasure.
-- **Next reduction:** none planned for the default; private mode is the
-  stricter alternative.
-- **Status:** TESTED + REVIEWED.
+- **Next reduction:** check the CTR half too, for example a key check value
+  in the local key file (a local format change, not a wire change), or by
+  opening one committed record at `unlock`. Private mode remains the
+  stricter alternative for local exposure.
+- **Status:** key selection and pairing PROVED relative to
+  `KeyScheduleRealizes`; the key schedule TESTED (A5); file I/O TESTED +
+  REVIEWED; CTR-half integrity ASSUMED (A8); local-account exposure
+  ACCEPTED RISK.
 
 ### A18 — Authenticated path rebinding on rename
 
@@ -925,6 +989,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Selection checked against the listing's own paths; selectability | `parse_listing_attrs_spec` (both directions), `first_unselectable_spec` |
 | Keyless move check | `blob_elsewhere_spec` |
 | Stored-key decision | `stored_key_state_spec`, `storedKeySpec_unlocked`, `stored_key_authenticates_current_config` |
+| Which key a configuration is used with: the stored file's own key bytes, only for the config they authenticate (relative to `KeyScheduleRealizes`) | `authenticate_key_spec`, `unlock_stored_key_spec`, `stored_key_binds_file_operations` |
 | `cat-file --batch` reply framing | `parse_batch_header_spec`, `batchHeader_unique`, `blob_read_spec` |
 | End to end: the hook accepts only authenticated ciphertext at the selected paths | `hook_accepts_only_authenticated_ciphertext` (with `hookPlan_spec`) |
 | Index record parsing | `parse_index_entry_spec` |
@@ -941,17 +1006,17 @@ verified decision that gates it:
 
 | Adapter action | Gate (verified core function) | Inputs passed | Acts only on |
 | --- | --- | --- | --- |
-| `clean` filter output (unlocked) | `Key::clean` → `clean_file` (stored key) or agent `Encrypt` (private): `open_record` (authentic record ⇒ returned unchanged) else `seal_record` | config bytes from `.transcrypt/config`; Git `%f` bytes; stdin | `Ok` (else Git aborts) |
+| `clean` filter output (unlocked) | `Key::clean` → `ValidatedKey::clean` (stored key) or agent `Encrypt` (private): `open_record` (authentic record ⇒ returned unchanged) else `seal_record` | config bytes from `.transcrypt/config`; Git `%f` bytes; stdin | `Ok` (else Git aborts) |
 | `smudge` filter output | `smudge_action` (no envelope ⇒ refuse; other config or locked ⇒ keep the record; own config ⇒ open), then `open_record`; private mode: `umask_is_private` chooses plaintext or the authenticated record | same config; `%f`; blob from stdin | `Ok` |
 | `clean` while locked | `record_envelope_ok` against `config_id(config)` | stdin | `true` ⇒ input unchanged; else refuse |
-| Key loading | `stored_key_state` (with `authenticate_config` under the stored key), or agent `Ping` | stored key file (config ‖ 64-byte key); current config | `Unlocked`; `unlock` replaces a `Damaged` file |
+| Key loading | `unlock_stored_key` (layout, `stored_key_state`, `authenticate_key` on the file's key bytes; returns the primitives and the config, held in a `ValidatedKey`), or agent `Ping` | stored key file (config ‖ 64-byte key); current config | `Ok`; `unlock` replaces a `Damaged` file |
 | Protected-file selection | `parse_attr_response` over the whole answer (one record per requested path, in order, nothing else); `is_reserved_path` | raw paths sent to `check-attr -z --stdin filter` (`--cached`, worktree, or a commit's temporary index) | `protected = true` |
-| Pre-commit re-encryption (`seal_staged`) | `entry_provenance` over the index, `HEAD` and incoming listings, then `needs_record`; only then the blob's `RecordClass` (`open_record` at its path, `parse_file_header`, `open_record` at each `next_move_source` path), and `repair_plan` on the two; then `clean_file`/`seal_record` at the new path | staged blobs by oid; `HEAD` and incoming listings (`parse_listing`); sequencing state | `Seal` or `Rebind(j)` only |
+| Pre-commit re-encryption (`seal_staged`) | `entry_provenance` over the index, `HEAD` and incoming listings, then `needs_record`; only then the blob's `RecordClass` (`open_record` at its path, `parse_file_header`, `open_record` at each `next_move_source` path), and `repair_plan` on the two; then `ValidatedKey::clean`/`seal_record` at the new path | staged blobs by oid; `HEAD` and incoming listings (`parse_listing`); sequencing state | `Seal` or `Rebind(j)` only |
 | Agent framing | `encode_frame_header` / `decode_frame_header`, `encode_be_u32` / `decode_be_u32` | opcode, config, lengths | proved roundtrip |
 | Git filter-process framing | `decode_pkt_len` for every packet; then the same conversion as the per-file filters | 4-byte pkt-line headers from Git; `command=`/`pathname=` values | `Ok` (else the process ends and Git fails) |
 | Agent dispatch | `authorize_agent_request` before the body is read; peer UID check | opcode, supplied config, startup config, path, length | `Ok(op)` from a same-UID peer |
-| Agent startup | `authenticate_config` | config bytes, piped key | `Ok` |
-| `unlock` / `init` | `authenticate_config` / `initialize_config` | config bytes / fresh salt | `Ok`, before any persistent effect |
+| Agent startup | `authenticate_key` (`ValidatedKey::authenticate`) | config bytes, piped key | `Ok`; the agent holds only that `ValidatedKey` |
+| `unlock` / `init` | `authenticate_key` / `initialize_config` then `authenticate_key` (`ValidatedKey::unlock` / `initialize`) | config bytes / fresh salt | `Ok`, before any persistent effect |
 | Index and tree listings | `parse_listing` (whole listing: records, object ids), then `listing_fields` per entry | `ls-files --stage -z`, or `ls-tree -r -z` records rewritten to that shape (path copied verbatim) | `true` (else refuse) |
 | Object reads | `is_object_id`, then `parse_batch_header` and `blob_read` | oid from the parsed snapshot | `true`; one `cat-file --batch` per process; header exactly `<oid> blob <size>` (canonical decimal), `Read` only within 16 MiB, trailing LF checked |
 | `verify-index` and the hook's check | `parse_listing_attrs`, `first_unselectable`, then `open_record` per entry (incremental hook: unless `policy_unchanged` holds and `held_entries` shows it unchanged since `HEAD` and `HEAD^1`), or, while locked, `record_envelope_ok` and `blob_elsewhere` | snapshot listing; blobs by oid | `true` / `Ok` for every entry |
@@ -959,11 +1024,11 @@ verified decision that gates it:
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action`; stamp equality | worktree bytes and stamp, blob by oid, reseal output | `Ok(Flush)`; `Keep` untouched |
 | Re-index after hydrate/lock | none (bookkeeping); listing compared with the verified snapshot afterwards | verified protected paths, raw, via `update-index -z --stdin` | listing unchanged |
 | `audit` / `pre-push` | `parse_index_entry`, `is_object_id`, `parse_config`, selection with the commit's attribute files, `record_envelope_ok`, no blob moved from a deleted path, `open_record` when the key authenticates that config | `ls-tree`/`diff-tree` per commit; blobs by oid | every protected entry `true`/`Ok` |
-| `rekey` staging | `open_record` of each staged record, equality with the worktree, then `seal_record` under the new config (`encrypt_file`); `initialize_config` for the new config; config written by `write_repository_file` (dirfd, no symlinks) | staged blobs by oid, worktree bytes, fresh salt | all `Ok`, before any index or credential change |
+| `rekey` staging | `open_record` of each staged record, equality with the worktree, then `seal_record` under the new config (`ValidatedKey::encrypt` of the new config's key); `initialize_config` for the new config; config written by `write_repository_file` (dirfd, no symlinks) | staged blobs by oid, worktree bytes, fresh salt | all `Ok`, before any index or credential change |
 | `protect` / `unprotect` / `init` / `migrate` | selection before and after the `.gitattributes` edit (written by `write_repository_file`); `seal_staged` with the newly selected paths; `open_record` before staging plaintext on `unprotect`; reserved metadata refused | attribute files; staged blobs | all `Ok`, or the edit is reverted |
 | `uninstall` | `lock` (above), then `record_envelope_ok` for every protected worktree file | worktree bytes | all `true` before removing filters |
 | `doctor` | none (read-only checks of Git config, attributes, hooks, `check_index`) | — | reports only |
-| Merge driver | agent `Decrypt` (`open_record`) of ours and theirs at `%P` (base: empty if it does not open), `git merge-file`, agent `Encrypt` (`clean_file`) of the result | Git's `%O %A %B` files, `%P` path | both `Ok` (else `ours` is left unchanged and Git records a conflict) |
+| Merge driver | agent `Decrypt` (`open_record`) of ours and theirs at `%P` (base: empty if it does not open), `git merge-file`, agent `Encrypt` (`ValidatedKey::clean`) of the result | Git's `%O %A %B` files, `%P` path | both `Ok` (else `ours` is left unchanged and Git records a conflict) |
 | Diff driver | `record_envelope_ok`, then agent `Decrypt` (`open_record`) of each record side at its own path | Git's external diff arguments | `Ok` (else Git stops the diff) |
 | `hydrate` during a merge | unmerged paths: `record_envelope_ok`, agent `Decrypt`, `hydrate_action`; effective filter checked for every protected path | worktree bytes | `Ok(Publish)` |
 
