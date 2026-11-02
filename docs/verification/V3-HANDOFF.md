@@ -230,8 +230,9 @@ or `tests/git_lifecycle.rs`.
   by `object_order_ok`); several trees are combined only by
   `Listing::merge` (the one `unique = false` parse).
 - Count a protected entry as settled (skipping authentication) only if
-  `HEAD` and `HEAD^1` hold it and no attribute file and not the config
-  changed since them (A24, H-77).
+  `HEAD` and `HEAD^1` hold it (`held_entries`) and no attribute file and
+  not the config changed since them (the verified `policy_unchanged`;
+  A24, H-77).
 - Replace a worktree file only through `Protected::replace` with the stamp
   from the read that justified it, while holding `staging_dir`. Write any
   other repository file only through `write_repository_file`.

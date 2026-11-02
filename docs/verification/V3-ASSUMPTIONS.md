@@ -160,6 +160,22 @@ one.
     nor orders booleans for the decision (a swapped argument does not
     typecheck); the end-to-end statement reasons about the generated
     `entry_provenance`, `needs_record` and `repair_plan` directly.
+  - **PROVED (settled guard, 2026-11-01).** Whether the incremental hook
+    may count any entry as settled (skip authenticating it) is no longer
+    adapter code: the core's `policy_unchanged`, over the verified index,
+    `HEAD` and `HEAD^1` listings, compares their records at policy paths
+    (`is_policy_path`: every attribute file, top-level or nested, by the
+    core's `is_attributes_path`, and `CONFIG_PATH`), mode and object id
+    included. `policy_unchanged_spec` proves it equal to the spec's
+    `PolicyUnchanged` (the three `policyEntries` lists are equal; no
+    order or uniqueness assumed), and `policy_unchanged_sound` gives what
+    the history argument consumes: when it returns `true` the three
+    snapshots hold exactly the same entries at every attribute file and at
+    the config (`PolicyUnchanged.agree`, `PolicyUnchanged.holds`). It
+    compares committed bytes; it does not interpret the attributes. The
+    adapter's reimplementation (`lifecycle::policy_unchanged`,
+    `is_attributes_file`) is deleted; its `.transcrypt/config` constant is
+    the core's.
 - **Residual:** the adapter Rust itself is not proved. On the pre-commit
   path what remains reviewed and tested, not proved, is:
   - that the adapter acts on the verified results as `HookEvidence` and the
@@ -172,10 +188,12 @@ one.
     refused by the verified `object_order_ok`, so this only fails closed)
     and merging the incoming trees by path (`Listing::merge`, parsed with
     `unique = false`);
-  - counting an entry as settled only while no attribute file and not the
-    config changed since `HEAD` and `HEAD^1` (A24; `HookEvidence.settled` only
-    requires settled ⇒ held by both, so this restriction is stricter than
-    the model);
+  - the one-line conjunction `settled = policy_unchanged && in_head[i] &&
+    in_parent[i]` that feeds the verified `entry_check` (each conjunct is a
+    verified result: `policy_unchanged`, `held_entries`; A24.
+    `HookEvidence.settled` still only requires settled ⇒ held by both, so
+    the adapter's rule is stricter than the model until the model records
+    the `policy_unchanged` result too);
   - sizing `ends` by the listing's NUL count (fails closed: the parse then
     refuses);
   - the equality of the staged `.transcrypt/config` blob with the
@@ -707,7 +725,8 @@ one.
   authenticates too (`hook_accepts_only_authenticated_ciphertext_given_history`).
 - **Discharge:** by induction over the hook's own runs. An entry is
   settled only while no attribute file and not the config changed since
-  `HEAD` and `HEAD^1` (adapter rule, stricter than the model), so its
+  `HEAD` and `HEAD^1` (the verified `policy_unchanged`,
+  `policy_unchanged_sound`; stricter than the model), so its
   selection and configuration are those of the commit that introduced it,
   whose hook (or a later full check: `verify-index` before merge commits,
   `audit` at push) authenticated it. `HEAD` and `HEAD^1` are parsed as
@@ -831,6 +850,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Encoders write the spec layout | `encode_config_bytes`, `encode_config_refines`, `encode_file_header_bytes`, `encode_file_header_refines` |
 | Decoders and public parsers implement the spec grammar | `decode_*_exact_spec`, `parse_config_spec`, `parse_file_header_spec`, roundtrips |
 | Path policy: canonical, any name except reserved metadata | `is_canonical_protected_path_spec`, `is_reserved_path_spec` |
+| The incremental hook counts entries as settled only while every attribute file and the config are the same in the index, `HEAD` and `HEAD^1` | `policy_unchanged_spec` (= `PolicyUnchanged`), `policy_unchanged_sound`, `is_policy_path_spec`, `is_attributes_path_spec`; spec `PolicyUnchanged.agree`, `PolicyUnchanged.holds` |
 | Config authentication | `authenticate_config_spec`, `initialize_config_spec` |
 | Clean never emits anything but a correct record, never double-encrypts | `seal_record_spec` |
 | Smudge/verify release only authentic plaintext for this config and path | `open_record_spec`, `open_record_complete`, `opensTo_unique` |
@@ -871,7 +891,7 @@ verified decision that gates it:
 | `unlock` / `init` | `authenticate_config` / `initialize_config` | config bytes / fresh salt | `Ok`, before any persistent effect |
 | Index and tree listings | `parse_listing` (whole listing: records, object ids), then `listing_fields` per entry | `ls-files --stage -z`, or `ls-tree -r -z` records rewritten to that shape (path copied verbatim) | `true` (else refuse) |
 | Object reads | `is_object_id`, then `parse_batch_header` and `blob_read` | oid from the parsed snapshot | `true`; one `cat-file --batch` per process; header exactly `<oid> blob <size>` (canonical decimal), `Read` only within 16 MiB, trailing LF checked |
-| `verify-index` and the hook's check | `parse_listing_attrs`, `first_unselectable`, then `open_record` per entry (incremental hook: unless `held_entries` shows it unchanged since `HEAD` and `HEAD^1`), or, while locked, `record_envelope_ok` and `blob_elsewhere` | snapshot listing; blobs by oid | `true` / `Ok` for every entry |
+| `verify-index` and the hook's check | `parse_listing_attrs`, `first_unselectable`, then `open_record` per entry (incremental hook: unless `policy_unchanged` holds and `held_entries` shows it unchanged since `HEAD` and `HEAD^1`), or, while locked, `record_envelope_ok` and `blob_elsewhere` | snapshot listing; blobs by oid | `true` / `Ok` for every entry |
 | `hydrate` publish | agent `Decrypt`, then `hydrate_action`, all entries before any write; stamp equality | blob by snapshot oid; worktree bytes and stamp via held dirfd | `Ok(Publish)` for all; `Keep` untouched |
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action`; stamp equality | worktree bytes and stamp, blob by oid, reseal output | `Ok(Flush)`; `Keep` untouched |
 | Re-index after hydrate/lock | none (bookkeeping); listing compared with the verified snapshot afterwards | verified protected paths, raw, via `update-index -z --stdin` | listing unchanged |
