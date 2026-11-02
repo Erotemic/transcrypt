@@ -43,9 +43,13 @@ abbrev opEncrypt : Nat := 69
 abbrev opDecrypt : Nat := 68
 abbrev opStop : Nat := 88
 /-- The derived key's length, and the stored key file: the config it was
-    unlocked for, then the key. -/
+    unlocked for, the key, then the key's check value (`Credentials`): the
+    tag and the encryption of a `keyCheckPlaintextLen`-byte constant. -/
 abbrev keyLen : Nat := 64
-abbrev keyFileLen : Nat := configLen + keyLen
+abbrev keyCheckPlaintextLen : Nat := 23
+abbrev keyCheckLen : Nat := tagLen + keyCheckPlaintextLen
+abbrev keyCheckStart : Nat := configLen + keyLen
+abbrev keyFileLen : Nat := keyCheckStart + keyCheckLen
 /-- Git object names: SHA-1 or SHA-256, in hexadecimal digits. -/
 abbrev sha1OidLen : Nat := 40
 abbrev sha256OidLen : Nat := 64

@@ -1803,9 +1803,28 @@ pub fn policy_unchanged(
 
 /// Length of the derived AES-SIV key.
 pub const KEY_LEN: usize = 64;
-/// Length of the stored key file: the public config it unlocks, then the
-/// key (119 = 55 + 64).
-pub const KEY_FILE_LEN: usize = 119;
+/// The associated-data path of the stored key's check value. It is reserved
+/// metadata (in `METADATA_DIR`), so no record is ever sealed or opened at
+/// it: the check value is no record, and no record is a check value.
+pub const KEY_CHECK_PATH: [u8; 21] = *b".transcrypt/key-check";
+/// Length of `KEY_CHECK_PLAINTEXT`.
+pub const KEY_CHECK_PLAINTEXT_LEN: usize = 23;
+/// The plaintext of the check value. It is not empty, so opening the check
+/// value decrypts it with the CTR half of the key and verifies its tag over
+/// the result with the S2V half (RFC 5297): unlike the configuration tag
+/// (the encryption of the empty plaintext), it involves the whole key.
+pub const KEY_CHECK_PLAINTEXT: [u8; 23] = *b"transcrypt/v3/key-check";
+// Literal lengths, as for `CONFIG_LEN` (`literal_lengths_are_the_field_sums`).
+/// The check value: the tag, then the encrypted `KEY_CHECK_PLAINTEXT`
+/// (39 = 16 + 23).
+pub const KEY_CHECK_LEN: usize = 39;
+/// Where the check value starts in the stored key file: after the config
+/// and the key (119 = 55 + 64).
+pub const KEY_CHECK_START: usize = 119;
+/// Length of the stored key file: the public config it unlocks, the key,
+/// and the key's check value for that config (158 = 55 + 64 + 39). A file
+/// of the earlier layout, the config and the key (119 bytes), is damaged.
+pub const KEY_FILE_LEN: usize = 158;
 
 /// What the stored key file means for the current configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1826,9 +1845,11 @@ pub enum StoredKey {
 /// Decide what the stored key file means for configuration `current`.
 /// `present`: the file exists; `file`: its bytes (the adapter reads at most
 /// one byte more than `KEY_FILE_LEN`); `authentic`: the key
-/// `file[CONFIG_LEN..]` authenticates `current` (`authenticate_config`), which
-/// matters only for a file of `KEY_FILE_LEN` bytes. A key is used only for
-/// the configuration it was stored with, and only once it authenticates it.
+/// `file[CONFIG_LEN..KEY_CHECK_START]` authenticates `current`
+/// (`authenticate_config`) and the check value `file[KEY_CHECK_START..]`
+/// opens under it (`key_check_opens`), which matters only for a file of
+/// `KEY_FILE_LEN` bytes. A key is used only for the configuration it was
+/// stored with, and only once it authenticates it and its check value.
 pub fn stored_key_state(present: bool, file: &[u8], current: &[u8], authentic: bool) -> StoredKey {
     if !present || file.len() == KEY_LEN {
         return StoredKey::Absent;
@@ -1851,6 +1872,25 @@ pub trait V3KeySchedule: Sized {
     fn from_key(key: &[u8]) -> Option<Self>;
 }
 
+/// The check value of the stored key file for `config` under `primitives`
+/// (those of the key stored with it): `KEY_CHECK_PLAINTEXT` sealed at
+/// `KEY_CHECK_PATH` under `config`.
+pub fn seal_key_check<P: V3Primitives>(primitives: &P, config: &[u8; CONFIG_LEN]) -> Result<[u8; KEY_CHECK_LEN], Refusal> {
+    let mut check = [0u8; KEY_CHECK_LEN];
+    if !primitives.seal_file(config, &KEY_CHECK_PATH, &KEY_CHECK_PLAINTEXT, &mut check) {
+        return Err(Refusal::Primitive);
+    }
+    Ok(check)
+}
+
+/// Whether `check` is the check value of `config` under `primitives`: it
+/// opens at `KEY_CHECK_PATH` under `config`, to exactly
+/// `KEY_CHECK_PLAINTEXT`.
+pub fn key_check_opens<P: V3Primitives>(primitives: &P, config: &[u8; CONFIG_LEN], check: &[u8]) -> bool {
+    let mut plaintext = [0u8; KEY_CHECK_PLAINTEXT_LEN];
+    primitives.open_file(config, &KEY_CHECK_PATH, check, &mut plaintext) && bytes_eq(&plaintext, &KEY_CHECK_PLAINTEXT)
+}
+
 /// The primitives of `key`, only if they authenticate `config`: the single
 /// way the adapter obtains primitives to use with a configuration, whether
 /// the key was just derived from a passphrase or read from the stored file.
@@ -1868,8 +1908,9 @@ pub fn authenticate_key<P: V3Primitives + V3KeySchedule>(key: &[u8], config: &[u
 /// The stored key for configuration `current` (inputs as for
 /// `stored_key_state`), with the primitives it selects: `Ok` exactly when
 /// `stored_key_state` says `Unlocked`, and then the primitives are those of
-/// the key bytes `file[CONFIG_LEN..]`, which authenticate `current`, together
-/// with the configuration they authenticated (the bytes of `current`).
+/// the key bytes `file[CONFIG_LEN..KEY_CHECK_START]`, which authenticate
+/// `current` and under which the file's check value opens, together with
+/// the configuration they authenticated (the bytes of `current`).
 /// Otherwise the state, never `Unlocked`.
 pub fn unlock_stored_key<P: V3Primitives + V3KeySchedule>(
     present: bool,
@@ -1885,11 +1926,14 @@ pub fn unlock_stored_key<P: V3Primitives + V3KeySchedule>(
         config[i] = current[i];
         i += 1;
     }
-    match authenticate_key::<P>(&file[CONFIG_LEN..KEY_FILE_LEN], &config) {
-        Ok(primitives) => match stored_key_state(present, file, current, true) {
-            StoredKey::Unlocked => Ok((primitives, config)),
-            state => Err(state),
-        },
+    match authenticate_key::<P>(&file[CONFIG_LEN..KEY_CHECK_START], &config) {
+        Ok(primitives) => {
+            let checked = key_check_opens(&primitives, &config, &file[KEY_CHECK_START..KEY_FILE_LEN]);
+            match stored_key_state(present, file, current, checked) {
+                StoredKey::Unlocked => Ok((primitives, config)),
+                state => Err(state),
+            }
+        }
         Err(_) => Err(stored_key_state(present, file, current, false)),
     }
 }

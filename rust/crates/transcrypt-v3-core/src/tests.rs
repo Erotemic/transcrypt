@@ -12,6 +12,10 @@ fn literal_lengths_are_the_field_sums() {
     assert_eq!(BE_U32_LEN, size_of::<u32>());
     assert_eq!(BLOB_FIELD_LEN, BLOB_FIELD.len());
     assert_eq!(MAX_SIZE_DIGITS, u64::MAX.ilog10() as usize);
+    assert_eq!(KEY_CHECK_PLAINTEXT_LEN, KEY_CHECK_PLAINTEXT.len());
+    assert_eq!(KEY_CHECK_LEN, TAG_LEN + KEY_CHECK_PLAINTEXT_LEN);
+    assert_eq!(KEY_CHECK_START, CONFIG_LEN + KEY_LEN);
+    assert_eq!(KEY_FILE_LEN, KEY_CHECK_START + KEY_CHECK_LEN);
 }
 
 #[test]
@@ -693,6 +697,7 @@ fn stored_keys_unlock_only_their_own_authentic_config() {
     let config = [7u8; CONFIG_LEN];
     let mut file = std::vec::Vec::from(&config[..]);
     file.extend_from_slice(&[1u8; KEY_LEN]);
+    file.extend_from_slice(&[2u8; KEY_CHECK_LEN]);
     assert_eq!(stored_key_state(true, &file, &config, true), StoredKey::Unlocked);
     assert_eq!(stored_key_state(true, &file, &config, false), StoredKey::Stale);
     let mut other = config;
@@ -700,7 +705,9 @@ fn stored_keys_unlock_only_their_own_authentic_config() {
     assert_eq!(stored_key_state(true, &file, &other, true), StoredKey::Stale);
     assert_eq!(stored_key_state(false, &file, &config, true), StoredKey::Absent);
     assert_eq!(stored_key_state(true, &[1u8; KEY_LEN], &config, true), StoredKey::Absent);
-    for n in [0, 1, KEY_LEN + 1, KEY_FILE_LEN - 1, KEY_FILE_LEN + 1] {
+    // The earlier layout (the config and the key, without a check value)
+    // is one of the damaged lengths.
+    for n in [0, 1, KEY_LEN + 1, KEY_CHECK_START, KEY_FILE_LEN - 1, KEY_FILE_LEN + 1] {
         assert_eq!(stored_key_state(true, &std::vec![0u8; n], &config, true), StoredKey::Damaged, "{n}");
     }
 }
@@ -851,10 +858,12 @@ fn stored_keys_select_the_file_key_for_the_config_it_authenticates() {
     key[KEY_LEN - 1] = 9;
     assert_eq!(mock_key(&key), 9);
     let config = initialize_config(&Mock { key: 9 }, &[3u8; SALT_LEN]).unwrap();
-    let file = [&config[..], &key[..]].concat();
+    let check = seal_key_check(&Mock { key: 9 }, &config).unwrap();
+    let file = [&config[..], &key[..], &check[..]].concat();
     let (m, cfg) = unlock_stored_key::<Mock>(true, &file, &config).unwrap();
     assert_eq!((m.key, cfg), (9, config));
     assert!(authenticate_key::<Mock>(&key, &config).is_ok());
+    assert!(key_check_opens(&Mock { key: 9 }, &config, &check));
     // Another config (stored or current), another key, a damaged or
     // absent file: never unlocked, and the state is `stored_key_state`'s.
     let other = initialize_config(&Mock { key: 10 }, &[3u8; SALT_LEN]).unwrap();
@@ -863,19 +872,36 @@ fn stored_keys_select_the_file_key_for_the_config_it_authenticates() {
     assert_ne!(sibling, config);
     let mut wrong_key = key;
     wrong_key[KEY_LEN - 1] = 10;
+    // Check values that do not open under the file's key for its config:
+    // another key's, another config's, and a damaged one.
+    let other_check = seal_key_check(&Mock { key: 10 }, &config).unwrap();
+    let sibling_check = seal_key_check(&Mock { key: 9 }, &sibling).unwrap();
+    let mut damaged_check = check;
+    damaged_check[KEY_CHECK_LEN - 1] ^= 1;
+    for wrong in [&other_check, &sibling_check, &damaged_check] {
+        assert!(!key_check_opens(&Mock { key: 9 }, &config, wrong));
+    }
     for (present, file, current) in [
-        (true, [&config[..], &key[..]].concat(), other.to_vec()),
-        (true, [&other[..], &key[..]].concat(), other.to_vec()),
-        (true, [&sibling[..], &key[..]].concat(), config.to_vec()),
-        (true, [&config[..], &wrong_key[..]].concat(), config.to_vec()),
-        (true, [&config[..], &key[..]].concat(), config[1..].to_vec()),
-        (false, [&config[..], &key[..]].concat(), config.to_vec()),
+        (true, [&config[..], &key[..], &check[..]].concat(), other.to_vec()),
+        (true, [&other[..], &key[..], &check[..]].concat(), other.to_vec()),
+        (true, [&sibling[..], &key[..], &check[..]].concat(), config.to_vec()),
+        (true, [&config[..], &wrong_key[..], &check[..]].concat(), config.to_vec()),
+        (true, [&config[..], &key[..], &other_check[..]].concat(), config.to_vec()),
+        (true, [&config[..], &key[..], &sibling_check[..]].concat(), config.to_vec()),
+        (true, [&config[..], &key[..], &damaged_check[..]].concat(), config.to_vec()),
+        (true, [&config[..], &key[..], &check[..]].concat(), config[1..].to_vec()),
+        (false, [&config[..], &key[..], &check[..]].concat(), config.to_vec()),
         (true, key.to_vec(), config.to_vec()),
-        (true, [&config[..], &key[1..]].concat(), config.to_vec()),
+        // The earlier layout: the config and the key, no check value.
+        (true, [&config[..], &key[..]].concat(), config.to_vec()),
+        (true, [&config[..], &key[1..], &check[..]].concat(), config.to_vec()),
     ] {
         let state = unlock_stored_key::<Mock>(present, &file, &current).map(|_| ());
-        let authentic = file.len() == KEY_FILE_LEN && current.len() == CONFIG_LEN
-            && authenticate_key::<Mock>(&file[CONFIG_LEN..], current[..].try_into().unwrap()).is_ok();
+        let authentic = file.len() == KEY_FILE_LEN && current.len() == CONFIG_LEN && {
+            let current: &[u8; CONFIG_LEN] = current[..].try_into().unwrap();
+            authenticate_key::<Mock>(&file[CONFIG_LEN..KEY_CHECK_START], current)
+                .is_ok_and(|m| key_check_opens(&m, current, &file[KEY_CHECK_START..]))
+        };
         let expected = stored_key_state(present, &file, &current, authentic);
         assert_ne!(expected, StoredKey::Unlocked);
         assert_eq!(state, Err(expected));

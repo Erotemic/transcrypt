@@ -215,7 +215,7 @@ inductive StagedRefusal where
 | UnprotectedForgery : StagedRefusal
 
 /-- [transcrypt_v3_core::StoredKey]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1812:0-1824:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1831:0-1843:1
     Visibility: public -/
 @[discriminant isize]
 inductive StoredKey where
@@ -225,13 +225,13 @@ inductive StoredKey where
 | Unlocked : StoredKey
 
 /-- Trait declaration: [transcrypt_v3_core::V3KeySchedule]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1848:0-1852:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1869:0-1873:1
     Visibility: public -/
 structure V3KeySchedule (Self : Type) where
   from_key : Slice Std.U8 → RustM (core.option.Option Self)
 
 /-- [transcrypt_v3_core::BlobRead]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1959:0-1966:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2003:0-2010:1
     Visibility: public -/
 @[discriminant isize]
 inductive BlobRead where

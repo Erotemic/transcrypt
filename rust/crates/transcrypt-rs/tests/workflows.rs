@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::{io::Write, process::{Command, Stdio}};
 use std::{ffi::OsString, fs, time::{Duration, Instant}};
 use transcrypt_rs::KEY_SIZE;
-use transcrypt_v3_core::{KEY_FILE_LEN, OID_START};
+use transcrypt_v3_core::{CONFIG_LEN, KEY_CHECK_START, KEY_FILE_LEN, OID_START};
 
 const NEW: &[u8] = b"a completely different long passphrase\n";
 
@@ -325,10 +325,13 @@ fn pulled_rekey_makes_the_stored_key_stale_until_unlock() {
 }
 
 /// Key material is never taken from another configuration or credential
-/// source: another repository's key file, a file naming this config with
-/// another key, or a file naming another config with this key all leave
-/// the checkout locked (stale), and no file is decrypted or encrypted with
-/// them, including by a checkout (`Key::stored`).
+/// source, nor used damaged: another repository's key file, a file naming
+/// this config with another key, a file naming another config with this
+/// key, this config and key with another key's check value, and this file
+/// with one bit flipped in either half of the key (the CTR half, which the
+/// config tag does not depend on, included) or in its check value all
+/// leave the checkout locked (stale), and no file is decrypted or encrypted
+/// with them, including by a checkout (`Key::stored`).
 #[test]
 fn stored_keys_of_other_configs_are_never_used() {
     let mut scratch = Scratch::new("keysource");
@@ -344,12 +347,23 @@ fn stored_keys_of_other_configs_are_never_used() {
     let genuine = fs::read(key_path(&a)).unwrap();
     let other = fs::read(key_path(&b)).unwrap();
     assert_eq!((genuine.len(), other.len()), (KEY_FILE_LEN, KEY_FILE_LEN));
-    let config_len = KEY_FILE_LEN - KEY_SIZE;
-    assert_ne!(genuine[..config_len], other[..config_len]);
+    assert_eq!(KEY_CHECK_START, CONFIG_LEN + KEY_SIZE);
+    assert_ne!(genuine[..CONFIG_LEN], other[..CONFIG_LEN]);
+    // One bit flipped in the S2V half of the key, in its CTR half, and in
+    // the check value.
+    let flipped = |at: usize| {
+        let mut file = genuine.clone();
+        file[at] ^= 1;
+        file
+    };
     let substitutes = [
         other.clone(),
-        [&genuine[..config_len], &other[config_len..]].concat(),
-        [&other[..config_len], &genuine[config_len..]].concat(),
+        [&genuine[..CONFIG_LEN], &other[CONFIG_LEN..]].concat(),
+        [&other[..CONFIG_LEN], &genuine[CONFIG_LEN..]].concat(),
+        [&genuine[..KEY_CHECK_START], &other[KEY_CHECK_START..]].concat(),
+        flipped(CONFIG_LEN),
+        flipped(KEY_CHECK_START - 1),
+        flipped(KEY_FILE_LEN - 1),
     ];
     for (n, substitute) in substitutes.iter().enumerate() {
         fs::write(key_path(&a), substitute).unwrap();
@@ -375,7 +389,7 @@ fn stored_keys_of_other_configs_are_never_used() {
     const REFUSAL_WAIT: Duration = Duration::from_secs(30);
     let mut agent = std::process::Command::new(bin()).arg("serve").current_dir(&a)
         .stdin(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
-    let startup = [&other[config_len..], &NO_IDLE_LIMIT.to_be_bytes()[..]].concat();
+    let startup = [&other[CONFIG_LEN..KEY_CHECK_START], &NO_IDLE_LIMIT.to_be_bytes()[..]].concat();
     std::io::Write::write_all(&mut agent.stdin.take().unwrap(), &startup).unwrap();
     let start = Instant::now();
     while agent.try_wait().unwrap().is_none() && start.elapsed() < REFUSAL_WAIT {
@@ -910,16 +924,17 @@ fn legacy_keys_macro_redefinitions_and_crlf() {
     assert!(status.contains("key:        locked"), "{status}");
     unlock(&repo);
     assert_eq!(fs::metadata(repo.join(".git/transcrypt-v3/key")).unwrap().len(), KEY_FILE_LEN as u64);
-    // Any other length is damaged (the verified `stored_key_state`), and
-    // `unlock` repairs it.
+    // Any other length is damaged (the verified `stored_key_state`),
+    // including the earlier layout (the config and the key, without a check
+    // value), and `unlock` repairs it.
     let stored = fs::read(repo.join(".git/transcrypt-v3/key")).unwrap();
-    for damaged in [&stored[..KEY_FILE_LEN - 1], &[&stored[..], b"x"].concat()[..]] {
+    for damaged in [&stored[..KEY_FILE_LEN - 1], &[&stored[..], b"x"].concat()[..], &stored[..KEY_CHECK_START]] {
         fs::write(repo.join(".git/transcrypt-v3/key"), damaged).unwrap();
         let err = run_fails(&repo, bin(), &["verify-index"], None);
-        assert!(err.contains("damaged .git/transcrypt-v3/key"), "{err}");
+        assert!(err.contains("damaged .git/transcrypt-v3/key, or one an earlier build wrote"), "{err}");
+        unlock(&repo);
+        assert_eq!(fs::read(repo.join(".git/transcrypt-v3/key")).unwrap(), stored);
     }
-    unlock(&repo);
-    assert_eq!(fs::read(repo.join(".git/transcrypt-v3/key")).unwrap(), stored);
     // A quoted macro redefinition in .git/info/attributes.
     fs::write(repo.join(".git/info/attributes"), b"\"[attr]transcrypt\" -diff\n").unwrap();
     fs::write(repo.join("a.env"), b"S=3\n").unwrap();

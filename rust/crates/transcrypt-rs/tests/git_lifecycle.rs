@@ -3,7 +3,10 @@ mod common;
 use common::*;
 use std::{fs, path::Path};
 use transcrypt_rs::KEY_SIZE;
-use transcrypt_v3_core::CONFIG_LEN;
+use transcrypt_v3_core::{CONFIG_LEN, KEY_CHECK_LEN, KEY_FILE_LEN};
+
+// The key file: the config, the key, its check value.
+const _: () = assert!(KEY_FILE_LEN == CONFIG_LEN + KEY_SIZE + KEY_CHECK_LEN);
 
 /// Unlocked means exactly one private key file in a private directory, and
 /// no agent; locked means no key file.
@@ -12,8 +15,8 @@ fn assert_unlocked(root: &Path, expected: bool) {
     let key = dir.join("key");
     if expected {
         let meta = fs::symlink_metadata(&key).expect("unlocked checkout must store its key");
-        assert!(meta.file_type().is_file() && meta.len() == (CONFIG_LEN + KEY_SIZE) as u64,
-            "the key file holds the public config it unlocks and the derived key");
+        assert!(meta.file_type().is_file() && meta.len() == KEY_FILE_LEN as u64,
+            "the key file holds the public config it unlocks, the derived key and its check value");
         assert!(owner_only(&key), "key file must be private");
         assert!(owner_only(&dir));
         let items: Vec<_> = fs::read_dir(&dir).unwrap().map(|f| f.unwrap().file_name()).collect();

@@ -13,7 +13,8 @@ use argon2::{Algorithm, Argon2, Block, Params, Version};
 use sha2::{Digest, Sha256};
 pub use transcrypt_v3_core::{StoredKey, MAX_FILE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
-    Refusal, V3KeySchedule, V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_MIN_LEN, ID_LEN, SALT_LEN, TAG_LEN,
+    Refusal, V3KeySchedule, V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_MIN_LEN, ID_LEN, KEY_FILE_LEN, SALT_LEN,
+    TAG_LEN,
 };
 use zeroize::Zeroizing;
 
@@ -230,12 +231,26 @@ impl ValidatedKey {
 
     /// The stored key for configuration `current`, as the verified
     /// `unlock_stored_key` decides from the key file's bytes `file` (if
-    /// `present`): only for a file holding exactly `current` followed by a
-    /// key that authenticates it, and then with that key. Otherwise the
-    /// state (`Absent`, `Damaged` or `Stale`).
+    /// `present`): only for a file holding exactly `current`, a key that
+    /// authenticates it, and that key's check value for it, and then with
+    /// that key. Otherwise the state (`Absent`, `Damaged` or `Stale`).
     pub fn from_stored(present: bool, file: &[u8], current: &[u8]) -> Result<Self, StoredKey> {
         transcrypt_v3_core::unlock_stored_key::<Keyed>(present, file, current)
             .map(|(keyed, config)| ValidatedKey { config, keyed })
+    }
+
+    /// The stored key file of this key (`from_stored` reads it back): the
+    /// configuration, the key, and the key's check value for the
+    /// configuration, which the verified `seal_key_check` computes. The
+    /// configuration tag depends on only half of the AES-SIV key; the check
+    /// value, a sealed nonempty constant, involves all of it.
+    pub fn to_stored(&self) -> Result<Zeroizing<Vec<u8>>, String> {
+        let check = transcrypt_v3_core::seal_key_check(&self.keyed, &self.config).map_err(refusal)?;
+        let mut file = Zeroizing::new(Vec::with_capacity(KEY_FILE_LEN));
+        file.extend_from_slice(&self.config);
+        file.extend_from_slice(&self.keyed.key[..]);
+        file.extend_from_slice(&check);
+        Ok(file)
     }
 
     /// The configuration this key authenticated.
@@ -294,7 +309,7 @@ impl ValidatedKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use transcrypt_v3_core::KEY_FILE_LEN;
+    use transcrypt_v3_core::KEY_CHECK_START;
 
     const PASSPHRASE: &[u8] = b"correct horse battery staple long secret";
 
@@ -303,9 +318,15 @@ mod tests {
         ValidatedKey::initialize(PASSPHRASE, &salt).unwrap()
     }
 
-    /// The stored key file for `config`: the config, then the key.
-    fn key_file(config: &[u8], key: &[u8]) -> Vec<u8> {
-        [config, key].concat()
+    /// A stored key file for `config`: the config, the key, then the check
+    /// value `check`.
+    fn key_file(config: &[u8], key: &[u8], check: &[u8]) -> Vec<u8> {
+        [config, key, check].concat()
+    }
+
+    /// The check value of `key`'s file.
+    fn check_of(key: &ValidatedKey) -> Vec<u8> {
+        key.to_stored().unwrap()[KEY_CHECK_START..].to_vec()
     }
 
     #[test]
@@ -394,35 +415,44 @@ mod tests {
         let a = fixture();
         let b = ValidatedKey::initialize(PASSPHRASE, &[8u8; SALT_LEN]).unwrap();
         assert_ne!(a.config(), b.config());
+        // The file `store` writes: the config, the key, its check value.
+        let file_a = a.to_stored().unwrap();
+        assert_eq!(file_a.len(), KEY_FILE_LEN);
+        assert_eq!(&file_a[..KEY_CHECK_START], &key_file(a.config(), a.secret(), &[])[..]);
         // The file of A while the current config is B: stale, no key.
-        let file_a = key_file(a.config(), a.secret());
         assert!(matches!(ValidatedKey::from_stored(true, &file_a, b.config()), Err(StoredKey::Stale)));
-        // B's config with A's key: the prefix matches, the key does not
-        // authenticate it.
-        let spliced = key_file(b.config(), a.secret());
-        assert!(matches!(ValidatedKey::from_stored(true, &spliced, b.config()), Err(StoredKey::Stale)));
-        // The config tag is the AES-SIV encryption of the empty plaintext,
-        // which only the S2V (CMAC) half of the key determines (RFC 5297:
-        // K1 = key[..KEY_SIZE / 2]). Every single-bit change of that half is
-        // refused; a change of the CTR half is not detected by config
-        // authentication (A17: the file system keeps that half intact).
+        // B's config with A's key (and either check value): the prefix
+        // matches, the key does not authenticate it.
+        for check in [check_of(&a), check_of(&b)] {
+            let spliced = key_file(b.config(), a.secret(), &check);
+            assert!(matches!(ValidatedKey::from_stored(true, &spliced, b.config()), Err(StoredKey::Stale)));
+        }
+        // A's config and key with B's check value: the key authenticates
+        // the config, but the check value is not its own.
+        let spliced = key_file(a.config(), a.secret(), &check_of(&b));
+        assert!(matches!(ValidatedKey::from_stored(true, &spliced, a.config()), Err(StoredKey::Stale)));
+        // Every single-bit change of the key or of its check value is
+        // refused, including in the CTR half of the key (RFC 5297:
+        // key[KEY_SIZE / 2..]), which the config tag, the encryption of
+        // the empty plaintext, does not depend on: the check value, the
+        // encryption of a nonempty constant, does. So a damaged key never
+        // seals records the genuine key would refuse.
         const BITS: usize = u8::BITS as usize;
-        const S2V_KEY: usize = KEY_SIZE / 2;
-        for bit in 0..(KEY_SIZE * BITS) {
+        for bit in 0..((KEY_FILE_LEN - CONFIG_LEN) * BITS) {
             let mut flipped = file_a.clone();
             flipped[CONFIG_LEN + bit / BITS] ^= 1 << (bit % BITS);
             let state = ValidatedKey::from_stored(true, &flipped, a.config());
-            if bit / BITS < S2V_KEY {
-                assert!(matches!(state, Err(StoredKey::Stale)), "bit {bit}");
-            } else {
-                assert!(state.is_ok_and(|k| k.encrypt(b"x.secret", b"payload").ok().and_then(|r| a.decrypt(b"x.secret", &r).ok()).is_none()),
-                    "bit {bit}: a key with another CTR half seals records the genuine key refuses");
-            }
+            assert!(matches!(state, Err(StoredKey::Stale)), "bit {bit}");
         }
+        // A file of the earlier layout (the config and the key, without a
+        // check value) is damaged: `unlock` rewrites it.
+        let earlier = key_file(a.config(), a.secret(), &[]);
+        assert!(matches!(ValidatedKey::from_stored(true, &earlier, a.config()), Err(StoredKey::Damaged)));
         // The genuine file: its key, for the config it names.
         let stored = ValidatedKey::from_stored(true, &file_a, a.config()).unwrap();
         assert_eq!(stored.config(), a.config());
-        assert_eq!(&stored.secret()[..], &file_a[CONFIG_LEN..]);
+        assert_eq!(&stored.secret()[..], &file_a[CONFIG_LEN..KEY_CHECK_START]);
+        assert_eq!(stored.to_stored().unwrap(), file_a);
         let record = stored.encrypt(b"x.secret", b"payload").unwrap();
         assert_eq!(record, a.encrypt(b"x.secret", b"payload").unwrap());
         assert!(b.decrypt(b"x.secret", &record).is_err());
@@ -430,7 +460,7 @@ mod tests {
         // current config of the wrong length.
         assert!(matches!(ValidatedKey::from_stored(false, &file_a, a.config()), Err(StoredKey::Absent)));
         assert!(matches!(ValidatedKey::from_stored(true, &a.secret()[..], a.config()), Err(StoredKey::Absent)));
-        for len in [0, 1, CONFIG_LEN, KEY_FILE_LEN - 1, KEY_FILE_LEN + 1] {
+        for len in [0, 1, CONFIG_LEN, KEY_CHECK_START, KEY_FILE_LEN - 1, KEY_FILE_LEN + 1] {
             let mut damaged = file_a.clone();
             damaged.resize(len, 0);
             assert!(matches!(ValidatedKey::from_stored(true, &damaged, a.config()), Err(StoredKey::Damaged)), "{len}");

@@ -50,10 +50,11 @@ check, A4), `RepairContracts` (A4, A20, A23), and, for history, `CommitStep`
   seals plaintext), and never skips the user's change.
 * **D. Configuration-bound key use** (`stored_key_binds_file_operations`): a
   stored key is used only when its file holds exactly the current
-  configuration, which the key authenticates; the primitives used are those
-  `unlock_stored_key` built from the file's own key bytes (`KeyUse.lean`;
-  the key schedule is the contract `KeyScheduleRealizes`, A5/A17); every
-  record they open or seal is bound to that configuration and the exact path.
+  configuration, which the key authenticates, and the key's own check value
+  for it; the primitives used are those `unlock_stored_key` built from the
+  file's own key bytes (`KeyUse.lean`; the key schedule is the contract
+  `KeyScheduleRealizes`, A5/A17); every record they open or seal is bound to
+  that configuration and the exact path.
 -/
 
 open CoreModels Aeneas
@@ -480,8 +481,12 @@ theorem repair_never_launders (g : GitState) (run : RepairInputs)
     file's bytes and the current configuration. Then the file holds exactly
     that configuration followed by the key bytes `storedKeyBytes file`; the
     primitives realize the suite of those bytes (given only the key-schedule
-    contract `KeyScheduleRealizes`, A5/A17), and the configuration
-    authenticates under them; and every file operation under them is bound
+    contract `KeyScheduleRealizes`, A5/A17), the configuration
+    authenticates under them, and the rest of the file is their check value
+    for it (`keyCheckValue`: whereas the configuration tag involves only the
+    S2V half of an AES-SIV key, the check value involves both; that it
+    differs for a damaged key is the cipher's property, A10); and every
+    file operation under them is bound
     to that configuration and the exact path: a record `open_record` accepts
     opens there to exactly the released bytes, and a record `seal_record`
     writes is the spec's sealing, which opens there to the plaintext.
@@ -495,6 +500,7 @@ theorem stored_key_binds_file_operations {sched : V3KeySchedule P} {σk : List N
     wireBytes config = sliceBytes current ∧
     (sliceBytes file).take Transcrypt.V3Wire.configLen = wireBytes config ∧
     ConfigAuthentic (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) ∧
+    storedKeyCheck (sliceBytes file) = keyCheckValue (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) ∧
     (∀ path record out buf : Slice U8,
       open_record inst keyed config path record out = ok (core.result.Result.Ok (), buf) →
         OpensTo (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) (sliceBytes path)
@@ -505,9 +511,10 @@ theorem stored_key_binds_file_operations {sched : V3KeySchedule P} {σk : List N
           (sliceBytes path) (sliceBytes plaintext) ∧
         OpensTo (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) (sliceBytes path)
           (sliceBytes sealed) (sliceBytes plaintext)) := by
-  obtain ⟨-, -, htake, hcfg, hR, hca⟩ :=
+  obtain ⟨-, -, htake, hcfg, hR, hca, hchk⟩ :=
     spec_result (unlock_stored_key_spec hK present file current) hunlock
-  refine ⟨hcfg, htake.trans hcfg.symm, hca, fun path record out buf ho => ?_, fun path plaintext out sealed hs => ?_⟩
+  refine ⟨hcfg, htake.trans hcfg.symm, hca, hchk, fun path record out buf ho => ?_,
+    fun path plaintext out sealed hs => ?_⟩
   · have h := open_record_spec hR config path record out
     rw [ho] at h
     simpa using h

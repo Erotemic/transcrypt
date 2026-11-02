@@ -2,7 +2,8 @@
 //! filter and command uses to encrypt and decrypt with it.
 //!
 //! - **Stored** (the default): `unlock` writes the derived key, never the
-//!   passphrase, with the public config it unlocks, to
+//!   passphrase, with the public config it unlocks and a check value
+//!   (`ValidatedKey::to_stored`), to
 //!   `.git/transcrypt-v3/key` (mode 0600 in a 0700 directory
 //!   shared by all worktrees, never committed and not in `git config`). Git
 //!   commands then work without prompting, across shells and reboots, with
@@ -22,13 +23,15 @@ use std::{
 };
 use zeroize::Zeroizing;
 use transcrypt_rs::{StoredKey, ValidatedKey, KEY_SIZE};
-use transcrypt_v3_core::{AgentOp, CONFIG_LEN, ID_LEN, KEY_FILE_LEN};
+use transcrypt_v3_core::{AgentOp, CONFIG_LEN, ID_LEN, KEY_CHECK_LEN, KEY_FILE_LEN};
 use crate::{fsat, git::Repository, session};
 
 const KEY_FILE: &str = "key";
-const DAMAGED: &str = "damaged .git/transcrypt-v3/key; run `transcrypt-rs unlock` again";
-// The verified decision's layout is this adapter's: the config, then the key.
-const _: () = assert!(KEY_FILE_LEN == CONFIG_LEN + KEY_SIZE && transcrypt_v3_core::KEY_LEN == KEY_SIZE);
+const DAMAGED: &str = "damaged .git/transcrypt-v3/key, or one an earlier build wrote; \
+    run `transcrypt-rs unlock` again";
+// The verified decision's layout is this adapter's: the config, the key,
+// then its check value.
+const _: () = assert!(KEY_FILE_LEN == CONFIG_LEN + KEY_SIZE + KEY_CHECK_LEN && transcrypt_v3_core::KEY_LEN == KEY_SIZE);
 
 /// An unlocked key for one public configuration.
 pub(crate) struct Key {
@@ -53,8 +56,9 @@ pub(crate) enum Unlock {
     Unlocked(Key),
     /// No credential.
     Locked,
-    /// A stored key that does not authenticate this configuration: the
-    /// committed config changed (a pulled `rekey`), or the file is damaged.
+    /// A stored key that does not authenticate this configuration and its
+    /// check value: the committed config changed (a pulled `rekey`), or the
+    /// file is damaged.
     Stale,
 }
 
@@ -75,8 +79,8 @@ impl Key {
     pub(crate) fn require(repo: &Repository, config: &[u8]) -> Result<Key, String> {
         match lookup(repo, config)? {
             Unlock::Unlocked(key) => Ok(key),
-            Unlock::Stale => Err("the stored key does not match .transcrypt/config (it was rekeyed?); \
-                run `transcrypt-rs unlock` with the current passphrase".into()),
+            Unlock::Stale => Err("the stored key does not match .transcrypt/config (it was rekeyed?, \
+                or the key file is damaged); run `transcrypt-rs unlock` with the current passphrase".into()),
             Unlock::Locked => Err("this checkout is locked; run `transcrypt-rs unlock`".into()),
         }
     }
@@ -163,11 +167,13 @@ fn unlock_state(repo: &Repository, config: &[u8], stored: Result<Option<Validate
 }
 
 /// The stored key for `config`, as the verified `unlock_stored_key`
-/// decides: `Ok(Some)` only if the file holds exactly `config` then a key
-/// that authenticates it, and then that key, validated for `config`;
-/// `Ok(None)` without a stored key (none, or one written by an earlier
-/// version: the key alone); `Err(Stale)` for a key of another config or one
-/// that does not authenticate it; `Err(Damaged)` otherwise.
+/// decides: `Ok(Some)` only if the file holds exactly `config`, a key that
+/// authenticates it and that key's check value for it, and then that key,
+/// validated for `config`; `Ok(None)` without a stored key (none, or one
+/// written by an earlier version: the key alone); `Err(Stale)` for a key of
+/// another config or one that does not authenticate it or its check value;
+/// `Err(Damaged)` otherwise (including the earlier layout without a check
+/// value).
 fn stored_lookup(file: Option<&[u8]>, config: &[u8]) -> Result<Option<ValidatedKey>, StoredKey> {
     match ValidatedKey::from_stored(file.is_some(), file.unwrap_or_default(), config) {
         Ok(key) => Ok(Some(key)),
@@ -191,17 +197,19 @@ fn read_key_file(repo: &Repository) -> Result<Option<Zeroizing<Vec<u8>>>, String
         .map(Some).map_err(|_| "cannot read .git/transcrypt-v3/key".into())
 }
 
-/// Store `key`, with the public config it authenticated, for later
-/// commands: an exclusive 0600 temporary in the private directory, synced,
-/// then renamed over any previous key.
+/// Store `key`, with the public config it authenticated and its check
+/// value (`ValidatedKey::to_stored`), for later commands: an exclusive 0600
+/// temporary in the private directory, synced, then renamed over any
+/// previous key.
 pub(crate) fn store(repo: &Repository, key: &ValidatedKey) -> Result<(), String> {
+    let contents = key.to_stored()?;
     let dir = fsat::Dir::open(&session::prepare_directory(repo)?)
         .map_err(|_| "cannot open the local v3 credential directory")?;
     let temp = format!("{KEY_FILE}.{}.tmp", std::process::id());
     let temp = OsStr::new(&temp);
     let _ = dir.unlink(temp);
     let mut file = dir.create_new(temp, crate::modes::PRIVATE_FILE).map_err(|e| format!("cannot create the key file: {e}"))?;
-    let written = file.write_all(key.config()).and_then(|_| file.write_all(key.secret())).and_then(|_| file.sync_all());
+    let written = file.write_all(&contents).and_then(|_| file.sync_all());
     drop(file);
     if let Err(e) = written.and_then(|_| dir.rename_to(temp, &dir, OsStr::new(KEY_FILE))) {
         let _ = dir.unlink(temp);

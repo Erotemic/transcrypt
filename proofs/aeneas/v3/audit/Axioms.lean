@@ -137,6 +137,9 @@ open Transcrypt.V3Verification
 -- KeyUse
 #print axioms authenticate_key_spec
 #print axioms stored_key_state_unauthentic
+#print axioms seal_key_check_spec
+#print axioms key_check_opens_spec
+#print axioms key_check_round_trip
 #print axioms unlock_stored_key_spec
 -- Objects
 #print axioms parse_batch_header_spec
@@ -196,4 +199,6 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.Sorted.eq_of_path
 #print axioms Transcrypt.V3Policy.Sorted.holds_oid
 #print axioms Transcrypt.V3Policy.storedKeySpec_unlocked
+#print axioms Transcrypt.V3Policy.keyCheckValue_length
+#print axioms Transcrypt.V3Policy.keyCheckPath_reserved
 #print axioms Transcrypt.V3Policy.batchHeader_unique

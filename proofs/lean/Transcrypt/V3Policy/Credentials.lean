@@ -1,4 +1,4 @@
-import Transcrypt.V3Policy.Paths
+import Transcrypt.V3Policy.Authentication
 
 /-!
 # Credentials: the agent's requests and the stored key
@@ -56,12 +56,54 @@ theorem be32_injective {m n : Nat} (hm : m < 2^32) (hn : n < 2^32) (h : be32 m =
 inductive StoredKey | absent | damaged | stale | unlocked
   deriving DecidableEq
 
+/-- The associated-data path and the plaintext of a stored key's check
+    value. The path is reserved metadata, so no record is ever sealed or
+    opened at it (`keyCheckPath_reserved`). -/
+def keyCheckPath : List Nat := ascii ".transcrypt/key-check"
+def keyCheckPlaintext : List Nat := ascii "transcrypt/v3/key-check"
+
+/-- The check value of the key of suite `s`, stored with `config`: the
+    sealing of `keyCheckPlaintext` at `keyCheckPath` under `config`. Unlike
+    the configuration tag (the encryption of the empty plaintext) its
+    plaintext is not empty, so with AES-SIV it involves both halves of the
+    key; that a different key gives a different value is the cipher's
+    property (A10), not this specification's. -/
+def keyCheckValue (s : Suite) (config : List Nat) : List Nat :=
+  s.siv [fileDomain, config, keyCheckPath] keyCheckPlaintext
+
+/-- The key bytes and the check value of a stored key file, after its
+    `configLen`-byte configuration. -/
+def storedKeyBytes (file : List Nat) : List Nat := (file.drop configLen).take keyLen
+def storedKeyCheck (file : List Nat) : List Nat := file.drop keyCheckStart
+
+/-- A stored key file is authentic for suite `s` (that of its key bytes)
+    when its configuration authenticates under `s` and its check value is
+    the one `s` gives that configuration. This is what `storedKeySpec`'s
+    `authentic` means. -/
+def StoredKeyAuthentic (s : Suite) (file : List Nat) : Prop :=
+  ConfigAuthentic s (file.take configLen) ∧ storedKeyCheck file = keyCheckValue s (file.take configLen)
+
+theorem keyCheckPlaintext_length : keyCheckPlaintext.length = keyCheckPlaintextLen := by decide
+
+theorem keyCheckValue_length (s : Suite) (config : List Nat) :
+    (keyCheckValue s config).length = keyCheckLen := by
+  rw [keyCheckValue, s.siv_length, keyCheckPlaintext_length, keyCheckLen, Nat.add_comm]
+
+/-- The check value's path is reserved, so it is no protected path: no
+    record is sealed or opened with the check value's associated data. -/
+theorem keyCheckPath_reserved : Reserved keyCheckPath ∧ ¬ CanonicalProtectedPath keyCheckPath :=
+  have h : Reserved keyCheckPath := Or.inl ⟨ascii "key-check", by decide⟩
+  ⟨h, fun hc => hc.2.2.2.2 h⟩
+
 /-- The stored key file of an unlocked checkout holds the public
-    configuration it was unlocked for, then the key. A key-sized file
-    (the key alone, from an earlier version) or no file at all means no
-    stored key; any other length is damaged. A key is used only for exactly
-    the configuration stored with it, and only if it authenticates that
-    configuration (`authentic`); otherwise it is stale. -/
+    configuration it was unlocked for, the key, and the key's check value
+    (`keyFileLen` bytes). A key-sized file (the key alone, from an earlier
+    version) or no file at all means no stored key; any other length is
+    damaged, including the earlier layout without a check value
+    (`keyCheckStart` bytes). A key is used only for exactly the
+    configuration stored with it, and only if it authenticates that
+    configuration and its check value (`authentic`, which is
+    `StoredKeyAuthentic` of the key's suite); otherwise it is stale. -/
 def storedKeySpec (present : Bool) (file current : List Nat) (authentic : Bool) : StoredKey :=
   if present = false ∨ file.length = keyLen then .absent
   else if file.length ≠ keyFileLen then .damaged

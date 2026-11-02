@@ -52,20 +52,20 @@ theorem stored_key_state_spec (present : Bool) (file current : Slice U8) (authen
       have h64' : file.length ≠ 64 := by
         intro h; apply h64; apply UScalar.eq_of_val_eq; simp [hk, h]
       split
-      · rename_i h119
-        have h119' : file.length ≠ 119 := by
-          intro h; simp_bne at h119; apply h119; apply UScalar.eq_of_val_eq; simp [hkf, h]
-        simp [storedKeyResult, hfl, h64', h119', hp]
-      · rename_i h119
-        have h119' : file.length = 119 := by
-          simp_bne at h119
-          have := congrArg UScalar.val h119; simpa [hkf] using this
+      · rename_i hlen
+        have hlen' : file.length ≠ 158 := by
+          intro h; simp_bne at hlen; apply hlen; apply UScalar.eq_of_val_eq; simp [hkf, h]
+        simp [storedKeyResult, hfl, h64', hlen', hp]
+      · rename_i hlen
+        have hlen' : file.length = 158 := by
+          simp_bne at hlen
+          have := congrArg UScalar.val hlen; simpa [hkf] using this
         step with index_range_spec file 0#usize CONFIG_LEN (by simp) (by rw [hc]; omega) as ⟨ s, hs ⟩
         step with bytes_eq_spec as ⟨ b, hb ⟩
         have hst : sliceBytes s = (sliceBytes file).take 55 := by
           rw [hs, hc, List.extract_eq_take_drop]; simp
         rw [← sliceBytes_inj, hst] at hb
-        simp only [hp, hfl, h119', Bool.true_eq_false, false_or, if_false, ne_eq, not_true_eq_false]
+        simp only [hp, hfl, hlen', Bool.true_eq_false, false_or, if_false, ne_eq, not_true_eq_false]
         split
         · rename_i hbt
           split

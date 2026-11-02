@@ -103,7 +103,8 @@ attribute [scalar_tac_simps] Transcrypt.V3Policy.oidStart Transcrypt.V3Policy.mo
   Transcrypt.V3Policy.decimalRadix Transcrypt.V3Wire.configLen Transcrypt.V3Wire.configMagicLen
   Transcrypt.V3Wire.saltLen Transcrypt.V3Wire.tagLen
 @[simp] theorem KEY_LEN_val : KEY_LEN.val = 64 := by simp [KEY_LEN]
-@[simp] theorem KEY_FILE_LEN_val : KEY_FILE_LEN.val = 119 := by simp [KEY_FILE_LEN]
+@[simp] theorem KEY_CHECK_START_val : KEY_CHECK_START.val = 119 := by simp [KEY_CHECK_START]
+@[simp] theorem KEY_FILE_LEN_val : KEY_FILE_LEN.val = 158 := by simp [KEY_FILE_LEN]
 
 @[step] theorem MAX_FILE_spec : MAX_FILE ⦃ x => x.val = Transcrypt.V3Policy.maxFile ⦄ := by
   unfold MAX_FILE; step*; simp [Transcrypt.V3Policy.maxFile, *]
@@ -167,6 +168,16 @@ theorem MODULES_NAME_bytes :
 theorem CONFIG_PATH_bytes :
     sliceBytes (Array.to_slice CONFIG_PATH) = Transcrypt.V3Policy.configPath := by
   unfold CONFIG_PATH Transcrypt.V3Policy.configPath Transcrypt.V3Policy.ascii sliceBytes
+  decide
+
+theorem KEY_CHECK_PATH_bytes :
+    sliceBytes (Array.to_slice KEY_CHECK_PATH) = Transcrypt.V3Policy.keyCheckPath := by
+  unfold KEY_CHECK_PATH Transcrypt.V3Policy.keyCheckPath Transcrypt.V3Policy.ascii sliceBytes
+  decide
+
+theorem KEY_CHECK_PLAINTEXT_bytes :
+    sliceBytes (Array.to_slice KEY_CHECK_PLAINTEXT) = Transcrypt.V3Policy.keyCheckPlaintext := by
+  unfold KEY_CHECK_PLAINTEXT Transcrypt.V3Policy.keyCheckPlaintext Transcrypt.V3Policy.ascii sliceBytes
   decide
 
 theorem FILTER_ATTR_bytes :

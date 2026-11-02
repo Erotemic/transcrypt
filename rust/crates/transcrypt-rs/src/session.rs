@@ -334,7 +334,10 @@ pub(crate) fn serve(repo: &Repository, config: &[u8]) -> Result<(), String> {
         seconds => Some(Duration::from_secs(seconds)),
     };
     // The agent holds the key only validated for this worktree's config,
-    // and serves only that config (`authorize_agent_request`).
+    // and serves only that config (`authorize_agent_request`). Unlike the
+    // stored file, the key needs no check value: it is the parent's
+    // `ValidatedKey`, delivered whole or not at all by a pipe, and never
+    // rests in storage that could damage it.
     let key = ValidatedKey::authenticate(config, &received)?;
     drop(received);
     os::lock_memory(key.secret().as_ptr(), KEY_SIZE);

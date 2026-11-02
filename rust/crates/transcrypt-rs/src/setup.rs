@@ -437,7 +437,7 @@ pub(crate) fn status(repo: &Repository) -> Result<(), String> {
         Unlock::Unlocked(key) if !key.private() => "unlocked (stored in .git/transcrypt-v3/key)",
         Unlock::Unlocked(_) => "unlocked (private: held in memory by an agent)",
         Unlock::Locked => "locked",
-        Unlock::Stale => "locked: the stored key does not match .transcrypt/config (rekeyed?); run unlock",
+        Unlock::Stale => "locked: the stored key does not match .transcrypt/config (rekeyed?, or damaged); run unlock",
     });
     let key = unlock.key();
     let mut counts = [0usize; BUCKETS];
@@ -610,7 +610,7 @@ pub(crate) fn doctor(repo: &Repository) -> Result<(), String> {
     println!("note key {}", match &unlock {
         Some(Unlock::Unlocked(key)) if !key.private() => "stored in .git/transcrypt-v3/key (unlocked)",
         Some(Unlock::Unlocked(_)) => "held in memory by the private agent (unlocked)",
-        Some(Unlock::Stale) => "stored, but for another config (rekeyed?): run unlock",
+        Some(Unlock::Stale) => "stored, but for another config (rekeyed?) or damaged: run unlock",
         _ => "none (locked)",
     });
     if key.is_some_and(Key::private) {
