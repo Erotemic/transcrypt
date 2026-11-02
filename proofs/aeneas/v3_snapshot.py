@@ -50,7 +50,7 @@ ENTRYPOINTS = (
     'is_canonical_protected_path', 'initialize_config', 'authenticate_config',
     'seal_record', 'open_record', 'hydrate_action', 'lock_action',
     'authorize_agent_request', 'parse_attr_record', 'parse_attr_response', 'smudge_action', 'needs_record', 'repair_plan', 'entry_check',
-    'staged_check', 'reads_blob', 'staged_verdict',
+    'staged_check', 'reads_blob', 'staged_verdict', 'audit_check',
     'parse_index_entry',
     'encode_frame_header', 'decode_frame_header',
     'is_object_id', 'record_envelope_ok', 'decode_pkt_len',

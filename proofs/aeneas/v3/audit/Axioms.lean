@@ -149,6 +149,7 @@ open Transcrypt.V3Verification
 #print axioms reads_blob_spec
 #print axioms stagedCheckOf_reads
 #print axioms staged_verdict_ok
+#print axioms audit_check_spec
 -- EndToEnd
 #print axioms hookPlan_accepts
 #print axioms hookEntry_accepted
@@ -176,6 +177,18 @@ open Transcrypt.V3Verification
 #print axioms checkout_opens_genuine_records
 #print axioms repair_never_launders
 #print axioms stored_key_binds_file_operations
+-- Audit
+#print axioms auditPlan_accepts
+#print axioms auditEntry_accepted
+#print axioms audit_entry_checked
+#print axioms keyed_audit_records_authentic
+#print axioms keyed_audit_selection_authentic
+#print axioms keyed_audit_authenticates_commit
+#print axioms keyless_audit_checks_envelopes
+#print axioms config_of_guard_head
+#print axioms audited_head_starts_keyed_history
+#print axioms audited_head_keyed_history_authenticated
+#print axioms keyed_audit_chain_authenticated
 -- spec (V3Policy)
 #print axioms Transcrypt.V3Policy.opensTo_unique
 #print axioms Transcrypt.V3Policy.seal_opens
