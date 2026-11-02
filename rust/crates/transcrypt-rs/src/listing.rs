@@ -6,8 +6,9 @@
 
 use std::fmt;
 use transcrypt_v3_core::{
-    blob_elsewhere, entry_provenance, first_unselectable, held_entries, listing_fields, next_move_source,
-    object_order_ok, parse_listing as parse_listing_ends, parse_listing_attrs, policy_unchanged, Provenance, EXECUTABLE_MODE,
+    blob_elsewhere, entry_provenance, first_unselectable, held_entries, held_records, listing_fields, next_move_source,
+    object_order_ok, parse_listing as parse_listing_ends, parse_listing_attrs, policy_unchanged, staged_check, Provenance,
+    StagedCheck, EXECUTABLE_MODE,
     OID_START, REGULAR_MODE,
 };
 use crate::git::{git_records, ObjectId, MODE_LEN};
@@ -165,11 +166,33 @@ impl Listing {
         Ok(held)
     }
 
+    /// For each entry that is `wanted`, whether `other` (a commit's tree)
+    /// holds exactly that record: its mode, object id and path (the verified
+    /// `held_records`).
+    pub(crate) fn records_in(&self, wanted: &[bool], other: &Listing) -> Result<Vec<bool>, String> {
+        let mut held = vec![false; self.entries.len()];
+        if !held_records(&self.bytes, &self.ends, wanted, &other.bytes, &other.ends, &mut held) {
+            return Err("internal error: snapshot sizes differ".into());
+        }
+        Ok(held)
+    }
+
     /// Whether this listing (the index), `head` and `parent` have exactly
     /// the same attribute files and configuration, each with its mode and
     /// object id (the verified `policy_unchanged`).
     pub(crate) fn policy_unchanged(&self, head: &Listing, parent: &Listing) -> bool {
         policy_unchanged(&self.bytes, &self.ends, &head.bytes, &head.ends, &parent.bytes, &parent.ends)
+    }
+
+    /// How the pre-commit hook's final check examines entry `i` (the
+    /// verified `staged_check`), from Git's selection `flags`, whether
+    /// `HEAD` and `HEAD^1` hold each entry (`records_in`), whether the check is
+    /// `keyed` and `incremental`, and the settled `guard` (`policy_unchanged`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn staged_check(&self, i: usize, flags: &[bool], in_head: &[bool], in_parent: &[bool], keyed: bool,
+        incremental: bool, guard: bool) -> StagedCheck
+    {
+        staged_check(&self.bytes, &self.ends, i, flags, in_head, in_parent, keyed, incremental, guard)
     }
 
     /// Where the content of entry `i` came from (the verified

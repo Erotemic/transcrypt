@@ -2,12 +2,12 @@
 //! hook, `hydrate`, and `lock` (`flush` per worktree). Every decision to
 //! publish, keep or replace bytes is made by the verified core.
 
-use std::{collections::{HashMap, HashSet}, env, fs, io, path::{Path, PathBuf}};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, env, fs, io, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    entry_check, hydrate_action, is_reserved_path, lock_action, needs_record, parse_file_header,
-    record_envelope_ok, repair_plan,
-    EntryCheck, HydrateAction, LockAction, RecordClass, RepairPlan, ATTRIBUTES_NAME,
+    hydrate_action, is_reserved_path, lock_action, needs_record, parse_file_header, reads_blob, record_envelope_ok,
+    repair_plan, staged_verdict,
+    HydrateAction, LockAction, RecordClass, RepairPlan, StagedEvidence, StagedRefusal, ATTRIBUTES_NAME, ID_LEN,
 };
 use crate::{
     credential::Key,
@@ -90,20 +90,25 @@ pub(crate) fn staged_protected(repo: &Repository, entries: Vec<Staged>) -> Resul
 ///   can re-encrypt it);
 /// - no unprotected entry staged since `HEAD` is a record of this
 ///   configuration: one moved to an unprotected name (`git mv x.env x.bak`)
-///   would be committed where nothing ever decrypts it.
+///   would be committed where nothing ever decrypts it;
+/// - with the key, every unprotected file `HEAD` holds that is a record of
+///   this configuration opens at its path (a forgery left at an unprotected
+///   name is refused before any attribute source can protect it).
 pub(crate) fn check_index(repo: &Repository, key: Option<&Key>) -> Result<Verified, String> {
     let config = load_config(repo)?;
     check_staged(repo, &config, Snapshot::read(repo)?, &commit_listing(repo, "HEAD")?, key, false)
 }
 
 /// `check_index` of `snapshot`; with `incremental` (the pre-commit hook),
-/// protected entries unchanged since both `HEAD` and `HEAD^1` (*settled*)
-/// get the keyless checks only. They are already in history, so
-/// authenticating them again on every commit would prevent nothing
-/// (`HEAD^1` counts because `--amend` makes it the parent); `verify-index`,
-/// `hydrate`, `lock`, merge commits and the audit still authenticate
-/// everything. Nothing is settled while an attribute file or the config
-/// differs from `HEAD` or `HEAD^1`: a newly selected file was never checked.
+/// entries `HEAD` holds are trusted from history while the attribute files
+/// and the config are those of `HEAD` and `HEAD^1` (the guard): a protected
+/// entry unchanged since both (*settled*) gets the keyless checks only, and
+/// an unprotected file `HEAD` holds is not read at all. Authenticating them
+/// again on every commit would prevent nothing (`HEAD^1` counts because
+/// `--amend` makes it the parent); `verify-index`, `lock`, `rekey`, merge
+/// commits and the audit still authenticate everything. The verified core
+/// decides each entry's check (`staged_check`) and whether it passes
+/// (`staged_verdict`); this reads what the check needs (`EntryEvidence`).
 fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Listing, key: Option<&Key>, incremental: bool)
     -> Result<Verified, String>
 {
@@ -124,67 +129,150 @@ fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Lis
     // files count too, as they do for the audit, which compares with the
     // parent.
     let parent = commit_listing(repo, "HEAD^1")?;
-    // Whether `HEAD` holds each entry's blob at its path, and (protected
-    // entries) `HEAD^1` too: the verified `held_entries`.
-    let in_head = snapshot.listing.held_in(&vec![true; entries.len()], head)?;
-    let in_parent = snapshot.listing.held_in(flags, &parent)?;
-    let protected = snapshot.protected()?;
+    // Whether `HEAD` holds each entry's exact record (mode, blob and path),
+    // and (protected entries) `HEAD^1` too: the verified `held_records`. A
+    // symlink of `HEAD` staged as a file with the same blob is not held: it
+    // was never checked as a file.
+    let in_head = snapshot.listing.records_in(&vec![true; entries.len()], head)?;
+    let in_parent = snapshot.listing.records_in(flags, &parent)?;
+    snapshot.protected()?;
     let id = transcrypt_rs::config_id(config);
-    check_unprotected(repo, &id, &snapshot, &in_head, head, &parent)?;
-    // Nothing is settled unless the attribute files and the config are the
-    // same in the index, `HEAD` and `HEAD^1` (the verified
-    // `policy_unchanged`): what selected an entry, and the config it was
-    // checked under, must be what they were when it was committed.
-    let same_policy = snapshot.listing.policy_unchanged(head, &parent);
-    // The keyless move check looks blobs up by object id (`blob_elsewhere`).
-    let mut ordered: Option<[OrderedListing; 3]> = None;
-    for i in protected {
-        let staged = &entries[i];
-        // Unchanged since `HEAD` and `HEAD^1`: already in history.
-        let settled = same_policy && in_head[i] && in_parent[i];
-        let record = git_blob(repo, &staged.oid)?;
-        let name = staged.name();
-        match parse_file_header(&record) {
-            Err(_) => return Err(format!("staged {name} is not encrypted (was it staged before it was protected?); \
-                run `transcrypt-rs protect` or `git add --renormalize -- {name}`")),
-            Ok(found) if found != id => return Err(format!("staged {name} is encrypted under another config \
-                (cherry-picked or rebased across a rekey?); run `transcrypt-rs reencrypt` with that config's passphrase")),
-            Ok(_) => {},
+    // Nothing is trusted from `HEAD` unless the attribute files and the
+    // config are the same in the index, `HEAD` and `HEAD^1` (the verified
+    // `policy_unchanged`). The config is what the history's records were
+    // checked under; the attribute files are defence in depth.
+    let guard = snapshot.listing.policy_unchanged(head, &parent);
+    // The keyless move check looks blobs up by object id (`blob_elsewhere`),
+    // in orders built at most once.
+    let ordered = RefCell::new(None);
+    for (i, staged) in entries.iter().enumerate() {
+        let check = snapshot.listing.staged_check(i, flags, &in_head, &in_parent, key.is_some(), incremental, guard);
+        let record = if reads_blob(check) { Some(git_blob(repo, &staged.oid)?) } else { None };
+        let evidence = EntryEvidence {
+            repo, key, id: &id, i, staged, record: record.as_deref(), index: &snapshot.listing, head, parent: &parent,
+            ordered: &ordered, unopened: RefCell::new(None), failure: RefCell::new(None),
+        };
+        let verdict = staged_verdict(&evidence, check, record.as_deref().unwrap_or_default(), &id);
+        // An answer that could not be found refuses, whatever the verdict.
+        if let Some(failure) = evidence.failure.take() {
+            return Err(failure);
         }
-        match (entry_check(key.is_some(), incremental, settled), key) {
-            (EntryCheck::Authenticate, Some(key)) => { key.open(&staged.path, &record).map_err(|e| format!("staged \
-                {name}: {e}; if it was moved here, `git add --renormalize -- {name}` re-encrypts it from the worktree"))?; },
-            // `entry_check` authenticates only with the key; refuse rather than check less.
-            (EntryCheck::Authenticate, None) => return Err("internal error: authentication without a key".into()),
-            _ if !record_envelope_ok(&record, &id) =>
-                return Err(format!("staged {name} is not v3 ciphertext for this repository")),
-            // A copy already in history is reported where it was made.
-            (EntryCheck::Envelope, _) => {},
-            (EntryCheck::EnvelopeNotMoved, _) => {
-                let [index_ordered, head_ordered, parent_ordered] = get_or_try_init(&mut ordered, || -> Result<_, String> {
-                    Ok([snapshot.listing.ordered()?, head.ordered()?, parent.ordered()?])
-                })?;
-                if !index_ordered.blob_elsewhere(i, head_ordered, parent_ordered) {
-                    continue;
-                }
-                let other = head.entries().iter().chain(parent.entries()).chain(entries)
-                    .find(|e| e.oid == staged.oid && e.path != staged.path).map(Staged::name).unwrap_or_default();
-                return Err(format!("staged {name} holds the encrypted {other}: a renamed or copied protected \
-                    file must be committed while unlocked, which re-encrypts it for its new name"));
-            },
+        if let Err(refusal) = verdict {
+            return Err(refusal_message(refusal, &evidence));
         }
     }
+    check_drift(repo, &id, &snapshot, &in_head, head, &parent)?;
     let Snapshot { listing, flags } = snapshot;
     let (listing, entries) = listing.into_bytes_and_entries();
     let protected = entries.into_iter().zip(flags).filter(|(_, p)| *p).map(|(e, _)| e).collect();
     Ok(Verified { listing, protected })
 }
 
-/// The checks of `check_staged` on the unprotected regular entries staged
-/// since `HEAD` (`in_head` false): none is a record of this configuration
-/// `id`, and none that was a record in `HEAD` (or `HEAD^1`, `parent`) is
-/// now claimed by another named filter.
-fn check_unprotected(repo: &Repository, id: &[u8; transcrypt_v3_core::ID_LEN], snapshot: &Snapshot, in_head: &[bool],
+/// The adapter's answers about entry `i` of the index (`staged`) for the
+/// verified `staged_verdict`, each about the entry's own blob (by object
+/// id) and path, computed only when asked.
+struct EntryEvidence<'a, 'l> {
+    repo: &'a Repository,
+    key: Option<&'a Key>,
+    id: &'a [u8; ID_LEN],
+    i: usize,
+    staged: &'a Staged,
+    /// The blob, when the check read it (`reads_blob`).
+    record: Option<&'a [u8]>,
+    index: &'l Listing,
+    head: &'l Listing,
+    parent: &'l Listing,
+    ordered: &'a RefCell<Option<[OrderedListing<'l>; 3]>>,
+    /// Why the blob did not open, for the message.
+    unopened: RefCell<Option<String>>,
+    /// Why an answer could not be found (a failed read): the check refuses.
+    failure: RefCell<Option<String>>,
+}
+
+impl EntryEvidence<'_, '_> {
+    /// The answer `find` gives; if it fails, `false`, with the failure kept.
+    fn answer(&self, find: impl FnOnce() -> Result<bool, String>) -> bool {
+        find().unwrap_or_else(|e| {
+            self.failure.replace(Some(e));
+            false
+        })
+    }
+}
+
+impl StagedEvidence for EntryEvidence<'_, '_> {
+    /// Its size and first bytes, decided by `record_envelope_prefix_ok`.
+    fn is_record(&self) -> bool {
+        self.answer(|| is_record(self.repo, &self.staged.oid, self.id))
+    }
+
+    /// `Key::open` at the entry's path: `open_record` with the stored key,
+    /// or the agent's.
+    fn opens(&self) -> bool {
+        let Some(key) = self.key else { return false };
+        let read;
+        let record = match self.record {
+            Some(record) => record,
+            None => match git_blob(self.repo, &self.staged.oid) {
+                Ok(blob) => { read = blob; &read },
+                Err(e) => return self.answer(|| Err(e)),
+            },
+        };
+        match key.open(&self.staged.path, record) {
+            Ok(_) => true,
+            Err(e) => {
+                self.unopened.replace(Some(e));
+                false
+            },
+        }
+    }
+
+    /// The verified `blob_elsewhere`.
+    fn elsewhere(&self) -> bool {
+        self.answer(|| {
+            let mut ordered = self.ordered.borrow_mut();
+            let [index, head, parent] = get_or_try_init(&mut ordered, || -> Result<_, String> {
+                Ok([self.index.ordered()?, self.head.ordered()?, self.parent.ordered()?])
+            })?;
+            Ok(index.blob_elsewhere(self.i, head, parent))
+        })
+    }
+}
+
+/// The message for the verified refusal of `evidence`'s entry.
+fn refusal_message(refusal: StagedRefusal, evidence: &EntryEvidence) -> String {
+    let staged = evidence.staged;
+    let name = staged.name();
+    let unopened = || evidence.unopened.take().unwrap_or_default();
+    match refusal {
+        StagedRefusal::Plaintext => format!("staged {name} is not encrypted (was it staged before it was protected?); \
+            run `transcrypt-rs protect` or `git add --renormalize -- {name}`"),
+        StagedRefusal::OtherConfig => format!("staged {name} is encrypted under another config (cherry-picked or \
+            rebased across a rekey?); run `transcrypt-rs reencrypt` with that config's passphrase"),
+        StagedRefusal::Envelope => format!("staged {name} is not v3 ciphertext for this repository"),
+        StagedRefusal::Authentication => format!("staged {name}: {}; if it was moved here, `git add --renormalize \
+            -- {name}` re-encrypts it from the worktree", unopened()),
+        StagedRefusal::Moved => {
+            let other = evidence.head.entries().iter().chain(evidence.parent.entries()).chain(evidence.index.entries())
+                .find(|e| e.oid == staged.oid && e.path != staged.path).map(Staged::name).unwrap_or_default();
+            format!("staged {name} holds the encrypted {other}: a renamed or copied protected file must be \
+                committed while unlocked, which re-encrypts it for its new name")
+        },
+        StagedRefusal::UnprotectedRecord => format!("{name} holds an encrypted record but is not protected (moved \
+            to an unprotected name? or a pattern that matches it only case-insensitively: v3 matches \
+            case-sensitively, so write it with the file's exact case): nothing would ever decrypt it there. \
+            Protect that name, move the file back, or stage its plaintext"),
+        StagedRefusal::UnprotectedForgery => format!("{name} is not protected but holds a record of this \
+            configuration that does not open there ({}): a record moved without re-encryption, or a forgery, \
+            which an attribute change would protect unauthenticated. Remove it, or stage its plaintext",
+            unopened()),
+    }
+}
+
+/// The unprotected regular entries staged since `HEAD` (`in_head` false):
+/// none that was a record in `HEAD` (or `HEAD^1`, `parent`) is now claimed by
+/// another named filter (configuration `id`). The final check already
+/// refused any that is a record itself.
+fn check_drift(repo: &Repository, id: &[u8; ID_LEN], snapshot: &Snapshot, in_head: &[bool],
     head: &Listing, parent: &Listing) -> Result<(), String>
 {
     let (head_oid, parent_oid) = (oids_by_path(head.entries()), oids_by_path(parent.entries()));
@@ -193,12 +281,6 @@ fn check_unprotected(repo: &Repository, id: &[u8; transcrypt_v3_core::ID_LEN], s
     let mut drifted: Vec<&[u8]> = Vec::new();
     for entry in staged_unprotected {
         let path = entry.path.as_slice();
-        if is_record(repo, &entry.oid, id)? {
-            return Err(format!("{} holds an encrypted record but is not protected (moved to an unprotected \
-                name? or a pattern that matches it only case-insensitively: v3 matches case-sensitively, \
-                so write it with the file's exact case): nothing would ever decrypt it there. Protect that \
-                name, move the file back, or stage its plaintext", String::from_utf8_lossy(path)));
-        }
         // Either old blob may be the record: `HEAD^1` is the parent of an
         // amended commit. As strict as the audit: an unreadable one is an
         // error, not a plaintext.
