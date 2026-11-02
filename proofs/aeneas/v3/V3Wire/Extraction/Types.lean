@@ -239,4 +239,21 @@ inductive BlobRead where
 | Skip : BlobRead
 | TooLarge : BlobRead
 
+/-- [transcrypt_v3_core::AuditBase]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1982:0-1992:1
+    Visibility: public -/
+@[discriminant isize]
+inductive AuditBase where
+| Tree : AuditBase
+| Parent : AuditBase
+
+/-- [transcrypt_v3_core::AuditedEntry]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1997:0-2007:1
+    Visibility: public -/
+structure AuditedEntry where
+  regular : Bool
+  selected : Bool
+  held : Bool
+  moved : Bool
+
 end transcrypt_v3_core
