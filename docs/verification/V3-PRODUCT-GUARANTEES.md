@@ -58,21 +58,32 @@ incremental keyed and keyless results separately.
   key), and a record of another configuration.
 - **Lean theorems:**
   - `keyed_publication_authenticates` (full or incremental).
+  - `keyed_check_records_authentic`: with the key, every record of this
+    configuration in the index authenticates at its own path, whatever
+    selects paths (see "Checked history" below).
   - `hook_full_check_authenticates`: a full check needs no trusted history.
   - `pre_commit_check_modes`: the three modes.
 - **Source connection:**
-  - The decision `hookPlan` is composed from the extracted `entry_check`,
-    `record_envelope_ok` and `open_record`, together with the listing,
-    attribute and selection parsers (`parse_listing`, `parse_listing_attrs`,
-    `first_unselectable`, `held_entries`).
-  - Whether an entry is settled comes from the extracted `policy_unchanged`
-    and `held_entries`; the guard has its own proof (see "Checked history"
-    below).
-  - Production Rust: `lifecycle.rs` `check_staged` and the core's
-    `lib.rs`.
+  - Each index entry's check is decided by the extracted `staged_check`
+    (which check: authenticate, envelope, envelope and not moved, no
+    record, authenticate if a record, or nothing) and accepted by the
+    extracted `staged_verdict` (with `entry_check`, `parse_file_header`,
+    `record_envelope_ok`). The Lean loop `hookPlan` only sequences these two
+    calls; it reimplements nothing.
+  - The verdict asks the adapter three questions (`StagedEvidence`), each
+    only when its check needs it: is the blob a record of this
+    configuration (`record_envelope_prefix_ok`), does it open at its path
+    (`open_record`), and is it another path's blob (`blob_elsewhere`).
+  - The inputs come from the listing, attribute and selection parsers
+    (`parse_listing`, `parse_listing_attrs`, `first_unselectable`), exact
+    record membership in `HEAD` and `HEAD^1` (`held_records`) and the guard
+    (`policy_unchanged`).
+  - Production Rust: `lifecycle.rs` `check_staged` (and its `EntryEvidence`)
+    and the core's `lib.rs`.
 - **Assumptions:**
-  - A4 (the adapter feeds Git's real snapshots to these functions and obeys
-    their answers);
+  - A4 (the adapter feeds Git's real snapshots to these functions, runs the
+    loop over every entry, answers the three questions truthfully about the
+    entry's own blob and path, and obeys the verdict: `HookAnswers`);
   - A16 and A19 (Git's attribute selection);
   - A20 and A21 (listings and object reads);
   - A5, A9 and A10 (the primitives realize `Realizes`);
@@ -84,9 +95,11 @@ incremental keyed and keyless results separately.
     `audit` at push time (A13). This includes `--no-verify`, a locked
     checkout, a rebase, and another party's commits.
 - **Status:**
-  - The decision functions: source-derived proof.
-  - The composition (`HookEvidence`, `hookPlan`): model proof.
-  - The adapter's sequencing: tested and reviewed.
+  - The decision functions, the per-entry check and its acceptance:
+    source-derived proof.
+  - The composition (`HookEvidence`, `hookPlan`): model proof (a loop over
+    the extracted functions).
+  - The adapter's loop and its three answers: tested and reviewed.
 
 ## B. Authenticated recovery
 
@@ -185,50 +198,57 @@ incremental keyed and keyless results separately.
 
 ## Checked history (A24)
 
-The incremental hook re-checks only the envelope of a "settled" entry, one
-that is unchanged since `HEAD` and `HEAD^1`. This is what lets a commit
-avoid decrypting thousands of unchanged files. In return, it trusts that
-`HEAD` was itself authenticated. Three results are proved:
+The incremental hook trusts what `HEAD` holds while the committed
+attribute files and `.transcrypt/config` are those of `HEAD` and `HEAD^1`
+(the guard): it re-checks only the envelope of a "settled" protected entry,
+one whose exact record `HEAD` and `HEAD^1` hold, and does not read an
+unprotected file `HEAD` holds. This is what lets a commit avoid decrypting
+thousands of unchanged files. In return, it trusts an invariant of `HEAD`
+that does not depend on selection: every record of this configuration at a
+regular, non-reserved path authenticates at that path (`RecordsAuthentic`).
+Because the invariant does not mention selection, a local attribute source
+(`.git/info/attributes`, `core.attributesFile`) that starts selecting a path
+cannot turn a forged record of checked history into an accepted protected
+file. Four results are proved:
 
-- **Bootstrap (`hook_full_check_authenticates`):** a full keyed check
-  authenticates the index with no history hypothesis.
-- **Transition (`head_authentic_of_checked_commit`):** suppose an
-  authenticated index is committed (`CommitStep`), and neither the selection
-  nor the configuration changed (`PolicyUnchanged`). Then the next check may
-  trust `HEAD`.
-- **Induction (`keyed_history_stays_authenticated`):** a sequence of keyed
-  commits stays authenticated if two conditions hold:
-  - it starts with a full check;
-  - every incremental check follows a commit whose policy was unchanged.
-- **Induction from the guard (`keyed_history_authenticated_by_guard`):** the
-  same conclusion with no policy hypothesis on any step. Each check's run
-  records the guard's result (`HookGuard`: an entry is settled only when
-  the verified `policy_unchanged` returned true for the listings the run
-  parsed). A check whose guard returned true derives `PolicyUnchanged`
-  (`policy_unchanged_of_guard`); a check whose guard returned false settled
-  nothing, so it is a full check (`unguarded_check_is_full`).
+- **One run (`keyed_check_records_authentic`, `hook_records_authentic`):** a
+  keyed check that accepted keeps the invariant, trusting `HEAD`'s records
+  only when it was incremental with the guard true. An entry staged since
+  `HEAD` is authenticated or is no record of this configuration; with the
+  key, an unprotected file `HEAD` holds is authenticated if it is a record
+  whenever the check does not trust `HEAD`. Every selected entry then
+  authenticates (`hook_authenticated_of_records`).
+- **Bootstrap (`hook_full_check_authenticates`):** a keyed check that trusts
+  nothing (not incremental, or the guard false) establishes the invariant
+  and authenticates the index with no history hypothesis.
+- **Transition (`records_authentic_of_checked_commit`,
+  `config_unchanged_of_guard`):** the checked index's records are the next
+  `HEAD`'s (`CommitStep`), and a true guard keeps the configuration.
+- **Induction (`keyed_history_authenticated_by_guard`):** a sequence of keyed
+  commits keeps the invariant and authenticates every selected path, with no
+  hypothesis about the policy or about how Git selects paths on any step.
 
-The guard that decides whether entries may be settled is source-derived.
-`policy_unchanged` compares the committed attribute files and
-`.transcrypt/config` across the index, `HEAD` and `HEAD^1`, and
-`policy_unchanged_sound` proves that when it returns true, the three
-snapshots agree exactly on those files (`hook_policy_guard`, for a run).
-A policy change therefore forces a full check.
+The guard is source-derived: `policy_unchanged` compares the committed
+attribute files and `.transcrypt/config` across the index, `HEAD` and
+`HEAD^1`, and `policy_unchanged_sound` proves that when it returns true the
+three snapshots agree exactly on those files (`hook_policy_guard`). Its
+configuration part is what the induction uses; its attribute part is
+defence in depth.
 
 **Remaining obligations** (all stated in [A24](V3-ASSUMPTIONS.md)):
 
 - **Commit flow:** Git commits the checked index, so the next `HEAD` has
   its entries and its policy entries (`GuardedHistoryStep`), and object ids
   are unique (A22, A11).
-- **Selection:** Git's `filter` answer is one fixed function of the
-  committed policy entries (`SelectionByPolicy`, A19, a visible hypothesis
-  of the theorem). Local attribute sources (`.git/info/attributes`,
-  `core.attributesFile`) are not committed: the contract assumes they do
-  not change during the history.
-- **Start of each run of keyed commits:** the first commit's `HEAD` must
-  authenticate if its check was incremental with the guard true; commits
-  made without the keyed hook must be checked by the keyed `audit` before
-  they are trusted (A13).
+- **Start of each run of keyed commits:** the first commit's `HEAD` records
+  must authenticate if its check trusted `HEAD`. A keyed `verify-index` of a
+  checkout whose index holds `HEAD`'s entries establishes this, as does a
+  keyed commit that changes an attribute file or the config. The keyed
+  `audit` at push time (A13) checks only the paths each commit's attributes
+  select, so it does not: a forged record committed without the keyed hook
+  at an unprotected name, then selected only by a local override, is
+  accepted by the incremental hook until such a check (a tested boundary).
+- **The adapter** answers the verdict's three questions truthfully (A4).
 
 ## What is not claimed
 

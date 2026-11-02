@@ -90,15 +90,19 @@ semantics silently or import legacy CBC into the proved core.
   (`keyed_publication_authenticates`, `pre_commit_check_modes`,
   `checkout_releases_only_authenticated_plaintext`,
   `checkout_opens_genuine_records`, `repair_never_launders`,
-  `stored_key_binds_file_operations`) and proves the A24 induction: a full
-  keyed check needs no history (`hook_full_check_authenticates`), an
-  authenticated index makes the next `HEAD` authentic under `CommitStep`
-  and `PolicyUnchanged` (`head_authentic_of_checked_commit`), and a history
-  of keyed commits stays authenticated (`keyed_history_stays_authenticated`).
-  The hook's policy guard is recorded in each run (`HookGuard`), and
-  `keyed_history_authenticated_by_guard` derives `PolicyUnchanged` from it
-  (`policy_unchanged_of_guard`) under A19 as the contract
-  `SelectionByPolicy`, with no policy hypothesis on any step.
+  `stored_key_binds_file_operations`) and proves the A24 induction. Since
+  2026-11-02 the hook's per-entry check is the core's (`staged_check`,
+  `staged_verdict`, `held_records`; the Lean loop only sequences them), and
+  A24 is selection-independent: an accepted keyed check keeps
+  `RecordsAuthentic` (every record of this configuration at a regular,
+  non-reserved path authenticates there, `keyed_check_records_authentic`),
+  a full keyed check needs no history (`hook_full_check_authenticates`), and
+  a history of keyed commits keeps it with no policy or selection
+  hypothesis (`keyed_history_authenticated_by_guard`, through
+  `records_authentic_of_checked_commit` and `config_unchanged_of_guard`).
+  `SelectionByPolicy` (A19 for local attribute sources) is gone; the start
+  of history is a full keyed check or a policy change, not the keyed audit
+  (A24).
 - The pre-commit repair is a typed plan: the core derives each entry's
   `Provenance` from the snapshots (`entry_provenance`), decides whether its
   blob is read (`needs_record`), and decides `repair_plan(Provenance,

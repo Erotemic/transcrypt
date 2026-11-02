@@ -85,8 +85,10 @@ What kind of evidence each step has (column **Kind**):
 | Where a staged entry's content came from (`Provenance`) | S | `entry_provenance`, `provenance_of` | `entry_provenance_spec`, `provenance_of_spec` (SnapshotLookup) |
 | Whether its blob is read at all | S | `needs_record` | `needs_record_spec`, `needs_record_skip` (Bytes) |
 | Keep, seal, re-encrypt or leave it (`RepairPlan`) | S | `repair_plan` | `repair_plan_spec`, `repair_plan_repairs_only_local`, `repairSpec_repairs_only_local` (Bytes) |
-| Check it: authenticate, or (keyless or settled) the envelope | S | `entry_check` | `entry_check_spec` (Bytes) |
-| Settled only while no attribute file and not the config changed since `HEAD` and `HEAD^1` (A24) | S | `policy_unchanged` (over `is_policy_path`, `is_attributes_path`), with `held_entries` | `policy_unchanged_spec`, `policy_unchanged_sound` (SnapshotPolicy); the model records the guard (`HookGuard`; `hook_policy_guard`, `hook_settled_policy_unchanged`, EndToEnd); `settled_entries_are_authenticated_after_*`, `newly_protected_files_are_authenticated_by_the_hook` (`adversarial.rs`) |
+| Which check each index entry gets (`check_staged`): protected, authenticate or (keyless or settled) the envelope; unprotected, no record if staged since `HEAD`, authenticated if a record when `HEAD` is not trusted | S | `staged_check` (over `entry_check`), `reads_blob` | `staged_check_spec`, `reads_blob_spec`, `entry_check_spec` (Staged, Bytes) |
+| Whether it passes, asking the adapter (`EntryEvidence`) only what the check needs | S | `staged_verdict` (generic over `StagedEvidence`) | `staged_verdict_ok` (Staged); laziness in `staged_verdicts_accept_only_what_their_check_requires` (core tests) |
+| Does `HEAD` (or `HEAD^1`) hold an entry's exact record | S | `held_records` | `held_records_spec` (Staged) |
+| `HEAD` is trusted only while no attribute file and not the config changed since `HEAD` and `HEAD^1` (A24) | S | `policy_unchanged` (over `is_policy_path`, `is_attributes_path`), with `held_records` | `policy_unchanged_spec`, `policy_unchanged_sound` (SnapshotPolicy); `hook_policy_guard`, `config_unchanged_of_guard` (EndToEnd, ProductSecurity); `settled_entries_are_authenticated_after_*`, `newly_protected_files_are_authenticated_by_the_hook`, `local_attribute_overrides_*`, `ordinary_commits_read_no_unchanged_unprotected_file` (`adversarial.rs`) |
 | Where a renamed record came from | S | `next_move_source` | `next_move_source_spec` (SnapshotMoves) |
 | Encrypt, decrypt | S | `seal_record`, `open_record` | `seal_record_spec`, `open_record_spec` (Protocol) |
 | Keyless check of a record (`is_record` reads only its size and first bytes) | S | `record_envelope_ok`, `record_envelope_prefix_ok` | `record_envelope_ok_spec`, `record_envelope_prefix_ok_spec`, `record_envelope_prefix_ok_record` (Envelope) |
@@ -95,10 +97,10 @@ What kind of evidence each step has (column **Kind**):
 | Use the stored key | S | `stored_key_state` | `stored_key_state_spec` (Objects) |
 | Hydrate or lock a file | S | `hydrate_action`, `lock_action` | `hydrate_action_spec`, `lock_action_spec` (Bytes) |
 | Hydrate, lock and `verify-index` over all protected files | M | the rows above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` (Lifecycle) |
-| The hook's final check, as a whole | M | the rows above | `hookPlan_spec`, `hook_accepts_only_authenticated_ciphertext` (EndToEnd) |
+| The hook's final check, as a whole (a loop over `staged_check` and `staged_verdict`) | M | the rows above | `hook_entry_checked`, `hook_accepts_only_authenticated_ciphertext`, `hook_records_authentic` (EndToEnd) |
 | The hook's repairs, as a whole | M | the rows above | `hook_provenance`, `hook_skips_only_unrepairable`, `hook_repairs_only_local_changes` (EndToEnd) |
-| The product statements and the A24 history over keyed commits | M | the rows above | `keyed_publication_authenticates`, `pre_commit_check_modes`, `keyed_history_stays_authenticated`, `keyed_history_authenticated_by_guard` (with `policy_unchanged_of_guard`, `SelectionByPolicy`), `checkout_releases_only_authenticated_plaintext`, `repair_never_launders`, `stored_key_binds_file_operations` (ProductSecurity) |
-| Unprotected staged entries: no record under an unprotected name, no record handed to another filter (`check_unprotected`) | T | `record_envelope_prefix_ok` (S) per blob | none; tests in `workflows.rs` (F2 rename, `git lfs track`) |
+| The product statements and the A24 history over keyed commits | M | the rows above | `keyed_publication_authenticates`, `pre_commit_check_modes`, `keyed_check_records_authentic`, `keyed_history_authenticated_by_guard` (with `records_authentic_of_checked_commit`, `config_unchanged_of_guard`), `checkout_releases_only_authenticated_plaintext`, `repair_never_launders`, `stored_key_binds_file_operations` (ProductSecurity) |
+| Unprotected staged entries: no record handed to another filter (`check_drift`) | T | `record_envelope_prefix_ok` (S) per blob | none; tests in `workflows.rs` (`git lfs track`) |
 | Enumerate and flush or check the other worktrees in `lock` (`other_worktrees`, `others_encrypted`) | T | none | none; tests in `workflows.rs`, `adversarial.rs` (linked worktrees) |
 
 An S or M row means the adapter calls those functions and acts on their answers. The
