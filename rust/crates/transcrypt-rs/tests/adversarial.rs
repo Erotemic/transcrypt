@@ -1383,12 +1383,25 @@ fn commit_twice_unchecked(repo: &Path, path: &str, oid: &str) {
     run(repo, "git", &["commit", "-q", "--no-verify", "-m", "hostile again", "README"], None);
 }
 
-/// Run `f` without the stored key (locked), then put it back.
+/// Run `f` without the stored key, then put it back. The worktree keeps its
+/// plaintext, so `f` must not make Git re-read a protected file: use
+/// [`locked`] for checkouts and merges.
 fn without_key<T>(repo: &Path, f: impl FnOnce() -> T) -> T {
     let (key, aside) = (repo.join(".git/transcrypt-v3/key"), repo.join(".git/transcrypt-v3/key.aside"));
     fs::rename(&key, &aside).unwrap();
     let result = f();
     fs::rename(&aside, &key).unwrap();
+    result
+}
+
+/// Run `f` in a locked checkout, then unlock again. Unlike [`without_key`]
+/// the worktree holds records, as a real locked checkout does: Git may
+/// re-read (clean) any racily clean file, and the locked clean filter
+/// rightly refuses plaintext.
+fn locked<T>(repo: &Path, f: impl FnOnce() -> T) -> T {
+    run(repo, bin(), &["lock"], None);
+    let result = f();
+    unlock(repo);
     result
 }
 
@@ -1521,7 +1534,7 @@ fn amend_merge_and_rebase_accept_no_forged_record() {
     run(&repo, "git", &["reset", "-q", "--hard", &diverged], None);
     // Locked, the merge checks envelopes only; with the key, the next
     // commit authenticates the record: the merge's first parent lacks it.
-    without_key(&repo, || run(&repo, "git", &["merge", "-q", "--no-edit", "side"], None));
+    locked(&repo, || run(&repo, "git", &["merge", "-q", "--no-edit", "side"], None));
     let merged = rev(&repo, "HEAD");
     assert_ne!(merged, diverged);
     // (The hook Git runs: with the key, `git add` would already refuse the
@@ -1534,7 +1547,7 @@ fn amend_merge_and_rebase_accept_no_forged_record() {
     // A rebase replays the record without the pre-commit hook (locked, so
     // its checkout passes records through): the keyed audit and the
     // pre-push hook refuse the result.
-    without_key(&repo, || {
+    locked(&repo, || {
         run(&repo, "git", &["checkout", "-q", "side"], None);
         run(&repo, "git", &["rebase", "-q", "main"], None)
     });

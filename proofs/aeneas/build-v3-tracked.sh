@@ -11,6 +11,15 @@ fi
 "${PYTHON:-python3}" "$root/proofs/aeneas/v3_snapshot.py" stage
 cd "$root/proofs/aeneas/v3"
 # Exact project pin is v4.31.0; mathlib must use this project's cache/version.
-lake exe cache get
+# The download is retried: a dropped connection fails some of its files, and
+# a rerun fetches only the missing ones.
+cache_attempts=3
+for attempt in $(seq "$cache_attempts"); do
+	lake exe cache get && break
+	if [ "$attempt" -eq "$cache_attempts" ]; then
+		exit 1
+	fi
+	echo "mathlib cache download failed (attempt $attempt of $cache_attempts); retrying" >&2
+done
 lake build Transcrypt V3Wire
 printf '%s\n' 'Built checked-in production Aeneas extraction, independent spec and refinement module.'
