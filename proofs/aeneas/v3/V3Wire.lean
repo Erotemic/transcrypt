@@ -14,5 +14,6 @@ import V3Wire.Verification.Filters
 import V3Wire.Verification.Pkt
 import V3Wire.Verification.Snapshot
 import V3Wire.Verification.Objects
+import V3Wire.Verification.KeyUse
 import V3Wire.Verification.EndToEnd
 import V3Wire.Verification.ProductSecurity

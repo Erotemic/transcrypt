@@ -1611,6 +1611,58 @@ pub fn stored_key_state(present: bool, file: &[u8], current: &[u8], authentic: b
     StoredKey::Unlocked
 }
 
+/// The construction of primitives from one derived key. The adapter's
+/// implementation must give primitives that realize the cryptographic
+/// contract under exactly the key bytes it is passed (A5, A17).
+pub trait V3KeySchedule: Sized {
+    /// The primitives under the `KEY_LEN`-byte `key`; `None` for a key of
+    /// another length, or if they cannot be built.
+    fn from_key(key: &[u8]) -> Option<Self>;
+}
+
+/// The primitives of `key`, only if they authenticate `config`: the single
+/// way the adapter obtains primitives to use with a configuration, whether
+/// the key was just derived from a passphrase or read from the stored file.
+pub fn authenticate_key<P: V3Primitives + V3KeySchedule>(key: &[u8], config: &[u8; CONFIG_LEN]) -> Result<P, Refusal> {
+    let primitives = match P::from_key(key) {
+        Some(primitives) => primitives,
+        None => return Err(Refusal::Primitive),
+    };
+    if let Err(refusal) = authenticate_config(&primitives, config) {
+        return Err(refusal);
+    }
+    Ok(primitives)
+}
+
+/// The stored key for configuration `current` (inputs as for
+/// `stored_key_state`), with the primitives it selects: `Ok` exactly when
+/// `stored_key_state` says `Unlocked`, and then the primitives are those of
+/// the key bytes `file[CONFIG_LEN..]`, which authenticate `current`, together
+/// with the configuration they authenticated (the bytes of `current`).
+/// Otherwise the state, never `Unlocked`.
+pub fn unlock_stored_key<P: V3Primitives + V3KeySchedule>(
+    present: bool,
+    file: &[u8],
+    current: &[u8],
+) -> Result<(P, [u8; CONFIG_LEN]), StoredKey> {
+    if !present || file.len() != KEY_FILE_LEN || current.len() != CONFIG_LEN {
+        return Err(stored_key_state(present, file, current, false));
+    }
+    let mut config = [0u8; CONFIG_LEN];
+    let mut i = 0;
+    while i < CONFIG_LEN {
+        config[i] = current[i];
+        i += 1;
+    }
+    match authenticate_key::<P>(&file[CONFIG_LEN..KEY_FILE_LEN], &config) {
+        Ok(primitives) => match stored_key_state(present, file, current, true) {
+            StoredKey::Unlocked => Ok((primitives, config)),
+            state => Err(state),
+        },
+        Err(_) => Err(stored_key_state(present, file, current, false)),
+    }
+}
+
 /// Length of `BLOB_FIELD`.
 const BLOB_FIELD_LEN: usize = 6;
 /// The type field of a `cat-file --batch` reply for a blob.

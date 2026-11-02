@@ -831,3 +831,51 @@ fn policy_unchanged_matches_its_definition() {
     // Both outcomes occur.
     assert!(agreed > 0 && agreed < 2000, "{agreed}");
 }
+
+/// The toy key schedule: a mock keyed by a digest of exactly the key bytes.
+impl V3KeySchedule for Mock {
+    fn from_key(key: &[u8]) -> Option<Self> {
+        (key.len() == KEY_LEN).then(|| Mock { key: mock_key(key) })
+    }
+}
+
+/// The toy key of `bytes`: every byte counts.
+fn mock_key(bytes: &[u8]) -> u8 {
+    bytes.iter().fold(0u8, |k, &b| k.rotate_left(1) ^ b)
+}
+
+#[test]
+fn stored_keys_select_the_file_key_for_the_config_it_authenticates() {
+    // A key whose toy digest is 9, and its config.
+    let mut key = [0u8; KEY_LEN];
+    key[KEY_LEN - 1] = 9;
+    assert_eq!(mock_key(&key), 9);
+    let config = initialize_config(&Mock { key: 9 }, &[3u8; SALT_LEN]).unwrap();
+    let file = [&config[..], &key[..]].concat();
+    let (m, cfg) = unlock_stored_key::<Mock>(true, &file, &config).unwrap();
+    assert_eq!((m.key, cfg), (9, config));
+    assert!(authenticate_key::<Mock>(&key, &config).is_ok());
+    // Another config (stored or current), another key, a damaged or
+    // absent file: never unlocked, and the state is `stored_key_state`'s.
+    let other = initialize_config(&Mock { key: 10 }, &[3u8; SALT_LEN]).unwrap();
+    let mut wrong_key = key;
+    wrong_key[KEY_LEN - 1] = 10;
+    for (present, file, current) in [
+        (true, [&config[..], &key[..]].concat(), other.to_vec()),
+        (true, [&other[..], &key[..]].concat(), other.to_vec()),
+        (true, [&config[..], &wrong_key[..]].concat(), config.to_vec()),
+        (true, [&config[..], &key[..]].concat(), config[1..].to_vec()),
+        (false, [&config[..], &key[..]].concat(), config.to_vec()),
+        (true, key.to_vec(), config.to_vec()),
+        (true, [&config[..], &key[1..]].concat(), config.to_vec()),
+    ] {
+        let state = unlock_stored_key::<Mock>(present, &file, &current).map(|_| ());
+        let authentic = file.len() == KEY_FILE_LEN && current.len() == CONFIG_LEN
+            && authenticate_key::<Mock>(&file[CONFIG_LEN..], current[..].try_into().unwrap()).is_ok();
+        let expected = stored_key_state(present, &file, &current, authentic);
+        assert_ne!(expected, StoredKey::Unlocked);
+        assert_eq!(state, Err(expected));
+    }
+    assert_eq!(authenticate_key::<Mock>(&wrong_key, &config).map(|_| ()), Err(Refusal::ConfigAuthentication));
+    assert_eq!(authenticate_key::<Mock>(&key[1..], &config).map(|_| ()), Err(Refusal::Primitive));
+}

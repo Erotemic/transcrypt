@@ -193,8 +193,14 @@ inductive StoredKey where
 | Stale : StoredKey
 | Unlocked : StoredKey
 
+/-- Trait declaration: [transcrypt_v3_core::V3KeySchedule]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1617:0-1621:1
+    Visibility: public -/
+structure V3KeySchedule (Self : Type) where
+  from_key : Slice Std.U8 → RustM (core.option.Option Self)
+
 /-- [transcrypt_v3_core::BlobRead]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1676:0-1683:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1728:0-1735:1
     Visibility: public -/
 @[discriminant isize]
 inductive BlobRead where

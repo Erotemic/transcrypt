@@ -1,4 +1,5 @@
 import V3Wire.Verification.EndToEnd
+import V3Wire.Verification.KeyUse
 
 /-!
 # Product security: the public theorems
@@ -10,7 +11,8 @@ handful of theorems over named domain predicates. The mechanics (the parsed
 snapshots, offsets and per-entry checks of `HookEvidence`, the core's
 `Result`s) stay in `EndToEnd.lean`, `Lifecycle.lean` and `Filters.lean`;
 each theorem below composes the guarantees proved there. Every external
-contract is a visible hypothesis: `Realizes` (A5), `HookContracts` (A11,
+contract is a visible hypothesis: `Realizes` (A5), `KeyScheduleRealizes`
+(A5, A17), `HookContracts` (A11,
 A19, A20, A21), `ConfigCommitted` (the adapter's check, A4), `RepairContracts`
 (A4, A20, A23), and, for history, `HeadAuthentic`, `CommitStep` (A11, A22) and
 `PolicyUnchanged` (A19 and the hook's policy guard).
@@ -49,8 +51,10 @@ A19, A20, A21), `ConfigCommitted` (the adapter's check, A4), `RepairContracts`
   seals plaintext), and never skips the user's change.
 * **D. Configuration-bound key use** (`stored_key_binds_file_operations`): a
   stored key is used only when its file holds exactly the current
-  configuration, which the key authenticates; every record it opens or seals
-  is bound to that configuration and the exact path.
+  configuration, which the key authenticates; the primitives used are those
+  `unlock_stored_key` built from the file's own key bytes (`KeyUse.lean`;
+  the key schedule is the contract `KeyScheduleRealizes`, A5/A17); every
+  record they open or seal is bound to that configuration and the exact path.
 -/
 
 open CoreModels Aeneas
@@ -528,40 +532,49 @@ theorem repair_never_launders (g : GitState) (run : RepairInputs)
 
 /-! ## D. Configuration-bound key use -/
 
-/-- **Configuration-bound key use.** When `Key::load` uses the stored key
-    (the verified `stored_key_state` says `Unlocked`, with `authentic` from
-    `authenticate_config` under the primitives built from the stored key,
-    A17), the key file holds exactly the current configuration, the key
-    authenticates it, and every file operation under it is bound to that
-    configuration and the exact path: a record `open_record` accepts opens
-    there to exactly the released bytes, and a record `seal_record` writes is
-    the spec's sealing, which opens there to the plaintext. Nothing here is
-    about how the key was derived (Argon2id, A10) or where it came from. -/
-theorem stored_key_binds_file_operations (hR : Realizes inst prims σ)
-    (present : Bool) (file current : Slice U8) (config : Std.Array U8 55#usize)
-    (hcur : sliceBytes current = wireBytes config) (authentic : Bool)
-    (hauth : authentic = true → ∃ c, authenticate_config inst prims config = ok (core.result.Result.Ok c))
-    (hstate : stored_key_state present file current authentic = ok transcrypt_v3_core.StoredKey.Unlocked) :
+/-- **Configuration-bound key use.** When `Key::load` uses the stored key,
+    the primitives and configuration it holds (`ValidatedKey::from_stored`)
+    are exactly what the verified `unlock_stored_key` returned for the key
+    file's bytes and the current configuration. Then the file holds exactly
+    that configuration followed by the key bytes `storedKeyBytes file`; the
+    primitives realize the suite of those bytes (given only the key-schedule
+    contract `KeyScheduleRealizes`, A5/A17), and the configuration
+    authenticates under them; and every file operation under them is bound
+    to that configuration and the exact path: a record `open_record` accepts
+    opens there to exactly the released bytes, and a record `seal_record`
+    writes is the spec's sealing, which opens there to the plaintext.
+    Nothing here is about how the key was derived (Argon2id, A10) or which
+    `unlock` wrote the file. -/
+theorem stored_key_binds_file_operations {sched : V3KeySchedule P} {σk : List Nat → Suite}
+    (hK : KeyScheduleRealizes inst sched σk)
+    (present : Bool) (file current : Slice U8) (keyed : P) (config : Std.Array U8 55#usize)
+    (hunlock : unlock_stored_key inst sched present file current =
+      ok (core.result.Result.Ok (keyed, config))) :
+    wireBytes config = sliceBytes current ∧
     (sliceBytes file).take Transcrypt.V3Wire.configLen = wireBytes config ∧
-    ConfigAuthentic σ (wireBytes config) ∧
+    ConfigAuthentic (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) ∧
     (∀ path record out buf : Slice U8,
-      open_record inst prims config path record out = ok (core.result.Result.Ok (), buf) →
-        OpensTo σ (wireBytes config) (sliceBytes path) (sliceBytes record) (sliceBytes buf)) ∧
+      open_record inst keyed config path record out = ok (core.result.Result.Ok (), buf) →
+        OpensTo (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) (sliceBytes path)
+          (sliceBytes record) (sliceBytes buf)) ∧
     (∀ path plaintext out sealed : Slice U8,
-      seal_record inst prims config path plaintext out = ok (core.result.Result.Ok (), sealed) →
-        sliceBytes sealed = sealedRecord σ (wireBytes config) (sliceBytes path) (sliceBytes plaintext) ∧
-        OpensTo σ (wireBytes config) (sliceBytes path) (sliceBytes sealed) (sliceBytes plaintext)) := by
-  obtain ⟨-, -, htake, hca⟩ :=
-    stored_key_authenticates_current_config hR present file current config hcur authentic hauth hstate
-  refine ⟨htake, hca, fun path record out buf ho => ?_, fun path plaintext out sealed hs => ?_⟩
+      seal_record inst keyed config path plaintext out = ok (core.result.Result.Ok (), sealed) →
+        sliceBytes sealed = sealedRecord (σk (storedKeyBytes (sliceBytes file))) (wireBytes config)
+          (sliceBytes path) (sliceBytes plaintext) ∧
+        OpensTo (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) (sliceBytes path)
+          (sliceBytes sealed) (sliceBytes plaintext)) := by
+  obtain ⟨-, -, htake, hcfg, hR, hca⟩ :=
+    spec_result (unlock_stored_key_spec hK present file current) hunlock
+  refine ⟨hcfg, htake.trans hcfg.symm, hca, fun path record out buf ho => ?_, fun path plaintext out sealed hs => ?_⟩
   · have h := open_record_spec hR config path record out
     rw [ho] at h
     simpa using h
   · have h := seal_record_spec hR config path plaintext out
     rw [hs] at h
     obtain ⟨hmay, hsealed⟩ := (by simpa using h :
-      MaySeal σ (wireBytes config) (sliceBytes path) (sliceBytes plaintext) ∧
-        sliceBytes sealed = sealedRecord σ (wireBytes config) (sliceBytes path) (sliceBytes plaintext))
-    exact ⟨hsealed, hsealed ▸ seal_opens σ hmay⟩
+      MaySeal (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) (sliceBytes path) (sliceBytes plaintext) ∧
+        sliceBytes sealed = sealedRecord (σk (storedKeyBytes (sliceBytes file))) (wireBytes config)
+          (sliceBytes path) (sliceBytes plaintext))
+    exact ⟨hsealed, hsealed ▸ seal_opens _ hmay⟩
 
 end Transcrypt.V3Verification

@@ -52,6 +52,8 @@ include = [
   "transcrypt_v3_core::policy_unchanged",
   # The stored key and Git object replies.
   "transcrypt_v3_core::stored_key_state",
+  "transcrypt_v3_core::authenticate_key",
+  "transcrypt_v3_core::unlock_stored_key",
   "transcrypt_v3_core::parse_batch_header",
   "transcrypt_v3_core::blob_read",
 ]

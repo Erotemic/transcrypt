@@ -134,6 +134,10 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.PolicyPath.reserved
 -- Objects
 #print axioms stored_key_state_spec
+-- KeyUse
+#print axioms authenticate_key_spec
+#print axioms stored_key_state_unauthentic
+#print axioms unlock_stored_key_spec
 -- Objects
 #print axioms parse_batch_header_spec
 #print axioms batchHeader_iff

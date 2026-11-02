@@ -3000,26 +3000,118 @@ def stored_key_state
         else ok StoredKey.Stale
   else ok StoredKey.Absent
 
+/-- [transcrypt_v3_core::authenticate_key]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1626:0-1635:1
+    Visibility: public -/
+def authenticate_key
+  {P : Type} (V3PrimitivesInst : V3Primitives P) (V3KeyScheduleInst :
+  V3KeySchedule P) (key : Slice Std.U8) (config : Array Std.U8 55#usize) :
+  RustM (core.result.Result P Refusal)
+  := do
+  let o ← V3KeyScheduleInst.from_key key
+  match o with
+  | core.option.Option.None => ok (core.result.Result.Err Refusal.Primitive)
+  | core.option.Option.Some primitives =>
+    let r ← authenticate_config V3PrimitivesInst primitives config
+    match r with
+    | core.result.Result.Ok _ => ok (core.result.Result.Ok primitives)
+    | core.result.Result.Err refusal => ok (core.result.Result.Err refusal)
+
+/-- [transcrypt_v3_core::unlock_stored_key]: loop body 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1653:4-1656:5
+    Visibility: public -/
+@[rust_loop_body]
+def unlock_stored_key_loop.body
+  (current : Slice Std.U8) (config : Array Std.U8 55#usize) (i : Std.Usize) :
+  RustM (ControlFlow ((Array Std.U8 55#usize) × Std.Usize) (Array Std.U8
+    55#usize))
+  := do
+  if i < CONFIG_LEN
+  then
+    let i1 ← Slice.index_usize current i
+    let a ← Array.update config i i1
+    let i2 ← i + 1#usize
+    ok (cont (a, i2))
+  else ok (done config)
+
+/-- [transcrypt_v3_core::unlock_stored_key]: loop 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1653:4-1656:5
+    Visibility: public -/
+@[rust_loop]
+def unlock_stored_key_loop
+  (current : Slice Std.U8) (config : Array Std.U8 55#usize) (i : Std.Usize) :
+  RustM (Array Std.U8 55#usize)
+  := do
+  loop
+    (fun (config1, i1) => unlock_stored_key_loop.body current config1 i1)
+    (config, i)
+
+/-- [transcrypt_v3_core::unlock_stored_key]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1643:0-1664:1
+    Visibility: public -/
+def unlock_stored_key
+  {P : Type} (V3PrimitivesInst : V3Primitives P) (V3KeyScheduleInst :
+  V3KeySchedule P) (present : Bool) (file : Slice Std.U8)
+  (current : Slice Std.U8) :
+  RustM (core.result.Result (P × (Array Std.U8 55#usize)) StoredKey)
+  := do
+  if present
+  then
+    let i ← core.slice.Slice.len file
+    if i != KEY_FILE_LEN
+    then
+      let sk ← stored_key_state true file current false
+      ok (core.result.Result.Err sk)
+    else
+      let i1 ← core.slice.Slice.len current
+      if i1 != CONFIG_LEN
+      then
+        let sk ← stored_key_state true file current false
+        ok (core.result.Result.Err sk)
+      else
+        let config := Array.repeat 55#usize 0#u8
+        let config1 ← unlock_stored_key_loop current config 0#usize
+        let s ←
+          core.Slice.Insts.CoreOpsIndexIndex.index
+            (core.ops.range.RangeUsize.Insts.CoreSliceIndexSliceIndexSliceSlice
+            Std.U8) file { start := CONFIG_LEN, «end» := KEY_FILE_LEN }
+        let r ← authenticate_key V3PrimitivesInst V3KeyScheduleInst s config1
+        match r with
+        | core.result.Result.Ok primitives =>
+          let sk ← stored_key_state true file current true
+          match sk with
+          | StoredKey.Absent => ok (core.result.Result.Err StoredKey.Absent)
+          | StoredKey.Damaged => ok (core.result.Result.Err StoredKey.Damaged)
+          | StoredKey.Stale => ok (core.result.Result.Err StoredKey.Stale)
+          | StoredKey.Unlocked =>
+            ok (core.result.Result.Ok (primitives, config1))
+        | core.result.Result.Err _ =>
+          let sk ← stored_key_state true file current false
+          ok (core.result.Result.Err sk)
+  else
+    let sk ← stored_key_state false file current false
+    ok (core.result.Result.Err sk)
+
 /-- [transcrypt_v3_core::BLOB_FIELD_LEN]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1615:0-1615:32 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1667:0-1667:32 -/
 @[global_simps, irreducible] def BLOB_FIELD_LEN : Std.Usize := 6#usize
 
 /-- [transcrypt_v3_core::BLOB_FIELD]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1617:0-1617:52 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1669:0-1669:52 -/
 @[global_simps, irreducible]
 def BLOB_FIELD : Array Std.U8 6#usize :=
   Array.make 6#usize [ 32#u8, 98#u8, 108#u8, 111#u8, 98#u8, 32#u8 ]
 
 /-- [transcrypt_v3_core::MAX_SIZE_DIGITS]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1620:0-1620:34 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1672:0-1672:34 -/
 @[global_simps, irreducible] def MAX_SIZE_DIGITS : Std.Usize := 19#usize
 
 /-- [transcrypt_v3_core::DECIMAL_RADIX]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1622:0-1622:30 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1674:0-1674:30 -/
 @[global_simps, irreducible] def DECIMAL_RADIX : Std.U64 := 10#u64
 
 /-- [transcrypt_v3_core::decimal]: loop body 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1639:5 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1691:5 -/
 @[rust_loop_body]
 def decimal_loop.body
   (bytes : Slice Std.U8) («to» : Std.Usize) (value : Std.U64) (ok1 : Bool)
@@ -3047,7 +3139,7 @@ def decimal_loop.body
   else ok (done (value, false))
 
 /-- [transcrypt_v3_core::decimal]: loop 0:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1639:5 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-1691:5 -/
 @[rust_loop]
 def decimal_loop
   (bytes : Slice Std.U8) («to» : Std.Usize) (value : Std.U64) (ok1 : Bool)
@@ -3059,7 +3151,7 @@ def decimal_loop
     (value, ok1, i)
 
 /-- [transcrypt_v3_core::decimal]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1627:0-1645:1 -/
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1679:0-1697:1 -/
 def decimal
   (bytes : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
   RustM (core.option.Option Std.U64)
@@ -3070,7 +3162,7 @@ def decimal
   else ok core.option.Option.None
 
 /-- [transcrypt_v3_core::parse_batch_header]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1652:0-1672:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1704:0-1724:1
     Visibility: public -/
 def parse_batch_header
   (header : Slice Std.U8) (oid : Slice Std.U8) :
@@ -3112,7 +3204,7 @@ def parse_batch_header
   else ok core.option.Option.None
 
 /-- [transcrypt_v3_core::blob_read]:
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1687:0-1695:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1739:0-1747:1
     Visibility: public -/
 def blob_read (size : Std.U64) (skip_large : Bool) : RustM BlobRead := do
   let i ← MAX_RECORD
