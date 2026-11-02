@@ -32,9 +32,13 @@ The implementation now follows it:
   plaintext. Since 2026-11-02 every file operation goes through
   `transcrypt_rs::ValidatedKey` (private fields; built only by the verified
   `authenticate_key` or `unlock_stored_key`, which selects the file's own
-  key bytes; `KeyUse.lean`); the agent holds one too. Open finding (A17):
-  config authentication checks only the S2V half of the key, so a stored
-  key with a damaged CTR half is not detected.
+  key bytes; `KeyUse.lean`); the agent holds one too. The key file is
+  `config ‖ key ‖ check value` (158 bytes): config authentication checks
+  only the S2V half of the key, so the file also holds the key's sealing of
+  a constant (`seal_key_check`), which `unlock_stored_key` verifies
+  (`key_check_opens`) before it unlocks; a damaged half is refused (A17;
+  that the check detects it is AES-SIV's property, A10). A key file of the
+  earlier 119-byte layout is damaged: run `unlock` once.
 - **Renames.** The pre-commit hook re-encrypts local `git mv`s (and seals
   plaintext staged around the filter). It never re-encrypts content that
   came from a commit (no laundering), and keyless checks refuse moved

@@ -53,7 +53,7 @@ one.
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
-| A17 | The stored key is local-only, used only for the config it authenticates, with primitives built from exactly its bytes, and mode-independent | Selection and pairing PROVED relative to the key-schedule contract (`unlock_stored_key_spec`, `authenticate_key_spec`, `stored_key_binds_file_operations`; `ValidatedKey` is the only file-operation interface); key schedule TESTED (A5); file I/O TESTED + REVIEWED; integrity of the key's CTR half ASSUMED (A8: config authentication checks only the S2V half); local-account exposure ACCEPTED RISK (by charter) |
+| A17 | The stored key is local-only, used only for the config it authenticates and with its own check value, with primitives built from exactly its bytes, and mode-independent | Selection, pairing and the check value PROVED relative to the key-schedule contract (`unlock_stored_key_spec`, `authenticate_key_spec`, `key_check_opens_spec`, `stored_key_binds_file_operations`; `ValidatedKey` is the only file-operation interface); that the check value detects damage to either key half ASSUMED (A10, the cipher's property) and TESTED for every bit; key schedule TESTED (A5); file I/O TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
 | A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`repair_plan`, `needs_record`, `entry_provenance`, `next_move_source`, `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`); TESTED (real Git) + REVIEWED |
 | A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK (they can unprotect a file locally); no longer a hypothesis of the A24 history (2026-11-02) |
 | A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record), in byte order of paths, each path once | TESTED; parsing and order PROVED (`parse_listing_spec`: anything else is refused) |
@@ -556,12 +556,13 @@ one.
 
 - **Claim:** `unlock` stores the Argon2id-derived key, never the
   passphrase, only in `$GIT_COMMON_DIR/transcrypt-v3/key`. That is a regular
-  file of the public config it unlocks followed by the key (119 bytes), mode
+  file of the public config it unlocks, the key, and the key's check value
+  for that config (158 = 55 + 64 + 39 bytes), mode
   0600, in a 0700 directory owned by the user (on Windows, an owner-only
   DACL: A25), outside `git config`. The key
   is used for the worktree config only if that config equals the stored one
-  and authenticates with it; otherwise (a pulled rekey) the worktree counts
-  as locked. Smudge also opens records that name the stored config (a
+  and authenticates with it, and the check value opens under it; otherwise
+  (a pulled rekey, or a damaged file) the worktree counts as locked. Smudge also opens records that name the stored config (a
   checkout writes files before the config). The ciphertext does not depend
   on the mode. Every file operation uses primitives built from exactly the
   key bytes that authenticated the configuration it is paired with.
@@ -577,11 +578,19 @@ one.
     primitives from the given key bytes and returns them only if the
     configuration authenticates under them. `unlock_stored_key`
     (`unlock_stored_key_spec`, `StoredUnlock`) returns primitives only for a
-    present 119-byte file whose first 55 bytes are the current config; the
-    primitives are those of exactly the file's last 64 bytes
-    (`storedKeyBytes`), returned together with the config they
-    authenticated (the current config's bytes); otherwise the
-    `storedKeySpec` state, never `Unlocked`. `stored_key_binds_file_operations`
+    present 158-byte file whose first 55 bytes are the current config; the
+    primitives are those of exactly the next 64 bytes (`storedKeyBytes`),
+    returned together with the config they authenticated (the current
+    config's bytes), and the last 39 bytes are their check value for that
+    config (`storedKeyCheck file = keyCheckValue`: the suite's sealing of
+    the constant `transcrypt/v3/key-check` at the reserved path
+    `.transcrypt/key-check`, a path no record may have,
+    `keyCheckPath_reserved`); otherwise the `storedKeySpec` state, never
+    `Unlocked`. The check value is decided by the verified
+    `key_check_opens` (`key_check_opens_spec`: it accepts exactly
+    `keyCheckValue`, sound and complete) and written by the verified
+    `seal_key_check` (`seal_key_check_spec`), so what `store` writes is
+    accepted (`key_check_round_trip`). `stored_key_binds_file_operations`
     takes that output as its premise (no longer an arbitrary `Realizes`
     instance plus an independent `authentic` flag) and concludes that every
     record opened or sealed with those primitives is bound to that config
@@ -601,16 +610,23 @@ one.
     `Keyed`, the primitive traits, `derive_key` or the core's sealing,
     opening or key functions.
   - TESTED: key files of another repository, a file naming this config
-    with another repository's key, and one naming another config with this
-    key are all stale; nothing is encrypted with them, nothing is decrypted
+    with another repository's key, one naming another config with this
+    key, this config and key with another key's check value, and this file
+    with one bit flipped in the S2V half of the key, in its CTR half or in
+    its check value are all stale; nothing is encrypted with them, nothing is decrypted
     (also by a checkout, which uses the config the file names), and the
     private agent refuses to start with another repository's key
     (`stored_keys_of_other_configs_are_never_used`); the stored-key choice
     against `stored_key_state` with a toy key schedule, including a file
     naming one config with a key that also authenticates the current one
     (`stored_keys_select_the_file_key_for_the_config_it_authenticates`);
-    `ValidatedKey::from_stored` returns exactly the file's key bytes
-    (`stored_keys_validate_only_their_own_authentic_config`).
+    `ValidatedKey::from_stored` returns exactly the file's key bytes, the
+    file `to_stored` writes reads back to the same key, and every
+    single-bit change of the key (both halves) or of the check value is
+    stale (`stored_keys_validate_only_their_own_authentic_config`, all 824
+    bits with the production AES-SIV); a file of the earlier layout
+    (config and key, 119 bytes) is damaged and `unlock` rewrites it
+    (`legacy_keys_macro_redefinitions_and_crlf`).
   - Written via an exclusive 0600 temporary, `fsync` and `renameat` in the
     held, checked directory; read with `O_NOFOLLOW`, exact size required.
   - `assert_unlocked` (git_lifecycle): exactly one private 64-byte key file,
@@ -628,15 +644,27 @@ one.
     returned secret equals the file's key slice; A5's tests for the
     primitive under one key).
   - *File I/O*: the bytes `from_stored` receives are the key file's bytes
-    and `store` writes exactly `config ‖ secret` (REVIEWED, TESTED as above).
-  - *Integrity of the CTR half* (found 2026-11-02): config authentication is
-    the AES-SIV encryption of the empty plaintext, so it depends only on the
-    S2V (CMAC) half of the key, bytes 0..32 (RFC 5297). The CTR half, bytes
-    32..64 of the stored key, is checked by nothing: a stored key whose CTR
-    half was altered is `Unlocked`, and the records it seals do not open
-    under the genuine key (tested). Its integrity rests on the file system
-    (A8). Not reachable from public Git; a local writer of the key file is
-    inside the trust boundary anyway.
+    and `store` writes exactly `ValidatedKey::to_stored`, `config ‖ secret ‖
+    seal_key_check(config)` (REVIEWED, TESTED as above).
+  - *Damage detection* (the unchecked CTR half found and closed
+    2026-11-02): config authentication is the AES-SIV encryption of the
+    empty plaintext, so it depends only on the S2V (CMAC) half of the key,
+    bytes 0..32 (RFC 5297); a stored key with an altered CTR half used to be
+    `Unlocked` and seal records the genuine key refuses. The check value is
+    the encryption of a nonempty constant, so opening it decrypts with the
+    CTR half and verifies the tag over the result with the S2V half. What
+    is PROVED is that `Unlocked` implies the check value is the selected
+    key's own (`keyCheckValue` of its suite). That a key differing in
+    either half yields a different check value, so that damage is
+    detected, is a property of AES-SIV (A10), ASSUMED; TESTED for every
+    single-bit change. The private agent's key needs no check value: it
+    comes from the parent's `ValidatedKey` through a pipe (whole or not at
+    all) and never rests in storage.
+  - *Earlier layout*: a key file written before the check value (config
+    and key, 119 bytes) is `Damaged`: every command but `unlock` refuses it
+    ("damaged .git/transcrypt-v3/key, or one an earlier build wrote; run
+    `transcrypt-rs unlock` again"), and `unlock` replaces it. v3 is
+    unreleased, so this one-time re-unlock replaces a migration.
   - *Provenance*: nothing proves that the stored key was derived by Argon2id
     from a passphrase (A9 tested by vectors, A10 assumed) or written by a
     particular `unlock`; the theorems are about whatever key bytes the file
@@ -645,14 +673,13 @@ one.
   user's files (other same-UID programs, backups, copies of `.git`) can use
   the key, as it can read the unlocked plaintext. Deleting the file is not a
   secure erasure.
-- **Next reduction:** check the CTR half too, for example a key check value
-  in the local key file (a local format change, not a wire change), or by
-  opening one committed record at `unlock`. Private mode remains the
-  stricter alternative for local exposure.
+- **Next reduction:** none planned for the file's integrity. Private mode
+  remains the stricter alternative for local exposure.
 - **Status:** key selection and pairing PROVED relative to
-  `KeyScheduleRealizes`; the key schedule TESTED (A5); file I/O TESTED +
-  REVIEWED; CTR-half integrity ASSUMED (A8); local-account exposure
-  ACCEPTED RISK.
+  `KeyScheduleRealizes`, including that an unlocked key's check value is
+  its own; that this detects damage to either half ASSUMED (A10) and
+  TESTED; the key schedule TESTED (A5); file I/O TESTED + REVIEWED;
+  local-account exposure ACCEPTED RISK.
 
 ### A18 — Authenticated path rebinding on rename
 

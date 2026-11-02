@@ -112,7 +112,8 @@ run `transcrypt-rs hydrate`, which is safe to rerun at any time.
 **Where the key is.** The key is derived from your passphrase by Argon2id;
 the passphrase itself is stored nowhere. The key is in
 `.git/transcrypt-v3/key` (mode 0600, in a 0700 directory, shared by all
-worktrees of the clone). It is not in `.git/config`, so `git config --list`
+worktrees of the clone), with the config it unlocks and a check value
+that detects a damaged key file. It is not in `.git/config`, so `git config --list`
 does not show it. But anything that copies `.git` (a backup, a tarball, a
 support bundle) copies the key. Whoever has it can decrypt this repository's
 history, just as whoever can read your unlocked checkout can read its files.
@@ -340,7 +341,8 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 | Message | Meaning and fix |
 | --- | --- |
 | `this checkout is locked; run transcrypt-rs unlock` | No key: `transcrypt-rs unlock` |
-| `the stored key does not match .transcrypt/config (it was rekeyed?)` | Someone changed the passphrase: `transcrypt-rs unlock` with the new one |
+| `the stored key does not match .transcrypt/config (it was rekeyed?, or the key file is damaged)` | Someone changed the passphrase, or the key file was altered: `transcrypt-rs unlock` with the current one |
+| `damaged .git/transcrypt-v3/key, or one an earlier build wrote` | The key file has the wrong size, for example from a v3 build before the key check value: `transcrypt-rs unlock` once |
 | `this record does not open at PATH` | A file you moved with `git mv`: `git add --renormalize -- PATH` (or commit). Otherwise a commit moved or altered the record (broken or hostile); do not merge it, or restore the file from a good commit |
 | `PATH holds the encrypted OTHER: a renamed or copied protected file must be committed while unlocked` | Unlock, then commit; the hook re-encrypts it |
 | `PATH is encrypted for another config (from before a rekey?)` / `other config (reencrypt)` | `transcrypt-rs reencrypt` with that config's passphrase, then commit |

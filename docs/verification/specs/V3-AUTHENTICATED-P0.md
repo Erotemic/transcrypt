@@ -159,15 +159,23 @@ trusted state and is outside this POC.
     selected, and lists them.
 - `unlock [--private]`: derive from a terminal passphrase or opt-in stdin,
   and authenticate the config **first**.
-  - **Default (stored key):** the 55-byte config it unlocks followed by the
-    64-byte derived key, never the passphrase, is written to
-    `$GIT_COMMON_DIR/transcrypt-v3/key`. This is a
+  - **Default (stored key):** the 55-byte config it unlocks, the 64-byte
+    derived key (never the passphrase), and the key's 39-byte check value
+    for that config are written to
+    `$GIT_COMMON_DIR/transcrypt-v3/key`. The check value is
+    `AES-SIV(K).encrypt("transcrypt/v3/key-check", [FILE_DOMAIN, config,
+    ".transcrypt/key-check"])` (tag then ciphertext); the path is reserved,
+    so no record has that associated data. This is a
     regular file, mode 0600, created exclusively and renamed into place in a
     mode-0700 directory owned by the user. It is not in `git config`.
-    Every use reads it with `O_NOFOLLOW` and requires exactly 119 bytes.
+    Every use reads it with `O_NOFOLLOW` and requires exactly 158 bytes (a
+    64-byte file, the key alone, counts as no key; the earlier 119-byte
+    layout without the check value is damaged, as is any other length).
     The key is used for the worktree config only if that config equals the
-    stored one and authenticates with it; otherwise (a pulled `rekey`) the
-    worktree counts as locked. Smudge may also open a record that names the
+    stored one and authenticates with it, and the check value opens under
+    it to the constant; otherwise (a pulled `rekey`, or a damaged key) the
+    worktree counts as locked. This is local state, not wire format: no
+    record, config or identifier depends on it. Smudge may also open a record that names the
     stored config, which a checkout writes before `.transcrypt/config`.
   - **Private mode:** the key goes over a private one-way stdin pipe to a
     dedicated credential process that keeps it in memory. Its only

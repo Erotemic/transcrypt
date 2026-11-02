@@ -226,13 +226,14 @@ key authenticates that configuration (`ConfigAuthentic`, relative to
 **A5**). Since 2026-11-02 the core also builds the primitives:
 `unlock_stored_key_spec` proves that `unlock_stored_key` returns
 primitives only in that case, and that they are the key schedule's
-primitives for exactly the file's last 64 bytes, returned with the
-configuration they authenticated; the adapter keeps both in a
+primitives for exactly the file's 64 key bytes, returned with the
+configuration they authenticated, and that the file's last 39 bytes are
+their check value for it (`keyCheckValue`); the adapter keeps both in a
 `ValidatedKey`, the only interface that seals or opens files. What remains
 assumed is the key schedule (`KeyScheduleRealizes`: `Keyed::from_key(k)`
-realizes the suite of the bytes `k`, **A5**/**A17**), the file I/O, and the
-integrity of the key's CTR half, which config authentication does not
-check (**A17**).
+realizes the suite of the bytes `k`, **A5**/**A17**), the file I/O, and
+that a damaged key (either AES-SIV half) gives a different check value,
+the cipher's property (**A10**, tested for every bit, **A17**).
 
 ## The product theorems (`ProductSecurity.lean`)
 
@@ -247,7 +248,7 @@ named predicates; each keeps its external hypotheses visible.
 | A24 history | `keyed_history_authenticated_by_guard` (no policy or selection hypothesis) | the above, by induction; `records_authentic_of_checked_commit`, `config_unchanged_of_guard`, `hook_policy_guard`, `policy_unchanged_sound` |
 | B. Authenticated recovery | `checkout_releases_only_authenticated_plaintext`: smudge's output either differs from the stored record and is exactly the plaintext it authenticates to at that path and configuration, or is the record itself, unchanged, with the v3 envelope (locked, another configuration, private mode); a record it decided to open that does not authenticate is refused. `checkout_opens_genuine_records`: a genuine record of this configuration opens to its plaintext | `smudgeModel_spec`, `smudge_action_spec`, `open_record_complete`, `opensTo_envelopeOk`, `sealed_length` |
 | C. No laundering | `repair_never_launders`: seals only the user's change or forced plaintext (no v3 header); rebinds only the user's record that authenticates at its move source; content imported from `HEAD` or an incoming commit is never rebound, and sealed only when `protect` forced it; the user's change is never skipped | `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`, `repair_plan_repairs_only_local`, `UserStaged.not_committed` |
-| D. Configuration-bound key | `stored_key_binds_file_operations`: when the stored key is used (the verified `unlock_stored_key` returned primitives and a config), its file holds the current configuration, the primitives are those of the file's key bytes (`KeyScheduleRealizes`, A5/A17) and authenticate it, and every record they open or seal is bound to that configuration and path | `unlock_stored_key_spec`, `authenticate_key_spec`, `open_record_spec`, `seal_record_spec`, `seal_opens` |
+| D. Configuration-bound key | `stored_key_binds_file_operations`: when the stored key is used (the verified `unlock_stored_key` returned primitives and a config), its file holds the current configuration, the primitives are those of the file's key bytes (`KeyScheduleRealizes`, A5/A17) and authenticate it, the file holds their check value for it, and every record they open or seal is bound to that configuration and path | `unlock_stored_key_spec`, `authenticate_key_spec`, `key_check_opens_spec`, `open_record_spec`, `seal_record_spec`, `seal_opens` |
 
 Not claimed: that every successful smudge yields plaintext (a kept record
 is a success), Argon2id security or where a key came from (A10, A17), or

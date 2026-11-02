@@ -173,41 +173,52 @@ incremental keyed and keyless results separately.
 ## D. Configuration-bound key use
 
 - **Claim:** A persisted derived key is accepted only for the configuration
-  it authenticates, and the primitives used are built from exactly that
-  file's key bytes. Every file sealed or opened with them is bound to that
+  it authenticates, and only with its own check value for that
+  configuration; the primitives used are built from exactly that file's
+  key bytes. Every file sealed or opened with them is bound to that
   configuration and to the exact path.
 - **Why it matters:** A stale key, or a key for another repository or for
   the configuration before a rekey, is refused as "locked" or "stale". It is
   never used to produce or accept records, and no other key can be paired
-  with the configuration afterwards.
+  with the configuration afterwards. A damaged key file is refused, not
+  used to seal records that teammates could not open: the configuration tag
+  depends on only the S2V half of the AES-SIV key, the check value (a
+  sealed nonempty constant) on both halves.
 - **Lean theorem:** `stored_key_binds_file_operations`. Its premise is the
   output of the verified `unlock_stored_key` (the primitives and the
-  configuration the adapter keeps), not an arbitrary primitive instance. It
-  composes `unlock_stored_key_spec` (with `authenticate_key_spec` and
-  `stored_key_state_spec`), `open_record_spec`, `seal_record_spec` and
-  `seal_opens`.
+  configuration the adapter keeps), not an arbitrary primitive instance.
+  It concludes, besides the bindings, that the file's check value is the
+  suite's `keyCheckValue` for the configuration. It composes
+  `unlock_stored_key_spec` (with `authenticate_key_spec`,
+  `key_check_opens_spec` and `stored_key_state_spec`), `open_record_spec`,
+  `seal_record_spec` and `seal_opens`; `seal_key_check_spec` and
+  `key_check_round_trip` cover the check value `store` writes.
 - **Source connection:** The extracted `unlock_stored_key`,
-  `authenticate_key`, `stored_key_state` and `authenticate_config`, then
-  `seal_record` and `open_record`. Production Rust: `ValidatedKey` in
-  `lib.rs` (private fields; built only from those two core functions) and
+  `authenticate_key`, `key_check_opens`, `seal_key_check`,
+  `stored_key_state` and `authenticate_config`, then `seal_record` and
+  `open_record`. Production Rust: `ValidatedKey` in `lib.rs` (private
+  fields; built only from `authenticate_key` and `unlock_stored_key`;
+  `to_stored` writes the file through `seal_key_check`) and
   `credential.rs`.
 - **Assumptions:**
   - `KeyScheduleRealizes` (A5, A17): `Keyed::from_key(k)` realizes the
     suite of exactly the bytes `k`;
-  - A17 (the key file is read as stored and kept local; the CTR half of the
-    key is intact, since config authentication checks only the S2V half);
-  - A9 and A10.
+  - A17 (the key file is read as stored and kept local);
+  - A9 and A10 (A10 includes that a key differing in either half gives a
+    different check value, so that damage is detected).
 - **Limitations:**
   - The theorem does not prove that Argon2id resists offline guessing.
   - It does not prove that a persisted key came from a particular `init`
     or `unlock`, or from a passphrase at all.
   - It does not prove anything about how the key is protected at rest.
-  - A stored key with an altered CTR half (bytes 32..64) still
-    authenticates the config; its records do not open under the genuine
-    key (tested, A17).
+  - That the check value detects a damaged key is AES-SIV's property, not
+    proved; it is tested for every single-bit change of the key and the
+    check value (A17).
+  - A key file of the earlier layout (config and key, 119 bytes) is
+    refused as damaged until `unlock` rewrites it.
 - **Status:**
-  - Key selection and pairing: source-derived proof, relative to the key
-    schedule contract.
+  - Key selection, pairing and the check value: source-derived proof,
+    relative to the key schedule contract.
   - The interface: structural (`ValidatedKey`), with a source scan test.
   - The file I/O and the key schedule: tested and reviewed.
 

@@ -95,6 +95,7 @@ What kind of evidence each step has (column **Kind**):
 | What smudge does with a blob | S | `smudge_action` | `smudge_action_spec` (Envelope) |
 | Read one object from `cat-file --batch` | S | `parse_batch_header`, `blob_read` | `parse_batch_header_spec`, `blob_read_spec` (Objects) |
 | Use the stored key | S | `stored_key_state` | `stored_key_state_spec` (Objects) |
+| Which key, and its check value: select the stored file's key for the config it authenticates, write and verify the key's check value | S | `authenticate_key`, `unlock_stored_key`, `seal_key_check`, `key_check_opens` | `authenticate_key_spec`, `unlock_stored_key_spec`, `seal_key_check_spec`, `key_check_opens_spec`, `key_check_round_trip` (KeyUse); `stored_keys_validate_only_their_own_authentic_config` (`lib.rs`) |
 | Hydrate or lock a file | S | `hydrate_action`, `lock_action` | `hydrate_action_spec`, `lock_action_spec` (Bytes) |
 | Hydrate, lock and `verify-index` over all protected files | M | the rows above | `hydratePlan_spec`, `lockEntry_spec`, `verifyPlan_spec` (Lifecycle) |
 | The hook's final check, as a whole (a loop over `staged_check` and `staged_verdict`) | M | the rows above | `hook_entry_checked`, `hook_accepts_only_authenticated_ciphertext`, `hook_records_authentic` (EndToEnd) |
