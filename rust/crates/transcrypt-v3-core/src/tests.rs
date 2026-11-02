@@ -883,3 +883,133 @@ fn stored_keys_select_the_file_key_for_the_config_it_authenticates() {
     assert_eq!(authenticate_key::<Mock>(&wrong_key, &config).map(|_| ()), Err(Refusal::ConfigAuthentication));
     assert_eq!(authenticate_key::<Mock>(&key[1..], &config).map(|_| ()), Err(Refusal::Primitive));
 }
+
+/// `staged_check` agrees with its definition on every combination: a
+/// protected entry is checked as `entry_check` says, settled only under the
+/// guard; an unprotected symlink is skipped, an unprotected file staged since
+/// `HEAD` must not be a record, and one `HEAD` holds is authenticated if it
+/// is a record exactly when the key is there and `HEAD` is not trusted
+/// (reserved metadata excepted).
+#[test]
+fn staged_checks_match_their_definition() {
+    use StagedCheck::*;
+    let (bytes, ends) = listing(&[("100644", b'c', b".gitattributes"), ("100644", b'a', b"a.env"),
+        ("120000", b'b', b"link"), ("100755", b'd', b"run")]);
+    let reserved = [true, false, false, false];
+    let regular = [true, true, false, true];
+    for bits in 0..(1u32 << 9) {
+        let bit = |k: u32| bits & (1 << k) != 0;
+        let (i, keyed, incremental, guard) = ((bits & 3) as usize, bit(2), bit(3), bit(4));
+        let (protected, in_head, in_parent) = (bit(5), bit(6), bit(7));
+        let mut flags = [false; 4];
+        flags[i] = protected;
+        let (mut head, mut parent) = ([bit(8); 4], [!bit(8); 4]);
+        head[i] = in_head;
+        parent[i] = in_parent;
+        let expected = if protected {
+            Protected(entry_check(keyed, incremental, guard && in_head && in_parent))
+        } else if !regular[i] {
+            Skip
+        } else if !in_head {
+            NotRecord
+        } else if keyed && (!incremental || !guard) && !reserved[i] {
+            AuthenticateIfRecord
+        } else {
+            Skip
+        };
+        assert_eq!(staged_check(&bytes, &ends, i, &flags, &head, &parent, keyed, incremental, guard), expected,
+            "{bits:b}");
+        assert_eq!(reads_blob(expected), protected, "{bits:b}");
+    }
+    // A position the listing does not have, unprotected: nothing to read.
+    assert_eq!(staged_check(&bytes, &ends[..1], 1, &[false; 4], &[true; 4], &[true; 4], true, false, false), Skip);
+}
+
+/// Evidence with fixed answers that counts the questions asked.
+struct Answers {
+    record: bool,
+    opens: bool,
+    elsewhere: bool,
+    asked: core::cell::Cell<[usize; 3]>,
+}
+
+impl Answers {
+    fn ask(&self, question: usize, answer: bool) -> bool {
+        let mut asked = self.asked.get();
+        asked[question] += 1;
+        self.asked.set(asked);
+        answer
+    }
+}
+
+impl StagedEvidence for Answers {
+    fn is_record(&self) -> bool {
+        self.ask(0, self.record)
+    }
+    fn opens(&self) -> bool {
+        self.ask(1, self.opens)
+    }
+    fn elsewhere(&self) -> bool {
+        self.ask(2, self.elsewhere)
+    }
+}
+
+/// `staged_verdict` accepts exactly what each check requires, and asks
+/// only the questions that check needs, each at most once.
+#[test]
+fn staged_verdicts_accept_only_what_their_check_requires() {
+    use StagedRefusal::*;
+    let m = Mock { key: 9 };
+    let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+    let id = m.config_id(&config);
+    let record = seal(&m, &config, b"a.env", b"secret").unwrap();
+    let mut other = record.clone();
+    other[FILE_MAGIC.len()] ^= 1;
+    let oversized = [&record[..], &[0; MAX_RECORD]].concat();
+    for bits in 0..8u32 {
+        let (is_record, opens, elsewhere) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+        let verdict = |check, blob: &[u8]| {
+            let answers = Answers { record: is_record, opens, elsewhere, asked: core::cell::Cell::new([0; 3]) };
+            (staged_verdict(&answers, check, blob, &id), answers.asked.get())
+        };
+        assert_eq!(verdict(StagedCheck::Skip, b""), (Ok(()), [0, 0, 0]));
+        assert_eq!(verdict(StagedCheck::NotRecord, b""),
+            (if is_record { Err(UnprotectedRecord) } else { Ok(()) }, [1, 0, 0]));
+        assert_eq!(verdict(StagedCheck::AuthenticateIfRecord, b""),
+            (if is_record && !opens { Err(UnprotectedForgery) } else { Ok(()) }, [1, is_record as usize, 0]));
+        let protected = StagedCheck::Protected;
+        assert_eq!(verdict(protected(EntryCheck::Authenticate), &record),
+            (if opens { Ok(()) } else { Err(Authentication) }, [0, 1, 0]));
+        assert_eq!(verdict(protected(EntryCheck::Envelope), &record), (Ok(()), [0, 0, 0]));
+        assert_eq!(verdict(protected(EntryCheck::EnvelopeNotMoved), &record),
+            (if elsewhere { Err(Moved) } else { Ok(()) }, [0, 0, 1]));
+        for check in [EntryCheck::Authenticate, EntryCheck::Envelope, EntryCheck::EnvelopeNotMoved] {
+            assert_eq!(verdict(protected(check), b"plaintext"), (Err(Plaintext), [0, 0, 0]));
+            assert_eq!(verdict(protected(check), &other), (Err(OtherConfig), [0, 0, 0]));
+        }
+        for check in [EntryCheck::Envelope, EntryCheck::EnvelopeNotMoved] {
+            assert_eq!(verdict(protected(check), &oversized), (Err(Envelope), [0, 0, 0]));
+        }
+    }
+}
+
+/// `held_records` holds an entry only when the other listing has the same
+/// record: a symlink staged as a file, or a file made executable, with the
+/// same blob is held by `held_entries` but not by `held_records`.
+#[test]
+fn held_records_compare_the_mode_too() {
+    let index = listing(&[("100644", b'd', b"w"), ("100644", b'a', b"x"), ("100644", b'b', b"y"), ("100755", b'c', b"z")]);
+    let head = listing(&[("120000", b'a', b"x"), ("100644", b'b', b"y"), ("100644", b'c', b"z")]);
+    let wanted = [true, true, true, true];
+    let mut by_blob = [false; 4];
+    assert!(held_entries(&index.0, &index.1, &wanted, &head.0, &head.1, &mut by_blob));
+    assert_eq!(by_blob, [false, true, true, true]);
+    let mut by_record = [true; 4];
+    assert!(held_records(&index.0, &index.1, &wanted, &head.0, &head.1, &mut by_record));
+    assert_eq!(by_record, [false, false, true, false]);
+    assert!(held_records(&index.0, &index.1, &[true, true, false, false], &head.0, &head.1, &mut by_record));
+    assert_eq!(by_record, [false, false, false, false]);
+    assert!(!held_records(&index.0, &index.1, &wanted[..3], &head.0, &head.1, &mut by_record));
+    assert!(held_records(&index.0, &index.1, &wanted, &index.0, &index.1, &mut by_record));
+    assert_eq!(by_record, wanted);
+}

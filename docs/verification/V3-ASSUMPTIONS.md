@@ -12,7 +12,10 @@ hook's inputs are computed by the verified core are the remaining
 assumptions of the pre-commit path. A24 (2026-10-26) names what the
 incremental hook trusts about history; on 2026-11-01 its induction over
 keyed commits was proved, leaving the commit-step and policy contracts and
-the start of history assumed. A25 (2026-10-28) names the per-platform
+the start of history assumed; on 2026-11-02 it was restated without
+selection (`RecordsAuthentic`), which removed the selection contract (A19's
+local attribute sources) from the history, and the hook's per-entry check
+moved into the core (A4). A25 (2026-10-28) names the per-platform
 OS adapters (Unix and Windows). Older security-hardening priorities are
 superseded by the charter where they conflict (for example, private worktree
 permissions are now an optional mode); the source-derived proof status and
@@ -37,7 +40,7 @@ one.
 | A1 | Protocol decision core is correct | PROVED |
 | A2 | Wire codec matches the spec | PROVED |
 | A3 | Charon/Aeneas/hax translation and Lean are sound | ASSUMED (pinned, reproduced) |
-| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs are now verified functions |
+| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs, each entry's check (`staged_check`) and its acceptance (`staged_verdict`) are verified functions; what remains is the loop and three answers (`HookAnswers`) |
 | A5 | `Keyed` realizes the primitive contract | TESTED (differential vs OpenSSL, exhaustive tampering) |
 | A6 | Private-mode credential agent relays core results faithfully | TESTED + REVIEWED; same-UID ACCEPTED RISK (optional mode) |
 | A7 | Git semantics | TESTED on Git 2.43; ASSUMED otherwise |
@@ -52,12 +55,12 @@ one.
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
 | A17 | The stored key is local-only, used only for the config it authenticates, with primitives built from exactly its bytes, and mode-independent | Selection and pairing PROVED relative to the key-schedule contract (`unlock_stored_key_spec`, `authenticate_key_spec`, `stored_key_binds_file_operations`; `ValidatedKey` is the only file-operation interface); key schedule TESTED (A5); file I/O TESTED + REVIEWED; integrity of the key's CTR half ASSUMED (A8: config authentication checks only the S2V half); local-account exposure ACCEPTED RISK (by charter) |
 | A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`repair_plan`, `needs_record`, `entry_provenance`, `next_move_source`, `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`); TESTED (real Git) + REVIEWED |
-| A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files; for the history argument, as one fixed function of the committed policy entries (`SelectionByPolicy`) | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK (excluded from `SelectionByPolicy`: assumed unchanged during a history) |
+| A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK (they can unprotect a file locally); no longer a hypothesis of the A24 history (2026-11-02) |
 | A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record), in byte order of paths, each path once | TESTED; parsing and order PROVED (`parse_listing_spec`: anything else is refused) |
 | A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
-| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Narrowed: use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); the induction over keyed commits PROVED (model) (`hook_full_check_authenticates`, `head_authentic_of_checked_commit`, `keyed_history_stays_authenticated`), and with the hook's recorded guard in place of a policy hypothesis (`keyed_history_authenticated_by_guard`); remaining: the commit step (A22, A11), the selection contract `SelectionByPolicy` (A19, local attribute sources fixed) and the start of history (full check, or audit of imported history, A13) |
+| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s records authenticate at their paths (`RecordsAuthentic`, selection-independent) | Narrowed: use PROVED (model) (`hook_records_authentic`, `keyed_check_records_authentic`); the induction over keyed commits PROVED (model) with no policy or selection hypothesis (`keyed_history_authenticated_by_guard`, `config_unchanged_of_guard`, `records_authentic_of_checked_commit`); remaining: the commit step (A22, A11) and the start of history (a full keyed check, `verify-index`, or a keyed commit that changed the policy; the keyed audit does not establish it, A13) |
 | A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS not yet run (its CI jobs have not been seen passing); REVIEWED |
 
 ## Detailed register
@@ -178,24 +181,47 @@ one.
     adapter's reimplementation (`lifecycle::policy_unchanged`,
     `is_attributes_file`) is deleted; its `.transcrypt/config` constant is
     the core's.
+  - **PROVED (per-entry check, 2026-11-02).** The hook's final check of
+    every index entry, protected or not, is decided by the core, and the
+    Lean model of the loop only sequences the extracted functions:
+    `hookEntry` is `staged_check` followed by `staged_verdict`. The core
+    decides which check an entry gets (`staged_check`, `staged_check_spec`
+    = `StagedCheckOf`: a protected entry as `entry_check` says, settled
+    only under the guard and when `HEAD` and `HEAD^1` hold its exact
+    record, `held_records`, `held_records_spec`; an unprotected file staged
+    since `HEAD` must be no record; one `HEAD` holds is authenticated if it
+    is a record unless the incremental hook trusts `HEAD` under the guard),
+    whether the blob is read (`reads_blob`), and whether the entry passes
+    (`staged_verdict`, `staged_verdict_ok` = `VerdictOk`). The verdict asks
+    the adapter three questions through the trait `StagedEvidence`, each only
+    when its check needs it (visible in the extracted code, not a theorem;
+    tested by `staged_verdicts_accept_only_what_their_check_requires`):
+    `is_record`, `opens`, `elsewhere`. The earlier handwritten acceptance
+    model (`hookEntry` with its own `open_record` call and `EntryAccepted`),
+    the adapter's conjunction `settled = same_policy && in_head[i] &&
+    in_parent[i]`, and the adapter's refusal of a record staged at an
+    unprotected name are gone: all three are the core's now.
 - **Residual:** the adapter Rust itself is not proved. On the pre-commit
   path what remains reviewed and tested, not proved, is:
-  - that the adapter acts on the verified results as `HookEvidence` and the
-    models `hookPlan`/`hookEntry` say (it builds entries from
-    `listing_fields`, iterates the flagged positions, and its per-entry
-    check is at least as strict as `hookEntry`; which check an entry gets is
-    the verified `entry_check`, on which both dispatch);
+  - the loop of `check_staged` (`HookEvidence`, `HookChecks`): for every
+    index position, in order, it calls `staged_check` with the run's
+    `flags`, `in_head` and `in_parent` (`held_records`), `key.is_some()`,
+    `incremental` and the guard; reads the entry's blob by its object id
+    when `reads_blob` says so (`HookContracts.objects`); calls
+    `staged_verdict`; and refuses on `Err` or when an answer could not be
+    found (a failed read);
+  - the three answers (`HookAnswers`), each about the entry's own blob and
+    path: `is_record` is `record_envelope_prefix_ok` of the blob's size and
+    first `ENVELOPE_PREFIX_LEN` bytes (A21 for the bytes); `opens` is
+    `Key::open` at the entry's path (the core's `open_record` with the stored
+    key's primitives, A17, A5; in private mode the agent's call of the same
+    function, A6); `elsewhere` is the verified `blob_elsewhere` on the run's
+    ordered listings;
   - the rewrite of `ls-tree` records to index records (`tree_record`, A20);
   - sorting the object orders (`Listing::object_order`; a wrong order is
     refused by the verified `object_order_ok`, so this only fails closed)
     and merging the incoming trees by path (`Listing::merge`, parsed with
     `unique = false`);
-  - the one-line conjunction `settled = policy_unchanged && in_head[i] &&
-    in_parent[i]` that feeds the verified `entry_check` (each conjunct is a
-    verified result: `policy_unchanged`, `held_entries`; A24. The model
-    states the same rule: `HookChecks.settled` (settled ⇒ held by both) and
-    `HookGuard` (the run's `policy_unchanged` result, settled ⇒ it was
-    `true`); only the conjunction's code is reviewed);
   - sizing `ends` by the listing's NUL count (fails closed: the parse then
     refuses);
   - the equality of the staged `.transcrypt/config` blob with the
@@ -203,9 +229,9 @@ one.
   - reading exactly the announced object size and the trailing LF (A21);
   - building the stored key's primitives from the file's key bytes (A17);
   - finding the commits being brought in (A23);
-  - the extra refusals for unprotected entries (a record moved to an
-    unprotected name, a file that lost its protection), which look up old
-    blobs by path in adapter code; they only refuse, and match `audit`;
+  - the refusal of a file that lost its protection to another named
+    filter (`check_drift`), which looks up old blobs by path in adapter
+    code; it only refuses, and matches `audit`;
   - for the repairs, the evidence about each blob: that the `RecordClass`
     `classify` reports is what `RecordEvidence` states (it tries the key at
     the entry's own path, then reads the header, then tries the move
@@ -217,8 +243,7 @@ one.
     lists the incoming commits whenever a protected entry is not in `HEAD`
     (`RepairContracts.lazy`).
 - **Next reduction:** a verified `ls-tree` record parser (removing the
-  `tree_record` rewrite), and moving the unprotected-entry checks onto
-  `held_entries`.
+  `tree_record` rewrite), and moving the drift check onto the core.
 - **Status:** narrowed; PROVED (source-derived inputs, model) + REVIEWED + TESTED.
 
 ### A5 — `Keyed` realizes the primitive contract
@@ -709,14 +734,15 @@ one.
   unprotect a file in this checkout, so local checks pass while a server
   audit (without those files) refuses the plaintext. `doctor` fails on such
   files and the pre-commit hook warns.
-- **As a contract in Lean (A24):** `SelectionByPolicy attrs g`
-  (`ProductSecurity.lean`): Git's `filter` answer in state `g` is
-  `attrs (policyEntries g.index)`, one fixed function of the index's
-  attribute files (by object id) and configuration entry. One `attrs` for
-  a whole history is where the local override files are excluded: they are
-  assumed not to change during it. It is a hypothesis of
-  `keyed_history_authenticated_by_guard` and `policy_unchanged_of_guard`;
-  it says nothing about records.
+- **Not a hypothesis of the history (2026-11-02):** the history
+  theorem used to assume Git's selection a fixed function of the committed
+  policy entries (`SelectionByPolicy`), which `.git/info/attributes`,
+  `core.attributesFile` and the system attributes contradict: they change
+  the selection without changing a committed file. A24 now carries an
+  invariant that does not mention selection (`RecordsAuthentic`), so the
+  contract and its exclusion of local sources are gone. Each run still
+  takes `GitAttributes` (its `check-attr --cached` answer is the selection
+  Git's filters apply), which local sources do not affect.
 - **Status:** TESTED; overrides ACCEPTED RISK (an informed user's choice).
 
 ### A20 — Git's listings (new)
@@ -789,85 +815,118 @@ one.
 
 ### A24 — The history the incremental hook trusts
 
-- **Claim:** every entry of `HEAD` whose path the committed attributes
-  select is a record that authenticates at its path under the committed
-  configuration (`HeadAuthentic` in `EndToEnd.lean`).
-- **Why it is needed:** the incremental pre-commit hook does not
-  authenticate an entry that is unchanged since `HEAD` and `HEAD^1`
-  (*settled*, H-74: a commit of 10 000 files takes 0.24 s); it checks only
-  the envelope. Theorem 1 states exactly that. With A24 the settled case
-  authenticates too (`hook_accepts_only_authenticated_ciphertext_given_history`).
-- **Proved (2026-11-01, `ProductSecurity.lean`, PROVED (model)):**
-  - *Bootstrap.* A keyed check that authenticated every protected entry
-    (`FullCheck`: `incremental = false`, or no entry counted as settled)
-    gives `AuthenticatedIndex` with **no** history hypothesis
-    (`hook_full_check_authenticates`). The three modes are stated
-    separately in `pre_commit_check_modes`.
-  - *One transition.* If the checked index authenticates under `config`,
-    the next commit's `HEAD` was made from it (`CommitStep`: each entry of
-    the next `HEAD` is a checked index entry, objects keep their content)
-    and the policy is unchanged (`PolicyUnchanged`: no path newly selected,
-    same committed configuration), then the next check may trust `HEAD`
-    (`head_authentic_of_checked_commit`).
+- **Claim (2026-11-02):** every regular, non-reserved entry of `HEAD` whose
+  blob has the committed configuration's v3 envelope authenticates at its
+  own path under that configuration (`RecordsAuthentic` in `EndToEnd.lean`).
+  The claim does not mention selection: it holds whatever Git's attributes,
+  committed or local, select. (The earlier, selection-dependent form,
+  `HeadAuthentic`: `HEAD`'s *selected* entries authenticate, remains the
+  hypothesis of the single-run
+  `hook_accepts_only_authenticated_ciphertext_given_history`.)
+- **Why it is needed:** the incremental pre-commit hook trusts the entries
+  `HEAD` holds while the attribute files and the config are those of `HEAD`
+  and `HEAD^1` (the guard): it checks only the envelope of a protected
+  entry whose exact record `HEAD` and `HEAD^1` hold (*settled*, H-74: a
+  commit of 10 000 files takes 0.24 s), and does not read an unprotected
+  file `HEAD` holds. Theorem 1 states exactly that.
+- **Why not selection (review, 2026-11-02):** the earlier invariant was about
+  `HEAD`'s selected entries, and the history theorem assumed Git's `filter`
+  a fixed function of the committed policy entries (`SelectionByPolicy`).
+  `.git/info/attributes`, `core.attributesFile` and the system attributes
+  break that: a forged record of this configuration, unselected at `p` in
+  `HEAD` and `HEAD^1`, becomes selected by a local override while every
+  committed attribute file is unchanged, so the guard holds and the hook
+  checks only its envelope. The selection-independent invariant closes this
+  for checked history: an entry staged since `HEAD` is authenticated, or is
+  no record of this configuration (`NotRecord`); with the key, every
+  unprotected file `HEAD` holds is authenticated if it is a record whenever
+  the check does not trust `HEAD` (`AuthenticateIfRecord`: a full check,
+  or the guard `false`); and the trust itself needs `HEAD` to hold the
+  entry's exact record, mode included (`held_records`: a symlink staged as
+  a file with the same blob was never checked as a file).
+- **Proved (`EndToEnd.lean`, `ProductSecurity.lean`, PROVED (model) over the
+  extracted `staged_check`, `staged_verdict`, `held_records`,
+  `policy_unchanged`):**
+  - *One run.* A keyed check that accepted keeps the invariant: the index's
+    records authenticate given `HEAD`'s only when it trusted `HEAD`
+    (incremental, guard `true`) (`hook_records_authentic`,
+    `keyed_check_records_authentic`); with it, every selected entry
+    authenticates (`hook_authenticated_of_records`).
+  - *Bootstrap.* A keyed check that trusted nothing (`FullCheck`:
+    `incremental = false`, or the guard `false`) gives the invariant and
+    `AuthenticatedIndex` with **no** history hypothesis
+    (`hook_full_check_authenticates`). The three modes are stated separately
+    in `pre_commit_check_modes`.
+  - *One transition.* If the checked index's records authenticate and the
+    next `HEAD` was made from it (`CommitStep`), the next check may trust
+    `HEAD`'s records under the same configuration
+    (`records_authentic_of_checked_commit`); a `true` guard of the next run
+    keeps the configuration (`config_unchanged_of_guard`: from the
+    verified `policy_unchanged`, `CommitStep.objects` and the sorted index).
   - *Induction.* For commits `h 0 … h n`, each accepted by a keyed check
-    (`KeyedCommit`), each made from the index checked before it, checked
-    incrementally only when the policy is unchanged (`HistoryStep`), and the
-    first checked in full or after an authentic `HEAD`: every commit's
-    selected entries authenticate (`keyed_history_stays_authenticated`).
-  - *The guard in the model (2026-11-01).* Each run records the guard
-    (`HookGuard`: the verified `policy_unchanged` on the run's parsed index,
-    `HEAD` and `HEAD^1` returned `samePolicy`, and an entry is settled only
-    if it is `true`, as in `check_staged`). `hook_policy_guard`: when it is
-    `true`, Git's three snapshots have the same policy entries;
-    `unguarded_check_is_full`: when it is `false`, nothing is settled, so the
-    check is a `FullCheck`. `policy_unchanged_of_guard` derives the whole of
-    `PolicyUnchanged` (no path newly selected, and the same configuration,
-    from the sorted checked index and `CommitStep.objects`) from a `true`
-    guard, the commit step and the A19 contract `SelectionByPolicy`.
-    `keyed_history_authenticated_by_guard` is the induction with no policy
-    hypothesis on any step (`GuardedHistoryStep`), whatever each check's
-    mode; `keyed_history_stays_authenticated` is kept.
+    (`KeyedCommit`) and made from the index checked before it
+    (`GuardedHistoryStep`), whatever each check's mode and whatever the
+    selection: every commit's records and selected entries authenticate
+    (`keyed_history_authenticated_by_guard`), given only the start below.
 - **Still assumed (the exact remaining obligation, for
   `keyed_history_authenticated_by_guard`):**
   1. `GuardedHistoryStep`: Git commits the index the hook checked (A22), so
      every entry of the next `HEAD` is a checked index entry and the next
      `HEAD` has the checked index's policy entries; an object id names one
      content (A11).
-  2. `SelectionByPolicy attrs` for every commit, with one `attrs` (A19): Git's
-     `filter` answer is a fixed function of the committed policy entries
-     (attribute files by object id, and the configuration entry). This
-     excludes changes of local attribute sources (`.git/info/attributes`,
-     `core.attributesFile`) during the history, which can change the
-     selection without changing a committed file (`doctor` reports local
-     filter overrides). Whether the policy changed is no longer assumed: it
-     is the guard's result, recorded in each run.
-  3. The start of the history: the first commit's `HEAD` must authenticate
-     if its check was incremental with the guard `true`. The first commit
-     after a clone, pull or any commit made without the keyed hook
-     (`--no-verify`, cherry-pick and rebase, which do not run `pre-commit`,
-     a locked checkout, another party's commits) is not covered by the
-     induction; its `HEAD` is trusted on the evidence of the keyed `audit`
-     (pre-push, A13) or `verify-index`, or the commit is checked in full.
-  4. One key across the history (`Realizes inst prims σ` fixed); a rekey
+  2. The start of the history: the first commit's `HEAD` records must
+     authenticate if its check trusted `HEAD` (incremental, guard `true`).
+     A keyed `verify-index` (or `lock`, `rekey`, `doctor`) of an index that
+     holds `HEAD`'s entries establishes it, as does a keyed commit whose
+     guard was `false` (any change of an attribute file or the config). The
+     keyed `audit` (pre-push, A13) does **not**: it authenticates the
+     entries each commit's attributes select and does not read unprotected
+     files. So history that entered without the keyed hook (`--no-verify`,
+     cherry-pick and rebase, which do not run `pre-commit`, a locked
+     checkout, another party's commits) is trusted on the keyed audit only
+     in the selection form (`HeadAuthentic`), which a local override can
+     invalidate: a forged record committed without the hook at an
+     unprotected name, later selected only by a local override, is accepted
+     by the incremental hook until such a check
+     (`local_attribute_overrides_never_admit_a_forged_record_through_checked_history`
+     records this boundary; every full keyed check and the first policy
+     change refuse it).
+  3. One key across the history (`Realizes inst prims σ` fixed); a rekey
      changes the committed configuration, so the next guard is `false` and
-     the check is full.
-  5. The adapter's run is as `HookEvidence` says (A4), including the
-     one-line conjunction `settled = same_policy && in_head[i] &&
-     in_parent[i]`.
+     the check trusts nothing.
+  4. The adapter's run is as `HookEvidence`, `HookContracts` and
+     `HookAnswers` say (A4): the loop and the three answers.
+- The policy part of the guard is now defence in depth: the configuration
+  part is what the induction needs (the invariant is per configuration);
+  the attribute files part is not needed for soundness, but keeps the
+  incremental hook from trusting history across a committed selection
+  change.
 - `HEAD` and `HEAD^1` are parsed as sorted listings, so the entry that
-  holds a settled blob is the only one at its path (`Sorted.holds_oid`): a
+  holds a trusted record is the only one at its path (`Sorted.holds_oid`): a
   crafted tree cannot show one checked entry and commit another (review
   H-76).
-- **Consequence if false:** a commit made without the hook
-  (`--no-verify`, a pulled commit) can hold a record that does not open at
-  its path; the next incremental commit keeps it without authenticating it.
-  `verify-index`, merge commits and the keyed `audit` (pre-push, A13)
-  authenticate every entry and refuse it.
+- **Cost:** in the ordinary commit (guard `true`) nothing more is read than
+  before: protected blobs and the prefixes of unprotected files staged since
+  `HEAD` (`ordinary_commits_read_no_unchanged_unprotected_file`). A full
+  check, and a commit that changes an attribute file or the config, reads
+  the prefix of every unprotected file `HEAD` holds and the whole blob only
+  of the records among them.
+- **Consequence if false:** a commit made without the hook (`--no-verify`, a
+  pulled commit) can hold a record that does not open at its path; the next
+  incremental commit keeps it without authenticating it. `verify-index`,
+  `lock`, a policy change, merge commits (for protected entries) and the
+  keyed `audit` (for selected entries, A13) authenticate it and refuse it.
 - **Evidence:** PROVED (model) as above; TESTED
   (`newly_protected_files_are_authenticated_by_the_hook`,
-  `trees_listing_a_path_twice_are_refused`, the H-74 suites); REVIEWED.
-- **Status:** narrowed: use and induction PROVED (model); contracts 1–4
-  ASSUMED (1 TESTED; 2 TESTED + REVIEWED; 3 deployment, A13).
+  `settled_entries_are_authenticated_after_*`,
+  `local_attribute_overrides_never_admit_a_forged_record_through_checked_history`,
+  `local_attribute_overrides_that_unprotect_a_file_are_reversible`,
+  `a_symlink_restaged_as_a_file_is_not_trusted_from_history`,
+  `ordinary_commits_read_no_unchanged_unprotected_file`,
+  `trees_listing_a_path_twice_are_refused`); REVIEWED.
+- **Status:** narrowed: use and induction PROVED (model), with no selection
+  contract; contracts 1, 3, 4 ASSUMED (1 TESTED); the start (2) is
+  deployment (A13) or a full keyed check.
 
 ### A25 — Platform adapters (new)
 
@@ -991,7 +1050,9 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Stored-key decision | `stored_key_state_spec`, `storedKeySpec_unlocked`, `stored_key_authenticates_current_config` |
 | Which key a configuration is used with: the stored file's own key bytes, only for the config they authenticate (relative to `KeyScheduleRealizes`) | `authenticate_key_spec`, `unlock_stored_key_spec`, `stored_key_binds_file_operations` |
 | `cat-file --batch` reply framing | `parse_batch_header_spec`, `batchHeader_unique`, `blob_read_spec` |
-| End to end: the hook accepts only authenticated ciphertext at the selected paths | `hook_accepts_only_authenticated_ciphertext` (with `hookPlan_spec`) |
+| Each entry's final check and its acceptance, decided by the core | `staged_check_spec`, `held_records_spec`, `reads_blob_spec`, `staged_verdict_ok`; composed in `hook_entry_checked` |
+| End to end: the hook accepts only authenticated ciphertext at the selected paths | `hook_accepts_only_authenticated_ciphertext` (with `hookPlan_accepts`, `hook_entry_checked`) |
+| The A24 history: every keyed commit's records authenticate, whatever selects paths | `hook_records_authentic`, `keyed_check_records_authentic`, `records_authentic_of_checked_commit`, `config_unchanged_of_guard`, `keyed_history_authenticated_by_guard` (model) |
 | Index record parsing | `parse_index_entry_spec` |
 | Git filter-protocol packet lengths | `decode_pkt_len_spec` |
 | Object ids passed to Git are plain hex names, taken from the right bytes | `is_object_id_spec`, `objectId_plain`, `indexRecord_oid` |
@@ -1019,7 +1080,7 @@ verified decision that gates it:
 | `unlock` / `init` | `authenticate_key` / `initialize_config` then `authenticate_key` (`ValidatedKey::unlock` / `initialize`) | config bytes / fresh salt | `Ok`, before any persistent effect |
 | Index and tree listings | `parse_listing` (whole listing: records, object ids), then `listing_fields` per entry | `ls-files --stage -z`, or `ls-tree -r -z` records rewritten to that shape (path copied verbatim) | `true` (else refuse) |
 | Object reads | `is_object_id`, then `parse_batch_header` and `blob_read` | oid from the parsed snapshot | `true`; one `cat-file --batch` per process; header exactly `<oid> blob <size>` (canonical decimal), `Read` only within 16 MiB, trailing LF checked |
-| `verify-index` and the hook's check | `parse_listing_attrs`, `first_unselectable`, then `open_record` per entry (incremental hook: unless `policy_unchanged` holds and `held_entries` shows it unchanged since `HEAD` and `HEAD^1`), or, while locked, `record_envelope_ok` and `blob_elsewhere` | snapshot listing; blobs by oid | `true` / `Ok` for every entry |
+| `verify-index` and the hook's check | `parse_listing_attrs`, `first_unselectable`, `held_records`, `policy_unchanged`, then for every entry `staged_check`, `reads_blob` and `staged_verdict`, which asks `is_record` (`record_envelope_prefix_ok`), `opens` (`open_record` via `Key::open`) and `elsewhere` (`blob_elsewhere`) only as needed | snapshot listing; blobs by oid | `Ok` for every entry, no answer failed |
 | `hydrate` publish | agent `Decrypt`, then `hydrate_action`, all entries before any write; stamp equality | blob by snapshot oid; worktree bytes and stamp via held dirfd | `Ok(Publish)` for all; `Keep` untouched |
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action`; stamp equality | worktree bytes and stamp, blob by oid, reseal output | `Ok(Flush)`; `Keep` untouched |
 | Re-index after hydrate/lock | none (bookkeeping); listing compared with the verified snapshot afterwards | verified protected paths, raw, via `update-index -z --stdin` | listing unchanged |
