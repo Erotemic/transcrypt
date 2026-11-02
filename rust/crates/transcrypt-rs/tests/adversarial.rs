@@ -1831,6 +1831,51 @@ fn the_keyed_audit_authenticates_records_at_unprotected_paths() {
     run(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
 }
 
+/// The audit checks each record once per blob, config and path: a genuine
+/// record copied (not moved) to another protected path without the hook is
+/// authenticated at its new path, where it does not open, though the same
+/// blob already passed at its own path in the same audit.
+#[test]
+fn the_audit_authenticates_a_copied_record_at_its_new_path() {
+    let mut scratch = Scratch::new("auditcopy");
+    let repo = scratch.repo("repo");
+    let record = rev(&repo, "HEAD:a.secret");
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{record},c.secret")], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "copy"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD"], None);
+    assert!(err.contains("c.secret"), "{err}");
+    // Without the key the copy is not a moved blob (a.secret is kept), so
+    // only its envelope is checked.
+    without_key(&repo, || run(&repo, bin(), &["audit", "HEAD"], None));
+}
+
+/// The audit trusts a parent only under the same configuration: a record
+/// forged for a new configuration, held at an unprotected path by the
+/// parent of the commit that introduces that configuration (where it was
+/// no record of the old one), is authenticated by the audit of that commit.
+#[test]
+fn the_audit_trusts_no_parent_across_a_config_change() {
+    const NEW: &[u8] = b"a completely different long passphrase\n";
+    let mut scratch = Scratch::new("auditrekey");
+    let repo = scratch.repo("repo");
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    // The staged records carry the new config's id: so does the forgery.
+    let forged = forged_envelope(&repo);
+    let mut tree = String::from_utf8(run(&repo, "git", &["ls-tree", "HEAD"], None)).unwrap();
+    tree.push_str(&format!("{REGULAR_FILE_MODE} blob {forged}\tf.data\n"));
+    let tree = String::from_utf8(run(&repo, "git", &["mktree"], Some(tree.as_bytes()))).unwrap();
+    let hostile = String::from_utf8(run(&repo, "git", &["commit-tree", tree.trim(), "-p", "HEAD", "-m", "hostile"], None)).unwrap();
+    run(&repo, "git", &["reset", "-q", "--soft", hostile.trim()], None);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{forged},f.data")], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "rekey"], None);
+    // Under the old config the parent's f.data is no record: it passes.
+    run(&repo, bin(), &["audit", "HEAD~2..HEAD~1"], None);
+    for revs in [&["HEAD"][..], &["HEAD~1..HEAD"]] {
+        let err = run_fails(&repo, bin(), &[&["audit"][..], revs].concat(), None);
+        assert!(err.contains("f.data") && err.contains("does not open there"), "{revs:?}: {err}");
+    }
+}
+
 /// The keyed audit's history: a commit's records authenticate given its
 /// parent's, so an unprotected file the parent holds is not read again,
 /// even across an attribute change (only a config change, or a root
