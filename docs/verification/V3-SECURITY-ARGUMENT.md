@@ -12,6 +12,20 @@ evidence levels follow the [proof ledger](V3-PROOF-COVERAGE.md) (PROVED is
 never used for TESTED or REVIEWED evidence). For a short summary, one card per product
 guarantee, start with [V3-PRODUCT-GUARANTEES](V3-PRODUCT-GUARANTEES.md).
 
+**The top-level statement (2026-11-02)** is `transcrypt_product_assurance`
+in [`ProductAssurance.lean`](../../proofs/aeneas/v3/V3Wire/Verification/ProductAssurance.lean).
+It composes the theorems below with one crypto context, the output of the
+verified `unlock_stored_key`. Given a history of keyed publications with
+that key and configuration, each committed by Git from the checked index,
+and starting at a keyed-audited commit or at a check that trusted nothing,
+it concludes four things. The key is validated for the configuration
+(`ValidatedCryptoContext`). Every checked state is authenticated
+(`AuthenticatedRepositoryState`). Checkout releases only authenticated
+plaintext (`AuthenticatedRecovery`). The repair step never launders
+(`NoLaunderingRepair`). What remains trusted is listed in
+[V3-PRODUCT-GUARANTEES](V3-PRODUCT-GUARANTEES.md#what-remains-trusted). The
+sections below are the parts it is built from.
+
 ## The promise
 
 From the [product charter](V3-PRODUCT-CHARTER.md): *user-selected files are
@@ -321,7 +335,7 @@ anything about commits outside a keyed history (A13).
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 161 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 167 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the per-entry composition `hook_entry_checked` and

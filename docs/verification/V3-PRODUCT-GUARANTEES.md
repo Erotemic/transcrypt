@@ -1,25 +1,65 @@
 # Transcrypt v3: what the proofs guarantee
 
-Transcrypt v3 protects the files you select in public Git history using
-encryption that is authenticated and bound to the repository's configuration
-and to each file's exact path. The Lean proofs establish three things about
-the verified Rust protocol:
+## The product guarantee
 
-- how it authenticates records;
-- that a decrypted file is released only after its record authenticates;
-- that the pre-commit hook checks the staged state before publication, and
-  that its repair step never launders content from another commit.
+Suppose you unlocked a checkout, so that the verified stored-key check
+accepted the key file for the repository's current configuration, and you
+commit through the keyed pre-commit hook, starting from a commit the keyed
+audit accepted with the same key (or from a commit whose check
+authenticated everything). Then, as long as Git, the adapter code around
+the verified core and the cryptographic primitives meet their stated
+contracts:
 
-The proofs also show that a history built from keyed commits, each checked
-properly, keeps these properties from commit to commit. Every guarantee rests
-on cryptographic, Git and operating-system contracts. Each card below names
-them, so a reader can see exactly what is proved and what is trusted.
+- every commit you make stores each file its committed `.gitattributes`
+  select as a record that authenticates under that configuration at exactly
+  that file's path, and every record of that configuration anywhere in the
+  index authenticates at its own path;
+- checkout releases plaintext only after the record authenticates at its
+  exact path under that configuration, never after a failure, and every
+  genuine record opens;
+- the hook's repair step encrypts only plaintext you staged (or explicitly
+  `protect`ed) and re-encrypts only your own renames, never content imported
+  from another commit;
+- all of this uses only the key whose file names this configuration,
+  authenticates it and holds its own check value for it.
 
-All four public theorems are in one file,
-[`ProductSecurity.lean`](../../proofs/aeneas/v3/V3Wire/Verification/ProductSecurity.lean);
-what the keyed audit establishes for history the hook never saw is in
-[`Audit.lean`](../../proofs/aeneas/v3/V3Wire/Verification/Audit.lean).
-The theorems they build on are listed in the
+Nothing here is a confidentiality theorem, and Git and the operating system
+are not verified.
+
+## The theorem
+
+That paragraph is one Lean theorem, `transcrypt_product_assurance`, in
+[`ProductAssurance.lean`](../../proofs/aeneas/v3/V3Wire/Verification/ProductAssurance.lean).
+It composes the product theorems of
+[`ProductSecurity.lean`](../../proofs/aeneas/v3/V3Wire/Verification/ProductSecurity.lean)
+and [`Audit.lean`](../../proofs/aeneas/v3/V3Wire/Verification/Audit.lean).
+The parts must agree. One crypto context, the output of the verified
+`unlock_stored_key`, is used by every publication check, audit, checkout and
+repair in the statement. Each commit's configuration is the one the key
+validated, and the history starts exactly where the audit theorem leaves
+off.
+
+| Part of the statement | Predicate | Card below |
+| --- | --- | --- |
+| Hypothesis: the stored key unlocked | `StoredKeyUnlocked` (`unlock_stored_key` returned `Ok`; the id is the configuration's digest, A5) and `KeyScheduleRealizes` (A5, A17) | D |
+| Hypothesis: each commit is a keyed publication with that key and configuration | `ValidCheckedPublication` (wraps `KeyedCommit`: `HookContracts`, `ConfigCommitted`, `KeyedCheckAccepted` with `HookAnswers`) | A |
+| Hypothesis: Git commits the checked index | `GuardedHistoryStep` (A22, A11) | Checked history |
+| Hypothesis: how the history starts | `HistoryStart`: a check that trusted nothing, or a `KeyedAuditRange` ending at `HEAD` (`KeyedAudit` with `AuditContracts` and `AuditAnswers`; `AuditStep`; the parent of its first commit, A13) | Checked history |
+| Conclusion: key use | `ValidatedCryptoContext` (from `stored_key_binds_file_operations`) | D |
+| Conclusion: every checked state is authenticated | `AuthenticatedRepositoryState` (`RecordsAuthentic` and `AuthenticatedIndex`) | A, Checked history |
+| Conclusion: recovery | `AuthenticatedRecovery` (`CheckoutOutcome` for every smudge run; genuine records open) | B |
+| Conclusion: repair | `NoLaunderingRepair` for every repair decided with that key (`RepairContracts`) | C |
+
+Within those contracts, the theorem rules out:
+
+- publishing plaintext, a forged record, or a record sealed for another
+  path or another configuration;
+- releasing unauthenticated plaintext;
+- turning imported content into an accepted record;
+- using a stale key, a key for another configuration, or a damaged key.
+
+It uses only Lean's standard axioms (`check-v3-axioms.sh`). The theorems it
+builds on are listed in the
 [proof ledger](../../proofs/aeneas/v3/PROOF-STATUS.md). The full argument is
 in [V3-SECURITY-ARGUMENT.md](V3-SECURITY-ARGUMENT.md), and every assumption
 is defined in [V3-ASSUMPTIONS.md](V3-ASSUMPTIONS.md).
@@ -123,8 +163,8 @@ them and any record at an unprotected path"
   can never reach the worktree as plaintext. An attacker cannot make a
   failed authentication look like a decryption.
 - **Lean theorems:**
-  - `checkout_releases_only_authenticated_plaintext`. Every output differs
-    from the record only if it is exactly the plaintext the record
+  - `checkout_releases_only_authenticated_plaintext` (`CheckoutOutcome`).
+    Every output differs from the record only if it is exactly the plaintext the record
     authenticates to. An output equal to the record is the record kept
     as-is, which has a v3 header. If the decision was to open and nothing
     authenticates, the result is `none`.
@@ -158,7 +198,8 @@ them and any record at an unprotected path"
   into an accepted protected record.
 - **Why it matters:** A hostile commit cannot get a forged or misplaced
   record "repaired" into a genuine one by the next person who commits.
-- **Lean theorem:** `repair_never_launders`. It proves four things:
+- **Lean theorem:** `repair_never_launders`. Its conclusion,
+  `NoLaunderingRepair`, has four parts:
   - A seal is only of the user's own change or of plaintext that `protect`
     forced, and never of a record with a v3 header.
   - A rebind is only of the user's change, and its record authenticates at
@@ -200,7 +241,9 @@ them and any record at an unprotected path"
 - **Lean theorem:** `stored_key_binds_file_operations`. Its premise is the
   output of the verified `unlock_stored_key` (the primitives and the
   configuration the adapter keeps), not an arbitrary primitive instance.
-  It concludes, besides the bindings, that the file's check value is the
+  Its conclusion, `ValidatedCryptoContext`, includes that the primitives
+  realize the suite of the file's own key bytes. This is how the top-level
+  theorem gets its one crypto context. It concludes, besides the bindings, that the file's check value is the
   suite's `keyCheckValue` for the configuration. It composes
   `unlock_stored_key_spec` (with `authenticate_key_spec`,
   `key_check_opens_spec` and `stored_key_state_spec`), `open_record_spec`,
@@ -314,6 +357,40 @@ defence in depth.
   the parent's (`AuditContracts`, `AuditSelectionAgrees`; A19, A20). Its
   per-run cache of checked records is tested, not modelled.
 - **The adapter** answers the verdict's three questions truthfully (A4).
+
+## What remains trusted
+
+These are the hypotheses of `transcrypt_product_assurance` and the
+boundaries it does not cross. Each is defined in
+[V3-ASSUMPTIONS.md](V3-ASSUMPTIONS.md).
+
+- **The key schedule** (A5, A17): `Keyed::from_key(k)` realizes the suite of
+  exactly the bytes `k`, and `config_id` is its digest. This is tested, not
+  proved.
+- **The primitives and their security** (A9, A10): RustCrypto computes
+  AES-SIV, Argon2id and SHA-256 correctly, and they are secure. A10 also
+  covers the check value detecting a damaged key.
+- **The adapter around the core** (A4): it runs the loops of the hook and
+  the audit over every entry and answers truthfully (`HookAnswers`,
+  `AuditAnswers`, `RecordEvidence`), and the filters write what the core
+  returned. The loops, `smudgeModel` and the audit's record cache are
+  models or tests, not extracted code.
+- **Git** (A11, A19–A21, A23): its listings, attribute answers, object reads
+  and sequencing state are what the contracts say.
+- **Git commits the checked index** (A22), so each step is a
+  `GuardedHistoryStep`.
+- **The start of the audited range** (A13): the parent of the first audited
+  commit is trusted when it lies outside the range, so the pre-push range
+  trusts what the remote already has. An audit from the root, or from a
+  configuration change, trusts nothing.
+- **An unaudited local checkout** (A24, open): the theorem needs a
+  `HistoryStart`. A local history that was never audited is still trusted
+  by the incremental hook in that checkout. This is tested: such a history
+  cannot pass the pre-push hook.
+- **Translation and the kernel** (A3): Charon/Aeneas and Lean are sound.
+- **Private mode** (A6): the theorem's key is the stored key. The agent of
+  `--private` calls the same verified functions, and this is tested, not
+  part of the statement.
 
 ## What is not claimed
 

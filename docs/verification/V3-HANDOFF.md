@@ -120,6 +120,24 @@ semantics silently or import legacy CBC into the proved core.
   start is the audit's own: a first parent outside the audited range is
   trusted (A13), and a local history never audited is trusted by the
   incremental hook in that checkout (it cannot pass the pre-push hook).
+- **The top-level statement** (2026-11-02) is `transcrypt_product_assurance`
+  (`ProductAssurance.lean`). It takes one crypto context, the output of
+  `unlock_stored_key`, and uses it for every part. Its hypotheses are a
+  history of keyed publications with that key and configuration
+  (`ValidCheckedPublication`), Git committing the checked index
+  (`GuardedHistoryStep`), and a start at a check that trusted nothing or at
+  a keyed audit range (`HistoryStart`). It concludes
+  `ValidatedCryptoContext`, `AuthenticatedRepositoryState` for every
+  checked commit, `AuthenticatedRecovery` and `NoLaunderingRepair`. The
+  plain-English version and the remaining trusted boundaries are in
+  [V3-PRODUCT-GUARANTEES](V3-PRODUCT-GUARANTEES.md).
+  Mutations (2026-11-02): ignoring the guard in `staged_check`, a keyed
+  verdict accepting an envelope, and `open_record` returning `Ok` on failed
+  authentication each break the proof build (`staged_check_spec`,
+  `staged_verdict_ok`, `open_record_spec`), so the top-level theorem does
+  not build. Two adapter mutations were caught by no test until
+  `records_moved_to_the_same_name_in_another_directory_are_refused` and
+  `an_index_staging_another_configuration_is_refused` were added.
 - The pre-commit repair is a typed plan: the core derives each entry's
   `Provenance` from the snapshots (`entry_provenance`), decides whether its
   blob is read (`needs_record`), and decides `repair_plan(Provenance,
