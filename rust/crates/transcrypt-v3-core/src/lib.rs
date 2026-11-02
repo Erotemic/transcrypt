@@ -959,6 +959,201 @@ pub fn entry_check(keyed: bool, incremental: bool, settled: bool) -> EntryCheck 
     }
 }
 
+/// How the pre-commit hook's final check examines one index entry, protected
+/// or not. With the key, the hook keeps one invariant of every commit it
+/// accepts, whatever selects the paths: every regular, non-reserved entry
+/// whose blob has this configuration's envelope authenticates at its own
+/// path. So, while the configuration is the same, an entry `HEAD` holds
+/// needs no authentication (no attribute source can turn a forged record of
+/// `HEAD` into a protected file), and every other entry is checked as it
+/// enters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagedCheck {
+    /// Nothing to check: a symlink or submodule; reserved metadata `HEAD`
+    /// holds; or an unprotected file `HEAD` holds, checked when it entered
+    /// (or, without the key, that nothing here could authenticate).
+    Skip,
+    /// An unprotected file staged since `HEAD`: it must not be a record of
+    /// this configuration (`git mv x.env x.bak`), which would be committed
+    /// where nothing decrypts it.
+    NotRecord,
+    /// An unprotected file `HEAD` holds, in a check that does not trust
+    /// `HEAD` (a full check, or the policy changed): if it is a record of
+    /// this configuration it must authenticate at its path.
+    AuthenticateIfRecord,
+    /// A protected entry, checked as `entry_check` says.
+    Protected(EntryCheck),
+}
+
+/// The final check of entry `i` of the index listing (`index`,
+/// `index_ends`). `flags`: Git's selection of each entry; `in_head` and
+/// `in_parent`: whether `HEAD` and `HEAD^1` hold the entry's blob at its path
+/// (`held_entries`; `in_parent` is read only for protected entries);
+/// `guard`: the settled guard (`policy_unchanged`); `keyed` and
+/// `incremental` as for `entry_check`. A protected entry is settled only when
+/// the guard holds and `HEAD` and `HEAD^1` hold it. An unprotected file
+/// staged since `HEAD` must not be a record; one that `HEAD` holds is trusted
+/// from `HEAD` in the incremental hook under the guard, and otherwise, with
+/// the key, authenticated if it is a record.
+#[allow(clippy::too_many_arguments)]
+pub fn staged_check(
+    index: &[u8],
+    index_ends: &[usize],
+    i: usize,
+    flags: &[bool],
+    in_head: &[bool],
+    in_parent: &[bool],
+    keyed: bool,
+    incremental: bool,
+    guard: bool,
+) -> StagedCheck {
+    if flags[i] {
+        StagedCheck::Protected(entry_check(keyed, incremental, guard & in_head[i] & in_parent[i]))
+    } else {
+        match listing_fields(index, index_ends, i) {
+            Some(f) => {
+                if !f.regular {
+                    StagedCheck::Skip
+                } else if !in_head[i] {
+                    StagedCheck::NotRecord
+                } else if keyed && (!incremental || !guard) && !is_reserved_path(&index[f.path_start..f.end]) {
+                    StagedCheck::AuthenticateIfRecord
+                } else {
+                    StagedCheck::Skip
+                }
+            }
+            None => StagedCheck::Skip,
+        }
+    }
+}
+
+/// Whether the check reads the entry's whole blob (the `record` of
+/// `staged_verdict`): only a protected entry's.
+pub fn reads_blob(check: StagedCheck) -> bool {
+    match check {
+        StagedCheck::Skip => false,
+        StagedCheck::NotRecord => false,
+        StagedCheck::AuthenticateIfRecord => false,
+        StagedCheck::Protected(_) => true,
+    }
+}
+
+/// What the final check knows about one staged entry besides its blob. The
+/// adapter answers each question about the entry's own blob and path, and
+/// `staged_verdict` asks only what its check needs, so an expensive answer
+/// (a read, a decryption, a lookup by object id) is computed only then.
+pub trait StagedEvidence {
+    /// Whether the blob has this configuration's envelope: the adapter reads
+    /// its size and first `ENVELOPE_PREFIX_LEN` bytes and decides with
+    /// `record_envelope_prefix_ok`.
+    fn is_record(&self) -> bool;
+    /// Whether the blob authenticates at the entry's path under the
+    /// configuration (`open_record`, with the key).
+    fn opens(&self) -> bool;
+    /// Whether the blob is at another path of the index, `HEAD` or `HEAD^1`
+    /// (`blob_elsewhere`).
+    fn elsewhere(&self) -> bool;
+}
+
+/// Why the final check refuses an entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagedRefusal {
+    /// A protected blob without the v3 file header: plaintext.
+    Plaintext,
+    /// A protected record of another configuration.
+    OtherConfig,
+    /// A protected blob whose envelope is not a record of this configuration.
+    Envelope,
+    /// A protected record that does not authenticate at its path.
+    Authentication,
+    /// A protected record that is another path's blob (checked without the
+    /// key): moved or copied without re-encryption.
+    Moved,
+    /// An unprotected file staged since `HEAD` that is a record of this
+    /// configuration.
+    UnprotectedRecord,
+    /// An unprotected file that is a record of this configuration and does
+    /// not authenticate at its path.
+    UnprotectedForgery,
+}
+
+/// The check of a protected entry whose blob `record` has the header of
+/// this configuration `id`.
+fn protected_verdict<E: StagedEvidence>(
+    evidence: &E,
+    check: EntryCheck,
+    record: &[u8],
+    id: &[u8; ID_LEN],
+) -> Result<(), StagedRefusal> {
+    match check {
+        EntryCheck::Authenticate => {
+            if evidence.opens() {
+                Ok(())
+            } else {
+                Err(StagedRefusal::Authentication)
+            }
+        }
+        EntryCheck::Envelope => {
+            if record_envelope_ok(record, id) {
+                Ok(())
+            } else {
+                Err(StagedRefusal::Envelope)
+            }
+        }
+        EntryCheck::EnvelopeNotMoved => {
+            if !record_envelope_ok(record, id) {
+                Err(StagedRefusal::Envelope)
+            } else if evidence.elsewhere() {
+                Err(StagedRefusal::Moved)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Whether one staged entry passes its check (`staged_check`), for the
+/// configuration `id`. `record` is the entry's blob when the check reads it
+/// (`reads_blob`), and is not used otherwise. `evidence` is asked only what
+/// the check needs: `is_record` only of an unprotected entry, `opens` only
+/// to authenticate (an unprotected entry only once it is a record), and
+/// `elsewhere` only of an entry checked without the key that has the
+/// envelope.
+pub fn staged_verdict<E: StagedEvidence>(
+    evidence: &E,
+    check: StagedCheck,
+    record: &[u8],
+    id: &[u8; ID_LEN],
+) -> Result<(), StagedRefusal> {
+    match check {
+        StagedCheck::Skip => Ok(()),
+        StagedCheck::NotRecord => {
+            if evidence.is_record() {
+                Err(StagedRefusal::UnprotectedRecord)
+            } else {
+                Ok(())
+            }
+        }
+        StagedCheck::AuthenticateIfRecord => {
+            if !evidence.is_record() || evidence.opens() {
+                Ok(())
+            } else {
+                Err(StagedRefusal::UnprotectedForgery)
+            }
+        }
+        StagedCheck::Protected(entry) => match parse_file_header(record) {
+            Err(_) => Err(StagedRefusal::Plaintext),
+            Ok(found) => {
+                if bytes_eq(&found, id) {
+                    protected_verdict(evidence, entry, record, id)
+                } else {
+                    Err(StagedRefusal::OtherConfig)
+                }
+            }
+        },
+    }
+}
+
 /// Length of a pkt-line header: the packet length in hexadecimal digits.
 pub const PKT_HEADER_LEN: usize = 4;
 /// Largest pkt-line Git sends or accepts: 4 length digits plus 65516 data bytes.
@@ -1210,6 +1405,42 @@ pub fn held_entries(
                 Some(f) => {
                     let j = find_entry(other, other_ends, &index[f.start + OID_START..f.oid_end], &index[f.path_start..f.end]);
                     held[i] = j < other_ends.len();
+                }
+                None => held[i] = false,
+            }
+        } else {
+            held[i] = false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// For each record `i` of the listing `index` with `wanted[i]`, whether the
+/// listing `other` holds exactly that record: the same mode, object id and
+/// path (`held[i]`); `held[i]` is false for the others. Unlike
+/// `held_entries`, a record whose mode changed (a symlink staged as a file
+/// with the same blob) is not held. Fails, writing nothing, unless `wanted`
+/// and `held` have one slot per record. `other` must be in path order with
+/// each path once (`parse_listing` with `unique`).
+pub fn held_records(
+    index: &[u8],
+    index_ends: &[usize],
+    wanted: &[bool],
+    other: &[u8],
+    other_ends: &[usize],
+    held: &mut [bool],
+) -> bool {
+    if wanted.len() != index_ends.len() || held.len() != index_ends.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < held.len() {
+        if wanted[i] {
+            match listing_fields(index, index_ends, i) {
+                Some(f) => {
+                    let j = find_entry(other, other_ends, &index[f.start + OID_START..f.oid_end], &index[f.path_start..f.end]);
+                    held[i] = j < other_ends.len() && same_record(index, index_ends, i, other, other_ends, j);
                 }
                 None => held[i] = false,
             }

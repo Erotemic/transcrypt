@@ -173,8 +173,18 @@ inductive EntryCheck where
 | Envelope : EntryCheck
 | EnvelopeNotMoved : EntryCheck
 
+/-- [transcrypt_v3_core::StagedCheck]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 971:0-986:1
+    Visibility: public -/
+@[discriminant isize]
+inductive StagedCheck where
+| Skip : StagedCheck
+| NotRecord : StagedCheck
+| AuthenticateIfRecord : StagedCheck
+| Protected : EntryCheck → StagedCheck
+
 /-- [transcrypt_v3_core::Fields]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1103:0-1109:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1298:0-1304:1
     Visibility: public -/
 structure Fields where
   start : Std.Usize
@@ -183,8 +193,29 @@ structure Fields where
   «end» : Std.Usize
   regular : Bool
 
+/-- Trait declaration: [transcrypt_v3_core::StagedEvidence]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1045:0-1056:1
+    Visibility: public -/
+structure StagedEvidence (Self : Type) where
+  is_record : Self → RustM Bool
+  opens : Self → RustM Bool
+  elsewhere : Self → RustM Bool
+
+/-- [transcrypt_v3_core::StagedRefusal]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1060:0-1078:1
+    Visibility: public -/
+@[discriminant isize]
+inductive StagedRefusal where
+| Plaintext : StagedRefusal
+| OtherConfig : StagedRefusal
+| Envelope : StagedRefusal
+| Authentication : StagedRefusal
+| Moved : StagedRefusal
+| UnprotectedRecord : StagedRefusal
+| UnprotectedForgery : StagedRefusal
+
 /-- [transcrypt_v3_core::StoredKey]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1581:0-1593:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1812:0-1824:1
     Visibility: public -/
 @[discriminant isize]
 inductive StoredKey where
@@ -194,7 +225,7 @@ inductive StoredKey where
 | Unlocked : StoredKey
 
 /-- [transcrypt_v3_core::BlobRead]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1676:0-1683:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1907:0-1914:1
     Visibility: public -/
 @[discriminant isize]
 inductive BlobRead where
