@@ -50,6 +50,7 @@ semantics silently or import legacy CBC into the proved core.
 | Independent review, scope classification and open reproductions | `docs/verification/V3-REVIEW-TRIAGE.md` |
 | Roadmap, stage status, remaining work | `docs/verification/V3-ROADMAP.md` |
 | Evidence per requirement | `docs/verification/V3-PROOF-COVERAGE.md` |
+| What the proofs guarantee, one card per product property | `docs/verification/V3-PRODUCT-GUARANTEES.md`, `proofs/aeneas/v3/V3Wire/Verification/ProductSecurity.lean` |
 | End-to-end statement and its hypotheses | `docs/verification/V3-SECURITY-ARGUMENT.md`, `proofs/aeneas/v3/V3Wire/Verification/EndToEnd.lean` |
 | Trust-ordered assumptions, adapter call-site table | `docs/verification/V3-ASSUMPTIONS.md` |
 | Internal security review (V6) | `docs/verification/V3-SECURITY-REVIEW.md` |
@@ -240,8 +241,9 @@ or `tests/git_lifecycle.rs`.
   by `object_order_ok`); several trees are combined only by
   `Listing::merge` (the one `unique = false` parse).
 - Count a protected entry as settled (skipping authentication) only if
-  `HEAD` and `HEAD^1` hold it and no attribute file and not the config
-  changed since them (A24, H-77).
+  `HEAD` and `HEAD^1` hold it (`held_entries`) and no attribute file and
+  not the config changed since them (the verified `policy_unchanged`;
+  A24, H-77).
 - Replace a worktree file only through `Protected::replace` with the stamp
   from the read that justified it, while holding `staging_dir`. Write any
   other repository file only through `write_repository_file`.

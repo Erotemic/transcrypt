@@ -36,7 +36,9 @@ open Transcrypt.V3Verification
 #print axioms lock_action_spec
 -- Path
 #print axioms ends_with_spec
+#print axioms is_attributes_path_spec
 #print axioms is_reserved_path_spec
+#print axioms is_policy_path_spec
 #print axioms component_ok_spec
 #print axioms is_canonical_protected_path_spec
 -- Attr
@@ -123,6 +125,13 @@ open Transcrypt.V3Verification
 #print axioms parse_listing_attrs_spec
 -- SnapshotAttrs
 #print axioms first_unselectable_spec
+-- SnapshotPolicy
+#print axioms policy_unchanged_spec
+#print axioms same_policy_spec
+#print axioms policy_unchanged_sound
+#print axioms Transcrypt.V3Policy.PolicyUnchanged.agree
+#print axioms Transcrypt.V3Policy.PolicyUnchanged.holds
+#print axioms Transcrypt.V3Policy.PolicyPath.reserved
 -- Objects
 #print axioms stored_key_state_spec
 -- Objects

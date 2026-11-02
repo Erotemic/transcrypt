@@ -110,7 +110,7 @@ pub(crate) fn migrate(repo: &Repository, args: &MigrateArgs) -> Result<(), Strin
     for entry in status.split(|b| *b == 0).filter(|e| e.len() > STATUS_PREFIX_LEN) {
         let path = &entry[STATUS_PREFIX_LEN..];
         let own = resuming && entry[0] != b'R'
-            && (path == CONFIG_PATH.as_bytes() || is_attributes_file(path) || selected.contains(&path));
+            && (path == CONFIG_PATH.as_bytes() || is_attributes_path(path) || selected.contains(&path));
         if !own {
             return Err("commit or discard your changes first; the conversion must start from a committed state".into());
         }
@@ -129,7 +129,7 @@ pub(crate) fn migrate(repo: &Repository, args: &MigrateArgs) -> Result<(), Strin
     // refuses: set Bash's hook aside, set up v3, then rewrite the rules, then
     // re-encrypt.
     let attribute_files: Vec<PathBuf> = entries.iter()
-        .filter(|e| is_attributes_file(&e.path))
+        .filter(|e| is_attributes_path(&e.path))
         .map(|e| indexed_path(&e.path)).collect::<Result<_, _>>()?;
     let password = passphrase(args.password_stdin, true)?;
     // Bash's own pre-commit hook checks only `filter=crypt` files, which will

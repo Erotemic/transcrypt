@@ -11,7 +11,7 @@ use std::{
 use crate::{
     attributes::split_lines,
     credential::Key,
-    git::{changed_files, Changes, PathBlob, CONFIG_PATH, config_blob, git, git_blob, git_command, is_attributes_file, paths_of, protected_flags,
+    git::{changed_files, Changes, PathBlob, CONFIG_PATH, config_blob, git, git_blob, git_command, is_attributes_path, paths_of, protected_flags,
         push_index_record, read_record, tree_files, Attributes, Mode, ObjectId, Repository, Staged, SHORT_OUTPUT_LIMIT},
 };
 use transcrypt_v3_core::{
@@ -134,7 +134,7 @@ struct CheckedRecord {
 type AttributeFiles = Vec<PathBlob>;
 
 fn attribute_files(entries: &[Staged]) -> AttributeFiles {
-    entries.iter().filter(|e| e.regular() && is_attributes_file(&e.path))
+    entries.iter().filter(|e| e.regular() && is_attributes_path(&e.path))
         .map(|e| PathBlob { path: e.path.clone(), oid: e.oid.clone() }).collect()
 }
 
@@ -184,7 +184,7 @@ fn audit_commit(repo: &Repository, keyed: bool, state: &mut AuditState, commit: 
     let Changes { mut entries, deleted, modified } = changed_files(repo, commit, parent.as_deref())?;
     let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|d| test(&d.path));
     let config_changed = parent.is_none() || touched(&|p| p == CONFIG_PATH.as_bytes());
-    let attributes_changed = parent.is_none() || touched(&is_attributes_file);
+    let attributes_changed = parent.is_none() || touched(&is_attributes_path);
     if (config_changed || attributes_changed) && parent.is_some() {
         // A new config re-binds every record, and new attributes may
         // protect files the commit did not change: check the whole tree.

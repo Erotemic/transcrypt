@@ -724,3 +724,110 @@ fn batch_headers_name_the_object_and_a_canonical_size() {
     assert_eq!(blob_read(MAX_RECORD as u64 + 1, true), BlobRead::Skip);
     assert_eq!(blob_read(u64::MAX, false), BlobRead::TooLarge);
 }
+
+#[test]
+fn policy_paths_are_attribute_files_and_the_config() {
+    for policy in [b".gitattributes".as_slice(), b"d/.gitattributes", b"a/b/.gitattributes", b".transcrypt/config"] {
+        assert!(is_policy_path(policy), "{:?}", policy);
+        assert!(is_reserved_path(policy));
+    }
+    for other in [b"x.gitattributes".as_slice(), b".gitattributes.d/x", b".gitattributes/x", b"d/x.gitattributes",
+                  b".gitattribute", b"d.gitattributes", b".transcrypt/config.bak", b".transcrypt/x",
+                  b"d/.transcrypt/config", b".gitmodules", b"", b"/"] {
+        assert!(!is_policy_path(other), "{:?}", other);
+    }
+    assert!(is_attributes_path(b"d/.gitattributes") && !is_attributes_path(b".transcrypt/config"));
+}
+
+/// `policy_unchanged` on three listings of `(mode, oid digit, path)`.
+fn policy_same(index: &[(&str, u8, &[u8])], head: &[(&str, u8, &[u8])], parent: &[(&str, u8, &[u8])]) -> bool {
+    let (index, head, parent) = (listing(index), listing(head), listing(parent));
+    policy_unchanged(&index.0, &index.1, &head.0, &head.1, &parent.0, &parent.1)
+}
+
+#[test]
+fn policy_is_unchanged_only_with_the_same_policy_records() {
+    let base: &[(&str, u8, &[u8])] = &[("100644", b'1', b".gitattributes"), ("100644", b'2', b".transcrypt/config"),
+        ("100644", b'3', b"a.env"), ("100644", b'4', b"d/.gitattributes"), ("100644", b'5', b"d/x.gitattributes")];
+    assert!(policy_same(base, base, base));
+    // Other entries do not matter, whatever they are (an attribute-like
+    // name that is no attribute file included).
+    let others: &[(&str, u8, &[u8])] = &[("100644", b'1', b".gitattributes"), ("100644", b'2', b".transcrypt/config"),
+        ("100755", b'9', b"b.env"), ("100644", b'4', b"d/.gitattributes"), ("100644", b'8', b"d/x.gitattributes")];
+    assert!(policy_same(base, others, base) && policy_same(others, base, base));
+    // A changed attribute file (top-level or nested) or config, in the
+    // index, HEAD or HEAD^1.
+    for k in [0, 1, 3] {
+        let mut changed = base.to_vec();
+        changed[k].1 = b'7';
+        assert!(!policy_same(base, &changed, base), "{k}");
+        assert!(!policy_same(base, base, &changed), "{k}");
+        assert!(!policy_same(&changed, base, base), "{k}");
+    }
+    // The mode counts too (an attribute file replaced by a symlink).
+    let mut link = base.to_vec();
+    link[0].0 = "120000";
+    assert!(!policy_same(base, base, &link));
+    // A missing or added attribute file or config.
+    for k in [0, 1, 3] {
+        let mut missing = base.to_vec();
+        missing.remove(k);
+        assert!(!policy_same(base, &missing, base), "{k}");
+        assert!(!policy_same(&missing, base, base), "{k}");
+        assert!(!policy_same(base, base, &missing), "{k}");
+        assert!(policy_same(&missing, &missing, &missing), "{k}");
+    }
+    // Moved: the same blob at another attribute path.
+    let moved: &[(&str, u8, &[u8])] = &[("100644", b'1', b".gitattributes"), ("100644", b'2', b".transcrypt/config"),
+        ("100644", b'3', b"a.env"), ("100644", b'4', b"e/.gitattributes")];
+    assert!(!policy_same(base, moved, base));
+    // Two attribute files swapping blobs: the same set of object ids, at
+    // other paths.
+    let swapped: &[(&str, u8, &[u8])] = &[("100644", b'4', b".gitattributes"), ("100644", b'2', b".transcrypt/config"),
+        ("100644", b'3', b"a.env"), ("100644", b'1', b"d/.gitattributes"), ("100644", b'5', b"d/x.gitattributes")];
+    assert!(!policy_same(base, swapped, base));
+    // No policy at all (before `init`), against some.
+    assert!(policy_same(&[], &[], &[]));
+    assert!(policy_same(&[("100644", b'3', b"a.env")], &[], &[("100644", b'4', b"b")]));
+    assert!(!policy_same(base, &[], &[]) && !policy_same(&[], base, base));
+}
+
+/// `policy_unchanged` agrees with its definition, the records at policy
+/// paths of the three listings being equal in order, on random listings.
+#[test]
+fn policy_unchanged_matches_its_definition() {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move |n: u64| { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state % n };
+    let names: [&[u8]; 8] = [b".gitattributes", b".transcrypt/config", b"a.env", b"a.gitattributes",
+        b"d/.gitattributes", b"d/.gitattributes.d", b"d/e/.gitattributes", b"z"];
+    let mut agreed = 0;
+    for _ in 0..2000 {
+        let mut random = || {
+            let mut records: std::vec::Vec<(&str, u8, &[u8])> = std::vec::Vec::new();
+            for name in names {
+                if next(4) != 0 {
+                    records.push((if next(8) == 0 { "100755" } else { "100644" }, b'0' + next(2) as u8, name));
+                }
+            }
+            records
+        };
+        // HEAD and HEAD^1 are often the index, possibly with other
+        // entries changed.
+        let (index, other_head, other_parent) = (random(), random(), random());
+        let like = |choice: u64, other: std::vec::Vec<(&'static str, u8, &'static [u8])>| match choice {
+            0 => other,
+            1 => index.clone(),
+            _ => index.iter().map(|r| if is_policy_path(r.2) { *r } else { (r.0, b'5', r.2) }).collect(),
+        };
+        let (head, parent) = (like(next(3), other_head), like(next(3), other_parent));
+        fn policy<'a>(l: &[(&'a str, u8, &'a [u8])]) -> std::vec::Vec<(&'a str, u8, &'a [u8])> {
+            l.iter().filter(|r| is_policy_path(r.2)).copied().collect()
+        }
+        let expected = policy(&index) == policy(&head) && policy(&index) == policy(&parent);
+        agreed += expected as usize;
+        assert_eq!(policy_same(&index, &head, &parent), expected);
+        assert!(policy_same(&index, &index, &index));
+    }
+    // Both outcomes occur.
+    assert!(agreed > 0 && agreed < 2000, "{agreed}");
+}

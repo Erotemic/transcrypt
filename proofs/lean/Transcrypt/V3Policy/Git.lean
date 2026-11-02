@@ -363,6 +363,49 @@ def MoveSource (index : List Entry) (s h : Entry) : Prop :=
 def Settled (head parent : List Entry) (s : Entry) : Prop :=
   Holds head s.oid s.path ∧ Holds parent s.oid s.path
 
+/-- The policy entries of a snapshot, in order: its attribute files and its
+    configuration (`PolicyPath`), each with its mode and object name. -/
+def policyEntries (es : List Entry) : List Entry := es.filter (fun e => decide (PolicyPath e.path))
+
+/-- The protection policy is unchanged: the index, `HEAD` and `HEAD^1` have
+    the same policy entries. An entry settled in `HEAD` and `HEAD^1` was
+    checked when it was committed only if what selected it, and the
+    configuration it was checked under, were the same then; the hook counts
+    entries as settled only while this holds. It compares committed
+    entries; it does not interpret the attributes. -/
+def PolicyUnchanged (index head parent : List Entry) : Prop :=
+  policyEntries index = policyEntries head ∧ policyEntries index = policyEntries parent
+
+theorem mem_policyEntries {es : List Entry} {e : Entry} :
+    e ∈ policyEntries es ↔ e ∈ es ∧ PolicyPath e.path := by
+  simp [policyEntries]
+
+/-- **What an unchanged policy gives.** With `PolicyUnchanged`, the index,
+    `HEAD` and `HEAD^1` hold exactly the same entries (mode, object name and
+    path) at every attribute file and at the configuration: each has an
+    entry there iff the others do, with the same blob. -/
+theorem PolicyUnchanged.agree {index head parent : List Entry} (h : PolicyUnchanged index head parent)
+    {e : Entry} (hp : PolicyPath e.path) :
+    (e ∈ index ↔ e ∈ head) ∧ (e ∈ index ↔ e ∈ parent) := by
+  have hi : e ∈ index ↔ e ∈ policyEntries index := by simp [mem_policyEntries, hp]
+  have hh : e ∈ head ↔ e ∈ policyEntries head := by simp [mem_policyEntries, hp]
+  have hq : e ∈ parent ↔ e ∈ policyEntries parent := by simp [mem_policyEntries, hp]
+  rw [hi, hh, hq, h.1, ← h.2, ← h.1]
+  exact ⟨Iff.rfl, Iff.rfl⟩
+
+/-- In particular the three snapshots hold the same blob at every policy
+    path, attribute files and configuration alike (`Holds`). -/
+theorem PolicyUnchanged.holds {index head parent : List Entry} (h : PolicyUnchanged index head parent)
+    {oid path : List Nat} (hp : PolicyPath path) :
+    (Holds index oid path ↔ Holds head oid path) ∧ (Holds index oid path ↔ Holds parent oid path) := by
+  have key : ∀ l : List Entry, Holds l oid path ↔ ∃ e ∈ policyEntries l, e.oid = oid ∧ e.path = path := by
+    intro l
+    constructor
+    · rintro ⟨e, he, ho, rfl⟩; exact ⟨e, mem_policyEntries.mpr ⟨he, hp⟩, ho, rfl⟩
+    · rintro ⟨e, he, ho, hep⟩; exact ⟨e, (mem_policyEntries.mp he).1, ho, hep⟩
+  rw [key index, key head, key parent, h.1, ← h.2, ← h.1]
+  exact ⟨Iff.rfl, Iff.rfl⟩
+
 /-- The blob of `s` is at another path of one of the snapshots: a record
     moved or copied there, which would not open at `s`'s path. -/
 def BlobElsewhere (snapshots : List (List Entry)) (s : Entry) : Prop :=

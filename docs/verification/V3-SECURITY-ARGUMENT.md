@@ -8,7 +8,8 @@ which assumptions that statement rests on. It is the readable companion of
 [`EndToEnd.lean`](../../proofs/aeneas/v3/V3Wire/Verification/EndToEnd.lean).
 Assumption IDs refer to the [assumption register](V3-ASSUMPTIONS.md);
 evidence levels follow the [proof ledger](V3-PROOF-COVERAGE.md) (PROVED is
-never used for TESTED or REVIEWED evidence).
+never used for TESTED or REVIEWED evidence). For a short summary, one card per product
+guarantee, start with [V3-PRODUCT-GUARANTEES](V3-PRODUCT-GUARANTEES.md).
 
 ## The promise
 
@@ -249,7 +250,7 @@ anything about commits outside a keyed history (A13).
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 124 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 132 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the composition `hookPlan_spec` and the end-to-end

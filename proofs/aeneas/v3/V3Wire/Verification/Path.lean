@@ -43,6 +43,17 @@ theorem ends_with_spec (bytes suffix : Slice U8) :
 
 /-! ## Reserved metadata paths -/
 
+/-- `is_attributes_path` decides exactly the spec's `AttributesPath`. -/
+@[step]
+theorem is_attributes_path_spec (p : Slice U8) :
+    is_attributes_path p ⦃ r => r = true ↔ Transcrypt.V3Policy.AttributesPath (sliceBytes p) ⦄ := by
+  unfold is_attributes_path Transcrypt.V3Policy.AttributesPath
+  step*
+  all_goals
+    subst_vars
+    simp only [ATTRIBUTES_NAME_bytes, ATTRIBUTES_SUFFIX_bytes, ← sliceBytes_inj] at *
+    tauto
+
 /-- `is_reserved_path` decides exactly the spec's `Reserved`. -/
 @[step]
 theorem is_reserved_path_spec (p : Slice U8) :
@@ -51,8 +62,19 @@ theorem is_reserved_path_spec (p : Slice U8) :
   step*
   all_goals
     subst_vars
-    simp only [METADATA_DIR_bytes, ATTRIBUTES_NAME_bytes, ATTRIBUTES_SUFFIX_bytes,
-      MODULES_NAME_bytes, List.drop_zero, Nat.zero_le, true_and, ← sliceBytes_inj] at *
+    simp only [METADATA_DIR_bytes, MODULES_NAME_bytes, Transcrypt.V3Policy.AttributesPath,
+      List.drop_zero, Nat.zero_le, true_and, ← sliceBytes_inj] at *
+    tauto
+
+/-- `is_policy_path` decides exactly the spec's `PolicyPath`. -/
+@[step]
+theorem is_policy_path_spec (p : Slice U8) :
+    is_policy_path p ⦃ r => r = true ↔ Transcrypt.V3Policy.PolicyPath (sliceBytes p) ⦄ := by
+  unfold is_policy_path Transcrypt.V3Policy.PolicyPath
+  step*
+  all_goals
+    subst_vars
+    simp only [CONFIG_PATH_bytes, ← sliceBytes_inj] at *
     tauto
 
 theorem componentOk_iff (c : List Nat) :

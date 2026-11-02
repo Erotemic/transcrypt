@@ -49,6 +49,7 @@ include = [
   "transcrypt_v3_core::bytes_lt",
   "transcrypt_v3_core::parse_listing_attrs",
   "transcrypt_v3_core::first_unselectable",
+  "transcrypt_v3_core::policy_unchanged",
   # The stored key and Git object replies.
   "transcrypt_v3_core::stored_key_state",
   "transcrypt_v3_core::parse_batch_header",

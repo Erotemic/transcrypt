@@ -3,11 +3,6 @@
 
 use super::*;
 
-/// Whether `path` is a `.gitattributes` file (at the top or nested).
-pub(crate) fn is_attributes_file(path: &[u8]) -> bool {
-    path == ATTRIBUTES_NAME || path.ends_with(&ATTRIBUTES_SUFFIX)
-}
-
 /// The records of Git `-z` output, exactly: each ends with a NUL and none is
 /// empty (Git never prints one). Anything else is an error, never quietly
 /// dropped or completed: this output is the evidence the verified core
