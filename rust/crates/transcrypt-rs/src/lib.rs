@@ -1,17 +1,19 @@
 //! Exact v3 cryptographic primitives: Argon2id and deterministic AES-256-CMAC-SIV.
 //!
-//! This crate only *implements* the `V3Primitives` trait of
-//! `transcrypt-v3-core` and derives keys. Every protocol decision (path policy,
-//! configuration authentication, envelope, configuration binding, release of
-//! plaintext) is made by the Aeneas-extracted core functions it calls.
+//! This crate only *implements* the `V3Primitives` and `V3KeySchedule`
+//! traits of `transcrypt-v3-core` and derives keys. Every protocol decision
+//! (path policy, configuration authentication, which key a configuration is
+//! used with, envelope, configuration binding, release of plaintext) is made
+//! by the Aeneas-extracted core functions it calls. Files are sealed and
+//! opened only through a `ValidatedKey`.
 //! Assumes RustCrypto primitive correctness. Research prototype, not audited.
 
 use aes_siv::{siv::Aes256Siv, KeyInit, Tag};
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use sha2::{Digest, Sha256};
-pub use transcrypt_v3_core::{MAX_FILE, MAX_PATH, MAX_RECORD};
+pub use transcrypt_v3_core::{StoredKey, MAX_FILE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
-    Refusal, V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_MIN_LEN, ID_LEN, SALT_LEN, TAG_LEN,
+    Refusal, V3KeySchedule, V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_MIN_LEN, ID_LEN, SALT_LEN, TAG_LEN,
 };
 use zeroize::Zeroizing;
 
@@ -46,14 +48,18 @@ pub fn derive_key(password: &[u8], salt: &[u8; SALT_LEN]) -> Result<SecretKey, S
     Ok(key)
 }
 
-/// RustCrypto realization of the core's cryptographic contract under one key.
-pub struct Keyed<'a> {
-    key: &'a [u8; KEY_SIZE],
+/// RustCrypto realization of the core's cryptographic contract under one
+/// key. It holds its own copy of the key, on the heap (so that the agent can
+/// lock that page in memory) and wiped when dropped.
+pub struct Keyed {
+    key: Box<SecretKey>,
 }
 
-impl<'a> Keyed<'a> {
-    pub fn new(key: &'a [u8; KEY_SIZE]) -> Self {
-        Keyed { key }
+impl Keyed {
+    pub fn new(key: &[u8; KEY_SIZE]) -> Self {
+        let mut held = Box::new(Zeroizing::new([0u8; KEY_SIZE]));
+        held.copy_from_slice(key);
+        Keyed { key: held }
     }
 
     fn siv(&self) -> Option<Aes256Siv> {
@@ -61,7 +67,15 @@ impl<'a> Keyed<'a> {
     }
 }
 
-impl V3Primitives for Keyed<'_> {
+/// `from_key(k)` holds exactly the bytes `k` (assumption A17: it realizes
+/// the contract under them, A5).
+impl V3KeySchedule for Keyed {
+    fn from_key(key: &[u8]) -> Option<Self> {
+        <&[u8; KEY_SIZE]>::try_from(key).ok().map(Keyed::new)
+    }
+}
+
+impl V3Primitives for Keyed {
     fn seal_config(&self, prefix: &[u8; CONFIG_PREFIX_LEN], tag: &mut [u8; TAG_LEN]) -> bool {
         let headers: [&[u8]; 2] = [CONFIG_DOMAIN, prefix];
         match self.siv().map(|mut siv| siv.encrypt(headers, &[])) {
@@ -167,27 +181,6 @@ pub fn config_array(config_bytes: &[u8]) -> Result<&[u8; CONFIG_LEN], String> {
     config_bytes.try_into().map_err(|_| invalid_config())
 }
 
-pub fn initialize_config(password: &[u8], salt: &[u8; SALT_LEN])
-    -> Result<([u8; CONFIG_LEN], SecretKey), String>
-{
-    let key = derive_key(password, salt)?;
-    let config = transcrypt_v3_core::initialize_config(&Keyed::new(&key), salt).map_err(refusal)?;
-    Ok((config, key))
-}
-
-pub fn authenticate_config(config_bytes: &[u8], key: &[u8; KEY_SIZE]) -> Result<(), String> {
-    transcrypt_v3_core::authenticate_config(&Keyed::new(key), config_array(config_bytes)?)
-        .map(|_| ())
-        .map_err(refusal)
-}
-
-pub fn unlock_config(password: &[u8], config_bytes: &[u8]) -> Result<SecretKey, String> {
-    let config = transcrypt_v3_core::parse_config(config_bytes).map_err(|_| invalid_config())?;
-    let key = derive_key(password, &config.salt)?;
-    authenticate_config(config_bytes, &key)?;
-    Ok(key)
-}
-
 pub fn config_id(config_bytes: &[u8]) -> [u8; ID_LEN] {
     let digest = Sha256::digest(config_bytes);
     let mut id = [0u8; ID_LEN];
@@ -195,127 +188,261 @@ pub fn config_id(config_bytes: &[u8]) -> [u8; ID_LEN] {
     id
 }
 
-pub fn encrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], plaintext: &[u8])
-    -> Result<Vec<u8>, String>
-{
-    if plaintext.len() > MAX_FILE {
-        return Err(refusal(Refusal::Size));
-    }
-    let mut out = vec![0u8; plaintext.len() + FILE_MIN_LEN];
-    transcrypt_v3_core::seal_record(&Keyed::new(key), config_array(config_bytes)?, path, plaintext, &mut out)
-        .map_err(refusal)?;
-    Ok(out)
+/// A key with the one public configuration it authenticated, and the
+/// primitives built from it: the only way this crate seals or opens a file.
+///
+/// Its fields are private, and every constructor obtains the primitives from
+/// the verified `authenticate_key` (directly, or through
+/// `unlock_stored_key`), which builds them from exactly the key bytes given
+/// and returns them only if they authenticate the configuration kept with
+/// them. So a key is never paired with a configuration it did not
+/// authenticate, and its configuration cannot be replaced afterwards:
+///
+/// ```compile_fail,E0451
+/// let key = transcrypt_rs::ValidatedKey { config: [0; 55], keyed: transcrypt_rs::Keyed::new(&[0; 64]) };
+/// ```
+pub struct ValidatedKey {
+    config: [u8; CONFIG_LEN],
+    keyed: Keyed,
 }
 
-/// Git's clean filter. Git expects filters to be idempotent (it re-cleans
-/// a worktree file whenever its cached stat data is stale, including a
-/// worktree that `lock` just reset to ciphertext). A record that already
-/// opens at this path under this configuration is returned unchanged: by
-/// determinism it is exactly what sealing its plaintext produces, so the
-/// result is the same as decrypting and re-encrypting. Everything else is
-/// sealed by the verified core, which still refuses any other v3 record.
-pub fn clean_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], input: &[u8])
-    -> Result<Vec<u8>, String>
-{
-    // Only a record can open: parsing its header first spares ordinary
-    // plaintext a decryption attempt (and its output buffer).
-    if transcrypt_v3_core::parse_file_header(input).is_ok() && decrypt_file(config_bytes, key, path, input).is_ok() {
-        return Ok(input.to_vec());
+impl ValidatedKey {
+    /// The key `key`, if it authenticates `config_bytes`.
+    pub fn authenticate(config_bytes: &[u8], key: &[u8; KEY_SIZE]) -> Result<Self, String> {
+        let config = *config_array(config_bytes)?;
+        let keyed = transcrypt_v3_core::authenticate_key::<Keyed>(key, &config).map_err(refusal)?;
+        Ok(ValidatedKey { config, keyed })
     }
-    encrypt_file(config_bytes, key, path, input)
-}
 
-pub fn decrypt_file(config_bytes: &[u8], key: &[u8; KEY_SIZE], path: &[u8], record: &[u8])
-    -> Result<Zeroizing<Vec<u8>>, String>
-{
-    if record.len() > MAX_RECORD {
-        return Err(refusal(Refusal::Size));
+    /// The key `password` derives for `config_bytes` (with its salt), if it
+    /// authenticates it.
+    pub fn unlock(password: &[u8], config_bytes: &[u8]) -> Result<Self, String> {
+        let config = transcrypt_v3_core::parse_config(config_bytes).map_err(|_| invalid_config())?;
+        ValidatedKey::authenticate(config_bytes, &*derive_key(password, &config.salt)?)
     }
-    let mut out = Zeroizing::new(vec![0u8; record.len().saturating_sub(FILE_MIN_LEN)]);
-    transcrypt_v3_core::open_record(&Keyed::new(key), config_array(config_bytes)?, path, record, &mut out)
-        .map_err(refusal)?;
-    Ok(out)
+
+    /// A new configuration for `password` and `salt`, with its key.
+    pub fn initialize(password: &[u8], salt: &[u8; SALT_LEN]) -> Result<Self, String> {
+        let key = derive_key(password, salt)?;
+        let config = transcrypt_v3_core::initialize_config(&Keyed::new(&key), salt).map_err(refusal)?;
+        ValidatedKey::authenticate(&config, &key)
+    }
+
+    /// The stored key for configuration `current`, as the verified
+    /// `unlock_stored_key` decides from the key file's bytes `file` (if
+    /// `present`): only for a file holding exactly `current` followed by a
+    /// key that authenticates it, and then with that key. Otherwise the
+    /// state (`Absent`, `Damaged` or `Stale`).
+    pub fn from_stored(present: bool, file: &[u8], current: &[u8]) -> Result<Self, StoredKey> {
+        transcrypt_v3_core::unlock_stored_key::<Keyed>(present, file, current)
+            .map(|(keyed, config)| ValidatedKey { config, keyed })
+    }
+
+    /// The configuration this key authenticated.
+    pub fn config(&self) -> &[u8; CONFIG_LEN] {
+        &self.config
+    }
+
+    /// The public identifier of this key's configuration (records name it).
+    pub fn config_id(&self) -> [u8; ID_LEN] {
+        config_id(&self.config)
+    }
+
+    /// The key bytes, to store them or to hand them to the private agent.
+    pub fn secret(&self) -> &[u8; KEY_SIZE] {
+        &self.keyed.key
+    }
+
+    /// The record of `plaintext` at `path`.
+    pub fn encrypt(&self, path: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+        if plaintext.len() > MAX_FILE {
+            return Err(refusal(Refusal::Size));
+        }
+        let mut out = vec![0u8; plaintext.len() + FILE_MIN_LEN];
+        transcrypt_v3_core::seal_record(&self.keyed, &self.config, path, plaintext, &mut out).map_err(refusal)?;
+        Ok(out)
+    }
+
+    /// The clean filter. Git expects filters to be idempotent (it re-cleans
+    /// a worktree file whenever its cached stat data is stale, including a
+    /// worktree that `lock` just reset to ciphertext). A record that already
+    /// opens at this path under this configuration is returned unchanged: by
+    /// determinism it is exactly what sealing its plaintext produces, so the
+    /// result is the same as decrypting and re-encrypting. Everything else
+    /// is sealed by the verified core, which still refuses any other v3
+    /// record.
+    pub fn clean(&self, path: &[u8], input: &[u8]) -> Result<Vec<u8>, String> {
+        // Only a record can open: parsing its header first spares ordinary
+        // plaintext a decryption attempt (and its output buffer).
+        if transcrypt_v3_core::parse_file_header(input).is_ok() && self.decrypt(path, input).is_ok() {
+            return Ok(input.to_vec());
+        }
+        self.encrypt(path, input)
+    }
+
+    /// Authenticate `record` at `path` and return its plaintext.
+    pub fn decrypt(&self, path: &[u8], record: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+        if record.len() > MAX_RECORD {
+            return Err(refusal(Refusal::Size));
+        }
+        let mut out = Zeroizing::new(vec![0u8; record.len().saturating_sub(FILE_MIN_LEN)]);
+        transcrypt_v3_core::open_record(&self.keyed, &self.config, path, record, &mut out).map_err(refusal)?;
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transcrypt_v3_core::KEY_FILE_LEN;
 
-    fn fixture() -> ([u8; CONFIG_LEN], SecretKey) {
+    const PASSPHRASE: &[u8] = b"correct horse battery staple long secret";
+
+    fn fixture() -> ValidatedKey {
         let salt = [7u8; SALT_LEN];
-        initialize_config(b"correct horse battery staple long secret", &salt).unwrap()
+        ValidatedKey::initialize(PASSPHRASE, &salt).unwrap()
+    }
+
+    /// The stored key file for `config`: the config, then the key.
+    fn key_file(config: &[u8], key: &[u8]) -> Vec<u8> {
+        [config, key].concat()
     }
 
     #[test]
     fn complete_lifecycle_and_determinism() {
-        let (config, key) = fixture();
-        let key2 = unlock_config(b"correct horse battery staple long secret", &config).unwrap();
-        assert_eq!(&key[..], &key2[..]);
-        assert!(unlock_config(b"bad password", &config).is_err());
+        let v = fixture();
+        let v2 = ValidatedKey::unlock(PASSPHRASE, v.config()).unwrap();
+        assert_eq!(&v.secret()[..], &v2.secret()[..]);
+        assert_eq!(v.config(), v2.config());
+        assert!(ValidatedKey::unlock(b"bad password", v.config()).is_err());
         for plaintext in [b"".as_slice(), b"hello".as_slice(), &[0, 1, 255, 0][..]] {
-            let ct1 = encrypt_file(&config, &key, b"safe/item.secret", plaintext).unwrap();
-            let ct2 = encrypt_file(&config, &key, b"safe/item.secret", plaintext).unwrap();
+            let ct1 = v.encrypt(b"safe/item.secret", plaintext).unwrap();
+            let ct2 = v.encrypt(b"safe/item.secret", plaintext).unwrap();
             assert_eq!(ct1, ct2);
-            assert_eq!(&decrypt_file(&config, &key, b"safe/item.secret", &ct1).unwrap()[..], plaintext);
+            assert_eq!(&v.decrypt(b"safe/item.secret", &ct1).unwrap()[..], plaintext);
             let mut corrupt = ct1.clone();
             let last = corrupt.len() - 1;
             corrupt[last] ^= 1;
-            assert!(decrypt_file(&config, &key, b"safe/item.secret", &corrupt).is_err());
+            assert!(v.decrypt(b"safe/item.secret", &corrupt).is_err());
         }
     }
 
     #[test]
     fn clean_is_idempotent_and_still_refuses_foreign_records() {
-        let (config, key) = fixture();
-        let record = encrypt_file(&config, &key, b"a.secret", b"payload").unwrap();
-        assert_eq!(clean_file(&config, &key, b"a.secret", b"payload").unwrap(), record);
-        assert_eq!(clean_file(&config, &key, b"a.secret", &record).unwrap(), record);
+        let v = fixture();
+        let record = v.encrypt(b"a.secret", b"payload").unwrap();
+        assert_eq!(v.clean(b"a.secret", b"payload").unwrap(), record);
+        assert_eq!(v.clean(b"a.secret", &record).unwrap(), record);
         // The same record at another path, or tampered, is not authentic there.
-        assert!(clean_file(&config, &key, b"b.secret", &record).is_err());
+        assert!(v.clean(b"b.secret", &record).is_err());
         let mut tampered = record.clone();
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
-        assert!(clean_file(&config, &key, b"a.secret", &tampered).is_err());
+        assert!(v.clean(b"a.secret", &tampered).is_err());
     }
 
     #[test]
     fn config_binding_and_fail_closed() {
-        let (config, key) = fixture();
-        let ct = encrypt_file(&config, &key, b"account.secret", b"private").unwrap();
-        let mut altered = config;
+        let v = fixture();
+        let ct = v.encrypt(b"account.secret", b"private").unwrap();
+        let mut altered = *v.config();
         altered[7] ^= 0x40;
-        assert!(decrypt_file(&altered, &key, b"account.secret", &ct).is_err());
+        // The key does not authenticate the altered config, so no validated
+        // key for it exists; and the core refuses it on every operation.
+        assert!(ValidatedKey::authenticate(&altered, v.secret()).is_err());
+        let mut out = vec![0u8; ct.len() - FILE_MIN_LEN];
+        assert_eq!(transcrypt_v3_core::open_record(&Keyed::new(v.secret()), &altered, b"account.secret", &ct, &mut out),
+            Err(Refusal::ConfigAuthentication));
         let mut altered_ct = ct.clone();
         altered_ct[0] = 0;
-        assert!(decrypt_file(&config, &key, b"account.secret", &altered_ct).is_err());
-        assert!(decrypt_file(&config, &key, b"account.secret", b"private").is_err());
+        assert!(v.decrypt(b"account.secret", &altered_ct).is_err());
+        assert!(v.decrypt(b"account.secret", b"private").is_err());
     }
 
     #[test]
     fn ciphertext_is_bound_to_exact_git_path() {
-        let (config, key) = fixture();
-        let original = encrypt_file(&config, &key, b"vault/a.secret", b"identical").unwrap();
-        let repeated = encrypt_file(&config, &key, b"vault/a.secret", b"identical").unwrap();
-        let different = encrypt_file(&config, &key, b"vault/b.secret", b"identical").unwrap();
+        let v = fixture();
+        let original = v.encrypt(b"vault/a.secret", b"identical").unwrap();
+        let repeated = v.encrypt(b"vault/a.secret", b"identical").unwrap();
+        let different = v.encrypt(b"vault/b.secret", b"identical").unwrap();
         assert_eq!(original, repeated, "Git determinism must be preserved within a path");
         assert_ne!(original, different, "distinct Git paths must use distinct SIV AD");
-        assert_eq!(&decrypt_file(&config, &key, b"vault/a.secret", &original).unwrap()[..], b"identical");
-        assert!(decrypt_file(&config, &key, b"vault/b.secret", &original).is_err());
-        assert!(decrypt_file(&config, &key, b"a.secret", &original).is_err());
-        assert!(decrypt_file(&config, &key, b"vault/a.secret", &different).is_err());
+        assert_eq!(&v.decrypt(b"vault/a.secret", &original).unwrap()[..], b"identical");
+        assert!(v.decrypt(b"vault/b.secret", &original).is_err());
+        assert!(v.decrypt(b"a.secret", &original).is_err());
+        assert!(v.decrypt(b"vault/a.secret", &different).is_err());
     }
 
     #[test]
     fn raw_unix_paths_are_bound_and_noncanonical_inputs_fail_closed() {
-        let (config, key) = fixture();
+        let v = fixture();
         for path in [b"a b.secret".as_slice(), b"a'quote.secret", b"dir/new\nline.secret", b"raw/\xff.secret"] {
-            let record = encrypt_file(&config, &key, path, b"payload").unwrap();
-            assert_eq!(&decrypt_file(&config, &key, path, &record).unwrap()[..], b"payload");
+            let record = v.encrypt(path, b"payload").unwrap();
+            assert_eq!(&v.decrypt(path, &record).unwrap()[..], b"payload");
         }
         for path in [b"".as_slice(), b".gitattributes", b"/root.secret", b"../bad.secret", b"x/../bad.secret", b"./x.secret", b"x//y.secret", b"x/./y.secret", b"x.secret/", b"evil\0.secret"] {
             assert!(validate_protected_path(path).is_err(), "accepted {:?}", path);
         }
         assert!(validate_protected_path(&std::vec![b'x'; MAX_PATH + 1]).is_err());
+    }
+
+    /// A validated key is the stored file's own key, for exactly the
+    /// configuration that file names and the key authenticates; never a key
+    /// from another configuration or credential source.
+    #[test]
+    fn stored_keys_validate_only_their_own_authentic_config() {
+        let a = fixture();
+        let b = ValidatedKey::initialize(PASSPHRASE, &[8u8; SALT_LEN]).unwrap();
+        assert_ne!(a.config(), b.config());
+        // The file of A while the current config is B: stale, no key.
+        let file_a = key_file(a.config(), a.secret());
+        assert!(matches!(ValidatedKey::from_stored(true, &file_a, b.config()), Err(StoredKey::Stale)));
+        // B's config with A's key: the prefix matches, the key does not
+        // authenticate it.
+        let spliced = key_file(b.config(), a.secret());
+        assert!(matches!(ValidatedKey::from_stored(true, &spliced, b.config()), Err(StoredKey::Stale)));
+        // The config tag is the AES-SIV encryption of the empty plaintext,
+        // which only the S2V (CMAC) half of the key determines (RFC 5297:
+        // K1 = key[..KEY_SIZE / 2]). Every single-bit change of that half is
+        // refused; a change of the CTR half is not detected by config
+        // authentication (A17: the file system keeps that half intact).
+        const BITS: usize = u8::BITS as usize;
+        const S2V_KEY: usize = KEY_SIZE / 2;
+        for bit in 0..(KEY_SIZE * BITS) {
+            let mut flipped = file_a.clone();
+            flipped[CONFIG_LEN + bit / BITS] ^= 1 << (bit % BITS);
+            let state = ValidatedKey::from_stored(true, &flipped, a.config());
+            if bit / BITS < S2V_KEY {
+                assert!(matches!(state, Err(StoredKey::Stale)), "bit {bit}");
+            } else {
+                assert!(state.is_ok_and(|k| k.encrypt(b"x.secret", b"payload").ok().and_then(|r| a.decrypt(b"x.secret", &r).ok()).is_none()),
+                    "bit {bit}: a key with another CTR half seals records the genuine key refuses");
+            }
+        }
+        // The genuine file: its key, for the config it names.
+        let stored = ValidatedKey::from_stored(true, &file_a, a.config()).unwrap();
+        assert_eq!(stored.config(), a.config());
+        assert_eq!(&stored.secret()[..], &file_a[CONFIG_LEN..]);
+        let record = stored.encrypt(b"x.secret", b"payload").unwrap();
+        assert_eq!(record, a.encrypt(b"x.secret", b"payload").unwrap());
+        assert!(b.decrypt(b"x.secret", &record).is_err());
+        // No file, a bare key (an earlier version's), other lengths, or a
+        // current config of the wrong length.
+        assert!(matches!(ValidatedKey::from_stored(false, &file_a, a.config()), Err(StoredKey::Absent)));
+        assert!(matches!(ValidatedKey::from_stored(true, &a.secret()[..], a.config()), Err(StoredKey::Absent)));
+        for len in [0, 1, CONFIG_LEN, KEY_FILE_LEN - 1, KEY_FILE_LEN + 1] {
+            let mut damaged = file_a.clone();
+            damaged.resize(len, 0);
+            assert!(matches!(ValidatedKey::from_stored(true, &damaged, a.config()), Err(StoredKey::Damaged)), "{len}");
+        }
+        assert!(matches!(ValidatedKey::from_stored(true, &file_a, &a.config()[1..]), Err(StoredKey::Stale)));
+        // Keys from passphrases: only for the config they authenticate.
+        assert!(ValidatedKey::authenticate(b.config(), a.secret()).is_err());
+        assert!(ValidatedKey::authenticate(&a.config()[1..], a.secret()).is_err());
+        assert!(ValidatedKey::unlock(b"another long passphrase", a.config()).is_err());
+        // The key schedule takes exactly the key bytes.
+        assert!(Keyed::from_key(&a.secret()[1..]).is_none());
+        assert!(Keyed::from_key(&file_a).is_none());
     }
 
 
@@ -325,9 +452,9 @@ mod tests {
     /// independent implementation is covered by `tests/v3_vectors.rs`.
     #[test]
     fn keyed_satisfies_the_realizes_contract() {
-        let (config, key) = fixture();
-        let keyed = Keyed::new(&key);
-        let config: [u8; CONFIG_LEN] = config;
+        let v = fixture();
+        let keyed = Keyed::new(v.secret());
+        let config: [u8; CONFIG_LEN] = *v.config();
         // seal_config / open_config agree, and the stored tag is the seal.
         let prefix: [u8; CONFIG_PREFIX_LEN] = config[..CONFIG_PREFIX_LEN].try_into().unwrap();
         let mut tag = [0u8; TAG_LEN];

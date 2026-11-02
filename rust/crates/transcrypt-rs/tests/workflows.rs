@@ -324,6 +324,59 @@ fn pulled_rekey_makes_the_stored_key_stale_until_unlock() {
     assert_eq!(fs::read(clone.join(".env")).unwrap(), b"before\n");
 }
 
+/// Key material is never taken from another configuration or credential
+/// source: another repository's key file, a file naming this config with
+/// another key, or a file naming another config with this key all leave
+/// the checkout locked (stale), and no file is decrypted or encrypted with
+/// them, including by a checkout (`Key::stored`).
+#[test]
+fn stored_keys_of_other_configs_are_never_used() {
+    let mut scratch = Scratch::new("keysource");
+    let a = scratch.git_repo("a");
+    let b = scratch.git_repo("b");
+    for repo in [&a, &b] {
+        // The same passphrase: only the salts, so the keys, differ.
+        run(repo, bin(), &["init", "--password-stdin", ".env"], Some(PASS));
+        fs::write(repo.join(".env"), b"secret\n").unwrap();
+        commit_all(repo, "env");
+    }
+    let key_path = |repo: &PathBuf| repo.join(".git/transcrypt-v3/key");
+    let genuine = fs::read(key_path(&a)).unwrap();
+    let other = fs::read(key_path(&b)).unwrap();
+    assert_eq!((genuine.len(), other.len()), (KEY_FILE_LEN, KEY_FILE_LEN));
+    let config_len = KEY_FILE_LEN - KEY_SIZE;
+    assert_ne!(genuine[..config_len], other[..config_len]);
+    let substitutes = [
+        other.clone(),
+        [&genuine[..config_len], &other[config_len..]].concat(),
+        [&other[..config_len], &genuine[config_len..]].concat(),
+    ];
+    for (n, substitute) in substitutes.iter().enumerate() {
+        fs::write(key_path(&a), substitute).unwrap();
+        let status = String::from_utf8(run(&a, bin(), &["status"], None)).unwrap();
+        assert!(status.contains("does not match .transcrypt/config"), "{n}: {status}");
+        // Nothing is encrypted with it.
+        fs::write(a.join(".env"), b"edited\n").unwrap();
+        let err = run_fails(&a, "git", &["add", ".env"], None);
+        assert!(err.contains("rekeyed"), "{n}: {err}");
+        // Nothing is decrypted with it, also by a checkout, which uses the
+        // config the key file names.
+        fs::remove_file(a.join(".env")).unwrap();
+        run(&a, "git", &["checkout", "--", ".env"], None);
+        assert!(is_record(&fs::read(a.join(".env")).unwrap()), "{n}: decrypted with another config's key");
+    }
+    fs::write(key_path(&a), &genuine).unwrap();
+    run(&a, bin(), &["hydrate"], None);
+    assert_eq!(fs::read(a.join(".env")).unwrap(), b"secret\n");
+    // The private agent starts only with a key that authenticates its
+    // worktree's config: another repository's key is refused before it
+    // listens.
+    let idle = 0u64.to_be_bytes();
+    let out = exec(&a, bin(), &["serve"], Some(&[&other[config_len..], &idle[..]].concat()));
+    assert!(!out.status.success() && !socket(&a).exists());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("incorrect credentials"), "{out:?}");
+}
+
 /// Review F-02: `rekey` wrote `.transcrypt/config.rekey` with a path-based
 /// write that followed a committed symlink out of the repository. The new
 /// config is now written through held directory descriptors, never through

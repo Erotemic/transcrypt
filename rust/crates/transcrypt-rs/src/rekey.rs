@@ -2,7 +2,7 @@
 //! re-encrypted) and `reencrypt` (records still under an earlier config
 //! brought forward).
 
-use transcrypt_rs::unlock_config;
+use transcrypt_rs::ValidatedKey;
 use transcrypt_v3_core::parse_file_header;
 use crate::{
     attributes::owned_paths,
@@ -48,22 +48,23 @@ pub(crate) fn rekey(repo: &Repository, password_stdin: bool) -> Result<(), Strin
         }
         plaintexts.push((staged, plaintext));
     }
-    let (config, key) = new_config(&password)?;
+    let key = new_config(&password)?;
+    let config = key.config();
     // The new records, written as Git objects, and one index update.
     let mut update = IndexUpdate::new(repo, Blobs::Records);
     for (staged, plaintext) in &plaintexts {
-        update.add(staged.mode, &staged.path, &transcrypt_rs::encrypt_file(&config, &key, &staged.path, plaintext)?)?;
+        update.add(staged.mode, &staged.path, &key.encrypt(&staged.path, plaintext)?)?;
     }
-    update.add(Mode::REGULAR, CONFIG_PATH.as_bytes(), &config)?;
+    update.add(Mode::REGULAR, CONFIG_PATH.as_bytes(), config)?;
     update.apply(&[])?;
     let undo = "; run `git reset` to undo the staged rekey";
-    write_repository_file(repo.root(), &staging, Path::new(CONFIG_PATH), &config)
+    write_repository_file(repo.root(), &staging, Path::new(CONFIG_PATH), config)
         .map_err(|e| format!("{e}{undo}"))?;
     if old_key.private() {
         session::stop(repo, &old_config)?;
     }
     let mode = if old_key.private() { KeyMode::Private { idle: None } } else { KeyMode::Stored };
-    activate(repo, &config, &key, mode)
+    activate(repo, &key, mode)
         .map_err(|e| format!("{e}; the rekey is staged: run `transcrypt-rs unlock` with the NEW passphrase"))?;
     drop(staging);
     // The worktree plaintext now cleans to the new staged records.
@@ -133,13 +134,13 @@ pub(crate) fn reencrypt(repo: &Repository, args: &ReencryptArgs) -> Result<(), S
         eprintln!("Passphrase of config {} (introduced by {}), for: {}",
             crate::short_id(&old.id), old.introduced, names.join(", "));
         let password = passphrase(args.password_stdin, false)?;
-        keys.push((old, unlock_config(&password, &old.bytes)?));
+        keys.push((old, ValidatedKey::unlock(&password, &old.bytes)?));
     }
     // Decrypt and re-seal every file before writing any.
     let mut resealed = Vec::new();
     for (old, old_key) in &keys {
         for Stale { staged, record, .. } in stale.iter().filter(|f| f.config == old.id) {
-            let plaintext = transcrypt_rs::decrypt_file(&old.bytes, old_key, &staged.path, record)
+            let plaintext = old_key.decrypt(&staged.path, record)
                 .map_err(|e| format!("{}: {e}", staged.name()))?;
             let new_record = key.clean(&staged.path, &plaintext)?;
             resealed.push((staged, record, plaintext, new_record));

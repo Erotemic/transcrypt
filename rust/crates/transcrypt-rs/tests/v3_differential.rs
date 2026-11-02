@@ -2,7 +2,7 @@
 //! AES-SIV and Argon2id) against independent implementations: OpenSSL
 //! AES-SIV and reference Argon2id, via `tests/v3/reference/differential.py`.
 //! No Python is needed to run these Rust tests.
-use transcrypt_rs::{authenticate_config, clean_file, decrypt_file, derive_key, encrypt_file, Keyed, KEY_SIZE};
+use transcrypt_rs::{derive_key, Keyed, ValidatedKey, KEY_SIZE};
 use transcrypt_v3_core::{V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_HEADER_LEN, FILE_MIN_LEN, SALT_LEN, TAG_LEN};
 
 mod common;
@@ -60,11 +60,11 @@ fn keyed_matches_openssl_aes_siv_byte_for_byte() {
         let mut tag = [0u8; TAG_LEN];
         assert!(keyed.seal_config(&prefix, &mut tag), "{n}");
         assert_eq!(&tag[..], &config[CONFIG_PREFIX_LEN..], "{n}: config tag");
-        authenticate_config(&config, &case.key).unwrap();
+        let v = ValidatedKey::authenticate(&config, &case.key).unwrap();
         // Sealing and opening, through the verified core.
-        assert_eq!(encrypt_file(&config, &case.key, &case.path, &case.plaintext).unwrap(), case.record, "{n}");
-        assert_eq!(&decrypt_file(&config, &case.key, &case.path, &case.record).unwrap()[..], &case.plaintext[..], "{n}");
-        assert_eq!(clean_file(&config, &case.key, &case.path, &case.record).unwrap(), case.record, "{n}");
+        assert_eq!(v.encrypt(&case.path, &case.plaintext).unwrap(), case.record, "{n}");
+        assert_eq!(&v.decrypt(&case.path, &case.record).unwrap()[..], &case.plaintext[..], "{n}");
+        assert_eq!(v.clean(&case.path, &case.record).unwrap(), case.record, "{n}");
         // The primitive alone, on exactly the SIV part of the record.
         let sealed = &case.record[FILE_HEADER_LEN..];
         let mut out = vec![0u8; sealed.len()];
@@ -74,25 +74,25 @@ fn keyed_matches_openssl_aes_siv_byte_for_byte() {
         for bit in flips(case.record.len()) {
             let mut bad = case.record.clone();
             bad[bit / BITS] ^= 1 << (bit % BITS);
-            assert!(decrypt_file(&config, &case.key, &case.path, &bad).is_err(), "{n}: bit {bit}");
+            assert!(v.decrypt(&case.path, &bad).is_err(), "{n}: bit {bit}");
         }
         for cut in [1, TAG_LEN, case.record.len() - FILE_HEADER_LEN] {
             if cut <= case.record.len() {
                 let short = &case.record[..case.record.len() - cut];
-                assert!(decrypt_file(&config, &case.key, &case.path, short).is_err(), "{n}: truncated by {cut}");
+                assert!(v.decrypt(&case.path, short).is_err(), "{n}: truncated by {cut}");
             }
         }
         for extra in [&[0u8][..], &[0u8; TAG_LEN], &case.record[FILE_HEADER_LEN..FILE_HEADER_LEN + TAG_LEN]] {
             let long = [&case.record[..], extra].concat();
-            assert!(decrypt_file(&config, &case.key, &case.path, &long).is_err(), "{n}: extended");
+            assert!(v.decrypt(&case.path, &long).is_err(), "{n}: extended");
         }
         // Wrong path, prefix/suffix path, other configuration, other key.
         for path in [[&case.path[..], b"x"].concat(), case.path[1..].to_vec(), b"other.secret".to_vec()] {
-            assert!(decrypt_file(&config, &case.key, &path, &case.record).is_err(), "{n}: path");
+            assert!(v.decrypt(&path, &case.record).is_err(), "{n}: path");
         }
         let other = &all[(i + 1) % all.len()];
-        assert!(decrypt_file(&other.config, &other.key, &case.path, &case.record).is_err(), "{n}: other repo");
-        assert!(authenticate_config(&config, &other.key).is_err(), "{n}: other key");
+        assert!(ValidatedKey::authenticate(&other.config, &other.key).unwrap().decrypt(&case.path, &case.record).is_err(), "{n}: other repo");
+        assert!(ValidatedKey::authenticate(&config, &other.key).is_err(), "{n}: other key");
         let mut short_out = vec![0u8; case.plaintext.len() + 1];
         assert!(!keyed.open_file(&config, &case.path, sealed, &mut short_out), "{n}: wrong size");
     }
@@ -112,25 +112,25 @@ fn argon2id_matches_the_reference_implementation() {
 fn size_bounds_are_exact_at_every_layer() {
     use transcrypt_rs::{MAX_FILE, MAX_RECORD};
     let case = &cases()[0];
-    let config = &case.config;
+    let v = ValidatedKey::authenticate(&case.config, &case.key).unwrap();
     let path = b"big.secret";
     // The largest plaintext seals and opens; one more byte is refused.
     let max = vec![0x5au8; MAX_FILE];
-    let record = encrypt_file(config, &case.key, path, &max).unwrap();
+    let record = v.encrypt(path, &max).unwrap();
     assert_eq!(record.len(), MAX_RECORD);
-    assert_eq!(&decrypt_file(config, &case.key, path, &record).unwrap()[..], &max[..]);
-    assert!(encrypt_file(config, &case.key, path, &vec![0u8; MAX_FILE + 1]).is_err());
+    assert_eq!(&v.decrypt(path, &record).unwrap()[..], &max[..]);
+    assert!(v.encrypt(path, &vec![0u8; MAX_FILE + 1]).is_err());
     let mut long = record.clone();
     long.push(0);
-    assert!(decrypt_file(config, &case.key, path, &long).is_err());
+    assert!(v.decrypt(path, &long).is_err());
     // Every record shorter than header + tag is refused, including empty.
     for len in 0..FILE_MIN_LEN {
-        assert!(decrypt_file(config, &case.key, path, &case.record[..len.min(case.record.len())]).is_err(), "{len}");
+        assert!(v.decrypt(path, &case.record[..len.min(case.record.len())]).is_err(), "{len}");
     }
     // A header-only record with a forged all-zero tag is refused.
     let mut forged = case.record[..FILE_HEADER_LEN].to_vec();
     forged.extend_from_slice(&[0u8; TAG_LEN]);
-    assert!(decrypt_file(config, &case.key, path, &forged).is_err());
+    assert!(v.decrypt(path, &forged).is_err());
 }
 
 /// Randomized mutation testing (deterministic seed): inserting, deleting,
@@ -143,7 +143,7 @@ fn random_mutations_never_authenticate() {
     // Insert, remove, flip or swap.
     const MUTATION_KINDS: u64 = 4;
     for case in cases().iter().filter(|c| c.record.len() < MUTATED_RECORD_LIMIT) {
-        let (config, key, path) = (&case.config, &case.key, &case.path);
+        let (v, path) = (ValidatedKey::authenticate(&case.config, &case.key).unwrap(), &case.path);
         for _ in 0..MUTATION_ROUNDS {
             let mut bad = case.record.clone();
             for _ in 0..(1 + next() % MAX_MUTATIONS) {
@@ -157,11 +157,11 @@ fn random_mutations_never_authenticate() {
                 }
             }
             if bad != case.record {
-                assert!(decrypt_file(config, key, path, &bad).is_err(), "{}: accepted a mutation", case.name);
+                assert!(v.decrypt(path, &bad).is_err(), "{}: accepted a mutation", case.name);
             }
             let mut random = case.record[..FILE_HEADER_LEN].to_vec();
             random.extend((0..(TAG_LEN + (next() % MAX_RANDOM_EXTRA) as usize)).map(|_| next() as u8));
-            assert!(decrypt_file(config, key, path, &random).is_err(), "{}: accepted random body", case.name);
+            assert!(v.decrypt(path, &random).is_err(), "{}: accepted random body", case.name);
         }
     }
 }

@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
-use transcrypt_rs::{initialize_config, unlock_config, SecretKey};
+use transcrypt_rs::ValidatedKey;
 use transcrypt_v3_core::{parse_file_header, record_envelope_ok, ATTRIBUTES_NAME, SALT_LEN};
 use crate::{
     attributes::{edit_attributes, filter_overrides, protect, restore_worktree_attributes, worktree_attributes},
@@ -217,17 +217,17 @@ fn remove_hook(repo: &Repository, name: &str, command: &str) -> io::Result<()> {
 
 /// Make `key` the credential of this checkout, in `mode`, and remove the
 /// other mode's.
-pub(crate) fn activate(repo: &Repository, config: &[u8], key: &SecretKey, mode: KeyMode) -> Result<(), String> {
+pub(crate) fn activate(repo: &Repository, key: &ValidatedKey, mode: KeyMode) -> Result<(), String> {
     match mode {
         KeyMode::Private { idle } => {
             credential::forget(repo)?;
-            if Key::load(repo, config)?.is_none() {
-                session::start(repo, config, key, idle)?;
+            if Key::load(repo, key.config())?.is_none() {
+                session::start(repo, key, idle)?;
             }
         },
         KeyMode::Stored => {
-            credential::store(repo, config, key)?;
-            let _ = session::stop(repo, config);
+            credential::store(repo, key)?;
+            let _ = session::stop(repo, key.config());
         },
     }
     Ok(())
@@ -281,10 +281,10 @@ impl Rollback {
 }
 
 /// A fresh salt and the config and key it gives with `password`.
-pub(crate) fn new_config(password: &[u8]) -> Result<([u8; transcrypt_v3_core::CONFIG_LEN], SecretKey), String> {
+pub(crate) fn new_config(password: &[u8]) -> Result<ValidatedKey, String> {
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
-    initialize_config(password, &salt)
+    ValidatedKey::initialize(password, &salt)
 }
 
 /// Whether `.transcrypt` exists but `HEAD` has no config: an interrupted
@@ -312,14 +312,12 @@ pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode,
     check_hook_available(repo)?;
     // Asked before anything is written: an interrupted prompt changes nothing.
     let password = password(interrupted.is_none())?;
-    let (config, key) = match &interrupted {
-        Some(existing) => {
-            let key = unlock_config(&password, existing).map_err(|e| format!("{e}: an interrupted init left \
-                .transcrypt/config under another passphrase; rerun with that one, or start over: {START_OVER}"))?;
-            (transcrypt_rs::config_array(existing)?.to_owned(), key)
-        },
+    let key = match &interrupted {
+        Some(existing) => ValidatedKey::unlock(&password, existing).map_err(|e| format!("{e}: an interrupted \
+            init left .transcrypt/config under another passphrase; rerun with that one, or start over: {START_OVER}"))?,
         None => new_config(&password)?,
     };
+    let config = key.config();
     let rollback = Rollback {
         config: config.to_vec(),
         attributes_before: worktree_attributes(repo)?,
@@ -328,11 +326,11 @@ pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode,
     let staging = staging_dir(repo)?;
     let result = (|| -> Result<(), String> {
         if interrupted.is_none() {
-            write_repository_file(repo.root(), &staging, Path::new(CONFIG_PATH), &config)?;
+            write_repository_file(repo.root(), &staging, Path::new(CONFIG_PATH), config)?;
         }
         edit_attributes(repo, &staging, false, |_| Ok(()))?;
         install(repo)?;
-        activate(repo, &config, &key, mode)?;
+        activate(repo, &key, mode)?;
         git(repo, &["add", "--", CONFIG_PATH, ".gitattributes"])?;
         Ok(())
     })();
@@ -364,9 +362,9 @@ pub(crate) fn unlock(repo: &Repository, args: &UnlockArgs) -> Result<(), String>
         return Ok(());
     }
     let password = passphrase(args.password_stdin, false)?;
-    let key = unlock_config(&password, &config)?; // Authenticate BEFORE any persistent writes.
+    let key = ValidatedKey::unlock(&password, &config)?; // Authenticate BEFORE any persistent writes.
     install(repo)?;
-    activate(repo, &config, &key, args.mode)?;
+    activate(repo, &key, args.mode)?;
     let mode = if args.mode.private() { "private mode: key in memory until lock or logout" }
         else { "key stored in .git/transcrypt-v3/key until lock" };
     if !args.hydrate {

@@ -1,6 +1,6 @@
 //! Independent reference vectors from OpenSSL-backed Python AESSIV + argon2-cffi.
 //! No Python is needed to run these Rust tests.
-use transcrypt_rs::{decrypt_file, encrypt_file, unlock_config};
+use transcrypt_rs::ValidatedKey;
 use transcrypt_v3_core::{parse_config, parse_file_header};
 
 mod common;
@@ -15,15 +15,15 @@ fn authenticated_vectors_and_strict_parsing() {
         let (path, plaintext, config, record) = (hex(path), hex(plaintext), hex(config), hex(record));
         assert!(parse_config(&config).is_ok());
         assert!(parse_file_header(&record).is_ok());
-        let key = unlock_config(b"correct horse battery staple long secret", &config).unwrap();
-        assert_eq!(encrypt_file(&config, &key, &path, &plaintext).unwrap(), record, "{name}");
-        assert_eq!(decrypt_file(&config, &key, &path, &record).unwrap().to_vec(), plaintext, "{name}");
+        let key = ValidatedKey::unlock(b"correct horse battery staple long secret", &config).unwrap();
+        assert_eq!(key.encrypt(&path, &plaintext).unwrap(), record, "{name}");
+        assert_eq!(key.decrypt(&path, &record).unwrap().to_vec(), plaintext, "{name}");
         let mut forged = record.clone();
         let last = forged.len() - 1;
         forged[last] ^= 1;
-        assert!(decrypt_file(&config, &key, &path, &forged).is_err());
-        assert!(unlock_config(b"not the right passphrase", &config).is_err());
-        assert!(decrypt_file(&config, &key, b"other.secret", &record).is_err(),
+        assert!(key.decrypt(&path, &forged).is_err());
+        assert!(ValidatedKey::unlock(b"not the right passphrase", &config).is_err());
+        assert!(key.decrypt(b"other.secret", &record).is_err(),
                 "cross-path transplant was accepted for {name}");
     }
 }

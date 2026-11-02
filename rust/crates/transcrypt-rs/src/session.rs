@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 
-use transcrypt_rs::{authenticate_config, clean_file, config_array, decrypt_file, SecretKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
+use transcrypt_rs::{SecretKey, ValidatedKey, KEY_SIZE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
     authorize_agent_request, decode_be_u32, decode_frame_header, encode_be_u32, encode_frame_header, AgentOp,
     BE_U32_LEN, CONFIG_LEN, FRAME_HEADER_LEN,
@@ -208,11 +208,12 @@ pub(crate) fn request(credentials: &Path, config: &[u8], op: AgentOp, path_bytes
     }
 }
 
-/// Derive and authenticate *before* this function is called. The process key
+/// Start the agent with `key`, validated for its config. The process key
 /// arrives by pipe, and the parent does not persist it anywhere on disk. With
 /// `idle`, the agent forgets the key and exits after that long without a
 /// request (session expiration).
-pub(crate) fn start(repo: &Repository, config: &[u8], key: &SecretKey, idle: Option<Duration>) -> Result<(), String> {
+pub(crate) fn start(repo: &Repository, key: &ValidatedKey, idle: Option<Duration>) -> Result<(), String> {
+    let config = key.config();
     let dir = prepare_directory(repo)?;
     let path = dir.join(SOCK);
     match os::is_socket(&path) {
@@ -239,11 +240,11 @@ pub(crate) fn start(repo: &Repository, config: &[u8], key: &SecretKey, idle: Opt
         Ok(None) => {},
         Err(_) => return Err("cannot examine session socket".into()),
     }
-    start_agent(repo, &dir, config, key, idle)
+    start_agent(repo, &dir, key, idle)
 }
 
 /// Start the agent of `repo`, listening in its credential directory `dir`.
-fn start_agent(repo: &Repository, dir: &Path, config: &[u8], key: &SecretKey, idle: Option<Duration>)
+fn start_agent(repo: &Repository, dir: &Path, key: &ValidatedKey, idle: Option<Duration>)
     -> Result<(), String>
 {
     let executable = std::env::current_exe().map_err(|_| "cannot locate executable for credential agent")?;
@@ -254,7 +255,7 @@ fn start_agent(repo: &Repository, dir: &Path, config: &[u8], key: &SecretKey, id
     // The key, then the idle limit in seconds (0: none), over the pipe.
     let idle_seconds = idle.map_or(NO_IDLE_LIMIT, |d| d.as_secs().max(MIN_IDLE_SECONDS));
     let sent = child.stdin.take().ok_or("agent key pipe missing")
-        .map(|mut pipe| sigpipe_blocked(&mut pipe, |pipe| pipe.write_all(&key[..]).and_then(|_| pipe.write_all(&idle_seconds.to_be_bytes()))))?;
+        .map(|mut pipe| sigpipe_blocked(&mut pipe, |pipe| pipe.write_all(key.secret()).and_then(|_| pipe.write_all(&idle_seconds.to_be_bytes()))))?;
     if sent.is_err() {
         let _ = child.kill();
         let _ = child.wait();
@@ -262,7 +263,7 @@ fn start_agent(repo: &Repository, dir: &Path, config: &[u8], key: &SecretKey, id
     }
     let mut last = "agent is not ready".to_owned();
     for _ in 0..polls(STARTUP_WAIT) {
-        match request(dir, config, AgentOp::Ping, &[], &[]) {
+        match request(dir, key.config(), AgentOp::Ping, &[], &[]) {
             Ok(_) => return Ok(()),
             Err(e) => last = e,
         }
@@ -287,7 +288,7 @@ pub(crate) fn stop(repo: &Repository, config: &[u8]) -> Result<(), String> {
     Err("agent acknowledged shutdown but socket still exists".into())
 }
 
-fn transaction(stream: &mut Stream, config: &[u8; CONFIG_LEN], key: &SecretKey) -> Result<bool, String> {
+fn transaction(stream: &mut Stream, key: &ValidatedKey) -> Result<bool, String> {
     let mut raw = [0u8; FRAME_HEADER_LEN];
     stream.read_exact(&mut raw).map_err(|_| "incomplete agent request header")?;
     let header = decode_frame_header(&raw);
@@ -300,14 +301,14 @@ fn transaction(stream: &mut Stream, config: &[u8; CONFIG_LEN], key: &SecretKey) 
     let size = decode_be_u32(&size_bytes) as usize;
     // The verified core decides, before the body is read, whether this
     // request is permitted under the configuration authenticated at startup.
-    let action = authorize_agent_request(header.opcode, &header.config, config, &path_bytes, size)
+    let action = authorize_agent_request(header.opcode, &header.config, key.config(), &path_bytes, size)
         .map_err(|_| "agent request refused: config, path, size or opcode not permitted")?;
     let mut body = Zeroizing::new(vec![0u8; size]);
     stream.read_exact(&mut body).map_err(|_| "incomplete agent body")?;
     let result = match action {
         AgentOp::Ping => Ok(Vec::new()),
-        AgentOp::Encrypt => clean_file(config, key, &path_bytes, &body),
-        AgentOp::Decrypt => decrypt_file(config, key, &path_bytes, &body)
+        AgentOp::Encrypt => key.clean(&path_bytes, &body),
+        AgentOp::Decrypt => key.decrypt(&path_bytes, &body)
             .map(|mut plaintext| std::mem::take(&mut *plaintext)),
         AgentOp::Stop => {
             reply(stream, Ok(Vec::new())).map_err(|_| "cannot acknowledge agent shutdown")?;
@@ -321,19 +322,22 @@ fn transaction(stream: &mut Stream, config: &[u8; CONFIG_LEN], key: &SecretKey) 
 /// Internal child entrypoint. Runs until explicit lock or a process shutdown.
 pub(crate) fn serve(repo: &Repository, config: &[u8]) -> Result<(), String> {
     os::close_inherited();
-    let config = config_array(config)?;
-    let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
-    // Keep the key page out of swap where the OS allows it (best effort;
+    let mut received: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
+    // Keep the key pages out of swap where the OS allows it (best effort;
     // the key is still never written to disk).
-    os::lock_memory(key.as_ptr(), KEY_SIZE);
-    io::stdin().read_exact(&mut key[..]).map_err(|_| "missing private startup key")?;
+    os::lock_memory(received.as_ptr(), KEY_SIZE);
+    io::stdin().read_exact(&mut received[..]).map_err(|_| "missing private startup key")?;
     let mut idle = [0u8; size_of::<u64>()];
     io::stdin().read_exact(&mut idle).map_err(|_| "missing agent idle limit")?;
     let idle = match u64::from_be_bytes(idle) {
         NO_IDLE_LIMIT => None,
         seconds => Some(Duration::from_secs(seconds)),
     };
-    authenticate_config(config, &key)?;
+    // The agent holds the key only validated for this worktree's config,
+    // and serves only that config (`authorize_agent_request`).
+    let key = ValidatedKey::authenticate(config, &received)?;
+    drop(received);
+    os::lock_memory(key.secret().as_ptr(), KEY_SIZE);
     let dir = directory(&credential_directory(repo))?;
     let path = dir.join(SOCK);
     let listener = at_socket(&dir, |p| Listener::bind(p))?.map_err(|e| format!("cannot bind private credential socket: {e}"))?;
@@ -344,7 +348,7 @@ pub(crate) fn serve(repo: &Repository, config: &[u8]) -> Result<(), String> {
         // One already gone can refuse the timeouts (macOS: EINVAL once the
         // peer has closed); it is dropped, and the agent keeps serving.
         if set_timeouts(&stream).is_err() || same_user(&stream).is_err() { continue; }
-        match transaction(&mut stream, config, &key) {
+        match transaction(&mut stream, &key) {
             Ok(true) => break,
             Ok(false) => {},
             Err(message) => {
@@ -352,7 +356,7 @@ pub(crate) fn serve(repo: &Repository, config: &[u8]) -> Result<(), String> {
                 // A refused request may come from a checkout whose config has
                 // since changed (a pulled rekey). If this agent's own
                 // worktree no longer has its config, its key is obsolete.
-                if fs::read(repo.root().join(crate::git::CONFIG_PATH)).ok().as_deref() != Some(&config[..]) {
+                if fs::read(repo.root().join(crate::git::CONFIG_PATH)).ok().as_deref() != Some(&key.config()[..]) {
                     break;
                 }
             },

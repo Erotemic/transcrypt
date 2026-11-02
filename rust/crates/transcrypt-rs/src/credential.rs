@@ -21,8 +21,8 @@ use std::{
     path::PathBuf,
 };
 use zeroize::Zeroizing;
-use transcrypt_rs::{authenticate_config, clean_file, decrypt_file, SecretKey, KEY_SIZE};
-use transcrypt_v3_core::{stored_key_state, AgentOp, StoredKey, CONFIG_LEN, ID_LEN, KEY_FILE_LEN};
+use transcrypt_rs::{StoredKey, ValidatedKey, KEY_SIZE};
+use transcrypt_v3_core::{AgentOp, CONFIG_LEN, ID_LEN, KEY_FILE_LEN};
 use crate::{fsat, git::Repository, session};
 
 const KEY_FILE: &str = "key";
@@ -35,8 +35,16 @@ pub(crate) struct Key {
     /// The repository's credential directory, where the private mode's
     /// agent listens (`session::credential_directory`).
     credentials: PathBuf,
-    config: Vec<u8>,
-    stored: Option<SecretKey>,
+    source: Source,
+}
+
+/// Where the key of a `Key` is.
+enum Source {
+    /// The stored key, validated for its configuration.
+    Stored(ValidatedKey),
+    /// The private agent, which answered for this configuration (it holds
+    /// its own `ValidatedKey` and refuses requests for any other).
+    Agent(Vec<u8>),
 }
 
 /// How this checkout is unlocked for a configuration (`lookup`).
@@ -75,15 +83,14 @@ impl Key {
 
     /// The stored key with the config it was unlocked for, whatever the
     /// worktree's config is now (during a checkout, Git may write files
-    /// before it writes `.transcrypt/config`).
+    /// before it writes `.transcrypt/config`): the verified decision for the
+    /// config the file itself names.
     pub(crate) fn stored(repo: &Repository) -> Result<Option<Key>, String> {
         let file = read_key_file(repo)?;
         let file = file.as_ref().map(|f| f.as_slice());
         let stored_config = file.and_then(|f| f.get(..CONFIG_LEN)).unwrap_or_default();
         match stored_lookup(file, stored_config) {
-            Ok(Some(secret)) => Ok(Some(Key {
-                credentials: session::credential_directory(repo), config: stored_config.to_vec(), stored: Some(secret),
-            })),
+            Ok(Some(key)) => Ok(Some(Key { credentials: session::credential_directory(repo), source: Source::Stored(key) })),
             Ok(None) | Err(StoredKey::Stale) => Ok(None),
             Err(_) => Err(DAMAGED.into()),
         }
@@ -91,28 +98,31 @@ impl Key {
 
     /// The public identifier of this key's config (records name it).
     pub(crate) fn config_id(&self) -> [u8; ID_LEN] {
-        transcrypt_rs::config_id(&self.config)
+        match &self.source {
+            Source::Stored(key) => key.config_id(),
+            Source::Agent(config) => transcrypt_rs::config_id(config),
+        }
     }
 
     /// Whether this is the private mode (in-memory agent, private files).
     pub(crate) fn private(&self) -> bool {
-        self.stored.is_none()
+        matches!(self.source, Source::Agent(_))
     }
 
     /// The clean filter: the record for `input` at `path` (an input that
     /// already is that genuine record is returned unchanged).
     pub(crate) fn clean(&self, path: &[u8], input: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
-        match &self.stored {
-            Some(key) => clean_file(&self.config, key, path, input).map(Zeroizing::new),
-            None => session::request(&self.credentials, &self.config, AgentOp::Encrypt, path, input),
+        match &self.source {
+            Source::Stored(key) => key.clean(path, input).map(Zeroizing::new),
+            Source::Agent(config) => session::request(&self.credentials, config, AgentOp::Encrypt, path, input),
         }
     }
 
     /// Authenticate `record` at `path` and return its plaintext.
     pub(crate) fn open(&self, path: &[u8], record: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
-        match &self.stored {
-            Some(key) => decrypt_file(&self.config, key, path, record),
-            None => session::request(&self.credentials, &self.config, AgentOp::Decrypt, path, record),
+        match &self.source {
+            Source::Stored(key) => key.decrypt(path, record),
+            Source::Agent(config) => session::request(&self.credentials, config, AgentOp::Decrypt, path, record),
         }
     }
 }
@@ -135,39 +145,34 @@ pub(crate) fn lookup(repo: &Repository, config: &[u8]) -> Result<Unlock, String>
 
 /// `lookup` given what the stored key file holds: without a stored key, the
 /// private agent is asked.
-fn unlock_state(repo: &Repository, config: &[u8], stored: Result<Option<SecretKey>, StoredKey>) -> Result<Unlock, String> {
+fn unlock_state(repo: &Repository, config: &[u8], stored: Result<Option<ValidatedKey>, StoredKey>)
+    -> Result<Unlock, String>
+{
     let credentials = session::credential_directory(repo);
     match stored {
-        Ok(Some(secret)) => return Ok(Unlock::Unlocked(Key { credentials, config: config.to_vec(), stored: Some(secret) })),
+        Ok(Some(key)) => return Ok(Unlock::Unlocked(Key { credentials, source: Source::Stored(key) })),
         Err(StoredKey::Stale) => return Ok(Unlock::Stale),
         Err(_) => return Err(DAMAGED.into()),
         Ok(None) => {},
     }
     Ok(if session::request(&credentials, config, AgentOp::Ping, &[], &[]).is_ok() {
-        Unlock::Unlocked(Key { credentials, config: config.to_vec(), stored: None })
+        Unlock::Unlocked(Key { credentials, source: Source::Agent(config.to_vec()) })
     } else {
         Unlock::Locked
     })
 }
 
-/// The stored key for `config`, as the verified `stored_key_state` decides:
-/// `Ok(Some)` only if the file holds exactly `config` then a key that
-/// authenticates it; `Ok(None)` without a stored key (none, or one written
-/// by an earlier version: the key alone); `Err(Stale)` for a key of another
-/// config or one that does not authenticate it; `Err(Damaged)` otherwise.
-fn stored_lookup(file: Option<&[u8]>, config: &[u8]) -> Result<Option<SecretKey>, StoredKey> {
-    let bytes = file.unwrap_or_default();
-    // The key bytes, if the file has the stored layout (`config ‖ key`).
-    let secret: Option<SecretKey> = (bytes.len() == KEY_FILE_LEN).then(|| {
-        let mut key: SecretKey = Zeroizing::new([0u8; KEY_SIZE]);
-        key.copy_from_slice(&bytes[CONFIG_LEN..]);
-        key
-    });
-    let authentic = secret.as_ref().is_some_and(|key| authenticate_config(config, key).is_ok());
-    match stored_key_state(file.is_some(), bytes, config, authentic) {
-        StoredKey::Unlocked => Ok(secret),
-        StoredKey::Absent => Ok(None),
-        state => Err(state),
+/// The stored key for `config`, as the verified `unlock_stored_key`
+/// decides: `Ok(Some)` only if the file holds exactly `config` then a key
+/// that authenticates it, and then that key, validated for `config`;
+/// `Ok(None)` without a stored key (none, or one written by an earlier
+/// version: the key alone); `Err(Stale)` for a key of another config or one
+/// that does not authenticate it; `Err(Damaged)` otherwise.
+fn stored_lookup(file: Option<&[u8]>, config: &[u8]) -> Result<Option<ValidatedKey>, StoredKey> {
+    match ValidatedKey::from_stored(file.is_some(), file.unwrap_or_default(), config) {
+        Ok(key) => Ok(Some(key)),
+        Err(StoredKey::Absent) => Ok(None),
+        Err(state) => Err(state),
     }
 }
 
@@ -186,18 +191,17 @@ fn read_key_file(repo: &Repository) -> Result<Option<Zeroizing<Vec<u8>>>, String
         .map(Some).map_err(|_| "cannot read .git/transcrypt-v3/key".into())
 }
 
-/// Store `key`, with the public `config` it unlocks, for later commands: an
-/// exclusive 0600 temporary in the private directory, synced, then renamed
-/// over any previous key.
-pub(crate) fn store(repo: &Repository, config: &[u8], key: &SecretKey) -> Result<(), String> {
-    if config.len() != CONFIG_LEN { return Err(transcrypt_rs::invalid_config()); }
+/// Store `key`, with the public config it authenticated, for later
+/// commands: an exclusive 0600 temporary in the private directory, synced,
+/// then renamed over any previous key.
+pub(crate) fn store(repo: &Repository, key: &ValidatedKey) -> Result<(), String> {
     let dir = fsat::Dir::open(&session::prepare_directory(repo)?)
         .map_err(|_| "cannot open the local v3 credential directory")?;
     let temp = format!("{KEY_FILE}.{}.tmp", std::process::id());
     let temp = OsStr::new(&temp);
     let _ = dir.unlink(temp);
     let mut file = dir.create_new(temp, crate::modes::PRIVATE_FILE).map_err(|e| format!("cannot create the key file: {e}"))?;
-    let written = file.write_all(config).and_then(|_| file.write_all(&key[..])).and_then(|_| file.sync_all());
+    let written = file.write_all(key.config()).and_then(|_| file.write_all(key.secret())).and_then(|_| file.sync_all());
     drop(file);
     if let Err(e) = written.and_then(|_| dir.rename_to(temp, &dir, OsStr::new(KEY_FILE))) {
         let _ = dir.unlink(temp);
