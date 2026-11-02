@@ -2,7 +2,8 @@
 
 **Written 2026-10-26; settled entries and A24 added the same day (review
 round 9); the product theorems and the A24 induction added 2026-11-01
-(`ProductSecurity.lean`).** This document states, in one place, what the
+(`ProductSecurity.lean`); the keyed audit of one commit and the start of a
+keyed history added 2026-11-02 (`Audit.lean`).** This document states, in one place, what the
 machine-checked proofs say about the product's main promise and exactly
 which assumptions that statement rests on. It is the readable companion of
 [`EndToEnd.lean`](../../proofs/aeneas/v3/V3Wire/Verification/EndToEnd.lean).
@@ -146,12 +147,53 @@ What remains assumed:
 * **The start of history.** Commits made without the keyed hook
   (`--no-verify`, cherry-pick and rebase, a locked checkout, pulled
   commits, other parties) are outside the induction. A full keyed check
-  (`verify-index` of an index holding `HEAD`'s entries) or a keyed commit
-  that changes the policy establishes the invariant. The keyed `audit`
-  (pre-push, A13) authenticates every selected entry of each commit but
-  does not read unprotected files, so it gives only `HeadAuthentic`, which
-  a later local override can invalidate (tested:
+  (`verify-index` of an index holding `HEAD`'s entries), a keyed commit
+  that changes the policy, or a keyed audit of the commit `HEAD` names
+  establishes the invariant. The keyed `audit` (pre-push, A13) keeps the
+  same selection-independent invariant for each commit it checks
+  (`keyed_audit_authenticates_commit`, below), so an audited `HEAD`
+  discharges the start (`audited_head_starts_keyed_history`), relative to
+  the audit's own contracts and its start: the parent of the first audited
+  commit when it lies outside the range (an audit from the root trusts
+  nothing). A local history that was never audited is still trusted by the
+  incremental hook in that checkout (tested, with the pre-push refusal:
   `local_attribute_overrides_never_admit_a_forged_record_through_checked_history`).
+
+### The keyed audit of one commit (`Audit.lean`)
+
+`audit_commit` checks one commit against its first parent: the entries
+`diff-tree` lists, or the whole tree for a root commit, a config change or
+an attribute change. Each examined entry is checked by the extracted
+`audit_check` (`audit_check_spec`), which chooses a check in the hook's
+vocabulary, and the extracted `staged_verdict`; the model `auditPlan` only
+sequences the two. With the key a selected entry is authenticated; an
+unprotected file the parent holds exactly is trusted from the parent only
+while the config is unchanged (`AuditBase.Parent`); any other unprotected
+file is authenticated if it is a record of the commit's config.
+
+* `keyed_audit_authenticates_commit`: if the keyed audit accepted, the
+  commit's records authenticate (`RecordsAuthentic`) given its parent's
+  when it trusted the parent (nothing for `AuditBase.Tree`), and every
+  path the commit's attributes select, metadata aside, is a regular file
+  whose record authenticates there (`SelectionAuthentic`), given the
+  parent's selection and its agreement on unexamined entries.
+* `keyless_audit_checks_envelopes`: without the key, every examined
+  selected entry has the envelope and is held by the parent or is no blob
+  of a path the commit deleted; nothing is authenticated (A14).
+* `audited_head_starts_keyed_history`, `audited_head_keyed_history_authenticated`:
+  an audited `HEAD` (with a true guard of the next hook run, which keeps
+  `HEAD`'s configuration, `config_of_guard_head`) is the start of
+  `keyed_history_authenticated_by_guard`.
+* `keyed_audit_chain_authenticated`: a chain of keyed audits, each commit's
+  first parent the previous commit, keeps both invariants.
+
+Its contracts: `AuditContracts` (every non-reserved entry not examined is
+the parent's exactly, and only while the config is unchanged; the facts
+`audit_check` receives and the blobs read are Git's: A20, A19, A11, A21),
+`AuditAnswers` (A4), `AuditSelectionAgrees` (A19: the adapter examines the
+whole tree when an attribute file changes) and `Realizes` (A5). The
+adapter's per-run cache of checked records (`settled_by_cache`) is
+reviewed and tested, not modelled.
 
 ### How the proof goes
 
@@ -245,6 +287,7 @@ named predicates; each keeps its external hypotheses visible.
 | Check modes | `pre_commit_check_modes` | Theorem 1 in each mode |
 | Record invariant | `keyed_check_records_authentic`: an accepted keyed check keeps `RecordsAuthentic` (selection-independent), trusting `HEAD`'s only under the guard | `hook_records_authentic`, `hook_authenticated_of_records` |
 | A24 history | `keyed_history_authenticated_by_guard` (no policy or selection hypothesis) | the above, by induction; `records_authentic_of_checked_commit`, `config_unchanged_of_guard`, `hook_policy_guard`, `policy_unchanged_sound` |
+| Audited history (A13, the start of A24) | `keyed_audit_authenticates_commit`, `audited_head_keyed_history_authenticated`, `keyed_audit_chain_authenticated` (`Audit.lean`) | `audit_check_spec`, `staged_verdict_ok`, `audit_entry_checked`, `config_of_guard_head`, `keyed_history_authenticated_by_guard` |
 | B. Authenticated recovery | `checkout_releases_only_authenticated_plaintext`: smudge's output either differs from the stored record and is exactly the plaintext it authenticates to at that path and configuration, or is the record itself, unchanged, with the v3 envelope (locked, another configuration, private mode); a record it decided to open that does not authenticate is refused. `checkout_opens_genuine_records`: a genuine record of this configuration opens to its plaintext | `smudgeModel_spec`, `smudge_action_spec`, `open_record_complete`, `opensTo_envelopeOk`, `sealed_length` |
 | C. No laundering | `repair_never_launders`: seals only the user's change or forced plaintext (no v3 header); rebinds only the user's record that authenticates at its move source; content imported from `HEAD` or an incoming commit is never rebound, and sealed only when `protect` forced it; the user's change is never skipped | `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`, `repair_plan_repairs_only_local`, `UserStaged.not_committed` |
 | D. Configuration-bound key | `stored_key_binds_file_operations`: when the stored key is used (the verified `unlock_stored_key` returned primitives and a config), its file holds the current configuration, the primitives are those of the file's key bytes (`KeyScheduleRealizes`, A5/A17) and authenticate it, and every record they open or seal is bound to that configuration and path | `unlock_stored_key_spec`, `authenticate_key_spec`, `open_record_spec`, `seal_record_spec`, `seal_opens` |
@@ -267,7 +310,9 @@ anything about commits outside a keyed history (A13).
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
 | `RepairContracts.incoming`, `.lazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | `HeadAuthentic` (corollary; only for an incremental check) | `HEAD`'s selected entries authenticate | A24 (selection form) | REVIEWED + TESTED (keyed audit, A13) |
-| `RecordsAuthentic … g.head` (only when the check trusted `HEAD`) | `HEAD`'s records authenticate at their paths, whatever selects them | A24 | induction PROVED (model) (`keyed_history_authenticated_by_guard`); its start: a full keyed check or a policy change (TESTED: `local_attribute_overrides_*`, `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`) |
+| `RecordsAuthentic … g.head` (only when the check trusted `HEAD`) | `HEAD`'s records authenticate at their paths, whatever selects them | A24 | induction PROVED (model) (`keyed_history_authenticated_by_guard`); its start PROVED (model) from a keyed audit of `HEAD` (`audited_head_starts_keyed_history`), or a full keyed check or a policy change (TESTED: `local_attribute_overrides_*`, `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`, `the_keyed_audit_authenticates_records_at_unprotected_paths`) |
+| `AuditContracts`, `AuditAnswers`, `AuditSelectionAgrees` (audit) | the audit examined what Git lists, every other entry is the parent's, its facts and answers are true, and an unexamined entry is selected as in the parent | A20, A19, A11, A21, A4 | REVIEWED + TESTED (`audits_read_no_unchanged_unprotected_file`, `the_audit_*`) |
+| the audit's parent records (when it trusted the parent) | the first audited commit's parent outside the range has authentic records | A13 | deployment: audited when pushed, or an audit from the root |
 | `CommitStep`, `GuardedHistoryStep` (history) | the next `HEAD` is made from the checked index and has its policy entries; objects keep their content | A22, A11 | TESTED; ASSUMED |
 | Unforgeability | only the key holder makes records that authenticate | A10 | ASSUMED (standard) |
 
@@ -275,13 +320,14 @@ anything about commits outside a keyed history (A13).
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 146 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 161 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the per-entry composition `hook_entry_checked` and
   the end-to-end theorems (with the A24 corollaries), the product theorems
-  and the A24 induction (`ProductSecurity.lean`), about Lean models that
-  only sequence the generated functions.
+  and the A24 induction (`ProductSecurity.lean`), and the keyed audit of
+  one commit with the start of a keyed history (`Audit.lean`), about Lean
+  models that only sequence the generated functions.
 * **TESTED:** that the Rust adapter matches the models and contracts
   (A4), Git's behavior (A7, A19–A23), the primitives (A5, A9); the
   discharge of A24 by the hook and the audit (also REVIEWED).
@@ -292,7 +338,8 @@ anything about commits outside a keyed history (A13).
 
 * **Commits made without the hook** (`--no-verify`, a clone that never ran
   `unlock`, merges that skip `pre-commit`): the `pre-push` hook and
-  `audit` check history (A13); `audit` is not part of this statement.
+  `audit` check history (A13); what a keyed audit establishes is stated
+  in `Audit.lean` (above), relative to its deployment.
 * **Keyless forgery:** without the key, only the envelope is checked
   (A14); the next unlocked check or keyed audit authenticates.
 * **Unprotected files:** the record checks of unprotected entries (no

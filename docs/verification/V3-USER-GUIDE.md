@@ -312,7 +312,11 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
   protects unless it opens there (a record moved without re-encryption, or
   a forgery): a local attribute file could otherwise protect it later
   without it ever being authenticated. Remove it, or stage its plaintext.
-  Ordinary commits do not read unchanged unprotected files.
+  The keyed `audit` and the pre-push hook refuse the same in any commit
+  they check, however it was made (`--no-verify`, a rebase, another
+  person); a genuine record that opens at its own unprotected name passes.
+  Without the key, `audit` checks envelopes only and says so. Ordinary
+  commits and pushes do not read unchanged unprotected files.
 - **Old history.** Checking out a commit encrypted under an earlier config
   (before a `rekey`) leaves its protected files encrypted, unless you unlock
   with that config's passphrase.
