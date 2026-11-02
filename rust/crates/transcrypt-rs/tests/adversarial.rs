@@ -170,6 +170,42 @@ fn foreign_truncated_and_plaintext_index_entries_fail_closed() {
     run(&repo, bin(), &["verify-index"], None);
 }
 
+/// A record authenticates only at its exact path: one sealed for `a.secret`
+/// and placed at `dir/a.secret` (same file name, another directory) is
+/// refused by the keyed index check and by the keyed audit, which pass the
+/// whole path to `Key::open` (the path of `AuthenticatedAt`).
+#[test]
+fn records_moved_to_the_same_name_in_another_directory_are_refused() {
+    let mut scratch = Scratch::new("samename");
+    let repo = scratch.repo("repo");
+    let record = staged(&repo, "a.secret");
+    let id = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(&record))).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", REGULAR_FILE_MODE, id.trim(), "dir/a.secret"], None);
+    let err = run_fails(&repo, bin(), &["verify-index"], None);
+    assert!(err.contains("dir/a.secret"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "transplant"], None);
+    let err = run_fails(&repo, bin(), &["audit"], None);
+    assert!(err.contains("dir/a.secret"), "{err}");
+}
+
+/// The index check runs with the key of the worktree's configuration, so it
+/// refuses an index that stages another configuration: records checked
+/// under one configuration are never committed with another (the shared
+/// configuration of `ValidCheckedPublication`).
+#[test]
+fn an_index_staging_another_configuration_is_refused() {
+    let mut scratch = Scratch::new("otherconfig");
+    let repo = scratch.repo("repo");
+    let other = scratch.repo("other");
+    let config = fs::read(other.join(".transcrypt/config")).unwrap();
+    let id = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(&config))).unwrap();
+    run(&repo, "git", &["update-index", "--cacheinfo", REGULAR_FILE_MODE, id.trim(), ".transcrypt/config"], None);
+    let err = run_fails(&repo, bin(), &["verify-index"], None);
+    assert!(err.contains("staged .transcrypt/config"), "{err}");
+    let err = run_fails(&repo, "git", &["commit", "-q", "-m", "other config"], None);
+    assert!(err.contains("staged .transcrypt/config"), "{err}");
+}
+
 #[test]
 fn help_and_status_report_state_without_changing_anything() {
     let mut scratch = Scratch::new("status");
