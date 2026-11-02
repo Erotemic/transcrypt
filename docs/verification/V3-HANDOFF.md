@@ -109,9 +109,17 @@ semantics silently or import legacy CBC into the proved core.
   a history of keyed commits keeps it with no policy or selection
   hypothesis (`keyed_history_authenticated_by_guard`, through
   `records_authentic_of_checked_commit` and `config_unchanged_of_guard`).
-  `SelectionByPolicy` (A19 for local attribute sources) is gone; the start
-  of history is a full keyed check or a policy change, not the keyed audit
-  (A24).
+  `SelectionByPolicy` (A19 for local attribute sources) is gone. Later on
+  2026-11-02 the keyed audit keeps the same invariant for history the hook
+  never saw: its per-entry check is the core's `audit_check` (with
+  `staged_verdict`), and `keyed_audit_authenticates_commit` (`Audit.lean`)
+  proves that a keyed audit of one commit gives its `RecordsAuthentic` from
+  its parent's (nothing for a root commit or a config change) and
+  authenticates its selection; `audited_head_starts_keyed_history`
+  discharges the start of A24 from an audited `HEAD`. What remains of the
+  start is the audit's own: a first parent outside the audited range is
+  trusted (A13), and a local history never audited is trusted by the
+  incremental hook in that checkout (it cannot pass the pre-push hook).
 - The pre-commit repair is a typed plan: the core derives each entry's
   `Provenance` from the snapshots (`entry_provenance`), decides whether its
   blob is read (`needs_record`), and decides `repair_plan(Provenance,
@@ -385,8 +393,10 @@ Pushes are the owner's.
    `stored_key_state` (`stored_key_authenticates_current_config`); object
    replies are `parse_batch_header`/`blob_read`. Next A4 narrowings: the
    inputs of smudge/hydrate/lock (worktree reads), the filter-process
-   key/value lines, and the audit's per-commit loop (an end-to-end
-   statement for `audit` like the hook's).
+   key/value lines. Done 2026-11-02: the audit's per-commit check
+   (`audit_check`, `keyed_audit_authenticates_commit`); its remaining
+   adapter parts are the `diff-tree` facts (`AuditContracts`), the drift
+   check and the checked-record cache.
 5. **Done:** the private-mode agent's optional idle timeout (`--timeout`).
 6. **Performance** (release build, 10 000 files, 300 protected): a commit
    with the hook takes 0.24 s, a protected edit 0.27 s, a `git mv` of a

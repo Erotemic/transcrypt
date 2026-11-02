@@ -3495,4 +3495,44 @@ def blob_read (size : Std.U64) (skip_large : Bool) : RustM BlobRead := do
        then ok BlobRead.Skip
        else ok BlobRead.TooLarge
 
+/-- [transcrypt_v3_core::audit_check]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2067:0-2089:1
+    Visibility: public -/
+def audit_check
+  (entry : AuditedEntry) (path : Slice Std.U8) (keyed : Bool)
+  (base : AuditBase) :
+  RustM (core.option.Option StagedCheck)
+  := do
+  let (entry1, trusted) ←
+    match base with
+    | AuditBase.Tree => ok (entry, false)
+    | AuditBase.Parent => ok (entry, entry.held)
+  let b ← is_reserved_path path
+  if b
+  then ok (core.option.Option.Some StagedCheck.Skip)
+  else
+    if entry1.selected
+    then
+      if entry1.regular
+      then
+        let ec ← entry_check keyed false entry1.held
+        ok (core.option.Option.Some (StagedCheck.Protected ec))
+      else ok core.option.Option.None
+    else
+      if entry1.regular
+      then
+        if trusted
+        then ok (core.option.Option.Some StagedCheck.Skip)
+        else
+          if keyed
+          then ok (core.option.Option.Some StagedCheck.AuthenticateIfRecord)
+          else
+            if entry1.moved
+            then
+              if entry1.held
+              then ok (core.option.Option.Some StagedCheck.Skip)
+              else ok (core.option.Option.Some StagedCheck.NotRecord)
+            else ok (core.option.Option.Some StagedCheck.Skip)
+      else ok (core.option.Option.Some StagedCheck.Skip)
+
 end transcrypt_v3_core

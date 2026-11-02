@@ -818,9 +818,9 @@ theorem hook_policy_guard {E : Type} {g : GitState} {run : HookEvidence g E} (hg
 /-- **Stored-key unlock.** `Key::load` uses a stored key only when the
     verified `stored_key_state` says `Unlocked`, with `authentic` computed by
     the verified `authenticate_config` under the primitives built from the
-    stored key bytes (A17: the adapter builds them from `file[CONFIG_LEN..]`). Then
-    the file holds exactly the current configuration and the key
-    authenticates it (`ConfigAuthentic`, relative to `Realizes`, A5). -/
+    stored key bytes (A17: `unlock_stored_key` takes them from
+    `file[CONFIG_LEN..KEY_CHECK_START]`). Then the file holds exactly the
+    current configuration and the key authenticates it (`ConfigAuthentic`, relative to `Realizes`, A5). -/
 theorem stored_key_authenticates_current_config (hR : Realizes inst prims σ)
     (present : Bool) (file current : Slice U8) (config : Std.Array U8 55#usize)
     (hcur : sliceBytes current = wireBytes config) (authentic : Bool)

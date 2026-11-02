@@ -339,4 +339,46 @@ theorem staged_verdict_ok {E : Type} (inst : StagedEvidence E) (ev : E) (check :
             | div => rw [he] at h; simp at h
     · simp at h
 
+/-! ## `audit_check` -/
+
+/-- What `audit_check` decides for an entry of an audited commit with the
+    facts `a` (regular, selected by the commit's attributes, held exactly by
+    the first parent, a blob of a path the commit deletes), whose path is
+    reserved metadata or not, in an audit with or without the key, from the
+    base `base`. Reserved metadata is skipped; a selected entry is refused
+    (`none`) unless it is a regular file, which is checked as `entry_check`
+    decides, not incremental, settled when the parent holds it; an
+    unprotected file is skipped when it is a symlink or submodule, or the
+    parent holds it under the same configuration, or, without the key,
+    unless it is a moved blob the parent does not hold, which must be no
+    record; with the key any other unprotected file is authenticated if it
+    is a record. -/
+def AuditCheckOf (a : AuditedEntry) (reserved : Prop) (keyed : Bool) (base : AuditBase) :
+    Option StagedCheck → Prop
+  | none => ¬ reserved ∧ a.selected = true ∧ a.regular = false
+  | some (.Protected c) => ¬ reserved ∧ a.selected = true ∧ a.regular = true ∧ EntryCheckOf keyed false a.held c
+  | some .Skip => reserved ∨ (a.selected = false ∧
+      (a.regular = false ∨ (a.held = true ∧ base = .Parent) ∨ (keyed = false ∧ ¬ (a.moved = true ∧ a.held = false))))
+  | some .NotRecord => ¬ reserved ∧ a.selected = false ∧ a.regular = true ∧ ¬ (a.held = true ∧ base = .Parent) ∧
+      keyed = false ∧ a.moved = true ∧ a.held = false
+  | some .AuthenticateIfRecord => ¬ reserved ∧ a.selected = false ∧ a.regular = true ∧
+      ¬ (a.held = true ∧ base = .Parent) ∧ keyed = true
+
+/-- **The audit's check of one entry.** `audit_check` decides
+    `AuditCheckOf` its facts and path. -/
+theorem audit_check_spec (a : AuditedEntry) (path : Slice U8) (keyed : Bool) (base : AuditBase) :
+    audit_check a path keyed base ⦃ r => AuditCheckOf a (Reserved (sliceBytes path)) keyed base r ⦄ := by
+  obtain ⟨b, hb, hres⟩ := WP.spec_imp_exists (is_reserved_path_spec path)
+  rcases a with ⟨regular, selected, held, moved⟩
+  revert keyed
+  cases b
+  · have hr : ¬ Reserved (sliceBytes path) := fun h => by simpa using hres.mpr h
+    intro keyed
+    rcases base with _ | _ <;> rcases keyed with _ | _ <;> rcases regular with _ | _ <;> rcases selected with _ | _ <;>
+      rcases held with _ | _ <;> rcases moved with _ | _ <;>
+      simp [audit_check, hb, entry_check, AuditCheckOf, EntryCheckOf, hr]
+  · have hr : Reserved (sliceBytes path) := hres.mp rfl
+    intro keyed
+    rcases base with _ | _ <;> simp [audit_check, hb, AuditCheckOf, hr]
+
 end Transcrypt.V3Verification

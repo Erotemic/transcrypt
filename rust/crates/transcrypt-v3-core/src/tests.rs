@@ -1039,3 +1039,40 @@ fn held_records_compare_the_mode_too() {
     assert!(held_records(&index.0, &index.1, &wanted, &index.0, &index.1, &mut by_record));
     assert_eq!(by_record, wanted);
 }
+
+/// `audit_check` agrees with its definition on every combination: reserved
+/// metadata is skipped; a selected regular file is checked as `entry_check`
+/// says (not incremental, settled when the parent holds it) and a selected
+/// symlink is refused; an unprotected file the parent holds is trusted only
+/// from a parent under the same configuration; with the key every other
+/// unprotected file is authenticated if it is a record, and without it only
+/// a moved record is refused.
+#[test]
+fn audit_checks_match_their_definition() {
+    use StagedCheck::*;
+    for bits in 0..(1u32 << 7) {
+        let bit = |k: u32| bits & (1 << k) != 0;
+        let entry = AuditedEntry { regular: bit(0), selected: bit(1), held: bit(2), moved: bit(3) };
+        let (keyed, reserved) = (bit(4), bit(5));
+        let base = if bit(6) { AuditBase::Parent } else { AuditBase::Tree };
+        let path: &[u8] = if reserved { b".transcrypt/config" } else { b"a.env" };
+        let expected = if reserved {
+            Some(Skip)
+        } else if entry.selected {
+            entry.regular.then(|| Protected(entry_check(keyed, false, entry.held)))
+        } else if !entry.regular || (entry.held && base == AuditBase::Parent) {
+            Some(Skip)
+        } else if keyed {
+            Some(AuthenticateIfRecord)
+        } else if entry.moved && !entry.held {
+            Some(NotRecord)
+        } else {
+            Some(Skip)
+        };
+        assert_eq!(audit_check(entry, path, keyed, base), expected, "{bits:b}");
+        // With the key, a selected file is always authenticated.
+        if keyed && entry.selected && entry.regular && !reserved {
+            assert_eq!(expected, Some(Protected(EntryCheck::Authenticate)), "{bits:b}");
+        }
+    }
+}

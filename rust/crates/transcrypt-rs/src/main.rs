@@ -156,8 +156,8 @@ fn run_audit(AuditArgs { max_commits, revs }: AuditArgs) -> Result<(), String> {
     };
     let audited = audit(&repo, &revs, keyed, max_commits)?;
     println!("audit: {} protected record(s) checked{}", audited.records,
-        if audited.authenticated { ", all authenticated with the key" }
-        else { " (envelopes only: unlock to authenticate them)" });
+        if audited.authenticated { ", all authenticated with the key, as is every record at an unprotected path" }
+        else { " (envelopes only: unlock to authenticate them and any record at an unprotected path)" });
     Ok(())
 }
 

@@ -15,7 +15,10 @@ keyed commits was proved, leaving the commit-step and policy contracts and
 the start of history assumed; on 2026-11-02 it was restated without
 selection (`RecordsAuthentic`), which removed the selection contract (A19's
 local attribute sources) from the history, and the hook's per-entry check
-moved into the core (A4). A25 (2026-10-28) names the per-platform
+moved into the core (A4). Later on 2026-11-02 the keyed audit was made to
+keep the same invariant for history the hook never saw (its per-entry check
+`audit_check` in the core, the single-commit theorem in `Audit.lean`), so it
+establishes the start of A24 (A13). A25 (2026-10-28) names the per-platform
 OS adapters (Unix and Windows). Older security-hardening priorities are
 superseded by the charter where they conflict (for example, private worktree
 permissions are now an optional mode); the source-derived proof status and
@@ -49,7 +52,7 @@ one.
 | A10 | AES-SIV, Argon2id, SHA-256 security | ASSUMED (standard) |
 | A11 | A Git object id names exactly one content | ASSUMED (Git's hash) |
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
-| A13 | History is audited before it reaches others (deployment) | REVIEWED; depends on deployment |
+| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`) |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
@@ -60,7 +63,7 @@ one.
 | A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
-| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s records authenticate at their paths (`RecordsAuthentic`, selection-independent) | Narrowed: use PROVED (model) (`hook_records_authentic`, `keyed_check_records_authentic`); the induction over keyed commits PROVED (model) with no policy or selection hypothesis (`keyed_history_authenticated_by_guard`, `config_unchanged_of_guard`, `records_authentic_of_checked_commit`); remaining: the commit step (A22, A11) and the start of history (a full keyed check, `verify-index`, or a keyed commit that changed the policy; the keyed audit does not establish it, A13) |
+| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s records authenticate at their paths (`RecordsAuthentic`, selection-independent) | Narrowed: use PROVED (model) (`hook_records_authentic`, `keyed_check_records_authentic`); the induction over keyed commits PROVED (model) with no policy or selection hypothesis (`keyed_history_authenticated_by_guard`, `config_unchanged_of_guard`, `records_authentic_of_checked_commit`); remaining: the commit step (A22, A11) and the start of history, now discharged by a keyed audit of the commit `HEAD` names (`audited_head_starts_keyed_history`, PROVED (model)) or a full keyed check; what remains of the start is the audit's own: its first commit's parent records when that parent lies outside the audited range (A13) |
 | A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS not yet run (its CI jobs have not been seen passing); REVIEWED |
 
 ## Detailed register
@@ -201,6 +204,14 @@ one.
     the adapter's conjunction `settled = same_policy && in_head[i] &&
     in_parent[i]`, and the adapter's refusal of a record staged at an
     unprotected name are gone: all three are the core's now.
+  - **PROVED (audit per-entry check, 2026-11-02).** The audit's check of
+    each examined entry of a commit is the core's `audit_check`
+    (`audit_check_spec` = `AuditCheckOf`), in the hook's vocabulary, decided
+    by the same `staged_verdict`; the Lean model `auditPlan` only sequences
+    the two (`Audit.lean`). The adapter's earlier separate checks (the
+    protected-record loop, the move-away refusal) are gone; what remains
+    adapter code there is the drift check (`check_drift`, refuse-only) and
+    the policy checks.
 - **Residual:** the adapter Rust itself is not proved. On the pre-commit
   path what remains reviewed and tested, not proved, is:
   - the loop of `check_staged` (`HookEvidence`, `HookChecks`): for every
@@ -217,6 +228,14 @@ one.
     key's primitives, A17, A5; in private mode the agent's call of the same
     function, A6); `elsewhere` is the verified `blob_elsewhere` on the run's
     ordered listings;
+  - on the audit path (`audit_commit`, `check_entries`): the facts passed
+    to `audit_check` (`AuditContracts`: `held` is "not listed by
+    `diff-tree`", `moved` is "the blob of a path `diff-tree` lists as
+    deleted", `selected` is `check-attr` against the commit's attribute
+    files, A19, A20), the choice of `AuditBase` (`Parent` only when
+    `diff-tree` does not list the config), the three answers
+    (`AuditAnswers`: `elsewhere` is `moved`), and the checked-record cache
+    (`settled_by_cache`);
   - the rewrite of `ls-tree` records to index records (`tree_record`, A20);
   - sorting the object orders (`Listing::object_order`; a wrong order is
     refused by the verified `object_order_ok`, so this only fails closed)
@@ -452,6 +471,54 @@ one.
 - **Consequence:** plaintext published.
 - **Evidence:** TESTED (pre-push refuses a `--no-verify` plaintext commit; a
   keyless `audit` in a never-unlocked clone refuses its plaintext commit).
+- **What a keyed audit establishes (2026-11-02).** The audit checks each
+  commit against its first parent: the entries `diff-tree` lists, or the
+  whole tree for a root commit, a config change or an attribute change.
+  Each examined entry is checked by the extracted `audit_check`
+  (`audit_check_spec`) and `staged_verdict` (`staged_verdict_ok`), the
+  pre-commit hook's vocabulary. With the key: a selected entry
+  authenticates at its path; an unprotected file the parent holds exactly
+  is trusted from the parent while the config is unchanged
+  (`AuditBase.Parent`); every other unprotected regular file is read as far
+  as its envelope prefix and, if it is a record of the commit's config,
+  must authenticate at its path (a forgery or a moved record is refused, a
+  genuine record at its own unprotected path passes). PROVED (model,
+  `Audit.lean`): `keyed_audit_authenticates_commit` (the commit's
+  `RecordsAuthentic` given the parent's when it trusted the parent, nothing
+  for `AuditBase.Tree`; and its `SelectionAuthentic` given the parent's
+  selection, `AuditSelectionAgrees`), `audited_head_starts_keyed_history`
+  (an audited `HEAD` is the start condition of
+  `keyed_history_authenticated_by_guard`),
+  `audited_head_keyed_history_authenticated` and
+  `keyed_audit_chain_authenticated` (a chain of audits, each commit's
+  parent the previous one). Contracts: `AuditContracts` (A20's diff
+  contract, A19, A11, A21), `AuditAnswers` (A4), `Realizes` (A5). TESTED:
+  `the_keyed_audit_authenticates_records_at_unprotected_paths`,
+  `the_audit_authenticates_a_copied_record_at_its_new_path`,
+  `the_audit_trusts_no_parent_across_a_config_change`,
+  `audits_read_no_unchanged_unprotected_file`,
+  `local_attribute_overrides_never_admit_a_forged_record_through_checked_history`.
+- **Keyless audit (by design, A14).** Without the key the audit checks
+  envelopes: every examined selected entry is a regular file with the
+  config's envelope that the parent holds or that is no blob of a path the
+  commit deleted (`keyless_audit_checks_envelopes`); an unprotected file is
+  refused only when it is a moved record. It authenticates nothing, and its
+  output says so ("envelopes only: unlock to authenticate them and any
+  record at an unprotected path").
+- **Trusted parents and the cache.** A first parent outside the audited
+  range (`--not origin/main`, the pre-push and pre-receive ranges) is
+  trusted: its records are assumed to authenticate (it was audited when it
+  was pushed, or is deliberately excluded). An audit from the root
+  (`transcrypt-rs audit`, default `HEAD`) trusts nothing. Within a run the
+  adapter checks each (blob, config, path) once (`settled_by_cache`): an
+  entry is recorded only after a selected entry's check passed, under a
+  config whose key is fixed for the run, and settles only `Authenticate`
+  and `Envelope`; reviewed and tested
+  (`the_audit_authenticates_a_copied_record_at_its_new_path`), not modelled.
+- **Cost:** prefix reads only for changed unprotected files (whole tree only
+  for a root commit or a config change); an unprotected file the parent
+  holds is never read, even across an attribute change
+  (`audits_read_no_unchanged_unprotected_file`).
 - **Residual:** `git push --no-verify`; repositories that deploy neither the
   hook nor a server-side audit; a fresh clone has no hooks at all. Git
   offers no repository-controlled enforcement. Plaintext copies of secrets
@@ -905,19 +972,24 @@ one.
      authenticate if its check trusted `HEAD` (incremental, guard `true`).
      A keyed `verify-index` (or `lock`, `rekey`, `doctor`) of an index that
      holds `HEAD`'s entries establishes it, as does a keyed commit whose
-     guard was `false` (any change of an attribute file or the config). The
-     keyed `audit` (pre-push, A13) does **not**: it authenticates the
-     entries each commit's attributes select and does not read unprotected
-     files. So history that entered without the keyed hook (`--no-verify`,
-     cherry-pick and rebase, which do not run `pre-commit`, a locked
-     checkout, another party's commits) is trusted on the keyed audit only
-     in the selection form (`HeadAuthentic`), which a local override can
-     invalidate: a forged record committed without the hook at an
-     unprotected name, later selected only by a local override, is accepted
-     by the incremental hook until such a check
-     (`local_attribute_overrides_never_admit_a_forged_record_through_checked_history`
-     records this boundary; every full keyed check and the first policy
-     change refuse it).
+     guard was `false` (any change of an attribute file or the config),
+     and, since 2026-11-02, **a keyed audit of the commit `HEAD` names**
+     (`audited_head_starts_keyed_history`; `audited_head_keyed_history_authenticated`
+     composes it with the induction): the audit keeps the same
+     selection-independent invariant, authenticating every record of the
+     commit's config at an unprotected path it examines. So history that
+     entered without the keyed hook (`--no-verify`, cherry-pick and rebase,
+     a locked checkout, another party's commits) is covered once it is
+     audited with the key (pre-push, A13): a forged record committed
+     without the hook at an unprotected name is refused by the keyed audit
+     and the pre-push hook before anyone else relies on it
+     (`local_attribute_overrides_never_admit_a_forged_record_through_checked_history`,
+     `the_keyed_audit_authenticates_records_at_unprotected_paths`). What
+     remains: (a) a local history that was never audited is still trusted
+     by the incremental hook in that checkout (the boundary test records
+     it; it cannot be pushed through the hook); (b) the audit's own start:
+     the parent of the first audited commit, when it lies outside the
+     range, is trusted (A13); an audit from the root trusts nothing.
   3. One key across the history (`Realizes inst prims σ` fixed); a rekey
      changes the committed configuration, so the next guard is `false` and
      the check trusts nothing.
@@ -942,7 +1014,8 @@ one.
   pulled commit) can hold a record that does not open at its path; the next
   incremental commit keeps it without authenticating it. `verify-index`,
   `lock`, a policy change, merge commits (for protected entries) and the
-  keyed `audit` (for selected entries, A13) authenticate it and refuse it.
+  keyed `audit` (every record it examines, selected or not, A13)
+  authenticate it and refuse it.
 - **Evidence:** PROVED (model) as above; TESTED
   (`newly_protected_files_are_authenticated_by_the_hook`,
   `settled_entries_are_authenticated_after_*`,
@@ -952,8 +1025,9 @@ one.
   `ordinary_commits_read_no_unchanged_unprotected_file`,
   `trees_listing_a_path_twice_are_refused`); REVIEWED.
 - **Status:** narrowed: use and induction PROVED (model), with no selection
-  contract; contracts 1, 3, 4 ASSUMED (1 TESTED); the start (2) is
-  deployment (A13) or a full keyed check.
+  contract; the start (2) PROVED (model) from a keyed audit of `HEAD`
+  (relative to the audit's contracts and its own start, A13) or a full keyed
+  check; contracts 1, 3, 4 ASSUMED (1 TESTED).
 
 ### A25 — Platform adapters (new)
 

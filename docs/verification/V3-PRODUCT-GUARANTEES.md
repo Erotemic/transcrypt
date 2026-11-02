@@ -16,7 +16,9 @@ on cryptographic, Git and operating-system contracts. Each card below names
 them, so a reader can see exactly what is proved and what is trusted.
 
 All four public theorems are in one file,
-[`ProductSecurity.lean`](../../proofs/aeneas/v3/V3Wire/Verification/ProductSecurity.lean).
+[`ProductSecurity.lean`](../../proofs/aeneas/v3/V3Wire/Verification/ProductSecurity.lean);
+what the keyed audit establishes for history the hook never saw is in
+[`Audit.lean`](../../proofs/aeneas/v3/V3Wire/Verification/Audit.lean).
 The theorems they build on are listed in the
 [proof ledger](../../proofs/aeneas/v3/PROOF-STATUS.md). The full argument is
 in [V3-SECURITY-ARGUMENT.md](V3-SECURITY-ARGUMENT.md), and every assumption
@@ -47,6 +49,16 @@ The hook and `verify-index` say which kind of check they ran. Without the
 key they print "checked staged record envelopes only, which does not
 authenticate them". `pre_commit_check_modes` states the full keyed,
 incremental keyed and keyless results separately.
+
+The audit (`transcrypt-rs audit`, the pre-push hook, a server hook) makes
+the same distinction. **Keyed**, it authenticates every selected record at
+its path and every record of the commit's configuration it examines at an
+unprotected path (`keyed_audit_authenticates_commit`). **Keyless**, it
+checks that every selected file has the envelope and is not a record moved
+from a deleted path, and refuses a record moved to an unprotected name; it
+authenticates nothing, and says "envelopes only: unlock to authenticate
+them and any record at an unprotected path"
+(`keyless_audit_checks_envelopes`).
 
 ## A. Authenticated publication
 
@@ -91,9 +103,10 @@ incremental keyed and keyless results separately.
 - **Limitations:**
   - It is about the index the hook checked. That this index is what Git
     commits is A22.
-  - Commits made without the keyed hook are covered only by the keyed
-    `audit` at push time (A13). This includes `--no-verify`, a locked
-    checkout, a rebase, and another party's commits.
+  - Commits made without the keyed hook are covered by the keyed `audit`
+    at push time (A13; see "Checked history"). This includes
+    `--no-verify`, a locked checkout, a rebase, and another party's
+    commits.
 - **Status:**
   - The decision functions, the per-entry check and its acceptance:
     source-derived proof.
@@ -253,6 +266,24 @@ file. Four results are proved:
 - **Induction (`keyed_history_authenticated_by_guard`):** a sequence of keyed
   commits keeps the invariant and authenticates every selected path, with no
   hypothesis about the policy or about how Git selects paths on any step.
+- **The keyed audit (`keyed_audit_authenticates_commit`, `Audit.lean`):**
+  for history the hook never saw, a keyed audit of one commit keeps the same
+  invariant. It examines what the commit changes against its first parent
+  (its whole tree for a root commit, a config change or an attribute
+  change), and each examined entry is checked by the extracted
+  `audit_check` and `staged_verdict`, the hook's vocabulary: a selected
+  entry authenticates; an unprotected file the parent holds exactly is
+  trusted from the parent while the config is unchanged; any other
+  unprotected file, if it is a record of the commit's config (a prefix
+  read), must authenticate at its path. If it accepted, the commit's records
+  authenticate given its parent's (nothing is needed for a root commit or a
+  config change), and so does every path the commit's attributes select.
+- **Start (`audited_head_starts_keyed_history`,
+  `audited_head_keyed_history_authenticated`):** a keyed audit of the
+  commit `HEAD` names establishes the start of the induction, so an audited
+  `HEAD` followed by keyed commits keeps every commit authenticated.
+  `keyed_audit_chain_authenticated` is the induction over a chain of
+  audits, each commit's parent the one before.
 
 The guard is source-derived: `policy_unchanged` compares the committed
 attribute files and `.transcrypt/config` across the index, `HEAD` and
@@ -267,13 +298,21 @@ defence in depth.
   its entries and its policy entries (`GuardedHistoryStep`), and object ids
   are unique (A22, A11).
 - **Start of each run of keyed commits:** the first commit's `HEAD` records
-  must authenticate if its check trusted `HEAD`. A keyed `verify-index` of a
-  checkout whose index holds `HEAD`'s entries establishes this, as does a
-  keyed commit that changes an attribute file or the config. The keyed
-  `audit` at push time (A13) checks only the paths each commit's attributes
-  select, so it does not: a forged record committed without the keyed hook
-  at an unprotected name, then selected only by a local override, is
-  accepted by the incremental hook until such a check (a tested boundary).
+  must authenticate if its check trusted `HEAD`. A keyed audit of `HEAD`
+  establishes this (proved, relative to the audit's contracts), as do a
+  keyed `verify-index` of a checkout whose index holds `HEAD`'s entries and
+  a keyed commit that changes an attribute file or the config. The audit's
+  own start is the parent of the first commit it audits: an audit from the
+  root trusts nothing, and the pre-push range trusts what the remote
+  already has (A13). A forged record committed without the keyed hook at an
+  unprotected name is refused by the keyed audit and the pre-push hook; a
+  local history that was never audited is still trusted by the incremental
+  hook in that checkout, even once a local override selects the record (a
+  tested boundary: it cannot be pushed through the pre-push hook).
+- **The audit's adapter** reports what Git lists: every entry it does not
+  examine is the parent's exactly, and its selection of such an entry is
+  the parent's (`AuditContracts`, `AuditSelectionAgrees`; A19, A20). Its
+  per-run cache of checked records is tested, not modelled.
 - **The adapter** answers the verdict's three questions truthfully (A4).
 
 ## What is not claimed

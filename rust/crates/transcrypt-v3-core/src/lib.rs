@@ -2021,6 +2021,73 @@ pub fn blob_read(size: u64, skip_large: bool) -> BlobRead {
     }
 }
 
+/// What the audit of one commit may take from its first parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditBase {
+    /// Nothing: a root commit, or a commit that changes the configuration.
+    /// The audit examines its whole tree and trusts no entry.
+    Tree,
+    /// The first parent, under the same configuration, whose records
+    /// authenticate at their paths: checked by the keyed audit before this
+    /// commit, or outside the audited range and trusted (already published,
+    /// or deliberately excluded). An unprotected file the parent holds
+    /// exactly needs no check.
+    Parent,
+}
+
+/// What the audit knows about one entry of a commit it examines, each
+/// fact about the entry itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuditedEntry {
+    /// Its mode is `100644` or `100755`: a file Git filters.
+    pub regular: bool,
+    /// The commit's own attributes select its path (`filter=transcrypt-v3`).
+    pub selected: bool,
+    /// The first parent holds exactly this entry: path, mode and blob.
+    pub held: bool,
+    /// Its blob is that of a path the commit deletes: moved there without
+    /// re-encryption.
+    pub moved: bool,
+}
+
+/// The audit's check of one entry of a commit, in the pre-commit hook's
+/// vocabulary (`StagedCheck`, decided by `staged_verdict`), or `None` to
+/// refuse: a selected path that is not a regular file. `keyed`: the audit
+/// has the key of the commit's configuration. With the key, the audit keeps
+/// the hook's invariant (`RecordsAuthentic`): every regular, non-reserved
+/// entry whose blob has this configuration's envelope authenticates at its
+/// own path. A selected entry is authenticated (`entry_check`, not
+/// incremental: the audit never trusts a protected entry's record); an
+/// unprotected file the parent holds exactly is trusted from `base`; any
+/// other unprotected file is authenticated if it is a record. Without the
+/// key only envelopes are checked: a selected entry has this
+/// configuration's envelope and, unless the parent holds it, is not a
+/// moved blob; an unprotected file is refused only if it is a moved record.
+/// Repository metadata is never encrypted and never checked.
+pub fn audit_check(entry: AuditedEntry, path: &[u8], keyed: bool, base: AuditBase) -> Option<StagedCheck> {
+    let trusted = match base {
+        AuditBase::Tree => false,
+        AuditBase::Parent => entry.held,
+    };
+    if is_reserved_path(path) {
+        Some(StagedCheck::Skip)
+    } else if entry.selected {
+        if entry.regular {
+            Some(StagedCheck::Protected(entry_check(keyed, false, entry.held)))
+        } else {
+            None
+        }
+    } else if !entry.regular || trusted {
+        Some(StagedCheck::Skip)
+    } else if keyed {
+        Some(StagedCheck::AuthenticateIfRecord)
+    } else if entry.moved && !entry.held {
+        Some(StagedCheck::NotRecord)
+    } else {
+        Some(StagedCheck::Skip)
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
