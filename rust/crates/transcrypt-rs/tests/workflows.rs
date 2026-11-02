@@ -371,8 +371,21 @@ fn stored_keys_of_other_configs_are_never_used() {
     // The private agent starts only with a key that authenticates its
     // worktree's config: another repository's key is refused before it
     // listens.
-    let idle = 0u64.to_be_bytes();
-    let out = exec(&a, bin(), &["serve"], Some(&[&other[config_len..], &idle[..]].concat()));
+    const NO_IDLE_LIMIT: u64 = 0;
+    const REFUSAL_WAIT: Duration = Duration::from_secs(30);
+    let mut agent = std::process::Command::new(bin()).arg("serve").current_dir(&a)
+        .stdin(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let startup = [&other[config_len..], &NO_IDLE_LIMIT.to_be_bytes()[..]].concat();
+    std::io::Write::write_all(&mut agent.stdin.take().unwrap(), &startup).unwrap();
+    let start = Instant::now();
+    while agent.try_wait().unwrap().is_none() && start.elapsed() < REFUSAL_WAIT {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if agent.try_wait().unwrap().is_none() {
+        let _ = agent.kill();
+        panic!("an agent started with another repository's key");
+    }
+    let out = agent.wait_with_output().unwrap();
     assert!(!out.status.success() && !socket(&a).exists());
     assert!(String::from_utf8_lossy(&out.stderr).contains("incorrect credentials"), "{out:?}");
 }

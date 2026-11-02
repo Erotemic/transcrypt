@@ -858,11 +858,15 @@ fn stored_keys_select_the_file_key_for_the_config_it_authenticates() {
     // Another config (stored or current), another key, a damaged or
     // absent file: never unlocked, and the state is `stored_key_state`'s.
     let other = initialize_config(&Mock { key: 10 }, &[3u8; SALT_LEN]).unwrap();
+    // A config the same key authenticates, but not the one the file names.
+    let sibling = initialize_config(&Mock { key: 9 }, &[4u8; SALT_LEN]).unwrap();
+    assert_ne!(sibling, config);
     let mut wrong_key = key;
     wrong_key[KEY_LEN - 1] = 10;
     for (present, file, current) in [
         (true, [&config[..], &key[..]].concat(), other.to_vec()),
         (true, [&other[..], &key[..]].concat(), other.to_vec()),
+        (true, [&sibling[..], &key[..]].concat(), config.to_vec()),
         (true, [&config[..], &wrong_key[..]].concat(), config.to_vec()),
         (true, [&config[..], &key[..]].concat(), config[1..].to_vec()),
         (false, [&config[..], &key[..]].concat(), config.to_vec()),
