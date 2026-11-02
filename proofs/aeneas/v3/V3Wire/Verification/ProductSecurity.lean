@@ -11,9 +11,10 @@ snapshots, offsets and per-entry checks of `HookEvidence`, the core's
 `Result`s) stay in `EndToEnd.lean`, `Lifecycle.lean` and `Filters.lean`;
 each theorem below composes the guarantees proved there. Every external
 contract is a visible hypothesis: `Realizes` (A5), `HookContracts` (A11,
-A19, A20, A21), `ConfigCommitted` (the adapter's check, A4), `RepairContracts`
-(A4, A20, A23), and, for history, `HeadAuthentic`, `CommitStep` (A11, A22) and
-`PolicyUnchanged` (A19 and the hook's policy guard).
+A19, A20, A21), `HookAnswers` (A4, A21: the adapter's answers to the
+verified check), `ConfigCommitted` (the adapter's check, A4),
+`RepairContracts` (A4, A20, A23), and, for history, `CommitStep` (A11, A22)
+and the start of the history (A24).
 
 * **A. Authenticated publication** (`keyed_publication_authenticates`): when
   a keyed pre-commit check accepts, every path the committed attributes
@@ -22,20 +23,19 @@ A19, A20, A21), `ConfigCommitted` (the adapter's check, A4), `RepairContracts`
   about history; an incremental one needs `HeadAuthentic` (A24).
 * **The three check modes** (`pre_commit_check_modes`): full keyed,
   incremental keyed and keyless acceptance, stated separately.
-* **The history** (`head_authentic_of_checked_commit`,
-  `keyed_history_stays_authenticated`): an authenticated index gives
-  `HeadAuthentic` for the next commit when that commit is the checked index
-  and the protected-path policy and configuration are unchanged; so in a
-  history of keyed commits that starts with a full check and checks in full
-  whenever the policy changes, every commit authenticates. This is the part
-  of A24 that is mathematics; what remains assumed is named in
-  `docs/verification/V3-ASSUMPTIONS.md` (A24).
-* **The history from the guard** (`keyed_history_authenticated_by_guard`):
-  the same with no policy hypothesis on any step. Each run records the
-  verified guard (`HookGuard`); a `true` guard gives `PolicyUnchanged`
-  (`policy_unchanged_of_guard`) under A19 stated as the contract
-  `SelectionByPolicy`, and a `false` guard settled nothing
-  (`unguarded_check_is_full`).
+* **The record invariant** (`keyed_check_records_authentic`): a keyed check
+  that accepted makes every regular, non-reserved index entry whose blob has
+  this configuration's envelope authenticate at its own path
+  (`RecordsAuthentic`), trusting `HEAD`'s records only when it was
+  incremental with the guard `true`. The invariant says nothing about
+  selection, so no attribute source, committed or local, can turn a forged
+  record of history into an accepted protected file.
+* **The history** (`keyed_history_authenticated_by_guard`): in a history of
+  keyed commits, each made from the index checked before it, every commit's
+  records and selected paths authenticate, given only that the first commit's
+  `HEAD` records authenticate if its check trusted `HEAD`. The guard keeps
+  the configuration (`config_unchanged_of_guard`); no assumption about how
+  Git selects paths is needed (A19 is not a hypothesis).
 * **B. Authenticated recovery** (`checkout_releases_only_authenticated_plaintext`,
   `checkout_opens_genuine_records`): a checkout either keeps the stored
   record unchanged or releases exactly the plaintext it authenticates to at
@@ -68,95 +68,108 @@ variable {P : Type} {inst : V3Primitives P} {prims : P} {σ : Suite}
 
 /-- How much of the index a keyed pre-commit check authenticated. -/
 inductive CheckMode
-  /-- Every protected entry was authenticated with the key. -/
+  /-- Nothing was trusted from `HEAD`. -/
   | full
-  /-- An entry unchanged since `HEAD` and `HEAD^1` (*settled*) may have been
-      checked by its envelope only, trusting history (A24). -/
+  /-- An entry `HEAD` holds exactly may have been trusted from history
+      (A24): a settled protected entry checked by its envelope only, an
+      unprotected file not read at all. -/
   | incremental
   deriving DecidableEq
 
-/-- The run authenticated every protected entry: it was not incremental
-    (`verify-index`, a full hook run), or no entry counted as settled (what
-    the incremental hook does when the protected-path policy changed). -/
-def FullCheck (incremental : Bool) (entries : List HookEntry) : Prop :=
-  incremental = false ∨ ∀ e ∈ entries, e.settled = false
+/-- The run trusted nothing from `HEAD`: it was not incremental
+    (`verify-index`, `lock`, `rekey`), or its guard returned `false` (an
+    attribute file or the configuration differs from `HEAD` or `HEAD^1`). -/
+def FullCheck {E : Type} {g : GitState} (incremental : Bool) (run : HookEvidence g E) : Prop :=
+  incremental = false ∨ run.samePolicy = false
 
 /-- The runs a mode describes: `full` only a `FullCheck`, `incremental` any. -/
-def CheckMode.Permits : CheckMode → Bool → List HookEntry → Prop
-  | .full, inc, es => FullCheck inc es
+def CheckMode.Permits {E : Type} {g : GitState} : CheckMode → Bool → HookEvidence g E → Prop
+  | .full, inc, run => FullCheck inc run
   | .incremental, _, _ => True
 
-/-- **An accepted keyed check.** The hook's final check of `run` (the
-    model `hookPlan` of `check_staged`, A4) accepted with the key, under the
-    configuration whose bytes are `config` and whose id is the suite's digest
-    of them (A5), in a run of the given mode. -/
-def KeyedCheckAccepted (inst : V3Primitives P) (prims : P) (σ : Suite) {g : GitState}
-    (run : HookEvidence g) (config : List Nat) (mode : CheckMode) : Prop :=
+/-- **An accepted keyed check.** The hook's final check of `run` (`hookPlan`
+    of the verified `staged_check` and `staged_verdict`) accepted with the
+    key, under the configuration whose bytes are `config` and whose id is
+    the suite's digest of them (A5), in a run of the given mode. The
+    adapter's answers are as `HookAnswers` states (A4): a contract on the
+    adapter, carried here with the configuration it is about, not something
+    the run checked. -/
+def KeyedCheckAccepted {E : Type} (ans : StagedEvidence E) (inst : V3Primitives P) (prims : P) (σ : Suite)
+    {g : GitState} (run : HookEvidence g E) (config : List Nat) (mode : CheckMode) : Prop :=
   ∃ (cfg : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (incremental : Bool),
-    wireBytes cfg = config ∧ wireBytes id = σ.digest16 config ∧
-    hookPlan inst prims cfg id true incremental run.entries = ok true ∧
-    mode.Permits incremental run.entries
+    wireBytes cfg = config ∧ wireBytes id = σ.digest16 config ∧ HookAnswers ans inst prims cfg id g run ∧
+    hookPlan ans id true incremental run.inputs run.entries = ok true ∧
+    mode.Permits incremental run
 
 /-! ## A24, part 1: a full check needs no history -/
 
-/-- **Full-check bootstrap.** A keyed check that authenticated every
-    protected entry (`FullCheck`) and accepted gives an `AuthenticatedIndex`
-    with no hypothesis about history (no `HeadAuthentic`), and without
-    `ConfigCommitted`: every selected entry authenticates under `config`. -/
-theorem hook_full_check_authenticates (g : GitState) (run : HookEvidence g)
-    (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (incremental : Bool)
+/-- **Full-check bootstrap.** A keyed check that trusted nothing from `HEAD`
+    (`FullCheck`) and accepted gives an `AuthenticatedIndex` and the record
+    invariant of the index (`RecordsAuthentic`) with no hypothesis about
+    history, and without `ConfigCommitted`. -/
+theorem hook_full_check_authenticates {E : Type} (g : GitState) (run : HookEvidence g E)
+    (ans : StagedEvidence E) (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize)
+    (incremental : Bool)
     (hR : Realizes inst prims σ)
+    (hid : wireBytes id = σ.digest16 (wireBytes config))
     (hgit : HookContracts g run)
-    (hcheck : hookPlan inst prims config id true incremental run.entries = ok true)
-    (hfull : FullCheck incremental run.entries) :
-    AuthenticatedIndex σ (wireBytes config) g := by
-  have hplan := spec_result (hookPlan_spec hR config id true incremental run.entries) hcheck rfl
-  intro x hx hsx
-  obtain ⟨e, he, hce⟩ := hook_checks_selected hgit hx hsx
-  have hk : true = true ∧ ¬ (incremental = true ∧ e.settled = true) := by
-    refine ⟨rfl, ?_⟩
-    rintro ⟨hi, hs⟩
-    rcases hfull with hf | hf
-    · rw [hf] at hi; cases hi
-    · rw [hf e he] at hs; cases hs
-  obtain ⟨pt, hpt⟩ := (hplan e he).1 hk
-  rw [hce.path] at hpt
-  exact ⟨hook_selectable hgit hx hsx, _, hce.blob, pt, hpt⟩
+    (hans : HookAnswers ans inst prims config id g run)
+    (hcheck : hookPlan ans id true incremental run.inputs run.entries = ok true)
+    (hfull : FullCheck incremental run) :
+    AuthenticatedIndex σ (wireBytes config) g ∧ RecordsAuthentic σ (wireBytes config) g g.index := by
+  have hrec := hook_records_authentic g run ans inst prims config id incremental hR hid hgit hans hcheck
+    (fun hi hg => by
+      rcases hfull with h | h
+      · rw [h] at hi; cases hi
+      · rw [h] at hg; cases hg)
+  exact ⟨hook_authenticated_of_records g run ans inst prims config id incremental hR hid hgit hans hcheck hrec,
+    hrec⟩
 
 /-- **The three modes of the pre-commit check**, under the hook's contracts:
 
     * **full keyed** (`incremental = false`): every selected entry
-      authenticates (`AuthenticatedIndex`), with no assumption about history;
+      authenticates (`AuthenticatedIndex`), and so does every record of the
+      index (`RecordsAuthentic`), with no assumption about history;
     * **incremental keyed**: every selected entry authenticates or is settled
-      with this configuration's envelope (`AcceptedIndex`), and every one
-      authenticates if `HEAD`'s selected entries do (`HeadAuthentic`, A24);
+      with this configuration's envelope (`AcceptedIndex`); every one
+      authenticates if `HEAD`'s selected entries do (`HeadAuthentic`, A24),
+      and the index's records and selected entries authenticate if `HEAD`'s
+      records do whenever the guard returned `true` (`RecordsAuthentic`, A24);
     * **keyless**: every selected entry is a regular, non-reserved file with
       this configuration's envelope, settled or not a blob moved from another
       path (`KeylessEnvelopeOk`); authenticity is not established (A14). -/
-theorem pre_commit_check_modes (g : GitState) (run : HookEvidence g)
-    (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize)
+theorem pre_commit_check_modes {E : Type} (g : GitState) (run : HookEvidence g E)
+    (ans : StagedEvidence E) (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize)
     (hR : Realizes inst prims σ)
     (hid : wireBytes id = σ.digest16 (wireBytes config))
     (hgit : HookContracts g run)
+    (hans : HookAnswers ans inst prims config id g run)
     (hcfg : ConfigCommitted g (wireBytes config)) :
-    (hookPlan inst prims config id true false run.entries = ok true →
-      AuthenticatedIndex σ (wireBytes config) g) ∧
-    (hookPlan inst prims config id true true run.entries = ok true →
+    (hookPlan ans id true false run.inputs run.entries = ok true →
+      AuthenticatedIndex σ (wireBytes config) g ∧ RecordsAuthentic σ (wireBytes config) g g.index) ∧
+    (hookPlan ans id true true run.inputs run.entries = ok true →
       AcceptedIndex σ (wireBytes config) true true g ∧
-      (HeadAuthentic σ (wireBytes config) g → AuthenticatedIndex σ (wireBytes config) g)) ∧
-    (∀ incremental, hookPlan inst prims config id false incremental run.entries = ok true →
+      (HeadAuthentic σ (wireBytes config) g → AuthenticatedIndex σ (wireBytes config) g) ∧
+      ((run.samePolicy = true → RecordsAuthentic σ (wireBytes config) g g.head) →
+        AuthenticatedIndex σ (wireBytes config) g ∧ RecordsAuthentic σ (wireBytes config) g g.index)) ∧
+    (∀ incremental, hookPlan ans id false incremental run.inputs run.entries = ok true →
       ∀ x ∈ g.index, Selected (g.filter x.path) →
         Selectable x ∧ ∃ content, g.blob x.oid = some content ∧
           KeylessEnvelopeOk σ (wireBytes config) g x content) := by
-  refine ⟨fun hc => hook_full_check_authenticates g run config id false hR hgit hc (Or.inl rfl),
-    fun hc => ⟨(hook_accepts_only_authenticated_ciphertext g run config id true true hR hid hgit hcfg hc).2.2,
-      fun hh => hook_accepts_only_authenticated_ciphertext_given_history g run config id true hR hid hgit
-        hcfg hc hh⟩, ?_⟩
-  intro incremental hc x hx hsx
-  obtain ⟨hsel, content, hcont, -, hkl⟩ :=
-    (hook_accepts_only_authenticated_ciphertext g run config id false incremental hR hid hgit hcfg hc).2.2
-      x hx hsx
-  exact ⟨hsel, content, hcont, hkl rfl⟩
+  refine ⟨fun hc => hook_full_check_authenticates g run ans config id false hR hid hgit hans hc (Or.inl rfl),
+    fun hc => ⟨(hook_accepts_only_authenticated_ciphertext g run ans inst prims config id true true hR hid hgit
+        hans hcfg hc).2.2,
+      fun hh => hook_accepts_only_authenticated_ciphertext_given_history g run ans inst prims config id true hR
+        hid hgit hans hcfg hc hh,
+      fun hh => ?_⟩, ?_⟩
+  · have hrec := hook_records_authentic g run ans inst prims config id true hR hid hgit hans hc
+      (fun _ hg => hh hg)
+    exact ⟨hook_authenticated_of_records g run ans inst prims config id true hR hid hgit hans hc hrec, hrec⟩
+  · intro incremental hc x hx hsx
+    obtain ⟨hsel, content, hcont, -, hkl⟩ :=
+      (hook_accepts_only_authenticated_ciphertext g run ans inst prims config id false incremental hR hid hgit
+        hans hcfg hc).2.2 x hx hsx
+    exact ⟨hsel, content, hcont, hkl rfl⟩
 
 /-! ## A. Authenticated publication -/
 
@@ -169,21 +182,47 @@ theorem pre_commit_check_modes (g : GitState) (run : HookEvidence g)
     committed attributes select is a regular, non-reserved file whose blob
     authenticates at exactly that path under the committed configuration
     (`AuthenticatedIndex`). -/
-theorem keyed_publication_authenticates (g : GitState) (run : HookEvidence g) (config : List Nat)
-    (mode : CheckMode)
+theorem keyed_publication_authenticates {E : Type} (g : GitState) (run : HookEvidence g E)
+    (ans : StagedEvidence E) (config : List Nat) (mode : CheckMode)
     (hR : Realizes inst prims σ)
     (hgit : HookContracts g run)
     (hcfg : ConfigCommitted g config)
-    (hacc : KeyedCheckAccepted inst prims σ run config mode)
+    (hacc : KeyedCheckAccepted ans inst prims σ run config mode)
     (hhist : mode = .incremental → HeadAuthentic σ config g) :
     ConfigCommitted g config ∧ AuthenticatedIndex σ config g := by
-  obtain ⟨cfg, id, incremental, rfl, hid, hcheck, hmode⟩ := hacc
+  obtain ⟨cfg, id, incremental, rfl, hid, hans, hcheck, hmode⟩ := hacc
   refine ⟨hcfg, ?_⟩
   cases mode with
-  | full => exact hook_full_check_authenticates g run cfg id incremental hR hgit hcheck hmode
+  | full => exact (hook_full_check_authenticates g run ans cfg id incremental hR hid hgit hans hcheck hmode).1
   | incremental =>
-    exact hook_accepts_only_authenticated_ciphertext_given_history g run cfg id incremental hR hid hgit
-      hcfg hcheck (hhist rfl)
+    exact hook_accepts_only_authenticated_ciphertext_given_history g run ans inst prims cfg id incremental hR hid
+      hgit hans hcfg hcheck (hhist rfl)
+
+/-- **The record invariant of an accepted keyed check.** A keyed check that
+    accepted makes every regular, non-reserved index entry whose blob has
+    this configuration's envelope authenticate at its own path
+    (`RecordsAuthentic`), and so every selected entry
+    (`AuthenticatedIndex`), given `HEAD`'s records only if the check trusted
+    `HEAD` (incremental, with the guard `true`). Nothing here depends on how
+    Git selects paths: a local attribute file that selects a path, or stops
+    selecting it, cannot make a forged record pass. -/
+theorem keyed_check_records_authentic {E : Type} (g : GitState) (run : HookEvidence g E)
+    (ans : StagedEvidence E) (config : List Nat) (mode : CheckMode)
+    (hR : Realizes inst prims σ)
+    (hgit : HookContracts g run)
+    (hacc : KeyedCheckAccepted ans inst prims σ run config mode)
+    (hhist : run.samePolicy = true → mode = .incremental → RecordsAuthentic σ config g g.head) :
+    RecordsAuthentic σ config g g.index ∧ AuthenticatedIndex σ config g := by
+  obtain ⟨cfg, id, incremental, rfl, hid, hans, hcheck, hmode⟩ := hacc
+  have hrec := hook_records_authentic g run ans inst prims cfg id incremental hR hid hgit hans hcheck
+    (fun hi hg => hhist hg (by
+      cases mode with
+      | full =>
+        rcases hmode with h | h
+        · rw [h] at hi; cases hi
+        · rw [h] at hg; cases hg
+      | incremental => rfl))
+  exact ⟨hrec, hook_authenticated_of_records g run ans inst prims cfg id incremental hR hid hgit hans hcheck hrec⟩
 
 /-! ## A24, part 2: one history transition
 
@@ -197,192 +236,96 @@ structure CommitStep (g g' : GitState) : Prop where
   head : ∀ y ∈ g'.head, y ∈ g.index
   objects : ∀ oid content, g.blob oid = some content → g'.blob oid = some content
 
-/-- **The protected-path policy did not change.** Every path the attributes
-    being committed now select was selected by the attributes of the checked
-    commit, and the committed configuration is the one the records were
-    checked under. The hook's policy guard (the committed attribute files and
-    `.transcrypt/config` are those of `HEAD` and `HEAD^1`) establishes it
-    through A19 (Git evaluates `filter` from the committed attribute files);
-    this is the hypothesis that guard plugs into. -/
-structure PolicyUnchanged (g g' : GitState) (config config' : List Nat) : Prop where
-  selection : ∀ p, Selected (g'.filter p) → Selected (g.filter p)
-  config : config' = config
-
-/-- **An authenticated index makes the next `HEAD` authentic.** If the
-    checked index authenticates under `config`, the next commit's `HEAD` was
-    made from it (`CommitStep`) and the policy is unchanged
-    (`PolicyUnchanged`), then the next check may trust `HEAD`
-    (`HeadAuthentic`). -/
-theorem head_authentic_of_checked_commit {g g' : GitState} {config config' : List Nat}
-    (hauth : AuthenticatedIndex σ config g) (hstep : CommitStep g g')
-    (hpol : PolicyUnchanged g g' config config') :
-    HeadAuthentic σ config' g' := by
-  intro y hy hsy
-  obtain ⟨-, content, hc, hat⟩ := hauth y (hstep.head y hy) (hpol.selection _ hsy)
-  rw [hpol.config]
-  exact ⟨content, hstep.objects _ _ hc, hat⟩
+/-- **The checked index's records are the next `HEAD`'s.** If the records of
+    the checked index authenticate under `config` and the next commit's
+    `HEAD` was made from it (`CommitStep`), the next check may trust
+    `HEAD`'s records under the same configuration. -/
+theorem records_authentic_of_checked_commit {g g' : GitState} {config config' : List Nat}
+    (hrec : RecordsAuthentic σ config g g.index) (hstep : CommitStep g g') (hcfg : config' = config) :
+    RecordsAuthentic σ config' g' g'.head := by
+  intro y hy hsel
+  obtain ⟨content, hc, hra⟩ := hrec y (hstep.head y hy) hsel
+  subst hcfg
+  exact ⟨content, hstep.objects _ _ hc, hra⟩
 
 /-! ## A24, part 3: a history of keyed commits -/
 
 /-- One commit of a history: Git's state when its hook ran, the run, the
     configuration it was checked under, and the mode of the check. -/
-structure CheckedCommit where
+structure CheckedCommit (E : Type) where
   g : GitState
-  run : HookEvidence g
+  run : HookEvidence g E
   config : List Nat
   mode : CheckMode
 
 /-- The commit was accepted by a keyed check, with the contracts of its run. -/
-structure KeyedCommit (inst : V3Primitives P) (prims : P) (σ : Suite) (c : CheckedCommit) : Prop where
+structure KeyedCommit {E : Type} (ans : StagedEvidence E) (inst : V3Primitives P) (prims : P) (σ : Suite)
+    (c : CheckedCommit E) : Prop where
   contracts : HookContracts c.g c.run
   config : ConfigCommitted c.g c.config
-  accepted : KeyedCheckAccepted inst prims σ c.run c.config c.mode
-
-/-- `c'` is the next commit after `c`: made from `c`'s checked index, and
-    checked incrementally only if the policy is unchanged (otherwise in full:
-    a selection or configuration change needs full revalidation). -/
-structure HistoryStep (c c' : CheckedCommit) : Prop where
-  commit : CommitStep c.g c'.g
-  policy : c'.mode = .incremental → PolicyUnchanged c.g c'.g c.config c'.config
-
-/-- **A history of keyed commits stays authenticated.** Take commits
-    `h 0, …, h n`, each accepted by a keyed check under one key
-    (`KeyedCommit`), each made from the index checked before it
-    (`HistoryStep`), and the first checked in full or after an authentic
-    `HEAD`. Then every commit's selected paths authenticate at their paths
-    under its committed configuration. -/
-theorem keyed_history_stays_authenticated (hR : Realizes inst prims σ)
-    (h : Nat → CheckedCommit) (n : Nat)
-    (hcommits : ∀ i ≤ n, KeyedCommit inst prims σ (h i))
-    (hsteps : ∀ i < n, HistoryStep (h i) (h (i + 1)))
-    (hstart : (h 0).mode = .incremental → HeadAuthentic σ (h 0).config (h 0).g) :
-    ∀ i ≤ n, AuthenticatedIndex σ (h i).config (h i).g := by
-  intro i hi
-  induction i with
-  | zero =>
-    have hc := hcommits 0 hi
-    exact (keyed_publication_authenticates _ _ _ _ hR hc.contracts hc.config hc.accepted hstart).2
-  | succ k ih =>
-    have hk := ih (by omega)
-    have hs := hsteps k (by omega)
-    have hc := hcommits (k + 1) hi
-    exact (keyed_publication_authenticates _ _ _ _ hR hc.contracts hc.config hc.accepted
-      (fun hm => head_authentic_of_checked_commit hk hs.commit (hs.policy hm))).2
-
-/-! ## A24, part 4: the hook's guard in place of `PolicyUnchanged`
-
-`HistoryStep` takes `PolicyUnchanged` as a hypothesis of each incremental
-step. Here it is derived instead: from the guard the next check computed
-(`run.samePolicy`, the verified `policy_unchanged`, `HookGuard`), the commit
-step, and A19 stated as a contract (`SelectionByPolicy`). A check whose guard
-returned `false` settled nothing, so it is a `FullCheck` and needs no
-history at all. -/
-
-/-- **A19, the selection rule, as a contract.** Git's effective `filter` of
-    every path is one fixed function `attrs` of the policy entries of the
-    index being committed: its attribute files, by object id (which names
-    their content, A11), and its configuration entry. `attrs` stands for
-    everything else Git's answer depends on, notably the local attribute
-    sources that are not committed (`.git/info/attributes`,
-    `core.attributesFile`): taking one `attrs` for every commit of a history
-    assumes those do not change during it. This is the stated exclusion. The
-    contract says how Git selects paths; it says nothing about records. -/
-def SelectionByPolicy (attrs : List Entry → List Nat → List Nat) (g : GitState) : Prop :=
-  ∀ p, g.filter p = attrs (policyEntries g.index) p
-
-/-- A run whose guard returned `false` settled nothing: it is a
-    `FullCheck`, whatever its mode. -/
-theorem unguarded_check_is_full {g : GitState} (run : HookEvidence g) (incremental : Bool)
-    (h : run.samePolicy = false) : FullCheck incremental run.entries :=
-  Or.inr (hook_unguarded_settles_nothing run h)
-
-/-- **The guard gives `PolicyUnchanged`.** Let `g'` be the next run's state,
-    made from the checked index of `g` (`CommitStep`) whose policy entries its
-    `HEAD` has (A22: Git commits the index the hook checked), with Git's
-    selection given by the policy entries in both (`SelectionByPolicy`, A19,
-    one `attrs`). If the next run's verified `policy_unchanged` returned
-    `true`, no path is newly selected, and the configuration it commits is the
-    one `g` committed. -/
-theorem policy_unchanged_of_guard {g g' : GitState} {run' : HookEvidence g'} {config config' : List Nat}
-    {attrs : List Entry → List Nat → List Nat}
-    (hgit' : HookContracts g' run') (hguard : run'.samePolicy = true)
-    (hsel : SelectionByPolicy attrs g) (hsel' : SelectionByPolicy attrs g')
-    (hstep : CommitStep g g') (hhead : policyEntries g'.head = policyEntries g.index)
-    (hsorted : Sorted g.index) (hcfg : ConfigCommitted g config) (hcfg' : ConfigCommitted g' config') :
-    PolicyUnchanged g g' config config' := by
-  have hpe : policyEntries g'.index = policyEntries g.index :=
-    (hook_policy_guard hgit' hguard).1.trans hhead
-  refine ⟨fun p hp => ?_, ?_⟩
-  · rw [hsel' p, hpe, ← hsel p] at hp
-    exact hp
-  · obtain ⟨c', hc'm, hc'p, -, hc'b⟩ := hcfg'
-    obtain ⟨c, hcm, hcp, -, hcb⟩ := hcfg
-    have hc' : c' ∈ policyEntries g.index := hpe ▸ mem_policyEntries.mpr ⟨hc'm, Or.inr hc'p⟩
-    have heq := hsorted.eq_of_path (mem_policyEntries.mp hc').1 hcm (hc'p.trans hcp.symm)
-    subst heq
-    rw [hstep.objects _ _ hcb, Option.some.injEq] at hc'b
-    exact hc'b.symm
-
-/-- **An accepted keyed check authenticates, trusting `HEAD` only under the
-    guard.** A keyed check that accepted gives an `AuthenticatedIndex` when
-    `HEAD`'s selected entries authenticate, which is needed only if the run
-    was incremental *and* its guard returned `true`: otherwise nothing was
-    settled. -/
-theorem keyed_check_authenticates_given_guard (g : GitState) (run : HookEvidence g) (config : List Nat)
-    (mode : CheckMode)
-    (hR : Realizes inst prims σ)
-    (hgit : HookContracts g run)
-    (hcfg : ConfigCommitted g config)
-    (hacc : KeyedCheckAccepted inst prims σ run config mode)
-    (hhist : run.samePolicy = true → mode = .incremental → HeadAuthentic σ config g) :
-    AuthenticatedIndex σ config g := by
-  cases hp : run.samePolicy
-  · obtain ⟨cfg, id, incremental, rfl, -, hcheck, -⟩ := hacc
-    exact hook_full_check_authenticates g run cfg id incremental hR hgit hcheck
-      (unguarded_check_is_full run incremental hp)
-  · exact (keyed_publication_authenticates g run config mode hR hgit hcfg hacc (hhist hp)).2
+  accepted : KeyedCheckAccepted ans inst prims σ c.run c.config c.mode
 
 /-- `c'` is the next commit after `c`, as Git makes it: from `c`'s checked
     index (`CommitStep`), so that its `HEAD` has that index's policy entries
-    (A22). Nothing is said about the policy or the mode of `c'`'s check. -/
-structure GuardedHistoryStep (c c' : CheckedCommit) : Prop where
+    (A22). Nothing is said about the policy, the selection or the mode of
+    `c'`'s check. -/
+structure GuardedHistoryStep {E : Type} (c c' : CheckedCommit E) : Prop where
   commit : CommitStep c.g c'.g
   policy : policyEntries c'.g.head = policyEntries c.g.index
 
-/-- **A history of keyed commits stays authenticated, with the hook's guard.**
-    Take commits `h 0, …, h n`, each accepted by a keyed check under one key
+/-- **The guard keeps the configuration.** Let `g'` be the next run's state,
+    made from the checked index of `g` (`CommitStep`) whose policy entries its
+    `HEAD` has (A22). If the next run's verified `policy_unchanged` returned
+    `true`, the configuration it commits is the one `g` committed. -/
+theorem config_unchanged_of_guard {E : Type} {g g' : GitState} {run' : HookEvidence g' E}
+    {config config' : List Nat}
+    (hgit' : HookContracts g' run') (hguard : run'.samePolicy = true)
+    (hstep : CommitStep g g') (hhead : policyEntries g'.head = policyEntries g.index)
+    (hsorted : Sorted g.index) (hcfg : ConfigCommitted g config) (hcfg' : ConfigCommitted g' config') :
+    config' = config := by
+  have hpe : policyEntries g'.index = policyEntries g.index :=
+    (hook_policy_guard hgit' hguard).1.trans hhead
+  obtain ⟨c', hc'm, hc'p, -, hc'b⟩ := hcfg'
+  obtain ⟨c, hcm, hcp, -, hcb⟩ := hcfg
+  have hc' : c' ∈ policyEntries g.index := hpe ▸ mem_policyEntries.mpr ⟨hc'm, Or.inr hc'p⟩
+  have heq := hsorted.eq_of_path (mem_policyEntries.mp hc').1 hcm (hc'p.trans hcp.symm)
+  subst heq
+  rw [hstep.objects _ _ hcb, Option.some.injEq] at hc'b
+  exact hc'b.symm
+
+/-- **A history of keyed commits stays authenticated.** Take commits
+    `h 0, …, h n`, each accepted by a keyed check under one key
     (`KeyedCommit`, whose run records its guard), each made from the index
-    checked before it (`GuardedHistoryStep`), with Git selecting paths by the
-    committed policy under one rule (`SelectionByPolicy attrs`, A19, local
-    attribute sources fixed), and the first commit's `HEAD` authentic if its
-    check was incremental with the guard `true`. Then every commit's
-    selected paths authenticate at their paths under its committed
-    configuration. No step assumes `PolicyUnchanged`: a check whose guard
-    returned `true` derives it (`policy_unchanged_of_guard`), and one whose
-    guard returned `false` settled nothing (`unguarded_check_is_full`). -/
-theorem keyed_history_authenticated_by_guard (hR : Realizes inst prims σ)
-    (attrs : List Entry → List Nat → List Nat)
-    (h : Nat → CheckedCommit) (n : Nat)
-    (hcommits : ∀ i ≤ n, KeyedCommit inst prims σ (h i))
-    (hselection : ∀ i ≤ n, SelectionByPolicy attrs (h i).g)
+    checked before it (`GuardedHistoryStep`), and the first commit's `HEAD`
+    records authentic if its check trusted `HEAD` (incremental, guard
+    `true`). Then every commit's records authenticate (`RecordsAuthentic`)
+    and so do its selected paths (`AuthenticatedIndex`), at their paths
+    under its committed configuration. No step assumes anything about the
+    policy or how Git selects paths: a check whose guard returned `true`
+    keeps the configuration (`config_unchanged_of_guard`) and trusts only
+    records `HEAD` holds exactly, and one whose guard returned `false`
+    trusted nothing. -/
+theorem keyed_history_authenticated_by_guard {E : Type} (ans : StagedEvidence E) (hR : Realizes inst prims σ)
+    (h : Nat → CheckedCommit E) (n : Nat)
+    (hcommits : ∀ i ≤ n, KeyedCommit ans inst prims σ (h i))
     (hsteps : ∀ i < n, GuardedHistoryStep (h i) (h (i + 1)))
     (hstart : (h 0).run.samePolicy = true → (h 0).mode = .incremental →
-      HeadAuthentic σ (h 0).config (h 0).g) :
-    ∀ i ≤ n, AuthenticatedIndex σ (h i).config (h i).g := by
+      RecordsAuthentic σ (h 0).config (h 0).g (h 0).g.head) :
+    ∀ i ≤ n, RecordsAuthentic σ (h i).config (h i).g (h i).g.index ∧ AuthenticatedIndex σ (h i).config (h i).g := by
   intro i hi
   induction i with
   | zero =>
     have hc := hcommits 0 hi
-    exact keyed_check_authenticates_given_guard _ _ _ _ hR hc.contracts hc.config hc.accepted hstart
+    exact keyed_check_records_authentic _ _ ans _ _ hR hc.contracts hc.accepted hstart
   | succ k ih =>
     have hk := ih (by omega)
     have hs := hsteps k (by omega)
     have hc0 := hcommits k (by omega)
     have hc := hcommits (k + 1) hi
-    exact keyed_check_authenticates_given_guard _ _ _ _ hR hc.contracts hc.config hc.accepted
-      (fun hg _ => head_authentic_of_checked_commit hk hs.commit
-        (policy_unchanged_of_guard hc.contracts hg (hselection k (by omega)) (hselection (k + 1) hi)
-          hs.commit hs.policy (hook_snapshots_sorted hc0.contracts).1 hc0.config hc.config))
+    exact keyed_check_records_authentic _ _ ans _ _ hR hc.contracts hc.accepted
+      (fun hg _ => records_authentic_of_checked_commit hk.1 hs.commit
+        (config_unchanged_of_guard hc.contracts hg hs.commit hs.policy (hook_snapshots_sorted hc0.contracts).1
+          hc0.config hc.config))
 
 /-! ## B. Authenticated recovery -/
 

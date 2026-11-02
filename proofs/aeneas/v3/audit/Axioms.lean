@@ -139,25 +139,34 @@ open Transcrypt.V3Verification
 #print axioms batchHeader_iff
 -- Objects
 #print axioms blob_read_spec
+-- Staged
+#print axioms held_records_spec
+#print axioms staged_check_spec
+#print axioms reads_blob_spec
+#print axioms stagedCheckOf_reads
+#print axioms staged_verdict_ok
 -- EndToEnd
-#print axioms hookPlan_spec
+#print axioms hookPlan_accepts
+#print axioms hookEntry_accepted
+#print axioms not_envelope_of_prefix
+#print axioms hook_membership
+#print axioms hook_entry_checked
 #print axioms hook_accepts_only_authenticated_ciphertext
 #print axioms hook_accepts_only_authenticated_ciphertext_given_history
+#print axioms hook_records_authentic
+#print axioms hook_authenticated_of_records
 #print axioms hook_provenance
 #print axioms hook_skips_only_unrepairable
 #print axioms hook_repairs_only_local_changes
 #print axioms stored_key_authenticates_current_config
 #print axioms hook_policy_guard
-#print axioms hook_settled_policy_unchanged
 -- ProductSecurity
 #print axioms hook_full_check_authenticates
 #print axioms pre_commit_check_modes
 #print axioms keyed_publication_authenticates
-#print axioms head_authentic_of_checked_commit
-#print axioms keyed_history_stays_authenticated
-#print axioms unguarded_check_is_full
-#print axioms policy_unchanged_of_guard
-#print axioms keyed_check_authenticates_given_guard
+#print axioms keyed_check_records_authentic
+#print axioms records_authentic_of_checked_commit
+#print axioms config_unchanged_of_guard
 #print axioms keyed_history_authenticated_by_guard
 #print axioms checkout_releases_only_authenticated_plaintext
 #print axioms checkout_opens_genuine_records

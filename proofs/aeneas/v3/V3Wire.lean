@@ -13,6 +13,7 @@ import V3Wire.Verification.Envelope
 import V3Wire.Verification.Filters
 import V3Wire.Verification.Pkt
 import V3Wire.Verification.Snapshot
+import V3Wire.Verification.Staged
 import V3Wire.Verification.Objects
 import V3Wire.Verification.EndToEnd
 import V3Wire.Verification.ProductSecurity
