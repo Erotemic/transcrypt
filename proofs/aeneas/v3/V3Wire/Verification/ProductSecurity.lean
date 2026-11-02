@@ -342,8 +342,23 @@ theorem opensTo_ne_record {config path record pt : List Nat} (hop : OpensTo σ c
   rw [sealed_length, ← heq] at hl
   simp [Transcrypt.V3Wire.fileMinLen, Transcrypt.V3Wire.fileHeaderLen] at hl
 
+/-- **What a checkout may return** for the stored `record` at `path`, under
+    `config` (id `id`): an output that differs from the record is exactly
+    the plaintext the record authenticates to there (`released`); one equal
+    to it is a v3 record within the size bound (`kept`); and when the
+    decision was to open, a record that does not authenticate gives no
+    output (`refused`). -/
+structure CheckoutOutcome (σ : Suite) (config id : List Nat) (unlocked : Bool) (path record : Slice U8)
+    (r : Option (Slice U8)) : Prop where
+  released : ∀ out, r = some out → sliceBytes out ≠ sliceBytes record →
+    OpensTo σ config (sliceBytes path) (sliceBytes record) (sliceBytes out)
+  kept : ∀ out, r = some out → sliceBytes out = sliceBytes record →
+    ∃ found, Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes record) = some found ∧ record.length ≤ maxRecord
+  refused : smudgeSpec (sliceBytes record) id unlocked = some .open_ →
+    (¬ ∃ pt, OpensTo σ config (sliceBytes path) (sliceBytes record) pt) → r = none
+
 /-- **Authenticated recovery.** What the smudge filter writes for a
-    protected path, given the stored `record`, is either
+    protected path, given the stored `record`, is a `CheckoutOutcome`:
 
     * **released plaintext** (it differs from the record): exactly the
       plaintext the record authenticates to at this path under this
@@ -360,20 +375,16 @@ theorem checkout_releases_only_authenticated_plaintext (hR : Realizes inst prims
     (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (unlocked keepRecord : Bool)
     (path record buf : Slice U8) :
     smudgeModel inst prims config id unlocked keepRecord path record buf ⦃ r =>
-      (∀ out, r = some out →
-        (sliceBytes out ≠ sliceBytes record →
-          OpensTo σ (wireBytes config) (sliceBytes path) (sliceBytes record) (sliceBytes out)) ∧
-        (sliceBytes out = sliceBytes record →
-          ∃ found, Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes record) = some found ∧
-            record.length ≤ maxRecord)) ∧
-      (smudgeSpec (sliceBytes record) (wireBytes id) unlocked = some .open_ →
-        (¬ ∃ pt, OpensTo σ (wireBytes config) (sliceBytes path) (sliceBytes record) pt) → r = none) ⦄ := by
+      CheckoutOutcome σ (wireBytes config) (wireBytes id) unlocked path record r ⦄ := by
   apply WP.spec_mono (smudgeModel_spec hR config id unlocked keepRecord path record buf)
   intro r hr
-  refine ⟨fun out hout => ?_, fun hopen hno => ?_⟩
+  refine ⟨fun out hout hne => ?_, fun out hout heq => ?_, fun hopen hno => ?_⟩
+  · rcases hr out hout with ⟨rfl, -, -⟩ | hop
+    · exact absurd rfl hne
+    · exact hop
   · rcases hr out hout with ⟨rfl, henv, -⟩ | hop
-    · exact ⟨fun hne => absurd rfl hne, fun _ => henv⟩
-    · exact ⟨fun _ => hop, fun heq => absurd heq (opensTo_ne_record hop)⟩
+    · exact henv
+    · exact absurd heq (opensTo_ne_record hop)
   · rcases r with _ | out
     · rfl
     · exfalso
@@ -417,9 +428,29 @@ theorem checkout_opens_genuine_records (hR : Realizes inst prims σ)
 def ImportedContent (g : GitState) (x : Entry) : Prop :=
   Holds g.head x.oid x.path ∨ ∃ m, g.incoming = some m ∧ Holds m x.oid x.path
 
+/-- **A repair that launders nothing**, for the repair `run` the hook
+    decided for the index entry `x`: a seal is of the user's change or of
+    plaintext `protect` forced, without the v3 header (`seals`); a rebind is
+    of the user's change, a record that authenticates at the path of the
+    `HEAD` record it was moved from (`rebinds`); content imported from a
+    commit is never rebound, and sealed only when `protect` forced it
+    (`imported`); and the user's change, or a forced entry, is read, never
+    skipped (`reads`). -/
+structure NoLaunderingRepair (σ : Suite) (g : GitState) (run : RepairInputs) (x : Entry) : Prop where
+  seals : run.plan = transcrypt_v3_core.RepairPlan.Seal →
+    (UserStaged g.head g.incoming x ∨ run.forced = true) ∧ NoHeader run.record
+  rebinds : ∀ j, run.plan = transcrypt_v3_core.RepairPlan.Rebind j →
+    UserStaged g.head g.incoming x ∧ ∃ h, g.head[j.val]? = some h ∧ MoveSource g.index x h ∧
+      ∃ pt, OpensTo σ (wireBytes run.config) h.path (sliceBytes run.record) pt
+  imported : ImportedContent g x →
+    (∀ j, run.plan ≠ transcrypt_v3_core.RepairPlan.Rebind j) ∧
+    (run.forced = false → run.plan ≠ transcrypt_v3_core.RepairPlan.Seal)
+  reads : UserStaged g.head g.incoming x ∨ run.forced = true → needs_record run.prov = ok true
+
 /-- **No laundering.** For a protected index entry `x` whose repair the hook
     decided (`RepairContracts`: Git's listings A20, the sequencing state A23,
-    the adapter's evidence about the blob and the verified decisions, A4):
+    the adapter's evidence about the blob and the verified decisions, A4),
+    the repair launders nothing (`NoLaunderingRepair`):
 
     * a **seal** is of the user's change or of plaintext `protect` forced,
       and only of a blob without the v3 header;
@@ -433,18 +464,7 @@ def ImportedContent (g : GitState) (x : Entry) : Prop :=
       reads its blob (`needs_record`). -/
 theorem repair_never_launders (g : GitState) (run : RepairInputs)
     (hR : Realizes inst prims σ) (hc : RepairContracts inst prims g run) :
-    (run.plan = transcrypt_v3_core.RepairPlan.Seal →
-      (UserStaged g.head g.incoming (g.index[run.i.val]'hc.entry) ∨ run.forced = true) ∧
-        NoHeader run.record) ∧
-    (∀ j, run.plan = transcrypt_v3_core.RepairPlan.Rebind j →
-      UserStaged g.head g.incoming (g.index[run.i.val]'hc.entry) ∧
-        ∃ h, g.head[j.val]? = some h ∧ MoveSource g.index (g.index[run.i.val]'hc.entry) h ∧
-          ∃ pt, OpensTo σ (wireBytes run.config) h.path (sliceBytes run.record) pt) ∧
-    (ImportedContent g (g.index[run.i.val]'hc.entry) →
-      (∀ j, run.plan ≠ transcrypt_v3_core.RepairPlan.Rebind j) ∧
-      (run.forced = false → run.plan ≠ transcrypt_v3_core.RepairPlan.Seal)) ∧
-    (UserStaged g.head g.incoming (g.index[run.i.val]'hc.entry) ∨ run.forced = true →
-      needs_record run.prov = ok true) := by
+    NoLaunderingRepair σ g run (g.index[run.i.val]'hc.entry) := by
   have hwho : run.plan = transcrypt_v3_core.RepairPlan.Seal →
       UserStaged g.head g.incoming (g.index[run.i.val]'hc.entry) ∨
         (run.forced = true ∧ run.plan = transcrypt_v3_core.RepairPlan.Seal) := fun hs =>
@@ -475,10 +495,33 @@ theorem repair_never_launders (g : GitState) (run : RepairInputs)
 
 /-! ## D. Configuration-bound key use -/
 
+/-- **A validated crypto context**: the primitives `keyed` and the
+    configuration `config` that a stored key file `file` gave for the
+    current configuration `current`. The configuration is the current one
+    and the one the file names; the primitives realize the suite `σ` of the
+    file's own key bytes, the configuration authenticates under them, and
+    the file holds their check value for it; and every file operation under
+    them is bound to that configuration and the exact path. -/
+structure ValidatedCryptoContext (inst : V3Primitives P) (σ : Suite) (file current : List Nat) (keyed : P)
+    (config : Std.Array U8 55#usize) : Prop where
+  current_config : wireBytes config = current
+  file_config : file.take Transcrypt.V3Wire.configLen = wireBytes config
+  realizes : Realizes inst keyed σ
+  authentic : ConfigAuthentic σ (wireBytes config)
+  check_value : storedKeyCheck file = keyCheckValue σ (wireBytes config)
+  opens : ∀ path record out buf : Slice U8,
+    open_record inst keyed config path record out = ok (core.result.Result.Ok (), buf) →
+      OpensTo σ (wireBytes config) (sliceBytes path) (sliceBytes record) (sliceBytes buf)
+  seals : ∀ path plaintext out sealed : Slice U8,
+    seal_record inst keyed config path plaintext out = ok (core.result.Result.Ok (), sealed) →
+      sliceBytes sealed = sealedRecord σ (wireBytes config) (sliceBytes path) (sliceBytes plaintext) ∧
+      OpensTo σ (wireBytes config) (sliceBytes path) (sliceBytes sealed) (sliceBytes plaintext)
+
 /-- **Configuration-bound key use.** When `Key::load` uses the stored key,
     the primitives and configuration it holds (`ValidatedKey::from_stored`)
     are exactly what the verified `unlock_stored_key` returned for the key
-    file's bytes and the current configuration. Then the file holds exactly
+    file's bytes and the current configuration. Then they are a
+    `ValidatedCryptoContext`: the file holds exactly
     that configuration followed by the key bytes `storedKeyBytes file`; the
     primitives realize the suite of those bytes (given only the key-schedule
     contract `KeyScheduleRealizes`, A5/A17), the configuration
@@ -497,23 +540,11 @@ theorem stored_key_binds_file_operations {sched : V3KeySchedule P} {σk : List N
     (present : Bool) (file current : Slice U8) (keyed : P) (config : Std.Array U8 55#usize)
     (hunlock : unlock_stored_key inst sched present file current =
       ok (core.result.Result.Ok (keyed, config))) :
-    wireBytes config = sliceBytes current ∧
-    (sliceBytes file).take Transcrypt.V3Wire.configLen = wireBytes config ∧
-    ConfigAuthentic (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) ∧
-    storedKeyCheck (sliceBytes file) = keyCheckValue (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) ∧
-    (∀ path record out buf : Slice U8,
-      open_record inst keyed config path record out = ok (core.result.Result.Ok (), buf) →
-        OpensTo (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) (sliceBytes path)
-          (sliceBytes record) (sliceBytes buf)) ∧
-    (∀ path plaintext out sealed : Slice U8,
-      seal_record inst keyed config path plaintext out = ok (core.result.Result.Ok (), sealed) →
-        sliceBytes sealed = sealedRecord (σk (storedKeyBytes (sliceBytes file))) (wireBytes config)
-          (sliceBytes path) (sliceBytes plaintext) ∧
-        OpensTo (σk (storedKeyBytes (sliceBytes file))) (wireBytes config) (sliceBytes path)
-          (sliceBytes sealed) (sliceBytes plaintext)) := by
+    ValidatedCryptoContext inst (σk (storedKeyBytes (sliceBytes file))) (sliceBytes file) (sliceBytes current)
+      keyed config := by
   obtain ⟨-, -, htake, hcfg, hR, hca, hchk⟩ :=
     spec_result (unlock_stored_key_spec hK present file current) hunlock
-  refine ⟨hcfg, htake.trans hcfg.symm, hca, hchk, fun path record out buf ho => ?_,
+  refine ⟨hcfg, htake.trans hcfg.symm, hR, hca, hchk, fun path record out buf ho => ?_,
     fun path plaintext out sealed hs => ?_⟩
   · have h := open_record_spec hR config path record out
     rw [ho] at h

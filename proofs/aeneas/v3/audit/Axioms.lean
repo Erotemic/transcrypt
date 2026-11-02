@@ -192,6 +192,8 @@ open Transcrypt.V3Verification
 #print axioms audited_head_starts_keyed_history
 #print axioms audited_head_keyed_history_authenticated
 #print axioms keyed_audit_chain_authenticated
+-- ProductAssurance
+#print axioms transcrypt_product_assurance
 -- spec (V3Policy)
 #print axioms Transcrypt.V3Policy.opensTo_unique
 #print axioms Transcrypt.V3Policy.seal_opens
