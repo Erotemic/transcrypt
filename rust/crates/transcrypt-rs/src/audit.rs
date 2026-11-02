@@ -1,6 +1,8 @@
-//! Keyless audit of committed history, and the pre-push hook built on it.
+//! Audit of committed history (keyed or keyless), and the pre-push hook
+//! built on it.
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     io::{self, BufRead, Read},
@@ -15,7 +17,8 @@ use crate::{
         push_index_record, read_record, tree_files, Attributes, Mode, ObjectId, Repository, Staged, SHORT_OUTPUT_LIMIT},
 };
 use transcrypt_v3_core::{
-    is_object_id, is_reserved_path, record_envelope_ok, ATTRIBUTES_NAME, ID_LEN,
+    audit_check, is_object_id, is_reserved_path, reads_blob, staged_verdict, AuditBase, AuditedEntry, EntryCheck,
+    StagedCheck, StagedEvidence, StagedRefusal, ATTRIBUTES_NAME, ID_LEN,
 };
 
 /// The longest `git rev-list --parents` line read: a commit id and its
@@ -178,18 +181,36 @@ fn at(commit: &str, path: &[u8]) -> String {
     format!("commit {commit}, {}", String::from_utf8_lossy(path))
 }
 
+/// Audit one commit against its first parent (`parent`). With the key of
+/// the commit's configuration this establishes the hook's record invariant
+/// of the commit (`RecordsAuthentic`: every regular, non-reserved entry whose
+/// blob has the configuration's envelope authenticates at its own path),
+/// given the parent's when the configuration is unchanged, and so every
+/// selected entry authenticates (`keyed_audit_authenticates_commit`).
+///
+/// The entries examined are those the commit adds or changes (`diff-tree`
+/// against the parent), or its whole tree when it is a root commit or changes
+/// the config or an attribute file; every other entry is the parent's exactly
+/// (A20). Each examined entry is checked by the verified `audit_check` and
+/// `staged_verdict`, the pre-commit hook's vocabulary: a selected entry
+/// authenticates (keyless: has the envelope and, unless the parent holds it,
+/// is not a moved blob); an unprotected file the parent holds exactly is
+/// trusted from the parent while the config is unchanged (`AuditBase::Parent`),
+/// and any other unprotected file, with the key, authenticates if it is a
+/// record (only its prefix is read to tell).
 fn audit_commit(repo: &Repository, keyed: bool, state: &mut AuditState, commit: &str, parent: Option<String>)
     -> Result<(), String>
 {
-    let Changes { mut entries, deleted, modified } = changed_files(repo, commit, parent.as_deref())?;
-    let touched = |test: &dyn Fn(&[u8]) -> bool| entries.iter().any(|e| test(&e.path)) || deleted.iter().any(|d| test(&d.path));
+    let Changes { entries: changed, deleted, modified } = changed_files(repo, commit, parent.as_deref())?;
+    let touched = |test: &dyn Fn(&[u8]) -> bool| changed.iter().any(|e| test(&e.path)) || deleted.iter().any(|d| test(&d.path));
     let config_changed = parent.is_none() || touched(&|p| p == CONFIG_PATH.as_bytes());
     let attributes_changed = parent.is_none() || touched(&is_attributes_path);
-    if (config_changed || attributes_changed) && parent.is_some() {
-        // A new config re-binds every record, and new attributes may
-        // protect files the commit did not change: check the whole tree.
-        entries = tree_files(repo, commit)?;
-    }
+    // A new config re-binds every record, and new attributes may protect
+    // files the commit did not change: examine the whole tree. An entry the
+    // diff does not list is the parent's exactly (the parent holds it).
+    let whole_tree = (config_changed || attributes_changed) && parent.is_some();
+    let changed_paths: HashSet<Vec<u8>> = changed.iter().map(|e| e.path.clone()).collect();
+    let mut entries = if whole_tree { tree_files(repo, commit)? } else { changed };
     // The commit's config blob and attribute files: from its tree when they
     // changed, else the parent's (looked up directly if the parent was not
     // audited).
@@ -216,36 +237,52 @@ fn audit_commit(repo: &Repository, keyed: bool, state: &mut AuditState, commit: 
     entries.retain(|e| !is_reserved_path(&e.path));
     let paths = paths_of(&entries);
     let flags = state.policy.protected(repo, &attributes, &paths)?;
-    let (mut protected, mut unprotected) = (Vec::new(), Vec::new());
-    for (entry, &flag) in entries.iter().zip(&flags) {
-        if flag { protected.push(entry) } else { unprotected.push(entry) }
-    }
     // The first deleted path of each removed blob, and the old blob of each
     // modified path.
     let mut moved: HashMap<&ObjectId, &[u8]> = HashMap::new();
     for d in &deleted { moved.entry(&d.oid).or_insert(d.path.as_slice()); }
     let old: HashMap<&[u8], &ObjectId> = modified.iter().map(|m| (m.path.as_slice(), &m.oid)).collect();
-    // A record this commit moved from a deleted path to an unprotected one is
-    // never decrypted there (`git mv x.env x.bak`, committed by any route).
-    let moved_away: Vec<(&Staged, &[u8])> = unprotected.iter()
-        .filter_map(|e| moved.get(&e.oid).map(|from| (*e, *from))).collect();
+    let Some(config_oid) = config_oid else {
+        // No configuration, so no records: only a protected file is wrong.
+        return match entries.iter().zip(&flags).find(|(_, selected)| **selected) {
+            Some((entry, _)) => Err(format!("{}: protected file in a commit without a v3 configuration (plaintext?)",
+                at(commit, &entry.path))),
+            None => Ok(()),
+        };
+    };
+    check_policy(repo, &state.policy, commit, &attributes, &paths, config_changed || attributes_changed)?;
+    if entries.is_empty() { return Ok(()); }
+    let id = committed_config(repo, keyed, state, commit, &config_oid)?.id;
     // A file that was encrypted and is now handed to another named filter
     // (`git lfs track` writing `filter=lfs`) silently lost its protection.
-    let was_record: Vec<(&Staged, &ObjectId)> = unprotected.iter()
-        .filter_map(|e| old.get(e.path.as_slice()).map(|oid| (*e, *oid))).collect();
-    if config_oid.is_some() {
-        check_policy(repo, &state.policy, commit, &attributes, &paths, config_changed || attributes_changed)?;
+    let was_record: Vec<(&Staged, &ObjectId)> = entries.iter().zip(&flags).filter(|(_, selected)| !**selected)
+        .filter_map(|(e, _)| old.get(e.path.as_slice()).map(|oid| (e, *oid))).collect();
+    check_drift(repo, &state.policy, commit, &id, was_record)?;
+    let base = if config_changed { AuditBase::Tree } else { AuditBase::Parent };
+    let examined = entries.iter().zip(&flags).map(|(entry, &selected)| (entry, AuditedEntry {
+        regular: entry.regular(),
+        selected,
+        held: !changed_paths.contains(&entry.path),
+        moved: moved.contains_key(&entry.oid),
+    }));
+    check_entries(repo, state, commit, &config_oid, base, examined, &moved)
+}
+
+/// The committed config `config_oid` (parsed and loaded once per run): its
+/// id, and its key when the audit is keyed and this checkout is unlocked for
+/// it. Whether a config has its key is therefore fixed for the whole run.
+fn committed_config<'s>(repo: &Repository, keyed: bool, state: &'s mut AuditState, commit: &str, config_oid: &ObjectId)
+    -> Result<&'s CommittedConfig, String>
+{
+    if !state.configs.contains_key(config_oid) {
+        let bytes = git_blob(repo, config_oid)?;
+        transcrypt_v3_core::parse_config(&bytes)
+            .map_err(|_| format!("commit {commit}: invalid v3 configuration"))?;
+        let id = transcrypt_rs::config_id(&bytes);
+        let key = if keyed { Key::load(repo, &bytes)? } else { None };
+        state.configs.insert(config_oid.clone(), CommittedConfig { id, key });
     }
-    if protected.is_empty() && moved_away.is_empty() && was_record.is_empty() { return Ok(()); }
-    if let Some(config_oid) = &config_oid {
-        check_moves(repo, &state.policy, commit, config_oid, moved_away, was_record)?;
-    }
-    if protected.is_empty() { return Ok(()); }
-    let Some(config_oid) = config_oid else {
-        return Err(format!("{}: protected file in a commit without a v3 configuration (plaintext?)",
-            at(commit, &protected[0].path)));
-    };
-    check_records(repo, keyed, state, commit, config_oid, protected, &moved)
+    Ok(&state.configs[config_oid])
 }
 
 /// While a v3 config exists, the policy must define the `transcrypt` macro
@@ -267,19 +304,12 @@ fn check_policy(repo: &Repository, policy: &AttributeIndex, commit: &str, attrib
     Ok(())
 }
 
-/// Records of the config `config_oid` that this commit moved to an
-/// unprotected path, or whose path another filter now takes.
-fn check_moves(repo: &Repository, policy: &AttributeIndex, commit: &str, config_oid: &ObjectId,
-    moved_away: Vec<(&Staged, &[u8])>, was_record: Vec<(&Staged, &ObjectId)>) -> Result<(), String>
+/// Unprotected files whose path held a record of the config `id` and that
+/// another filter now takes. It only refuses, like the hook's `check_drift`.
+fn check_drift(repo: &Repository, policy: &AttributeIndex, commit: &str, id: &[u8; ID_LEN],
+    was_record: Vec<(&Staged, &ObjectId)>) -> Result<(), String>
 {
-    let id = transcrypt_rs::config_id(&git_blob(repo, config_oid)?);
-    let is_record = |oid: &ObjectId| crate::git::is_record(repo, oid, &id);
-    for (entry, from) in moved_away {
-        if is_record(&entry.oid)? {
-            return Err(format!("{}: the encrypted {} moved to this unprotected name without decryption; \
-                nothing decrypts it here", at(commit, &entry.path), String::from_utf8_lossy(from)));
-        }
-    }
+    let is_record = |oid: &ObjectId| crate::git::is_record(repo, oid, id);
     let mut drifted = Vec::new();
     for (entry, old) in was_record {
         if is_record(old)? && !is_record(&entry.oid)? { drifted.push(entry.path.as_slice()); }
@@ -293,45 +323,148 @@ fn check_moves(repo: &Repository, policy: &AttributeIndex, commit: &str, config_
     Ok(())
 }
 
-/// Every protected file of the commit is a regular file holding a record of
-/// its config `config_oid`, at the path it was sealed for (authenticated
-/// there when this checkout has the key).
-fn check_records(repo: &Repository, keyed: bool, state: &mut AuditState, commit: &str, config_oid: ObjectId,
-    protected: Vec<&Staged>, moved: &HashMap<&ObjectId, &[u8]>) -> Result<(), String>
-{
-    if !state.configs.contains_key(&config_oid) {
-        let bytes = git_blob(repo, &config_oid)?;
-        transcrypt_v3_core::parse_config(&bytes)
-            .map_err(|_| format!("commit {commit}: invalid v3 configuration"))?;
-        let id = transcrypt_rs::config_id(&bytes);
-        let key = if keyed { Key::load(repo, &bytes)? } else { None };
-        state.configs.insert(config_oid.clone(), CommittedConfig { id, key });
+/// Whether the cache settles `check` for an entry whose blob, config and
+/// path it holds. The cache (`AuditState::checked`) gains an entry only after
+/// a selected entry's check passed (`StagedCheck::Protected`), under a config
+/// whose key is fixed for the run: so the blob has that config's envelope
+/// and, when the config is keyed, opened at that path. That settles
+/// `Authenticate` (asked only when keyed) and `Envelope`, which ask nothing
+/// else; `EnvelopeNotMoved` also asks about this commit's deletions, and the
+/// checks of unprotected files are never cached.
+fn settled_by_cache(check: StagedCheck) -> bool {
+    match check {
+        StagedCheck::Protected(EntryCheck::Authenticate) => true,
+        StagedCheck::Protected(EntryCheck::Envelope) => true,
+        StagedCheck::Protected(EntryCheck::EnvelopeNotMoved) => false,
+        StagedCheck::Skip => false,
+        StagedCheck::NotRecord => false,
+        StagedCheck::AuthenticateIfRecord => false,
     }
-    let CommittedConfig { id, key } = &state.configs[&config_oid];
-    // A blob this commit removed from one path and added at another is a
-    // record moved without re-encryption: it does not open at its new path.
-    for entry in protected {
-        if !entry.regular() {
+}
+
+/// Check every examined entry of the commit under its config `config_oid`
+/// (`audit_check`, then `staged_verdict`), each fact about the entry itself;
+/// `moved` names, for messages, the deleted path a moved blob came from.
+fn check_entries<'e>(repo: &Repository, state: &mut AuditState, commit: &str, config_oid: &ObjectId, base: AuditBase,
+    examined: impl Iterator<Item = (&'e Staged, AuditedEntry)>, moved: &HashMap<&ObjectId, &[u8]>) -> Result<(), String>
+{
+    let CommittedConfig { id, key } = &state.configs[config_oid];
+    for (entry, facts) in examined {
+        let Some(check) = audit_check(facts, &entry.path, key.is_some(), base) else {
             return Err(format!("{}: protected path is not a regular file", at(commit, &entry.path)));
-        }
+        };
         let checked = CheckedRecord { oid: entry.oid.clone(), config_oid: config_oid.clone(), path: entry.path.clone() };
-        if !state.checked.insert(checked) { continue; }
-        let record = git_blob(repo, &entry.oid).map_err(|e| format!("{}: {e}", at(commit, &entry.path)))?;
-        if !record_envelope_ok(&record, id) {
-            return Err(format!("{}: not v3 ciphertext for its configuration (plaintext?)", at(commit, &entry.path)));
+        if settled_by_cache(check) && state.checked.contains(&checked) { continue; }
+        let record = if reads_blob(check) {
+            Some(git_blob(repo, &entry.oid).map_err(|e| format!("{}: {e}", at(commit, &entry.path)))?)
+        } else {
+            None
+        };
+        let evidence = AuditEvidence {
+            repo, key: key.as_ref(), id, entry, moved: facts.moved, record: record.as_deref(),
+            unopened: RefCell::new(None), failure: RefCell::new(None),
+        };
+        let verdict = staged_verdict(&evidence, check, record.as_deref().unwrap_or_default(), id);
+        // An answer that could not be found refuses, whatever the verdict.
+        if let Some(failure) = evidence.failure.take() {
+            return Err(format!("{}: {failure}", at(commit, &entry.path)));
         }
-        if let Some(from) = moved.get(&entry.oid) {
-            return Err(format!("{}: the encrypted {} moved here without re-encryption (renamed while \
-                locked or with --no-verify?); it cannot be decrypted at its new path",
-                at(commit, &entry.path), String::from_utf8_lossy(from)));
+        if let Err(refusal) = verdict {
+            return Err(audit_refusal(refusal, commit, &evidence, moved.get(&entry.oid).copied()));
         }
-        if let Some(key) = key {
-            key.open(&entry.path, &record).map_err(|e| format!("{}: {e}", at(commit, &entry.path)))?;
+        // Recorded only now that the check passed (see `settled_by_cache`).
+        if let StagedCheck::Protected(_) = check {
+            state.checked.insert(checked);
+            state.records += 1;
         }
-        state.records += 1;
     }
     state.authenticated &= key.is_some();
     Ok(())
+}
+
+/// The audit's answers about one examined entry for the verified
+/// `staged_verdict`, each about the entry's own blob (by object id) and path,
+/// computed only when asked.
+struct AuditEvidence<'a> {
+    repo: &'a Repository,
+    key: Option<&'a Key>,
+    id: &'a [u8; ID_LEN],
+    entry: &'a Staged,
+    /// Whether the blob is that of a path the commit deletes.
+    moved: bool,
+    /// The blob, when the check read it (`reads_blob`).
+    record: Option<&'a [u8]>,
+    /// Why the blob did not open, for the message.
+    unopened: RefCell<Option<String>>,
+    /// Why an answer could not be found (a failed read): the check refuses.
+    failure: RefCell<Option<String>>,
+}
+
+impl StagedEvidence for AuditEvidence<'_> {
+    /// Its size and first bytes, decided by `record_envelope_prefix_ok`.
+    fn is_record(&self) -> bool {
+        crate::git::is_record(self.repo, &self.entry.oid, self.id).unwrap_or_else(|e| {
+            self.failure.replace(Some(e));
+            false
+        })
+    }
+
+    /// `Key::open` at the entry's path.
+    fn opens(&self) -> bool {
+        let Some(key) = self.key else { return false };
+        let read;
+        let record = match self.record {
+            Some(record) => record,
+            None => match git_blob(self.repo, &self.entry.oid) {
+                Ok(blob) => { read = blob; &read },
+                Err(e) => {
+                    self.failure.replace(Some(e));
+                    return false;
+                },
+            },
+        };
+        match key.open(&self.entry.path, record) {
+            Ok(_) => true,
+            Err(e) => {
+                self.unopened.replace(Some(e));
+                false
+            },
+        }
+    }
+
+    /// Moved: the blob of a path this commit deletes.
+    fn elsewhere(&self) -> bool {
+        self.moved
+    }
+}
+
+/// The message for the verified refusal of `evidence`'s entry in `commit`;
+/// `from`: the deleted path its blob came from, if any.
+fn audit_refusal(refusal: StagedRefusal, commit: &str, evidence: &AuditEvidence, from: Option<&[u8]>) -> String {
+    let here = at(commit, &evidence.entry.path);
+    let from = from.map(String::from_utf8_lossy).unwrap_or_default();
+    let unopened = || evidence.unopened.take().unwrap_or_default();
+    match refusal {
+        StagedRefusal::Plaintext | StagedRefusal::OtherConfig | StagedRefusal::Envelope =>
+            format!("{here}: not v3 ciphertext for its configuration (plaintext?)"),
+        StagedRefusal::Moved => moved_here(&here, &from),
+        StagedRefusal::Authentication if evidence.moved => moved_here(&here, &from),
+        StagedRefusal::Authentication => format!("{here}: {}", unopened()),
+        StagedRefusal::UnprotectedRecord => moved_away(&here, &from),
+        StagedRefusal::UnprotectedForgery if evidence.moved => moved_away(&here, &from),
+        StagedRefusal::UnprotectedForgery => format!("{here}: not protected, but holds a record of its \
+            configuration that does not open there ({}): a forgery, or a record copied from another path, \
+            which an attribute change would protect unauthenticated", unopened()),
+    }
+}
+
+fn moved_here(here: &str, from: &str) -> String {
+    format!("{here}: the encrypted {from} moved here without re-encryption (renamed while locked or with \
+        --no-verify?); it cannot be decrypted at its new path")
+}
+
+fn moved_away(here: &str, from: &str) -> String {
+    format!("{here}: the encrypted {from} moved to this unprotected name without decryption; nothing decrypts it here")
 }
 
 /// The pre-push hook: audit every commit being pushed that the remote does

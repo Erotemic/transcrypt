@@ -1613,11 +1613,14 @@ fn policy_change_refuses(repo: &Path, path: &str, expected: &str) {
 /// path. A forged record at an unprotected name, which a local attribute
 /// source (`.git/info/attributes`, `core.attributesFile`) could later
 /// select without any committed change, is refused by every full keyed
-/// check (`verify-index`, `lock`) and by the first keyed commit that
-/// changes the policy, and it can never enter through the keyed hook. The
-/// boundary is the start of history (A24): one committed without the keyed
-/// hook (`--no-verify`) is trusted by the incremental hook until such a
-/// check, even once a local override selects it, as this test records.
+/// check (`verify-index`, `lock`), by the first keyed commit that changes
+/// the policy, and by the keyed audit and the pre-push hook (which keep the
+/// same invariant for history the hook never saw), and it can never enter
+/// through the keyed hook. The boundary is the start of a local history
+/// (A24): one committed without the keyed hook (`--no-verify`) and never
+/// audited is trusted by the incremental hook in this checkout, even once a
+/// local override selects it, as this test records; it cannot be pushed,
+/// and an audit of it is refused, before anyone else relies on it.
 #[test]
 fn local_attribute_overrides_never_admit_a_forged_record_through_checked_history() {
     const SELECT: &[u8] = b"f.data filter=transcrypt-v3\n";
@@ -1638,6 +1641,13 @@ fn local_attribute_overrides_never_admit_a_forged_record_through_checked_history
     run(&repo, "git", &["rm", "-q", "--cached", "f.data"], None);
     // Committed without the hook, in HEAD and HEAD^1.
     commit_twice_unchecked(&repo, "f.data", &forged);
+    // The keyed audit refuses it, unprotected as it is: this history does
+    // not establish the start of a keyed history (A24), and is not pushed.
+    add_origin(&scratch, &repo);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD"], None);
+    assert!(err.contains("f.data") && err.contains("does not open there"), "{err}");
+    let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    assert!(err.contains("f.data") && err.contains("refusing to push"), "{err}");
     // Every full keyed check refuses it, unprotected as it is.
     for command in ["verify-index", "lock"] {
         let err = run_fails(&repo, bin(), &[command], None);
@@ -1646,10 +1656,11 @@ fn local_attribute_overrides_never_admit_a_forged_record_through_checked_history
     // The incremental hook trusts HEAD under the guard and does not read it.
     fs::write(repo.join("z"), b"z\n").unwrap();
     commit(&repo, &["z"], "unrelated");
-    // The boundary: unchecked history selected only by a local source is
+    // The boundary: unaudited history selected only by a local source is
     // settled (unchanged since HEAD and HEAD^1, the same committed policy),
     // so the incremental hook checks its envelope only; it warns about the
-    // override, and every full keyed check refuses the record.
+    // override, and every full keyed check, the keyed audit and the
+    // pre-push hook refuse the record.
     for (k, source) in LocalAttributes::BOTH.into_iter().enumerate() {
         source.set(&repo, SELECT);
         fs::write(repo.join("z"), format!("z{k}\n")).unwrap();
@@ -1658,15 +1669,20 @@ fn local_attribute_overrides_never_admit_a_forged_record_through_checked_history
         assert!(err.contains("sets `filter`"), "{source:?}: {err}");
         let err = run_fails(&repo, bin(), &["verify-index"], None);
         assert!(err.contains("f.data") && err.contains("authentication failed"), "{source:?}: {err}");
+        let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+        assert!(err.contains("f.data") && err.contains("refusing to push"), "{source:?}: {err}");
         // A policy change unsettles it, selected or not.
         policy_change_refuses(&repo, "f.data", "authentication failed");
         source.clear(&repo);
         policy_change_refuses(&repo, "f.data", "does not open there");
     }
-    // Removed, every check passes again.
+    // Removed, every check passes again; history still holds the forgery,
+    // so the audit still refuses it.
     run(&repo, "git", &["rm", "-q", "--cached", "f.data"], None);
     run(&repo, "git", &["commit", "-qm", "drop the forged record"], None);
     run(&repo, bin(), &["verify-index"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD"], None);
+    assert!(err.contains("f.data") && err.contains("does not open there"), "{err}");
 }
 
 /// A local source that stops selecting a protected file leaves its genuine
@@ -1752,4 +1768,97 @@ fn ordinary_commits_read_no_unchanged_unprotected_file() {
     policy_change_refuses(&repo, oid.trim(), "missing or not a blob");
     let err = run_fails(&repo, bin(), &["verify-index"], None);
     assert!(err.contains("missing or not a blob"), "{err}");
+}
+
+/// A bare repository that receives `repo`'s pushes, as `origin`.
+fn add_origin(scratch: &Scratch, repo: &Path) {
+    run(&scratch.root, "git", &["init", "-q", "--bare", "remote.git"], None);
+    run(repo, "git", &["remote", "add", "origin", "../remote.git"], None);
+}
+
+/// The keyed audit keeps the hook's invariant (`RecordsAuthentic`) for
+/// history the hook never saw: every record of this configuration at an
+/// unprotected path must open there. A forgery committed with `--no-verify`
+/// at an unprotected name is refused by the keyed audit and the pre-push
+/// hook; a record moved to an unprotected name is refused with or without
+/// the key; a genuine record at its own unprotected path passes. Without
+/// the key the audit says it checked envelopes only, and accepts the
+/// forgery: nothing can authenticate it.
+#[test]
+fn the_keyed_audit_authenticates_records_at_unprotected_paths() {
+    let mut scratch = Scratch::new("auditunprotected");
+    let repo = scratch.repo("repo");
+    add_origin(&scratch, &repo);
+    run(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    let main = rev(&repo, "HEAD");
+    let forged = forged_envelope(&repo);
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{forged},f.data")], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "hostile"], None);
+    for revs in [&["HEAD"][..], &["origin/main..HEAD"], &["HEAD", "--not", "origin/main"]] {
+        let err = run_fails(&repo, bin(), &[&["audit"][..], revs].concat(), None);
+        assert!(err.contains("f.data") && err.contains("does not open there"), "{revs:?}: {err}");
+    }
+    let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    assert!(err.contains("f.data") && err.contains("refusing to push"), "{err}");
+    // Keyless: envelopes only, and the output says so.
+    without_key(&repo, || {
+        let out = String::from_utf8(run(&repo, bin(), &["audit", "HEAD"], None)).unwrap();
+        assert!(out.contains("envelopes only") && out.contains("unprotected"), "{out}");
+    });
+    let remote = scratch.root.join("remote.git");
+    run(&repo, "git", &["push", "-q", "--no-verify", "origin", "HEAD:refs/heads/hostile"], None);
+    let out = String::from_utf8(run(&remote, bin(), &["audit", "--all"], None)).unwrap();
+    assert!(out.contains("envelopes only"), "{out}");
+    run(&repo, "git", &["push", "-q", "origin", ":refs/heads/hostile"], None);
+    // A record moved to an unprotected name, with or without the key.
+    run(&repo, "git", &["reset", "-q", "--hard", &main], None);
+    run(&repo, "git", &["mv", "a.secret", "a.bak"], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "moved"], None);
+    let err = run_fails(&repo, bin(), &["audit", "origin/main..HEAD"], None);
+    assert!(err.contains("a.bak") && err.contains("moved to this unprotected name"), "{err}");
+    without_key(&repo, || {
+        let err = run_fails(&repo, bin(), &["audit", "origin/main..HEAD"], None);
+        assert!(err.contains("a.bak") && err.contains("moved to this unprotected name"), "{err}");
+    });
+    // A genuine record sealed for its own unprotected path opens there.
+    run(&repo, "git", &["reset", "-q", "--hard", &main], None);
+    let sealed = run(&repo, bin(), &["clean", "g.data"], Some(b"genuine\n"));
+    assert!(is_record(&sealed));
+    let oid = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(&sealed))).unwrap();
+    run(&repo, "git", &["update-index", "--add", "--cacheinfo", &format!("{REGULAR_FILE_MODE},{},g.data", oid.trim())], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "genuine"], None);
+    run(&repo, bin(), &["audit", "HEAD"], None);
+    run(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+}
+
+/// The keyed audit's history: a commit's records authenticate given its
+/// parent's, so an unprotected file the parent holds is not read again,
+/// even across an attribute change (only a config change, or a root
+/// commit, examines the whole tree); a changed unprotected file is read
+/// only as far as its envelope prefix. An unreadable unchanged blob
+/// therefore does not stop the audit of later commits, and the commit that
+/// added it reads it and refuses.
+#[test]
+fn audits_read_no_unchanged_unprotected_file() {
+    let mut scratch = Scratch::new("auditlazy");
+    let repo = scratch.repo("repo");
+    add_origin(&scratch, &repo);
+    fs::write(repo.join("public.txt"), b"an unprotected file\n").unwrap();
+    commit(&repo, &["public.txt"], "public");
+    let oid = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD:public.txt"], None)).unwrap();
+    run(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    let (dir, file) = oid.trim().split_at(2);
+    let object = repo.join(".git/objects").join(dir).join(file);
+    fs::remove_file(&object).unwrap();
+    fs::write(&object, b"not a zlib stream").unwrap();
+    fs::write(repo.join("z"), b"z\n").unwrap();
+    commit(&repo, &["z"], "unrelated");
+    let attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    fs::write(repo.join(".gitattributes"), [&attributes[..], b"# a policy change\n"].concat()).unwrap();
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "policy change", ".gitattributes"], None);
+    let out = String::from_utf8(run(&repo, bin(), &["audit", "HEAD~2..HEAD"], None)).unwrap();
+    assert!(out.contains("all authenticated"), "{out}");
+    run(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    let err = run_fails(&repo, bin(), &["audit", "HEAD"], None);
+    assert!(err.contains("public.txt") && err.contains("missing or not a blob"), "{err}");
 }
