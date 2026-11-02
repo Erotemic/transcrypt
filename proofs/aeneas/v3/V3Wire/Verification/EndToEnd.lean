@@ -22,12 +22,14 @@ and names every assumption it rests on.
   (`Realizes`, A5); Git commits the index the hook checked (A22, stated in
   prose: the conclusion is about `g.index`).
 * **The run.** `HookEvidence` is what the adapter obtained from the
-  verified core, in four groups: the parsed snapshots (`HookSnapshots`:
+  verified core, in five groups: the parsed snapshots (`HookSnapshots`:
   three `OrderedListing`s, as the adapter's `OrderedListing`: parsed, each
   path once, with checked object orders), the attribute selection
-  (`HookSelection`), the `HEAD`/`HEAD^1` membership (`HookMembership`), and
+  (`HookSelection`), the `HEAD`/`HEAD^1` membership (`HookMembership`),
   the checked entries (`HookChecks`: each entry's fields, settled status
-  and keyless move check), on which `hookPlan` (a model of the loop in
+  and keyless move check), and the settled guard (`HookGuard`: the verified
+  `policy_unchanged`, without which nothing is settled), on which
+  `hookPlan` (a model of the loop in
   `check_staged`, like `verifyPlan`) runs. The adapter acts only on these
   results (A4). For the repairs, `RepairInputs` are the values the adapter
   computed for one entry (its `Provenance` and its blob's `RecordClass`, on
@@ -302,9 +304,8 @@ structure HookMembership (g : GitState) (index head parent : OrderedListing) (fl
 
 /-- The checked entries: one check per protected entry, in index order,
     each at the entry's path field (`listing_fields`), settled only if
-    `HEAD` and `HEAD^1` hold it (the adapter also requires unchanged
-    attribute files and config), with the keyless move check
-    (`blob_elsewhere`). -/
+    `HEAD` and `HEAD^1` hold it (and only under the policy guard,
+    `HookGuard`), with the keyless move check (`blob_elsewhere`). -/
 structure HookChecks (g : GitState) (index head parent : OrderedListing) (flags inHead inParent : Slice Bool) where
   entries : List HookEntry
   positions : entries.map (fun e => e.index.val) = (List.range g.index.length).filter (fun i => flags.val[i]!)
@@ -314,13 +315,24 @@ structure HookChecks (g : GitState) (index head parent : OrderedListing) (flags 
   elsewhere : ∀ e ∈ entries, blob_elsewhere index.bytes index.ends index.order e.index head.bytes head.ends
     head.order parent.bytes parent.ends parent.order = ok e.elsewhere
 
+/-- The settled guard: the verified `policy_unchanged` on the three parsed
+    snapshots returned `samePolicy`, and an entry is settled only when it
+    returned `true` (`check_staged`: `settled = same_policy && in_head[i] &&
+    in_parent[i]`; the membership half is `HookChecks.settled`). -/
+structure HookGuard (index head parent : OrderedListing) (entries : List HookEntry) where
+  samePolicy : Bool
+  policy : policy_unchanged index.bytes index.ends head.bytes head.ends parent.bytes parent.ends =
+    ok samePolicy
+  guarded : ∀ e ∈ entries, e.settled = true → samePolicy = true
+
 /-- What the adapter obtained from the verified core in the hook's final
     check (`check_staged`, after any sealing): it refuses the commit unless
     the results are as shown, and builds each protected entry's check from
-    them (A4). The four groups are flattened: `run.flags`, `run.inHead`,
-    `run.entries`, ... -/
+    them (A4). The five groups are flattened: `run.flags`, `run.inHead`,
+    `run.entries`, `run.samePolicy`, ... -/
 structure HookEvidence (g : GitState) extends HookSnapshots, HookSelection g index,
-    HookMembership g index head parent flags, HookChecks g index head parent flags inHead inParent
+    HookMembership g index head parent flags, HookChecks g index head parent flags inHead inParent,
+    HookGuard index head parent entries
 
 /-- **A20, A19, A11, A21.** The adapter contracts the hook relies on, for
     one run: Git reported the index, `HEAD` and `HEAD^1` exactly, and the
@@ -584,6 +596,38 @@ theorem hook_accepts_only_authenticated_ciphertext_given_history (g : GitState) 
     subst hc'
     rw [hyp] at hpt
     exact ⟨pt, hpt⟩
+
+/-! ## The settled guard -/
+
+/-- **The settled guard, end to end.** When the run's verified
+    `policy_unchanged` returned `true`, Git's index, `HEAD` and `HEAD^1` have
+    the same policy entries: every attribute file and the configuration, with
+    mode and object id (`PolicyUnchanged`; A20 for the listings). -/
+theorem hook_policy_guard {g : GitState} {run : HookEvidence g} (hgit : HookContracts g run)
+    (h : run.samePolicy = true) : PolicyUnchanged g.index g.head g.parent := by
+  obtain ⟨hL, -, -⟩ := run.index.of_git hgit.index
+  obtain ⟨hH, -, -⟩ := run.head.of_git hgit.head
+  obtain ⟨hP, -, -⟩ := run.parent.of_git hgit.parent
+  exact (policy_unchanged_sound hL hH hP (by rw [run.policy, h])).1
+
+/-- **Settled only under the guard.** An entry the run counts as settled was
+    checked while the index, `HEAD` and `HEAD^1` had the same policy
+    entries (and, by `hook_checks_selected`, is unchanged since `HEAD` and
+    `HEAD^1`). -/
+theorem hook_settled_policy_unchanged {g : GitState} {run : HookEvidence g} (hgit : HookContracts g run)
+    {e : HookEntry} (he : e ∈ run.entries) (hs : e.settled = true) :
+    PolicyUnchanged g.index g.head g.parent :=
+  hook_policy_guard hgit (run.guarded e he hs)
+
+/-- When the guard returned `false`, the run settled nothing. -/
+theorem hook_unguarded_settles_nothing {g : GitState} (run : HookEvidence g) (h : run.samePolicy = false) :
+    ∀ e ∈ run.entries, e.settled = false := by
+  intro e he
+  cases hs : e.settled
+  · rfl
+  · have := run.guarded e he hs
+    rw [h] at this
+    cases this
 
 /-! ## The key the hook uses -/
 

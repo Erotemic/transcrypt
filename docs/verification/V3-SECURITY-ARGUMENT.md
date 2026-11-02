@@ -116,6 +116,15 @@ The induction that discharges A24 is now proved
    checked incrementally only when the policy is unchanged (otherwise in
    full), and starting with a full check (or an authentic `HEAD`), every
    commit's selected entries authenticate.
+4. **Induction from the guard** (`keyed_history_authenticated_by_guard`).
+   The same conclusion with no policy hypothesis on any step. Each run
+   records the hook's guard (`HookGuard`: an entry is settled only when the
+   verified `policy_unchanged` returned `true` on the run's parsed index,
+   `HEAD` and `HEAD^1`). A check whose guard returned `true` derives
+   `PolicyUnchanged` (`policy_unchanged_of_guard`, from `hook_policy_guard`,
+   the commit step and the A19 contract `SelectionByPolicy`); one whose
+   guard returned `false` settled nothing and is a `FullCheck`
+   (`unguarded_check_is_full`).
 
 `HEAD` and `HEAD^1` are sorted (each path once; checked by the verified
 parse, review H-76), so the entry that holds a settled blob is *the* entry
@@ -124,14 +133,17 @@ is refused instead of letting one checked entry stand for another.
 
 What remains assumed:
 
-* **`CommitStep`**: Git commits the index the hook checked (A22), and an
-  object id names one content (A11).
-* **`PolicyUnchanged`** before an incremental check: the adapter counts an
-  entry as settled only while no attribute file and not the configuration
-  changed since `HEAD` and `HEAD^1` (review H-77); otherwise nothing is
-  settled, which is a `FullCheck`. That the guard gives `PolicyUnchanged`
-  rests on A19 and on the guard's own refinement, which is separate work
-  and plugs in as this hypothesis.
+* **`CommitStep`** / **`GuardedHistoryStep`**: Git commits the index the
+  hook checked (A22), so the next `HEAD` has its entries and its policy
+  entries, and an object id names one content (A11).
+* **`SelectionByPolicy attrs`** (A19), for step 4: Git's `filter` answer is
+  one fixed function of the committed policy entries. Local attribute
+  sources (`.git/info/attributes`, `core.attributesFile`) are not
+  committed; the contract assumes they do not change during the history.
+  Whether the policy changed is not assumed: it is the guard's recorded
+  result (`policy_unchanged`, PROVED; the one-line conjunction that uses it
+  is adapter code, A4). Step 3 instead takes `PolicyUnchanged` as a
+  hypothesis of each incremental step.
 * **The start of history.** Commits made without the keyed hook
   (`--no-verify`, cherry-pick and rebase, a locked checkout, pulled
   commits, other parties) are outside the induction. For them A24 rests
@@ -219,7 +231,7 @@ named predicates; each keeps its external hypotheses visible.
 | --- | --- | --- |
 | A. Authenticated publication | `keyed_publication_authenticates`: `HookContracts`, `Realizes`, `ConfigCommitted` and an accepted keyed check (`KeyedCheckAccepted` in a `CheckMode`) give `AuthenticatedIndex`; `HeadAuthentic` is needed only for an incremental check | `hook_full_check_authenticates` (new), `hook_accepts_only_authenticated_ciphertext_given_history` |
 | Check modes | `pre_commit_check_modes` | Theorem 1 in each mode |
-| A24 history | `head_authentic_of_checked_commit`, `keyed_history_stays_authenticated` | the above, by induction (new) |
+| A24 history | `head_authentic_of_checked_commit`, `keyed_history_stays_authenticated`; `keyed_history_authenticated_by_guard` (no policy hypothesis: the recorded guard and `SelectionByPolicy`) | the above, by induction; `policy_unchanged_of_guard`, `unguarded_check_is_full`, `hook_policy_guard`, `policy_unchanged_sound` |
 | B. Authenticated recovery | `checkout_releases_only_authenticated_plaintext`: smudge's output either differs from the stored record and is exactly the plaintext it authenticates to at that path and configuration, or is the record itself, unchanged, with the v3 envelope (locked, another configuration, private mode); a record it decided to open that does not authenticate is refused. `checkout_opens_genuine_records`: a genuine record of this configuration opens to its plaintext | `smudgeModel_spec`, `smudge_action_spec`, `open_record_complete`, `opensTo_envelopeOk`, `sealed_length` |
 | C. No laundering | `repair_never_launders`: seals only the user's change or forced plaintext (no v3 header); rebinds only the user's record that authenticates at its move source; content imported from `HEAD` or an incoming commit is never rebound, and sealed only when `protect` forced it; the user's change is never skipped | `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`, `repair_plan_repairs_only_local`, `UserStaged.not_committed` |
 | D. Configuration-bound key | `stored_key_binds_file_operations`: when the stored key is used, its file holds the current configuration, the key authenticates it, and every record it opens or seals is bound to that configuration and path | `stored_key_authenticates_current_config`, `open_record_spec`, `seal_record_spec`, `seal_opens` |
@@ -243,14 +255,16 @@ anything about commits outside a keyed history (A13).
 | `RepairContracts.incoming`, `.lazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | `HeadAuthentic` (corollary; only for an incremental check) | the history the incremental hook trusts was checked | A24 | induction PROVED (model) (`keyed_history_stays_authenticated`); its start REVIEWED + TESTED (audit, A13; `newly_protected_files_are_authenticated_by_the_hook`, `trees_listing_a_path_twice_are_refused`) |
 | `CommitStep` (history) | the next `HEAD` is the checked index; objects keep their content | A22, A11 | TESTED; ASSUMED |
-| `PolicyUnchanged` (history, before an incremental check) | no path newly selected; same committed configuration | A19 + the hook's policy guard | TESTED + REVIEWED; the guard's refinement is separate work |
+| `PolicyUnchanged` (history, before an incremental check; only in `keyed_history_stays_authenticated`) | no path newly selected; same committed configuration | A19 + the hook's policy guard | derived from the recorded guard in `keyed_history_authenticated_by_guard` (`policy_unchanged_of_guard`, PROVED (model)) |
+| `SelectionByPolicy attrs` (history, `keyed_history_authenticated_by_guard`) | Git's `filter` is one fixed function of the committed policy entries; local attribute sources unchanged | A19 | TESTED; local overrides ACCEPTED RISK |
+| `GuardedHistoryStep` (history) | the next `HEAD` is made from the checked index and has its policy entries; objects keep their content | A22, A11 | TESTED; ASSUMED |
 | Unforgeability | only the key holder makes records that authenticate | A10 | ASSUMED (standard) |
 
 ## What is proved, tested and trusted
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 132 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 138 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the composition `hookPlan_spec` and the end-to-end

@@ -147,12 +147,18 @@ open Transcrypt.V3Verification
 #print axioms hook_skips_only_unrepairable
 #print axioms hook_repairs_only_local_changes
 #print axioms stored_key_authenticates_current_config
+#print axioms hook_policy_guard
+#print axioms hook_settled_policy_unchanged
 -- ProductSecurity
 #print axioms hook_full_check_authenticates
 #print axioms pre_commit_check_modes
 #print axioms keyed_publication_authenticates
 #print axioms head_authentic_of_checked_commit
 #print axioms keyed_history_stays_authenticated
+#print axioms unguarded_check_is_full
+#print axioms policy_unchanged_of_guard
+#print axioms keyed_check_authenticates_given_guard
+#print axioms keyed_history_authenticated_by_guard
 #print axioms checkout_releases_only_authenticated_plaintext
 #print axioms checkout_opens_genuine_records
 #print axioms repair_never_launders

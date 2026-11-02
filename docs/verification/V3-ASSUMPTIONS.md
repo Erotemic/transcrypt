@@ -52,12 +52,12 @@ one.
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
 | A17 | The stored key is local-only, used only for the config it authenticates, and mode-independent | Decision PROVED (`stored_key_state`, `stored_key_authenticates_current_config`); file I/O TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
 | A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`repair_plan`, `needs_record`, `entry_provenance`, `next_move_source`, `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`); TESTED (real Git) + REVIEWED |
-| A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK |
+| A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files; for the history argument, as one fixed function of the committed policy entries (`SelectionByPolicy`) | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK (excluded from `SelectionByPolicy`: assumed unchanged during a history) |
 | A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record), in byte order of paths, each path once | TESTED; parsing and order PROVED (`parse_listing_spec`: anything else is refused) |
 | A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
-| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Narrowed: use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); the induction over keyed commits PROVED (model) (`hook_full_check_authenticates`, `head_authentic_of_checked_commit`, `keyed_history_stays_authenticated`); remaining: the commit-step and policy contracts (A22, A11, A19 + the hook's guard) and the start of history (full check, or audit of imported history, A13) |
+| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s selected entries authenticate (`HeadAuthentic`) | Narrowed: use PROVED (`hook_accepts_only_authenticated_ciphertext_given_history`); the induction over keyed commits PROVED (model) (`hook_full_check_authenticates`, `head_authentic_of_checked_commit`, `keyed_history_stays_authenticated`), and with the hook's recorded guard in place of a policy hypothesis (`keyed_history_authenticated_by_guard`); remaining: the commit step (A22, A11), the selection contract `SelectionByPolicy` (A19, local attribute sources fixed) and the start of history (full check, or audit of imported history, A13) |
 | A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS not yet run (its CI jobs have not been seen passing); REVIEWED |
 
 ## Detailed register
@@ -192,10 +192,10 @@ one.
     `unique = false`);
   - the one-line conjunction `settled = policy_unchanged && in_head[i] &&
     in_parent[i]` that feeds the verified `entry_check` (each conjunct is a
-    verified result: `policy_unchanged`, `held_entries`; A24.
-    `HookEvidence.settled` still only requires settled ⇒ held by both, so
-    the adapter's rule is stricter than the model until the model records
-    the `policy_unchanged` result too);
+    verified result: `policy_unchanged`, `held_entries`; A24. The model
+    states the same rule: `HookChecks.settled` (settled ⇒ held by both) and
+    `HookGuard` (the run's `policy_unchanged` result, settled ⇒ it was
+    `true`); only the conjunction's code is reviewed);
   - sizing `ends` by the listing's NUL count (fails closed: the parse then
     refuses);
   - the equality of the staged `.transcrypt/config` blob with the
@@ -645,6 +645,14 @@ one.
   unprotect a file in this checkout, so local checks pass while a server
   audit (without those files) refuses the plaintext. `doctor` fails on such
   files and the pre-commit hook warns.
+- **As a contract in Lean (A24):** `SelectionByPolicy attrs g`
+  (`ProductSecurity.lean`): Git's `filter` answer in state `g` is
+  `attrs (policyEntries g.index)`, one fixed function of the index's
+  attribute files (by object id) and configuration entry. One `attrs` for
+  a whole history is where the local override files are excluded: they are
+  assumed not to change during it. It is a hypothesis of
+  `keyed_history_authenticated_by_guard` and `policy_unchanged_of_guard`;
+  it says nothing about records.
 - **Status:** TESTED; overrides ACCEPTED RISK (an informed user's choice).
 
 ### A20 — Git's listings (new)
@@ -742,30 +750,46 @@ one.
     incrementally only when the policy is unchanged (`HistoryStep`), and the
     first checked in full or after an authentic `HEAD`: every commit's
     selected entries authenticate (`keyed_history_stays_authenticated`).
-- **Still assumed (the exact remaining obligation):**
-  1. `CommitStep`: Git commits the index the hook checked (A22) and an
-     object id names one content (A11).
-  2. `PolicyUnchanged` before each incremental check: an entry is settled
-     only while the committed attribute files and `.transcrypt/config` are
-     those of `HEAD` and `HEAD^1` (the verified `policy_unchanged`;
-     `policy_unchanged_sound`: the three snapshots hold exactly the same
-     entries at every policy path); otherwise nothing is settled, which is
-     a `FullCheck`. That equal committed policy files imply
-     `PolicyUnchanged` (no path newly selected) rests on A19 (Git evaluates
-     `filter` from the committed attribute files) and excludes local
-     attribute sources (`.git/info/attributes`, `core.attributesFile`),
-     which can change the selection without changing a committed file
-     (`doctor` reports local filter overrides). The hook model's `settled`
-     does not yet carry the guard's result, so the two are joined in prose,
-     not in one statement.
-  3. The start of the history: the first commit after a clone, pull or
-     any commit made without the keyed hook (`--no-verify`, cherry-pick
-     and rebase, which do not run `pre-commit`, a locked checkout, another
-     party's commits) is not covered by the induction; its `HEAD` is
-     trusted on the evidence of the keyed `audit` (pre-push, A13) or
-     `verify-index`, or the commit is checked in full.
+  - *The guard in the model (2026-11-01).* Each run records the guard
+    (`HookGuard`: the verified `policy_unchanged` on the run's parsed index,
+    `HEAD` and `HEAD^1` returned `samePolicy`, and an entry is settled only
+    if it is `true`, as in `check_staged`). `hook_policy_guard`: when it is
+    `true`, Git's three snapshots have the same policy entries;
+    `unguarded_check_is_full`: when it is `false`, nothing is settled, so the
+    check is a `FullCheck`. `policy_unchanged_of_guard` derives the whole of
+    `PolicyUnchanged` (no path newly selected, and the same configuration,
+    from the sorted checked index and `CommitStep.objects`) from a `true`
+    guard, the commit step and the A19 contract `SelectionByPolicy`.
+    `keyed_history_authenticated_by_guard` is the induction with no policy
+    hypothesis on any step (`GuardedHistoryStep`), whatever each check's
+    mode; `keyed_history_stays_authenticated` is kept.
+- **Still assumed (the exact remaining obligation, for
+  `keyed_history_authenticated_by_guard`):**
+  1. `GuardedHistoryStep`: Git commits the index the hook checked (A22), so
+     every entry of the next `HEAD` is a checked index entry and the next
+     `HEAD` has the checked index's policy entries; an object id names one
+     content (A11).
+  2. `SelectionByPolicy attrs` for every commit, with one `attrs` (A19): Git's
+     `filter` answer is a fixed function of the committed policy entries
+     (attribute files by object id, and the configuration entry). This
+     excludes changes of local attribute sources (`.git/info/attributes`,
+     `core.attributesFile`) during the history, which can change the
+     selection without changing a committed file (`doctor` reports local
+     filter overrides). Whether the policy changed is no longer assumed: it
+     is the guard's result, recorded in each run.
+  3. The start of the history: the first commit's `HEAD` must authenticate
+     if its check was incremental with the guard `true`. The first commit
+     after a clone, pull or any commit made without the keyed hook
+     (`--no-verify`, cherry-pick and rebase, which do not run `pre-commit`,
+     a locked checkout, another party's commits) is not covered by the
+     induction; its `HEAD` is trusted on the evidence of the keyed `audit`
+     (pre-push, A13) or `verify-index`, or the commit is checked in full.
   4. One key across the history (`Realizes inst prims σ` fixed); a rekey
-     changes the configuration, so the next check is full by (2).
+     changes the committed configuration, so the next guard is `false` and
+     the check is full.
+  5. The adapter's run is as `HookEvidence` says (A4), including the
+     one-line conjunction `settled = same_policy && in_head[i] &&
+     in_parent[i]`.
 - `HEAD` and `HEAD^1` are parsed as sorted listings, so the entry that
   holds a settled blob is the only one at its path (`Sorted.holds_oid`): a
   crafted tree cannot show one checked entry and commit another (review

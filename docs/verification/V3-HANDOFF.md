@@ -95,7 +95,10 @@ semantics silently or import legacy CBC into the proved core.
   authenticated index makes the next `HEAD` authentic under `CommitStep`
   and `PolicyUnchanged` (`head_authentic_of_checked_commit`), and a history
   of keyed commits stays authenticated (`keyed_history_stays_authenticated`).
-  The hook's policy guard plugs in as `PolicyUnchanged`.
+  The hook's policy guard is recorded in each run (`HookGuard`), and
+  `keyed_history_authenticated_by_guard` derives `PolicyUnchanged` from it
+  (`policy_unchanged_of_guard`) under A19 as the contract
+  `SelectionByPolicy`, with no policy hypothesis on any step.
 - The pre-commit repair is a typed plan: the core derives each entry's
   `Provenance` from the snapshots (`entry_provenance`), decides whether its
   blob is read (`needs_record`), and decides `repair_plan(Provenance,

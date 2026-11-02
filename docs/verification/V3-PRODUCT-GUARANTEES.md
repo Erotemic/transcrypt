@@ -200,26 +200,35 @@ avoid decrypting thousands of unchanged files. In return, it trusts that
   commits stays authenticated if two conditions hold:
   - it starts with a full check;
   - every incremental check follows a commit whose policy was unchanged.
+- **Induction from the guard (`keyed_history_authenticated_by_guard`):** the
+  same conclusion with no policy hypothesis on any step. Each check's run
+  records the guard's result (`HookGuard`: an entry is settled only when
+  the verified `policy_unchanged` returned true for the listings the run
+  parsed). A check whose guard returned true derives `PolicyUnchanged`
+  (`policy_unchanged_of_guard`); a check whose guard returned false settled
+  nothing, so it is a full check (`unguarded_check_is_full`).
 
 The guard that decides whether entries may be settled is source-derived.
 `policy_unchanged` compares the committed attribute files and
 `.transcrypt/config` across the index, `HEAD` and `HEAD^1`, and
 `policy_unchanged_sound` proves that when it returns true, the three
-snapshots agree exactly on those files. A policy change therefore forces a
-full check.
+snapshots agree exactly on those files (`hook_policy_guard`, for a run).
+A policy change therefore forces a full check.
 
 **Remaining obligations** (all stated in [A24](V3-ASSUMPTIONS.md)):
 
-- **Commit flow:** Git commits the checked index, and object ids are
-  unique (A22, A11).
-- **Selection:** unchanged committed attribute files mean an unchanged
-  selection (A19). Local attribute sources are excluded:
-  `.git/info/attributes` and `core.attributesFile`.
-- **Start of each run of keyed commits:** commits made without the keyed
-  hook must be checked by the keyed `audit` before they are trusted (A13).
-- **Connecting the guard to the model:** the guard's result is not yet a
-  field of the hook model's `settled` flag, so the guard and the transition
-  theorem are joined in prose.
+- **Commit flow:** Git commits the checked index, so the next `HEAD` has
+  its entries and its policy entries (`GuardedHistoryStep`), and object ids
+  are unique (A22, A11).
+- **Selection:** Git's `filter` answer is one fixed function of the
+  committed policy entries (`SelectionByPolicy`, A19, a visible hypothesis
+  of the theorem). Local attribute sources (`.git/info/attributes`,
+  `core.attributesFile`) are not committed: the contract assumes they do
+  not change during the history.
+- **Start of each run of keyed commits:** the first commit's `HEAD` must
+  authenticate if its check was incremental with the guard true; commits
+  made without the keyed hook must be checked by the keyed `audit` before
+  they are trusted (A13).
 
 ## What is not claimed
 
