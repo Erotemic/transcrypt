@@ -17,7 +17,7 @@ use crate::{
         push_index_record, read_record, tree_files, Attributes, Mode, ObjectId, Repository, Staged, SHORT_OUTPUT_LIMIT},
 };
 use transcrypt_v3_core::{
-    commit_verdict, is_object_id, is_reserved_path, AuditBase, AuditRefusal, AuditedEntries, AuditedEntry,
+    commit_needs_no_key, commit_verdict, is_object_id, is_reserved_path, AuditBase, AuditRefusal, AuditedEntries, AuditedEntry,
     StagedEvidence, StagedRefusal, ATTRIBUTES_NAME, ID_LEN,
 };
 
@@ -327,7 +327,9 @@ fn check_drift(repo: &Repository, policy: &AttributeIndex, commit: &str, id: &[u
 /// with one call of the verified `commit_verdict` (for each entry, in order,
 /// `audit_check`, then, unless an earlier pass of the same record settles
 /// it, `staged_verdict`), each fact about the entry itself; `moved` names,
-/// for messages, the deleted path a moved blob came from.
+/// for messages, the deleted path a moved blob came from. Without the key,
+/// the run stays authenticated only if the verified `commit_needs_no_key`
+/// finds that the keyed audit would have needed the key for no entry.
 fn check_entries<'e>(repo: &Repository, state: &mut AuditState, commit: &str, config_oid: &ObjectId, base: AuditBase,
     examined: impl Iterator<Item = (&'e Staged, AuditedEntry)>, moved: &HashMap<&ObjectId, &[u8]>) -> Result<(), String>
 {
@@ -345,7 +347,13 @@ fn check_entries<'e>(repo: &Repository, state: &mut AuditState, commit: &str, co
         Err((i, AuditRefusal::Verdict(refusal))) =>
             return Err(audit_refusal(refusal, commit, &evidence, i, moved.get(&entries[i].oid).copied())),
     }
-    *authenticated &= key.is_some();
+    // Keyless, the commit still counts as authenticated when its keyed
+    // audit would have opened nothing (the verified `commit_needs_no_key`):
+    // no examined entry is selected or holds a record of this
+    // configuration, and the rest are the parent's.
+    if key.is_none() && *authenticated {
+        *authenticated = commit_needs_no_key(&evidence, &facts, base);
+    }
     Ok(())
 }
 

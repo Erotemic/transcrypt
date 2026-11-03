@@ -120,6 +120,19 @@ semantics silently or import legacy CBC into the proved core.
   start is the audit's own: a first parent outside the audited range is
   trusted (A13), and a local history never audited is trusted by the
   incremental hook in that checkout (it cannot pass the pre-push hook).
+- **A keyless audit that needed no key** (2026-11-03). The pre-push hook
+  used to count every commit audited without its configuration's key
+  (locked, or an old epoch after a `rekey`) as checked by envelope only, so
+  `transcrypt.requireAuthenticatedPush` refused pushes of commits that
+  touched only unprotected files. Now `check_entries` asks the verified
+  `commit_needs_no_key` (once the keyless `commit_verdict` accepted) whether
+  the keyed audit would have needed the key for any examined entry: only a
+  selected entry or a record of the configuration at an unprotected path
+  (or an unanswered `is_record`) does. `keyless_audit_needing_no_key_authenticates`
+  proves both audit invariants for such a commit under every suite with the
+  configuration's id, given the parent's, and `keyless_dag_audit_authenticated`
+  lifts it to the graph. Trusted: the `is_record` prefix answer (A4, A21)
+  and the boundary (A13).
 - **The top-level statement** (2026-11-02) is `transcrypt_product_assurance`
   (`ProductAssurance.lean`). It takes one crypto context, the output of
   `unlock_stored_key`, and uses it for every part. Its hypotheses are a

@@ -227,11 +227,15 @@ catch this:
 
 - The `pre-push` hook installed by `init`/`unlock` audits every commit you
   push, including merges, rebases and `--no-verify` commits. A merge commit
-  is also verified before it is made (`pre-merge-commit`). When it cannot
-  authenticate every pushed record (the checkout is locked, or the push
-  carries history from before a `rekey`, whose key you no longer have), it
-  still checks every envelope, and warns that it did no more. To refuse such
-  pushes instead, set `git config transcrypt.requireAuthenticatedPush true`.
+  is also verified before it is made (`pre-merge-commit`). It warns only
+  when a pushed record actually could not be authenticated: the checkout is
+  locked, or the push carries history from before a `rekey`, whose key you
+  no longer have, **and** a pushed commit changes a protected file or adds a
+  record of its configuration at an unprotected path. It then still checks
+  every envelope, and warns that it did no more. A commit that needs no key
+  (say, a locked checkout pushing edits to unprotected files only) pushes
+  without a warning. To refuse the pushes that warn instead, set
+  `git config transcrypt.requireAuthenticatedPush true`.
 - `transcrypt-rs audit <rev-list arguments>` needs no key. Run it in CI or a
   server hook to refuse plaintext from any checkout. Each commit is judged
   by its own `.gitattributes`. Without the key, the audit checks that every
@@ -320,7 +324,9 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
   The keyed `audit` and the pre-push hook refuse the same in any commit
   they check, however it was made (`--no-verify`, a rebase, another
   person); a genuine record that opens at its own unprotected name passes.
-  Without the key, `audit` checks envelopes only and says so. Ordinary
+  Without the key, `audit` checks envelopes only and says so, unless no
+  checked commit needed the key (it changed no protected file and added no
+  record at an unprotected name). Ordinary
   commits and pushes do not read unchanged unprotected files.
 - **Old history.** Checking out a commit encrypted under an earlier config
   (before a `rekey`) leaves its protected files encrypted, unless you unlock

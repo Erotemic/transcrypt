@@ -1356,3 +1356,96 @@ fn pushes_checked_by_envelope_only_warn_or_refuse_when_required() {
     let out = push("origin", "main");
     assert!(out.status.success() && stderr(&out).contains("envelope only"), "{}", stderr(&out));
 }
+
+/// A repository whose history `origin` (a bare remote) already has, pushed
+/// while unlocked.
+fn pushed_repo(scratch: &mut Scratch) -> PathBuf {
+    let repo = scratch.repo("repo");
+    run(&scratch.root, "git", &["init", "-q", "--bare", "origin.git"], None);
+    run(&repo, "git", &["remote", "add", "origin", "../origin.git"], None);
+    let (pushed, err) = push_head(&repo);
+    assert!(pushed && !err.contains("envelope only"), "{err}");
+    repo
+}
+
+/// Push `HEAD` to `origin`'s `main`: whether it succeeded, and its stderr.
+fn push_head(repo: &std::path::Path) -> (bool, String) {
+    let out = exec(repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// Locked, a push of commits that change only unprotected files needs no
+/// key: it neither warns nor, with `transcrypt.requireAuthenticatedPush`,
+/// refuses.
+#[test]
+fn locked_pushes_of_unprotected_changes_need_no_key() {
+    let mut scratch = Scratch::new("nokeypush");
+    let repo = pushed_repo(&mut scratch);
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "true"], None);
+    fs::write(repo.join("README"), b"public, edited while locked\n").unwrap();
+    fs::write(repo.join("notes.txt"), b"a new public file\n").unwrap();
+    commit(&repo, &["README", "notes.txt"], "public edits");
+    let (pushed, err) = push_head(&repo);
+    assert!(pushed && !err.contains("envelope only") && !err.contains("warning"), "{err}");
+}
+
+/// Locked, a commit that adds an unprotected file holding a record of this
+/// configuration (a copy of a protected file's ciphertext; the pre-commit
+/// hook refuses it, so it is committed with `--no-verify`) would need the
+/// key to authenticate that record: the push refuses with
+/// `transcrypt.requireAuthenticatedPush`, and otherwise warns.
+#[test]
+fn locked_pushes_of_records_at_unprotected_paths_still_need_the_key() {
+    let mut scratch = Scratch::new("recordpush");
+    let repo = pushed_repo(&mut scratch);
+    run(&repo, bin(), &["lock"], None);
+    fs::copy(repo.join("a.secret"), repo.join("copy.txt")).unwrap();
+    assert!(is_record(&fs::read(repo.join("copy.txt")).unwrap()));
+    run(&repo, "git", &["add", "copy.txt"], None);
+    let err = run_fails(&repo, "git", &["commit", "-qm", "copied record"], None);
+    assert!(err.contains("copy.txt"), "{err}");
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "copied record"], None);
+    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "true"], None);
+    let (pushed, err) = push_head(&repo);
+    assert!(!pushed && err.contains("envelope only") && err.contains("refusing to push"), "{err}");
+    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "false"], None);
+    let (pushed, err) = push_head(&repo);
+    assert!(pushed && err.contains("envelope only"), "{err}");
+}
+
+/// Locked, a commit that changes a protected file needs the key: the push
+/// refuses with `transcrypt.requireAuthenticatedPush`, and otherwise warns.
+#[test]
+fn locked_pushes_of_protected_changes_still_need_the_key() {
+    let mut scratch = Scratch::new("protpush");
+    let repo = pushed_repo(&mut scratch);
+    fs::write(repo.join("a.secret"), b"changed\n").unwrap();
+    fs::write(repo.join("README"), b"public, changed too\n").unwrap();
+    commit(&repo, &["a.secret", "README"], "protected edit");
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "true"], None);
+    let (pushed, err) = push_head(&repo);
+    assert!(!pushed && err.contains("envelope only") && err.contains("refusing to push"), "{err}");
+    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "false"], None);
+    let (pushed, err) = push_head(&repo);
+    assert!(pushed && err.contains("envelope only"), "{err}");
+}
+
+/// After a rekey, a pushed commit of the old configuration, whose key this
+/// checkout no longer has, needs no key when it changed only unprotected
+/// files: with `transcrypt.requireAuthenticatedPush` the push succeeds
+/// without a warning (the rekey commit itself is authenticated with the new
+/// key).
+#[test]
+fn old_epoch_commits_of_unprotected_changes_need_no_key() {
+    let mut scratch = Scratch::new("epochpush");
+    let repo = pushed_repo(&mut scratch);
+    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "true"], None);
+    fs::write(repo.join("README"), b"public, before the rekey\n").unwrap();
+    commit(&repo, &["README"], "public edit");
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    let (pushed, err) = push_head(&repo);
+    assert!(pushed && !err.contains("envelope only") && !err.contains("warning"), "{err}");
+}

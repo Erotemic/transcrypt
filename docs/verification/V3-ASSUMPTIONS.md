@@ -43,7 +43,7 @@ one.
 | A1 | Protocol decision core is correct | PROVED |
 | A2 | Wire codec matches the spec | PROVED |
 | A3 | Charon/Aeneas/hax translation and Lean are sound | ASSUMED (pinned, reproduced) |
-| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs, each entry's check (`staged_check`), its acceptance (`staged_verdict`) and the loop over every index entry (`index_verdict`, `index_verdict_accepts`), as the audit's over every examined entry of a commit (`commit_verdict`, `commit_verdict_accepts`), are verified functions; what remains on these checks is one call each (`HookAccepted`, `AuditAccepted`: the run's inputs, refuse unless `Ok`) and the evidence's answers about each entry's own blob and path (`HookAnswers`, `AuditAnswers`) |
+| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs, each entry's check (`staged_check`), its acceptance (`staged_verdict`) and the loop over every index entry (`index_verdict`, `index_verdict_accepts`), as the audit's over every examined entry of a commit (`commit_verdict`, `commit_verdict_accepts`) and, keyless, whether any needed the key (`commit_needs_no_key`, `commit_needs_no_key_true`), are verified functions; what remains on these checks is one call each (`HookAccepted`, `AuditAccepted`: the run's inputs, refuse unless `Ok`) and the evidence's answers about each entry's own blob and path (`HookAnswers`, `AuditAnswers`) |
 | A5 | `Keyed` realizes the primitive contract | TESTED (differential vs OpenSSL, exhaustive tampering) |
 | A6 | Private-mode credential agent relays core results faithfully | TESTED + REVIEWED; same-UID ACCEPTED RISK (optional mode) |
 | A7 | Git semantics | TESTED on Git 2.43; ASSUMED otherwise |
@@ -52,7 +52,7 @@ one.
 | A10 | AES-SIV, Argon2id, SHA-256 security | ASSUMED (standard) |
 | A11 | A Git object id names exactly one content | ASSUMED (Git's hash) |
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
-| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`): only the boundary remains |
+| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`; a keyless commit that needed no key, `commit_needs_no_key`, authenticates: `keyless_dag_audit_authenticated`): only the boundary remains |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
@@ -281,7 +281,10 @@ one.
     `moved`); and the checked-record cache's answer (`checked` true only
     for a blob, config and path recorded by `passed`, under a config whose
     key is fixed for the run, so it has the envelope and, keyed, opened at
-    that path);
+    that path); and, without the key, one call of `commit_needs_no_key` on
+    the evidence state the accepted `commit_verdict` returned, whose `false`
+    marks the run as checked by envelope only (`KeylessNeedsNoKey`; its
+    `is_record` answers are the same prefix reads, A21);
   - the rewrite of `ls-tree` records to index records (`tree_record`, A20);
   - sorting the object orders (`Listing::object_order`; a wrong order is
     refused by the verified `object_order_ok`, so this only fails closed)
@@ -517,14 +520,35 @@ one.
 - **Consequence:** plaintext published.
 - **Evidence:** TESTED (pre-push refuses a `--no-verify` plaintext commit; a
   keyless `audit` in a never-unlocked clone refuses its plaintext commit).
-- **Keyless pre-push is visible (2026-11-02).** A pre-push audit that could
-  not authenticate every record (locked, or history under a configuration
-  whose key is gone after a `rekey`) checked envelopes only; it says so on
-  stderr, and refuses the push when `transcrypt.requireAuthenticatedPush` is
-  set (a value Git cannot read as a boolean counts as set). TESTED:
-  `pushes_checked_by_envelope_only_warn_or_refuse_when_required`. The
-  setting is local configuration: like the hook itself it binds this
-  checkout, not someone who controls it.
+- **Keyless pre-push is visible (2026-11-02; narrowed 2026-11-03).** A
+  pre-push audit that could not authenticate every record (locked, or
+  history under a configuration whose key is gone after a `rekey`) checked
+  envelopes only; it says so on stderr, and refuses the push when
+  `transcrypt.requireAuthenticatedPush` is set (a value Git cannot read as a
+  boolean counts as set). A commit audited without its configuration's key
+  counts as authenticated exactly when its keyed audit would have needed
+  the key for nothing: the verified `commit_needs_no_key`, asked once the
+  keyless `commit_verdict` accepted, finds every examined entry's keyed
+  check (`audit_check` with the key) `Skip`, or `AuthenticateIfRecord` with
+  `is_record` answering no record of the configuration (a selected entry,
+  a record at an unprotected path, or an unanswered question needs the
+  key). Unexamined entries are the parent's (A20), whose status the run
+  already carries, with parents outside the range trusted (this entry).
+  PROVED (model): `keyless_audit_needing_no_key_authenticates` (both audit
+  invariants under every suite with the configuration's id, given the
+  parent's, with no key and no `Realizes`) over the loop's spec
+  `commit_needs_no_key_true`; over the commit graph
+  `keyless_dag_audit_authenticated` (boundary `KeylessBoundaryAuthentic`,
+  the same trust as the keyed boundary). What remains trusted is the
+  `is_record` prefix answer (A4, A21: the adapter reads the blob's size and
+  first bytes by object id) and this boundary. TESTED:
+  `pushes_checked_by_envelope_only_warn_or_refuse_when_required`,
+  `locked_pushes_of_unprotected_changes_need_no_key`,
+  `locked_pushes_of_records_at_unprotected_paths_still_need_the_key`,
+  `locked_pushes_of_protected_changes_still_need_the_key`,
+  `old_epoch_commits_of_unprotected_changes_need_no_key`. The setting is
+  local configuration: like the hook itself it binds this checkout, not
+  someone who controls it.
 - **What a keyed audit establishes (2026-11-02).** The audit checks each
   commit against its first parent: the entries `diff-tree` lists, or the
   whole tree for a root commit, a config change or an attribute change.

@@ -196,6 +196,18 @@ file is authenticated if it is a record of the commit's config.
 * `keyless_audit_checks_envelopes`: without the key, every examined
   selected entry has the envelope and is held by the parent or is no blob
   of a path the commit deleted; nothing is authenticated (A14).
+* `keyless_audit_needing_no_key_authenticates`: unless the keyed audit
+  would have needed the key for nothing. When the extracted
+  `commit_needs_no_key`, asked once the keyless `commit_verdict` accepted,
+  returns `true` (`KeylessNeedsNoKey`; `commit_needs_no_key_true`: every
+  examined entry's keyed check is `Skip`, or `AuthenticateIfRecord` with
+  `is_record` answering no record), the commit keeps both invariants under
+  every suite with the configuration's id, given the parent's: no key and
+  no `Realizes`, since nothing is opened. It rests on the `is_record`
+  prefix answer (A4, A21) and, over a graph
+  (`keyless_dag_audit_authenticated`), on the trusted boundary (A13). This
+  is when the pre-push hook does not warn about a commit it audited
+  without the key.
 * `audited_head_starts_keyed_history`, `audited_head_keyed_history_authenticated`:
   an audited `HEAD` (with a true guard of the next hook run, which keeps
   `HEAD`'s configuration, `config_of_guard_head`) is the start of
@@ -343,7 +355,7 @@ anything about commits outside a keyed history (A13).
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 184 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 191 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the per-entry composition `hook_entry_checked` and

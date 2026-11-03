@@ -98,7 +98,15 @@ checks that every selected file has the envelope and is not a record moved
 from a deleted path, and refuses a record moved to an unprotected name; it
 authenticates nothing, and says "envelopes only: unlock to authenticate
 them and any record at an unprotected path"
-(`keyless_audit_checks_envelopes`).
+(`keyless_audit_checks_envelopes`). The exception is a commit that needed
+no key: one that changes no protected file and adds no record of its
+configuration at an unprotected path (for example, a locked checkout that
+edits only public files). Nothing of it needed opening, so the audit counts
+it as authenticated, and the pre-push hook does not warn about it
+(`keyless_audit_needing_no_key_authenticates`). That conclusion trusts the
+adapter's answer to "is this blob a record?" (it reads the blob's size and
+first bytes by object id) and the parents outside the pushed range, as the
+keyed audit does. It is an authenticity result, not a confidentiality one.
 
 ## A. Authenticated publication
 
