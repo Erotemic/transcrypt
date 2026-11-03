@@ -951,37 +951,80 @@ fn staged_checks_match_their_definition() {
     assert_eq!(staged_check(&bytes, &ends[..1], 1, &[false; 4], &[true; 4], &[true; 4], true, false, false), Skip);
 }
 
-/// Evidence with fixed answers that counts the questions asked.
+/// Evidence with fixed answers (`None`: the answer could not be found) and
+/// per-entry blobs, which counts the questions asked of each entry.
 struct Answers {
-    record: bool,
-    opens: bool,
-    elsewhere: bool,
-    asked: core::cell::Cell<[usize; 3]>,
+    record: Option<bool>,
+    opens: Option<bool>,
+    elsewhere: Option<bool>,
+    /// Each entry's blob; `None`: it cannot be read.
+    blobs: std::vec::Vec<Option<std::vec::Vec<u8>>>,
+    /// The blob last read.
+    read: std::vec::Vec<u8>,
+    /// For each entry: reads, then `is_record`, `opens` and `elsewhere`.
+    asked: core::cell::RefCell<std::vec::Vec<[usize; 4]>>,
+    /// The audit's view: each entry's path, whether an earlier pass checked
+    /// it, and how often `passed` recorded it.
+    paths: std::vec::Vec<std::vec::Vec<u8>>,
+    cached: std::vec::Vec<bool>,
+    passed: std::vec::Vec<usize>,
 }
 
 impl Answers {
-    fn ask(&self, question: usize, answer: bool) -> bool {
-        let mut asked = self.asked.get();
-        asked[question] += 1;
-        self.asked.set(asked);
+    fn new(record: Option<bool>, opens: Option<bool>, elsewhere: Option<bool>,
+        blobs: std::vec::Vec<Option<std::vec::Vec<u8>>>) -> Answers {
+        let n = blobs.len();
+        let asked = core::cell::RefCell::new(std::vec![[0; 4]; n]);
+        Answers { record, opens, elsewhere, blobs, read: std::vec::Vec::new(), asked,
+            paths: std::vec![b"a.env".to_vec(); n], cached: std::vec![false; n], passed: std::vec![0; n] }
+    }
+
+    fn ask(&self, i: usize, question: usize, answer: Option<bool>) -> Option<bool> {
+        self.asked.borrow_mut()[i][question] += 1;
         answer
     }
 }
 
 impl StagedEvidence for Answers {
-    fn is_record(&self) -> bool {
-        self.ask(0, self.record)
+    fn read(&mut self, i: usize) -> bool {
+        self.asked.borrow_mut()[i][0] += 1;
+        match &self.blobs[i] {
+            Some(blob) => {
+                self.read = blob.clone();
+                true
+            },
+            None => false,
+        }
     }
-    fn opens(&self) -> bool {
-        self.ask(1, self.opens)
+    fn blob(&self) -> &[u8] {
+        &self.read
     }
-    fn elsewhere(&self) -> bool {
-        self.ask(2, self.elsewhere)
+    fn is_record(&self, i: usize) -> Option<bool> {
+        self.ask(i, 1, self.record)
+    }
+    fn opens(&self, i: usize) -> Option<bool> {
+        self.ask(i, 2, self.opens)
+    }
+    fn elsewhere(&self, i: usize) -> Option<bool> {
+        self.ask(i, 3, self.elsewhere)
     }
 }
 
-/// `staged_verdict` accepts exactly what each check requires, and asks
-/// only the questions that check needs, each at most once.
+impl AuditedEntries for Answers {
+    fn path(&self, i: usize) -> &[u8] {
+        &self.paths[i]
+    }
+    fn checked(&self, i: usize) -> bool {
+        self.cached[i]
+    }
+    fn passed(&mut self, i: usize) {
+        self.passed[i] += 1;
+    }
+}
+
+/// `staged_verdict` accepts exactly what each check requires, asks only the
+/// questions that check needs, each at most once and about its own entry,
+/// and refuses when an answer it needs could not be found.
 #[test]
 fn staged_verdicts_accept_only_what_their_check_requires() {
     use StagedRefusal::*;
@@ -992,23 +1035,35 @@ fn staged_verdicts_accept_only_what_their_check_requires() {
     let mut other = record.clone();
     other[FILE_MAGIC.len()] ^= 1;
     let oversized = [&record[..], &[0; MAX_RECORD]].concat();
-    for bits in 0..8u32 {
-        let (is_record, opens, elsewhere) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+    const ANSWERS: [Option<bool>; 3] = [Some(false), Some(true), None];
+    for (is_record, opens, elsewhere) in ANSWERS.into_iter()
+        .flat_map(|a| ANSWERS.into_iter().flat_map(move |b| ANSWERS.into_iter().map(move |c| (a, b, c))))
+    {
         let verdict = |check, blob: &[u8]| {
-            let answers = Answers { record: is_record, opens, elsewhere, asked: core::cell::Cell::new([0; 3]) };
-            (staged_verdict(&answers, check, blob, &id), answers.asked.get())
+            let answers = Answers::new(is_record, opens, elsewhere, std::vec![None, None]);
+            let verdict = staged_verdict(&answers, 1, check, blob, &id);
+            let asked = answers.asked.borrow().clone();
+            assert_eq!(asked[0], [0; 4], "asked about another entry");
+            (verdict, [asked[1][1], asked[1][2], asked[1][3]])
+        };
+        // The verdict of a question with answer `a`: `yes` if true, `no` if false.
+        let decide = |a: Option<bool>, yes: Result<(), StagedRefusal>, no: Result<(), StagedRefusal>| match a {
+            Some(true) => yes,
+            Some(false) => no,
+            None => Err(Unanswered),
         };
         assert_eq!(verdict(StagedCheck::Skip, b""), (Ok(()), [0, 0, 0]));
-        assert_eq!(verdict(StagedCheck::NotRecord, b""),
-            (if is_record { Err(UnprotectedRecord) } else { Ok(()) }, [1, 0, 0]));
+        assert_eq!(verdict(StagedCheck::NotRecord, b""), (decide(is_record, Err(UnprotectedRecord), Ok(())), [1, 0, 0]));
+        let if_record = if is_record == Some(true) { decide(opens, Ok(()), Err(UnprotectedForgery)) }
+            else { decide(is_record, Ok(()), Ok(())) };
         assert_eq!(verdict(StagedCheck::AuthenticateIfRecord, b""),
-            (if is_record && !opens { Err(UnprotectedForgery) } else { Ok(()) }, [1, is_record as usize, 0]));
+            (if_record, [1, (is_record == Some(true)) as usize, 0]));
         let protected = StagedCheck::Protected;
         assert_eq!(verdict(protected(EntryCheck::Authenticate), &record),
-            (if opens { Ok(()) } else { Err(Authentication) }, [0, 1, 0]));
+            (decide(opens, Ok(()), Err(Authentication)), [0, 1, 0]));
         assert_eq!(verdict(protected(EntryCheck::Envelope), &record), (Ok(()), [0, 0, 0]));
         assert_eq!(verdict(protected(EntryCheck::EnvelopeNotMoved), &record),
-            (if elsewhere { Err(Moved) } else { Ok(()) }, [0, 0, 1]));
+            (decide(elsewhere, Err(Moved), Ok(())), [0, 0, 1]));
         for check in [EntryCheck::Authenticate, EntryCheck::Envelope, EntryCheck::EnvelopeNotMoved] {
             assert_eq!(verdict(protected(check), b"plaintext"), (Err(Plaintext), [0, 0, 0]));
             assert_eq!(verdict(protected(check), &other), (Err(OtherConfig), [0, 0, 0]));
@@ -1017,6 +1072,113 @@ fn staged_verdicts_accept_only_what_their_check_requires() {
             assert_eq!(verdict(protected(check), &oversized), (Err(Envelope), [0, 0, 0]));
         }
     }
+}
+
+/// `index_verdict` checks every entry of the listing, in order, with the
+/// run's inputs: it reads exactly the protected entries' blobs, asks each
+/// entry's questions about that entry only, accepts only when every entry
+/// passes, and otherwise stops at the first refusal, naming its position
+/// (the last entry included). A blob that cannot be read refuses.
+#[test]
+fn index_verdict_checks_every_entry_in_order() {
+    use StagedRefusal::*;
+    let m = Mock { key: 9 };
+    let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+    let id = m.config_id(&config);
+    let record = seal(&m, &config, b"a.env", b"secret").unwrap();
+    // A protected entry, an unprotected file staged since `HEAD`, a
+    // symlink, and a protected entry last.
+    let (bytes, ends) = listing(&[("100644", b'a', b"a.env"), ("100644", b'b', b"b.txt"),
+        ("120000", b'c', b"link"), ("100644", b'd', b"z.env")]);
+    let flags = [true, false, false, true];
+    let unheld = [false; 4];
+    let blobs = |last: &[u8]| std::vec![Some(record.clone()), None, None, Some(last.to_vec())];
+    // Keyed, full: both protected entries authenticate; `b.txt` must be no record.
+    let run = |answers: &mut Answers| index_verdict(answers, &bytes, &ends, &flags, &unheld, &unheld, true, false,
+        false, &id);
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), blobs(&record));
+    assert_eq!(run(&mut answers), Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[1, 0, 1, 0], [0, 1, 0, 0], [0; 4], [1, 0, 1, 0]]);
+    // The last entry is plaintext: refused at its position, after the others passed.
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), blobs(b"plaintext"));
+    assert_eq!(run(&mut answers), Err((3, Plaintext)));
+    assert_eq!(answers.asked.borrow()[3][0], 1);
+    // A refusal stops the check: nothing after it is read or asked.
+    let mut answers = Answers::new(Some(true), Some(true), Some(false), blobs(&record));
+    assert_eq!(run(&mut answers), Err((1, UnprotectedRecord)));
+    assert_eq!(answers.asked.borrow()[2..], [[0; 4], [0; 4]]);
+    // A blob that cannot be read, or an answer that cannot be found, refuses.
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), blobs(&record));
+    answers.blobs[3] = None;
+    assert_eq!(run(&mut answers), Err((3, Unanswered)));
+    let mut answers = Answers::new(None, Some(true), Some(false), blobs(&record));
+    assert_eq!(run(&mut answers), Err((1, Unanswered)));
+    // Without the key, the protected entries' envelopes and moves are checked.
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), blobs(&record));
+    assert_eq!(index_verdict(&mut answers, &bytes, &ends, &flags, &unheld, &unheld, false, false, false, &id), Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[1, 0, 0, 1], [0, 1, 0, 0], [0; 4], [1, 0, 0, 1]]);
+    // Incremental under the guard, everything held: only the envelopes, nothing asked.
+    let mut answers = Answers::new(Some(true), Some(false), Some(true), blobs(&record));
+    assert_eq!(index_verdict(&mut answers, &bytes, &ends, &flags, &[true; 4], &[true; 4], true, true, true, &id),
+        Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[1, 0, 0, 0], [0; 4], [0; 4], [1, 0, 0, 0]]);
+    // An empty index passes without a question.
+    let mut answers = Answers::new(None, None, None, std::vec::Vec::new());
+    assert_eq!(index_verdict(&mut answers, &[], &[], &[], &[], &[], true, false, false, &id), Ok(()));
+}
+
+/// `commit_verdict` checks every examined entry of a commit, in order: a
+/// selected path that is not a regular file refuses; a selected entry is
+/// read and authenticated (keyed) unless an earlier pass of the same record
+/// settles its check, and is recorded once it passed; nothing after the
+/// first refusal is read or asked; the last entry is checked too.
+#[test]
+fn commit_verdict_checks_every_examined_entry_in_order() {
+    use StagedRefusal::*;
+    let m = Mock { key: 9 };
+    let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+    let id = m.config_id(&config);
+    let record = seal(&m, &config, b"a.env", b"secret").unwrap();
+    let selected = AuditedEntry { regular: true, selected: true, held: false, moved: false };
+    let unprotected = AuditedEntry { regular: true, selected: false, held: false, moved: false };
+    let link = AuditedEntry { regular: false, selected: true, held: false, moved: false };
+    let blobs = |n: usize| (0..n).map(|_| Some(record.clone())).collect::<std::vec::Vec<_>>();
+    let run = |answers: &mut Answers, entries: &[AuditedEntry], keyed: bool|
+        commit_verdict(answers, entries, keyed, AuditBase::Parent, &id);
+    // Keyed: the selected entries authenticate, the unprotected one is asked whether it is a record.
+    let entries = [selected, unprotected, selected];
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), blobs(3));
+    assert_eq!(run(&mut answers, &entries, true), Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[1, 0, 1, 0], [0, 1, 0, 0], [1, 0, 1, 0]]);
+    assert_eq!(answers.passed, [1, 0, 1]);
+    // An earlier pass settles `Authenticate`: nothing is read or asked, nothing recorded again.
+    let mut answers = Answers::new(Some(false), Some(false), Some(false), blobs(3));
+    answers.cached = std::vec![true, false, true];
+    assert_eq!(run(&mut answers, &entries, true), Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[0; 4], [0, 1, 0, 0], [0; 4]]);
+    assert_eq!(answers.passed, [0, 0, 0]);
+    // Without the key the move check is not settled by an earlier pass.
+    let mut answers = Answers::new(Some(false), Some(false), Some(true), blobs(1));
+    answers.cached = std::vec![true];
+    assert_eq!(run(&mut answers, &[selected], false), Err((0, AuditRefusal::Verdict(Moved))));
+    // The last entry is checked: one that does not open is refused at its position.
+    let mut answers = Answers::new(Some(false), Some(false), Some(false), blobs(3));
+    answers.cached = std::vec![true, false, false];
+    assert_eq!(run(&mut answers, &entries, true), Err((2, AuditRefusal::Verdict(Authentication))));
+    // A selected symlink refuses, and nothing after a refusal is asked.
+    let mut answers = Answers::new(Some(true), Some(false), Some(false), blobs(3));
+    assert_eq!(run(&mut answers, &[unprotected, link, selected], true), Err((0, AuditRefusal::Verdict(UnprotectedForgery))));
+    assert_eq!(answers.asked.borrow()[1..], [[0; 4], [0; 4]]);
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), blobs(3));
+    assert_eq!(run(&mut answers, &[selected, link, selected], true), Err((1, AuditRefusal::NotRegular)));
+    assert_eq!(answers.asked.borrow()[2], [0; 4]);
+    // A blob that cannot be read refuses; reserved metadata is never checked.
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), std::vec![None]);
+    assert_eq!(run(&mut answers, &[selected], true), Err((0, AuditRefusal::Verdict(Unanswered))));
+    let mut answers = Answers::new(Some(true), Some(false), Some(false), std::vec![None]);
+    answers.paths = std::vec![b".transcrypt/config".to_vec()];
+    assert_eq!(run(&mut answers, &[link], true), Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[0; 4]]);
 }
 
 /// `held_records` holds an entry only when the other listing has the same

@@ -79,12 +79,12 @@ def KeysRealize (inst : V3Primitives P) (keys : EpochKeys P) : Prop :=
     answers (the shape of `KeyedAudit`, for `audit_check` with `keyed =
     false`). The primitives are never used; `σ₀` gives only the
     configuration's id (A5: `config_id`). -/
-structure KeylessAudit {A : Type} (ans : StagedEvidence A) (pinst : V3Primitives P) (σ₀ : Suite)
+structure KeylessAudit {A : Type} (ans : StagedEvidence A) (cache : AuditedEntries A) (pinst : V3Primitives P) (σ₀ : Suite)
     (g : GitState) (r : AuditRun A) : Prop where
   id : wireBytes r.id = σ₀.digest16 (wireBytes r.config)
-  contracts : AuditContracts g r.commit r.base r.entries
-  answers : ∃ prims : P, AuditAnswers ans pinst prims r.config r.id g r.entries
-  accepted : auditPlan ans r.id false r.base r.entries = ok true
+  contracts : AuditContracts r.commit r.base r.run
+  answers : ∃ prims : P, AuditAnswers ans cache pinst prims r.config r.id false g r.run
+  accepted : AuditAccepted ans cache r.id false r.base r.run
 
 /-- **An audited commit authenticates**: its records (`RecordsAuthentic`)
     and every entry its own attributes select (`SelectionAuthentic`). -/
@@ -101,15 +101,15 @@ def SelectionEnveloped (id : List Nat) (g : GitState) (filter : List Nat → Lis
 /-- **One keyed audit run.** `keyed_audit_authenticates_commit` for an
     accepted `KeyedAudit`: given the first parent's invariants (under the
     parent's selection `pfilter`) when the audit trusted the parent. -/
-theorem keyed_audit_run_authenticated {A : Type} {aans : StagedEvidence A} {prims : P} {σ : Suite}
+theorem keyed_audit_run_authenticated {A : Type} {aans : StagedEvidence A} {acache : AuditedEntries A} {prims : P} {σ : Suite}
     {g : GitState} {r : AuditRun A}
-    (ha : KeyedAudit aans inst prims σ g r) (hR : Realizes inst prims σ)
+    (ha : KeyedAudit aans acache inst prims σ g r) (hR : Realizes inst prims σ)
     (pfilter : List Nat → List Nat)
     (hparent : r.base = .Parent → RecordsAuthentic σ (wireBytes r.config) g r.commit.parent ∧
       SelectionAuthentic σ (wireBytes r.config) g pfilter r.commit.parent)
-    (hagree : AuditSelectionAgrees r.commit r.entries pfilter) :
+    (hagree : AuditSelectionAgrees r.commit r.run pfilter) :
     AuditedCommitAuthentic σ (wireBytes r.config) g r.commit :=
-  keyed_audit_authenticates_commit g _ _ _ aans inst prims _ _ hR ha.id ha.contracts ha.answers ha.accepted
+  keyed_audit_authenticates_commit g _ _ _ aans acache inst prims _ _ hR ha.id ha.contracts ha.answers ha.accepted
     (fun hb => (hparent hb).1) pfilter (fun hb => (hparent hb).2) hagree
 
 /-- **One keyless audit run.** Every entry the commit's attributes select,
@@ -117,18 +117,17 @@ theorem keyed_audit_run_authenticated {A : Type} {aans : StagedEvidence A} {prim
     `keyless_audit_checks_envelopes`, any other because the audit trusted the
     parent, which holds it exactly and selects it alike
     (`AuditSelectionAgrees`). -/
-theorem keyless_audit_run_enveloped {A : Type} {aans : StagedEvidence A} {σ₀ : Suite}
+theorem keyless_audit_run_enveloped {A : Type} {aans : StagedEvidence A} {acache : AuditedEntries A} {σ₀ : Suite}
     {g : GitState} {r : AuditRun A}
-    (ha : KeylessAudit aans inst σ₀ g r) (pfilter : List Nat → List Nat)
+    (ha : KeylessAudit aans acache inst σ₀ g r) (pfilter : List Nat → List Nat)
     (hparent : r.base = .Parent → SelectionEnveloped (σ₀.digest16 (wireBytes r.config)) g pfilter r.commit.parent)
-    (hagree : AuditSelectionAgrees r.commit r.entries pfilter) :
+    (hagree : AuditSelectionAgrees r.commit r.run pfilter) :
     SelectionEnveloped (σ₀.digest16 (wireBytes r.config)) g r.commit.filter r.commit.tree := by
   obtain ⟨prims, hans⟩ := ha.answers
   intro x hx hs hnr
-  by_cases hex : ∃ e ∈ r.entries, e.entry = x
-  · obtain ⟨e, he, rfl⟩ := hex
-    obtain ⟨hreg, content, hc, henv, -⟩ := keyless_audit_checks_envelopes (σ := σ₀) g r.commit r.base r.entries
-      aans inst prims r.config r.id ha.id ha.contracts hans ha.accepted e he hs hnr
+  by_cases hex : x ∈ r.run.entries
+  · obtain ⟨hreg, content, hc, henv, -⟩ := keyless_audit_checks_envelopes (σ := σ₀) g r.commit r.base r.run
+      aans acache inst prims r.config r.id ha.id ha.contracts hans ha.accepted x hex hs hnr
     exact ⟨hreg, content, hc, henv⟩
   · rcases ha.contracts.covers x hx hnr with hex' | ⟨hb, hxp⟩
     · exact absurd hex' hex
@@ -219,10 +218,10 @@ def KeylessBoundaryTrusted {C A : Type} (keys : EpochKeys P) (σ₀ : Suite) (g 
     so nothing about a second parent is used; a configuration change
     (`AuditBase.Tree`) uses nothing from its parent, so no epoch's key
     vouches for another's records. -/
-theorem keyed_dag_audit_authenticated {C A : Type} (aans : StagedEvidence A)
+theorem keyed_dag_audit_authenticated {C A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A)
     (keys : EpochKeys P) (hkeys : KeysRealize inst keys)
     (g : GitState) (d : AuditedRange C A) (hedges : FirstParentEdges d)
-    (haudits : ∀ c ∈ d.commits, ∀ k, keys (d.config c) = some k → KeyedAudit aans inst k.prims k.suite g (d.run c))
+    (haudits : ∀ c ∈ d.commits, ∀ k, keys (d.config c) = some k → KeyedAudit aans acache inst k.prims k.suite g (d.run c))
     (hboundary : KeyedBoundaryTrusted keys g d) :
     ∀ c ∈ d.commits, ∀ k, keys (d.config c) = some k →
       AuditedCommitAuthentic k.suite (d.config c) g (d.run c).commit := by
@@ -256,9 +255,9 @@ theorem keyed_dag_audit_authenticated {C A : Type} (aans : StagedEvidence A)
     unless it is metadata, is a regular file with its configuration's
     envelope (`SelectionEnveloped`). Nothing is authenticated: a forged
     envelope passes (A14). -/
-theorem keyless_dag_audit_enveloped {C A : Type} (aans : StagedEvidence A) (keys : EpochKeys P) (σ₀ : Suite)
+theorem keyless_dag_audit_enveloped {C A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A) (keys : EpochKeys P) (σ₀ : Suite)
     (g : GitState) (d : AuditedRange C A) (hedges : FirstParentEdges d)
-    (haudits : ∀ c ∈ d.commits, keys (d.config c) = none → KeylessAudit aans inst σ₀ g (d.run c))
+    (haudits : ∀ c ∈ d.commits, keys (d.config c) = none → KeylessAudit aans acache inst σ₀ g (d.run c))
     (hboundary : KeylessBoundaryTrusted keys σ₀ g d) :
     ∀ c ∈ d.commits, keys (d.config c) = none →
       SelectionEnveloped (σ₀.digest16 (d.config c)) g (d.run c).commit.filter (d.run c).commit.tree := by
@@ -376,11 +375,11 @@ def StoredKeysUnlocked (inst : V3Primitives P) (sched : V3KeySchedule P) (σk : 
     the keyed audit with it, each other one by the keyless audit (with
     `AuditContracts` and `AuditAnswers` inside, A4, A19–A21); and the trusted
     boundary of both kinds (A13). -/
-structure EpochAuditedRange {C A : Type} (aans : StagedEvidence A) (inst : V3Primitives P) (σk : List Nat → Suite)
+structure EpochAuditedRange {C A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A) (inst : V3Primitives P) (σk : List Nat → Suite)
     (σ₀ : Suite) (ks : List Nat → Option (StoredKeyRun P)) (g : GitState) (d : AuditedRange C A) : Prop where
   edges : FirstParentEdges d
-  keyed : ∀ c ∈ d.commits, ∀ k, ks (d.config c) = some k → KeyedAudit aans inst k.keyed (k.suite σk) g (d.run c)
-  keyless : ∀ c ∈ d.commits, ks (d.config c) = none → KeylessAudit aans inst σ₀ g (d.run c)
+  keyed : ∀ c ∈ d.commits, ∀ k, ks (d.config c) = some k → KeyedAudit aans acache inst k.keyed (k.suite σk) g (d.run c)
+  keyless : ∀ c ∈ d.commits, ks (d.config c) = none → KeylessAudit aans acache inst σ₀ g (d.run c)
   keyed_boundary : KeyedBoundaryTrusted (storedEpochKeys σk ks) g d
   keyless_boundary : KeylessBoundaryTrusted (storedEpochKeys σk ks) σ₀ g d
 
@@ -456,8 +455,8 @@ theorem storedEpochKeys_none {σk : List Nat → Suite} {ks : List Nat → Optio
 theorem transcrypt_product_assurance_dag {C A E : Type} {sched : V3KeySchedule P} {σk : List Nat → Suite}
     (hK : KeyScheduleRealizes inst sched σk)
     (ks : List Nat → Option (StoredKeyRun P)) (hks : StoredKeysUnlocked inst sched σk ks)
-    (aans : StagedEvidence A) (σ₀ : Suite) (g : GitState) (d : AuditedRange C A)
-    (hrange : EpochAuditedRange aans inst σk σ₀ ks g d)
+    (aans : StagedEvidence A) (acache : AuditedEntries A) (σ₀ : Suite) (g : GitState) (d : AuditedRange C A)
+    (hrange : EpochAuditedRange aans acache inst σk σ₀ ks g d)
     (ans : StagedEvidence E) (h : Nat → CheckedCommit E) (n : Nat)
     (hcommits : ∀ i ≤ n, EpochPublication ans inst σk ks (h i))
     (hsteps : ∀ i < n, GuardedHistoryStep (h i) (h (i + 1)))
@@ -478,7 +477,7 @@ theorem transcrypt_product_assurance_dag {C A E : Type} {sched : V3KeySchedule P
     obtain ⟨k, hk, rfl⟩ := storedEpochKeys_some he
     exact (hctx config k hk).realizes
   -- The audited graph, with keys and without.
-  have hdag := keyed_dag_audit_authenticated aans (storedEpochKeys σk ks) hkeys g d hrange.edges
+  have hdag := keyed_dag_audit_authenticated aans acache (storedEpochKeys σk ks) hkeys g d hrange.edges
     (fun c hc e he => by
       obtain ⟨k, hk, rfl⟩ := storedEpochKeys_some he
       exact hrange.keyed c hc k hk)
@@ -486,7 +485,7 @@ theorem transcrypt_product_assurance_dag {C A E : Type} {sched : V3KeySchedule P
   have hkeyed : ∀ c ∈ d.commits, ∀ k, ks (d.config c) = some k →
       AuditedCommitAuthentic (k.suite σk) (d.config c) g (d.run c).commit := fun c hc k hk =>
     hdag c hc ⟨k.keyed, k.suite σk⟩ (by simp [storedEpochKeys, hk])
-  have hkeyless := keyless_dag_audit_enveloped aans (storedEpochKeys σk ks) σ₀ g d hrange.edges
+  have hkeyless := keyless_dag_audit_enveloped aans acache (storedEpochKeys σk ks) σ₀ g d hrange.edges
     (fun c hc he => hrange.keyless c hc (by cases hk : ks (d.config c) <;> simp_all [storedEpochKeys]))
     hrange.keyless_boundary
   -- The history, across epochs.

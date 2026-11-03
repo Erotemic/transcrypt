@@ -85,9 +85,9 @@ structure ValidCheckedPublication {E : Type} (ans : StagedEvidence E) (inst : V3
     commit (`AuditStep`), and the first one starting from a root commit or a
     configuration change, or from a first parent outside the range whose
     records and selection authenticate (A13: what the remote already has). -/
-structure KeyedAuditRange {A : Type} (aans : StagedEvidence A) (inst : V3Primitives P) (σk : List Nat → Suite)
-    (k : StoredKeyRun P) (g : GitState) (a : Nat → AuditRun A) (m : Nat) : Prop where
-  audits : ∀ i ≤ m, KeyedAudit aans inst k.keyed (k.suite σk) g (a i)
+structure KeyedAuditRange {A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A) (inst : V3Primitives P)
+    (σk : List Nat → Suite) (k : StoredKeyRun P) (g : GitState) (a : Nat → AuditRun A) (m : Nat) : Prop where
+  audits : ∀ i ≤ m, KeyedAudit aans acache inst k.keyed (k.suite σk) g (a i)
   validated : ∀ i ≤ m, (a i).config = k.config
   steps : ∀ i < m, AuditStep (a i) (a (i + 1))
   start : (a 0).base = .Parent → RecordsAuthentic (k.suite σk) (wireBytes (a 0).config) g (a 0).commit.parent ∧
@@ -97,10 +97,10 @@ structure KeyedAuditRange {A : Type} (aans : StagedEvidence A) (inst : V3Primiti
     from `HEAD` (`full`: not incremental, or the guard `false`), or the
     commit its `HEAD` names is the last of a keyed audit range (`audited`:
     Git lists the same tree, A20, and objects keep their content, A11). -/
-inductive HistoryStart {E A : Type} (aans : StagedEvidence A) (inst : V3Primitives P) (σk : List Nat → Suite)
-    (k : StoredKeyRun P) (c : CheckedCommit E) : Prop
+inductive HistoryStart {E A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A) (inst : V3Primitives P)
+    (σk : List Nat → Suite) (k : StoredKeyRun P) (c : CheckedCommit E) : Prop
   | full (hmode : c.mode = .full)
-  | audited (g : GitState) (a : Nat → AuditRun A) (m : Nat) (hrange : KeyedAuditRange aans inst σk k g a m)
+  | audited (g : GitState) (a : Nat → AuditRun A) (m : Nat) (hrange : KeyedAuditRange aans acache inst σk k g a m)
       (hhead : c.g.head = (a m).commit.tree)
       (hobjects : ∀ oid content, g.blob oid = some content → c.g.blob oid = some content)
 
@@ -164,8 +164,8 @@ structure AuthenticatedRecovery (inst : V3Primitives P) (keyed : P) (σ : Suite)
     record, a record sealed for another path or another configuration;
     releasing unauthenticated plaintext; turning imported content into an
     accepted record; using a stale, other-configuration or damaged key.
-    Not excluded: what the contracts assume (Git, the adapter's loop and
-    answers, the key schedule, AES-SIV/Argon2id security, A10), the
+    Not excluded: what the contracts assume (Git, the adapter's one call of
+    each verified loop and its answers, the key schedule, AES-SIV/Argon2id security, A10), the
     incremental hook's trust in an unaudited local history (A24, A13),
     deterministic equality and replay of an old record at its path, and
     any confidentiality claim (none is proved). -/
@@ -175,7 +175,7 @@ theorem transcrypt_product_assurance {E A : Type} {sched : V3KeySchedule P} {σk
     (ans : StagedEvidence E) (h : Nat → CheckedCommit E) (n : Nat)
     (hcommits : ∀ i ≤ n, ValidCheckedPublication ans inst σk k (h i))
     (hsteps : ∀ i < n, GuardedHistoryStep (h i) (h (i + 1)))
-    (aans : StagedEvidence A) (hstart : HistoryStart aans inst σk k (h 0)) :
+    (aans : StagedEvidence A) (acache : AuditedEntries A) (hstart : HistoryStart aans acache inst σk k (h 0)) :
     ValidatedCryptoContext inst (k.suite σk) (sliceBytes k.file) (sliceBytes k.current) k.keyed k.config ∧
     (∀ i ≤ n, AuthenticatedRepositoryState (k.suite σk) (wireBytes k.config) (h i).g) ∧
     AuthenticatedRecovery inst k.keyed (k.suite σk) k.config k.id ∧
@@ -190,7 +190,7 @@ theorem transcrypt_product_assurance {E A : Type} {sched : V3KeySchedule P} {σk
     cases hstart with
     | full hmode => rw [hmode] at hinc; cases hinc
     | audited g a m hrange hhead hobjects =>
-      have hrec := (keyed_audit_chain_authenticated aans hR g a m hrange.audits hrange.steps hrange.start m
+      have hrec := (keyed_audit_chain_authenticated aans acache hR g a m hrange.audits hrange.steps hrange.start m
         (Nat.le_refl m)).1
       rw [hrange.validated m (Nat.le_refl m)] at hrec
       rw [(hcommits 0 (Nat.zero_le n)).validated, hhead]

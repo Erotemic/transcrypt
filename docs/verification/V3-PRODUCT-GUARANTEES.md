@@ -120,8 +120,9 @@ them and any record at an unprotected path"
     (which check: authenticate, envelope, envelope and not moved, no
     record, authenticate if a record, or nothing) and accepted by the
     extracted `staged_verdict` (with `entry_check`, `parse_file_header`,
-    `record_envelope_ok`). The Lean loop `hookPlan` only sequences these two
-    calls; it reimplements nothing.
+    `record_envelope_ok`). The loop over every entry is the extracted
+    `index_verdict`, called once; `index_verdict_accepts` proves that its
+    acceptance checked every position with the run's inputs.
   - The verdict asks the adapter three questions (`StagedEvidence`), each
     only when its check needs it: is the blob a record of this
     configuration (`record_envelope_prefix_ok`), does it open at its path
@@ -130,12 +131,14 @@ them and any record at an unprotected path"
     (`parse_listing`, `parse_listing_attrs`, `first_unselectable`), exact
     record membership in `HEAD` and `HEAD^1` (`held_records`) and the guard
     (`policy_unchanged`).
-  - Production Rust: `lifecycle.rs` `check_staged` (and its `EntryEvidence`)
+  - Production Rust: `lifecycle.rs` `check_staged` (and its `IndexEvidence`)
     and the core's `lib.rs`.
 - **Assumptions:**
-  - A4 (the adapter feeds Git's real snapshots to these functions, runs the
-    loop over every entry, answers the three questions truthfully about the
-    entry's own blob and path, and obeys the verdict: `HookAnswers`);
+  - A4 (the adapter feeds Git's real snapshots to these functions, calls
+    `index_verdict` once with the run's inputs and refuses unless it returns
+    `Ok`: `HookAccepted`; its evidence reads each entry's blob and answers
+    the three questions truthfully about that entry's own blob and path:
+    `HookAnswers`);
   - A16 and A19 (Git's attribute selection);
   - A20 and A21 (listings and object reads);
   - A5, A9 and A10 (the primitives realize `Realizes`);
@@ -148,11 +151,12 @@ them and any record at an unprotected path"
     `--no-verify`, a locked checkout, a rebase, and another party's
     commits.
 - **Status:**
-  - The decision functions, the per-entry check and its acceptance:
-    source-derived proof.
-  - The composition (`HookEvidence`, `hookPlan`): model proof (a loop over
-    the extracted functions).
-  - The adapter's loop and its three answers: tested and reviewed.
+  - The decision functions, the per-entry check, its acceptance and the
+    loop over every entry (`index_verdict`): source-derived proof.
+  - The composition (`HookEvidence`, `HookAccepted`): model proof over the
+    extracted functions.
+  - The adapter's one call and its evidence (reads and three answers):
+    tested and reviewed.
 
 ## B. Authenticated recovery
 
@@ -354,8 +358,10 @@ defence in depth.
   tested boundary: it cannot be pushed through the pre-push hook).
 - **The audit's adapter** reports what Git lists: every entry it does not
   examine is the parent's exactly, and its selection of such an entry is
-  the parent's (`AuditContracts`, `AuditSelectionAgrees`; A19, A20). Its
-  per-run cache of checked records is tested, not modelled.
+  the parent's (`AuditContracts`, `AuditSelectionAgrees`; A19, A20). It
+  calls the extracted loop `commit_verdict` once per commit, and its
+  per-run cache of checked records answers truthfully (`AuditAnswers`);
+  which checks the cache may settle is the core's.
 - **The adapter** answers the verdict's three questions truthfully (A4).
 
 ## Merges, branches and rekeys
@@ -424,11 +430,13 @@ boundaries it does not cross. Each is defined in
 - **The primitives and their security** (A9, A10): RustCrypto computes
   AES-SIV, Argon2id and SHA-256 correctly, and they are secure. A10 also
   covers the check value detecting a damaged key.
-- **The adapter around the core** (A4): it runs the loops of the hook and
-  the audit over every entry and answers truthfully (`HookAnswers`,
-  `AuditAnswers`, `RecordEvidence`), and the filters write what the core
-  returned. The loops, `smudgeModel` and the audit's record cache are
-  models or tests, not extracted code.
+- **The adapter around the core** (A4): it calls the core's loops over the
+  index and over each audited commit once with the run's inputs and obeys
+  the result (`HookAccepted`, `AuditAccepted`), and its evidence answers
+  truthfully (`HookAnswers`, `AuditAnswers`, `RecordEvidence`); the filters
+  write what the core returned. The loops are extracted code
+  (`index_verdict_accepts`, `commit_verdict_accepts`); `smudgeModel` and the
+  meaning of the evidence's answers are models or tests.
 - **Git** (A11, A19–A21, A23): its listings, attribute answers, object reads
   and sequencing state are what the contracts say.
 - **Git commits the checked index** (A22), so each step is a

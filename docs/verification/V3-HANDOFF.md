@@ -412,18 +412,45 @@ Pushes are the owner's.
    replies are `parse_batch_header`/`blob_read`. Next A4 narrowings: the
    inputs of smudge/hydrate/lock (worktree reads), the filter-process
    key/value lines. Done 2026-11-02: the audit's per-commit check
-   (`audit_check`, `keyed_audit_authenticates_commit`); its remaining
-   adapter parts are the `diff-tree` facts (`AuditContracts`), the drift
-   check and the checked-record cache.
+   (`audit_check`, `keyed_audit_authenticates_commit`), and both per-entry
+   loops in the core: the hook calls `index_verdict` once and the audit
+   `commit_verdict` once per commit (`index_verdict_accepts`,
+   `commit_verdict_accepts`: every position checked in order with the run's
+   inputs; answers are `Option<bool>`, a failed read or answer refused by
+   the core; the cache's settle rule `settled_by_cache` is core code). What
+   remains there is the one call with the run's inputs (`HookAccepted`,
+   `AuditAccepted`), the evidence's answers (`HookAnswers`,
+   `AuditAnswers`, including what a cache hit means), the `diff-tree` facts
+   (`AuditContracts`) and the drift check.
 5. **Done:** the private-mode agent's optional idle timeout (`--timeout`).
-6. **Performance** (release build, 10 000 files, 300 protected): a commit
-   with the hook takes 0.24 s, a protected edit 0.27 s, a `git mv` of a
-   protected file 0.36 s, `git status` 0.04 s. The hook reads the
-   index once, and authenticates only entries that differ from `HEAD` or
-   `HEAD^1` (the others get the keyless checks; H-74, A24). Every snapshot
-   lookup is a binary search (H-75): `verify-index` after rewriting 60 000
-   unprotected files takes 5.3 s (it was 32 s with linear scans), a locked
-   `verify-index` of a merge bringing 10 000 protected files 0.35 s.
+6. **Performance** (release build; `scripts/bench-hook.sh BIN [RUNS]`
+   reproduces every scenario below in fresh temporary repositories and
+   prints medians). Measured 2026-11-02 on an Intel Xeon Gold 5222
+   (14 vCPUs, Linux 6.8, Git 2.43.0, rustc 1.98.0), a machine shared with
+   virtual machines (load 8 to 14), so differences of a few tens of
+   milliseconds, and of up to 2 s on the 60 000-file run, are noise.
+   Medians of 5 runs, three rounds each, interleaved, for `bc24340` (the
+   adapter's own loop) and `a868ccf` (the core's `index_verdict` and
+   `commit_verdict`):
+
+   | Scenario | `bc24340` | `a868ccf` |
+   | --- | --- | --- |
+   | 10 000 files, 300 protected: commit of an unprotected edit | 0.23 s (0.23–0.29) | 0.26 s (0.25–0.27) |
+   | … commit of a protected edit | 0.29 s (0.29–0.29) | 0.29 s (0.28–0.29) |
+   | … `git mv` of a protected file, commit | 0.40 s (0.39–0.43) | 0.40 s (0.38–0.40) |
+   | … `git status` | 0.03 s | 0.03 s |
+   | `verify-index` after rewriting 60 000 unprotected files | 6.1 s (6.0–6.4) | 6.9 s (6.2–8.7) |
+   | the same, the two binaries alternated 7 times on one index | 6.2 s (5.9–7.5) | 6.5 s (5.4–7.7) |
+   | locked `verify-index` of a merge bringing 10 000 protected files | 0.36 s (0.34–0.37) | 0.35 s (0.32–0.56) |
+
+   So moving the loops into the core costs nothing measurable; the
+   incremental fast path is unchanged (`ordinary_commits_read_no_unchanged_unprotected_file`,
+   `audits_read_no_unchanged_unprotected_file`). The hook reads the index
+   once, and authenticates only entries that differ from `HEAD` or `HEAD^1`
+   (the others get the keyless checks; H-74, A24). Every snapshot lookup is
+   a binary search (H-75; the 60 000-file `verify-index` was 32 s with
+   linear scans). The figures recorded on 2026-10-26 were 0.24 s,
+   0.27 s, 0.36 s, 0.04 s, 5.3 s and 0.35 s.
    Every blob the adapter stages (hook sealing and re-binding, `rekey`,
    `reencrypt`, `unprotect`) goes through `git::IndexUpdate`: one `git
    fast-import --done` reading the contents from stdin (no temporary

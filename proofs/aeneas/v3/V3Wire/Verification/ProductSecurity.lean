@@ -91,8 +91,8 @@ def CheckMode.Permits {E : Type} {g : GitState} : CheckMode → Bool → HookEvi
   | .full, inc, run => FullCheck inc run
   | .incremental, _, _ => True
 
-/-- **An accepted keyed check.** The hook's final check of `run` (`hookPlan`
-    of the verified `staged_check` and `staged_verdict`) accepted with the
+/-- **An accepted keyed check.** The hook's final check of `run` (the
+    verified `index_verdict`, `HookAccepted`) accepted with the
     key, under the configuration whose bytes are `config` and whose id is
     the suite's digest of them (A5), in a run of the given mode. The
     adapter's answers are as `HookAnswers` states (A4): a contract on the
@@ -102,7 +102,7 @@ def KeyedCheckAccepted {E : Type} (ans : StagedEvidence E) (inst : V3Primitives 
     {g : GitState} (run : HookEvidence g E) (config : List Nat) (mode : CheckMode) : Prop :=
   ∃ (cfg : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (incremental : Bool),
     wireBytes cfg = config ∧ wireBytes id = σ.digest16 config ∧ HookAnswers ans inst prims cfg id g run ∧
-    hookPlan ans id true incremental run.inputs run.entries = ok true ∧
+    HookAccepted ans id true incremental run ∧
     mode.Permits incremental run
 
 /-! ## A24, part 1: a full check needs no history -/
@@ -118,7 +118,7 @@ theorem hook_full_check_authenticates {E : Type} (g : GitState) (run : HookEvide
     (hid : wireBytes id = σ.digest16 (wireBytes config))
     (hgit : HookContracts g run)
     (hans : HookAnswers ans inst prims config id g run)
-    (hcheck : hookPlan ans id true incremental run.inputs run.entries = ok true)
+    (hcheck : HookAccepted ans id true incremental run)
     (hfull : FullCheck incremental run) :
     AuthenticatedIndex σ (wireBytes config) g ∧ RecordsAuthentic σ (wireBytes config) g g.index := by
   have hrec := hook_records_authentic g run ans inst prims config id incremental hR hid hgit hans hcheck
@@ -149,14 +149,14 @@ theorem pre_commit_check_modes {E : Type} (g : GitState) (run : HookEvidence g E
     (hgit : HookContracts g run)
     (hans : HookAnswers ans inst prims config id g run)
     (hcfg : ConfigCommitted g (wireBytes config)) :
-    (hookPlan ans id true false run.inputs run.entries = ok true →
+    (HookAccepted ans id true false run →
       AuthenticatedIndex σ (wireBytes config) g ∧ RecordsAuthentic σ (wireBytes config) g g.index) ∧
-    (hookPlan ans id true true run.inputs run.entries = ok true →
+    (HookAccepted ans id true true run →
       AcceptedIndex σ (wireBytes config) true true g ∧
       (HeadAuthentic σ (wireBytes config) g → AuthenticatedIndex σ (wireBytes config) g) ∧
       ((run.samePolicy = true → RecordsAuthentic σ (wireBytes config) g g.head) →
         AuthenticatedIndex σ (wireBytes config) g ∧ RecordsAuthentic σ (wireBytes config) g g.index)) ∧
-    (∀ incremental, hookPlan ans id false incremental run.inputs run.entries = ok true →
+    (∀ incremental, HookAccepted ans id false incremental run →
       ∀ x ∈ g.index, Selected (g.filter x.path) →
         Selectable x ∧ ∃ content, g.blob x.oid = some content ∧
           KeylessEnvelopeOk σ (wireBytes config) g x content) := by

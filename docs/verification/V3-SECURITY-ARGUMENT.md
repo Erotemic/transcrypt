@@ -179,8 +179,10 @@ What remains assumed:
 `diff-tree` lists, or the whole tree for a root commit, a config change or
 an attribute change. Each examined entry is checked by the extracted
 `audit_check` (`audit_check_spec`), which chooses a check in the hook's
-vocabulary, and the extracted `staged_verdict`; the model `auditPlan` only
-sequences the two. With the key a selected entry is authenticated; an
+vocabulary, and the extracted `staged_verdict`, inside the extracted loop
+`commit_verdict` that the adapter calls once per commit
+(`commit_verdict_accepts`: an accepted call checked every examined
+position). With the key a selected entry is authenticated; an
 unprotected file the parent holds exactly is trusted from the parent only
 while the config is unchanged (`AuditBase.Parent`); any other unprotected
 file is authenticated if it is a record of the commit's config.
@@ -203,11 +205,14 @@ file is authenticated if it is a record of the commit's config.
 
 Its contracts: `AuditContracts` (every non-reserved entry not examined is
 the parent's exactly, and only while the config is unchanged; the facts
-`audit_check` receives and the blobs read are Git's: A20, A19, A11, A21),
-`AuditAnswers` (A4), `AuditSelectionAgrees` (A19: the adapter examines the
-whole tree when an attribute file changes) and `Realizes` (A5). The
-adapter's per-run cache of checked records (`settled_by_cache`) is
-reviewed and tested, not modelled.
+`audit_check` receives are Git's: A20, A19), `AuditAnswers` (A4, A11, A21:
+the blobs read, the paths, the three answers, and the per-run cache of
+checked records: a record it reports as checked has this configuration's
+envelope and, with the key, opens at its path), `AuditSelectionAgrees`
+(A19: the adapter examines the whole tree when an attribute file changes)
+and `Realizes` (A5). Which checks the cache may settle (`settled_by_cache`)
+and that a record is recorded only after its selected entry's check
+passed are the core's.
 
 ### How the proof goes
 
@@ -230,12 +235,15 @@ Every step is a theorem about the Aeneas translation of the production
 | Without the key: the envelope | `record_envelope_ok` (`record_envelope_ok_spec`) | `EnvelopeOk` |
 | Object replies are for the requested id and announced size | `parse_batch_header`, `blob_read` (`parse_batch_header_spec`, `blob_read_spec`) | `BatchHeader`, `blobReadSpec` |
 
-`hookPlan` is the loop in `transcrypt_rs::lifecycle::check_staged`: each
-iteration (`hookEntry`) is exactly the generated `staged_check` followed by
-the generated `staged_verdict`; it decides nothing itself. That the Rust loop
-visits every entry with these calls, reads the blob when `reads_blob` says
-so, and answers the verdict's questions truthfully (`HookAnswers`) is what
-remains of A4 here (reviewed, tested).
+The loop over the index is the generated `index_verdict`, which
+`transcrypt_rs::lifecycle::check_staged` calls once: `index_verdict_accepts`
+proves that when it returns `Ok`, every position was checked by
+`staged_check` with the run's inputs, its blob read for it when
+`reads_blob` says so, and passed by `staged_verdict`. What remains of A4
+here (reviewed, tested) is that the adapter makes that one call with the
+run's inputs and refuses unless it returns `Ok` (`HookAccepted`), and that
+its evidence reads each entry's blob and answers the verdict's questions
+truthfully about that entry (`HookAnswers`).
 
 ## Theorem 2: the hook repairs only local changes
 
@@ -321,7 +329,7 @@ anything about commits outside a keyed history (A13).
 | `Realizes inst prims σ` | the primitives compute AES-SIV / SHA-256 | A5 (with A9) | TESTED (vectors, differential) |
 | `hid : wireBytes id = σ.digest16 config` | the configuration id is the suite's digest | A5 | TESTED (vectors) |
 | `hcfg : ConfigCommitted g config` | the configuration used is the staged `.transcrypt/config` | A4 | REVIEWED + TESTED (`check_staged` compares the staged blob with it) |
-| `run : HookEvidence g E`, `hookPlan … = ok true`, `HookAnswers` (the three answers to `staged_verdict`); `RepairContracts` (Theorem 2: `provenance`, `decision`, and `record`, what each reported `RecordClass` means, `RecordEvidence`) | the adapter called the verified functions on these inputs, reports its evidence about each blob truthfully and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
+| `run : HookEvidence g E`, `HookAccepted` (the one call of `index_verdict` returned `Ok`), `HookAnswers` (the blob reads and the three answers to `staged_verdict`); `RepairContracts` (Theorem 2: `provenance`, `decision`, and `record`, what each reported `RecordClass` means, `RecordEvidence`) | the adapter called the verified functions on these inputs, reports its evidence about each blob truthfully and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
 | `RepairContracts.incoming`, `.lazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | `HeadAuthentic` (corollary; only for an incremental check) | `HEAD`'s selected entries authenticate | A24 (selection form) | REVIEWED + TESTED (keyed audit, A13) |
@@ -335,7 +343,7 @@ anything about commits outside a keyed history (A13).
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 167 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 182 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the per-entry composition `hook_entry_checked` and

@@ -67,7 +67,7 @@ What kind of evidence each step has (column **Kind**):
 * **S, source-derived:** the step is a core function extracted from
   `lib.rs` by Aeneas, and the theorem is about that generated code.
 * **M, Lean model:** the theorem is about a handwritten Lean model of the
-  adapter's sequencing (`hookPlan`, `hydratePlan`, `lockEntry`,
+  adapter's sequencing (`hydratePlan`, `lockEntry`,
   `verifyPlan`, and the end-to-end theorems over `HookEvidence` and
   `RepairInputs`). The model calls the generated functions, but that the
   Rust loop matches it is assumption A4. For the repairs the model is only
@@ -86,12 +86,14 @@ What kind of evidence each step has (column **Kind**):
 | Whether its blob is read at all | S | `needs_record` | `needs_record_spec`, `needs_record_skip` (Bytes) |
 | Keep, seal, re-encrypt or leave it (`RepairPlan`) | S | `repair_plan` | `repair_plan_spec`, `repair_plan_repairs_only_local`, `repairSpec_repairs_only_local` (Bytes) |
 | Which check each index entry gets (`check_staged`): protected, authenticate or (keyless or settled) the envelope; unprotected, no record if staged since `HEAD`, authenticated if a record when `HEAD` is not trusted | S | `staged_check` (over `entry_check`), `reads_blob` | `staged_check_spec`, `reads_blob_spec`, `entry_check_spec` (Staged, Bytes) |
-| Whether it passes, asking the adapter (`EntryEvidence`) only what the check needs | S | `staged_verdict` (generic over `StagedEvidence`) | `staged_verdict_ok` (Staged); laziness in `staged_verdicts_accept_only_what_their_check_requires` (core tests) |
+| Whether it passes, asking the adapter (`IndexEvidence`) only what the check needs | S | `staged_verdict` (generic over `StagedEvidence`) | `staged_verdict_ok` (Staged); laziness in `staged_verdicts_accept_only_what_their_check_requires` (core tests) |
+| Check every index entry, in order, with the run's inputs, reading a blob exactly when the check needs it (`check_staged` calls it once) | S | `index_verdict` | `index_verdict_accepts` (Staged); `index_verdict_checks_every_entry_in_order` (core tests) |
 | Does `HEAD` (or `HEAD^1`) hold an entry's exact record | S | `held_records` | `held_records_spec` (Staged) |
 | `HEAD` is trusted only while no attribute file and not the config changed since `HEAD` and `HEAD^1` (A24) | S | `policy_unchanged` (over `is_policy_path`, `is_attributes_path`), with `held_records` | `policy_unchanged_spec`, `policy_unchanged_sound` (SnapshotPolicy); `hook_policy_guard`, `config_unchanged_of_guard` (EndToEnd, ProductSecurity); `settled_entries_are_authenticated_after_*`, `newly_protected_files_are_authenticated_by_the_hook`, `local_attribute_overrides_*`, `ordinary_commits_read_no_unchanged_unprotected_file` (`adversarial.rs`) |
 | Which check each examined entry of an audited commit gets (`audit.rs` `check_entries`): selected, authenticate (keyless: envelope, not moved unless the parent holds it); unprotected, trusted when the parent holds it under the same config, else authenticated if a record (keyless: no moved record) | S | `audit_check` (over `entry_check`; `AuditBase`, `AuditedEntry`), then `staged_verdict` | `audit_check_spec` (Staged); `audit_checks_match_their_definition` (core tests) |
 | The keyed audit of one commit, and an audited `HEAD` as the start of a keyed history | M | the rows above | `audit_entry_checked`, `keyed_audit_authenticates_commit`, `keyless_audit_checks_envelopes`, `audited_head_starts_keyed_history`, `audited_head_keyed_history_authenticated`, `keyed_audit_chain_authenticated` (Audit); `the_keyed_audit_authenticates_records_at_unprotected_paths`, `audits_read_no_unchanged_unprotected_file` (`adversarial.rs`) |
-| The audit's per-run cache of checked records (`settled_by_cache`) | T | none | none; `the_audit_authenticates_a_copied_record_at_its_new_path` (`adversarial.rs`) |
+| Check every examined entry of a commit, in order; which checks the per-run cache of checked records settles, and recording a record only after its check passed | S | `commit_verdict`, `settled_by_cache`, `read_verdict` | `commit_verdict_accepts`, `settled_by_cache_spec`, `read_verdict_ok` (Staged); `commit_verdict_checks_every_examined_entry_in_order` (core tests) |
+| What a cache hit means (same blob, config and path, recorded after its pass) | T | none | `AuditAnswers.checked` (A4); `the_audit_authenticates_a_copied_record_at_its_new_path` (`adversarial.rs`) |
 | Where a renamed record came from | S | `next_move_source` | `next_move_source_spec` (SnapshotMoves) |
 | Encrypt, decrypt | S | `seal_record`, `open_record` | `seal_record_spec`, `open_record_spec` (Protocol) |
 | Keyless check of a record (`is_record` reads only its size and first bytes) | S | `record_envelope_ok`, `record_envelope_prefix_ok` | `record_envelope_ok_spec`, `record_envelope_prefix_ok_spec`, `record_envelope_prefix_ok_record` (Envelope) |
