@@ -358,6 +358,60 @@ defence in depth.
   per-run cache of checked records is tested, not modelled.
 - **The adapter** answers the verdict's three questions truthfully (A4).
 
+## Merges, branches and rekeys
+
+`transcrypt_product_assurance` describes one linear chain of commits under
+one key. [`History.lean`](../../proofs/aeneas/v3/V3Wire/Verification/History.lean)
+extends it to a commit graph and to successive configurations (rekeys),
+each with its own key or none. The top-level statement is
+`transcrypt_product_assurance_dag`. It concludes, for one audit run and one
+history of keyed commits:
+
+- every epoch's stored key is validated and gives authenticated recovery
+  and repair without laundering (`EpochKeyGuarantees`);
+- every audited commit whose configuration has a key keeps both
+  invariants under that key (`AuditedCommitAuthentic`,
+  `keyed_dag_audit_authenticated`);
+- every audited commit whose configuration has no key in this checkout
+  has that configuration's envelope at every selected path
+  (`SelectionEnveloped`, `keyless_dag_audit_enveloped`). It authenticates
+  nothing (A14);
+- every checked state of the history authenticates under its own
+  configuration's key, across rekeys (`epoch_history_authenticated`).
+
+What the graph theorem covers, and what it leaves out:
+
+- **First parent only.** The audit compares each commit with its first
+  parent, so the invariant flows only along first-parent edges. The theorem
+  uses nothing about a merge's other parents. A merge's entries are
+  examined as its changes relative to its first parent, so a file a
+  second parent brings in is checked like any other change. A second
+  parent inside the range is audited as its own commit. A second parent
+  outside the range is audited by nothing, and nothing is claimed about
+  its tree.
+- **Any walk order.** The induction is over the first-parent relation,
+  which is acyclic (`FirstParentAcyclic`: a commit names its parents by
+  object id, A11). The order in which `rev-list` prints commits does not
+  matter. With skewed commit dates, a commit can be printed before its
+  parent: `the_audit_does_not_depend_on_the_walk_order` tests this.
+- **Trusted boundary (A13).** A first parent outside the range is trusted
+  (`KeyedBoundaryTrusted`, `KeylessBoundaryTrusted`). A root commit is
+  compared with the empty tree and trusts nothing.
+- **Rekeys.** The audit trusts a parent only while the configuration is
+  unchanged (`AuditStep.config`). A configuration change examines the whole
+  tree (`AuditBase.Tree`), so no epoch's key vouches for another epoch's
+  records. In the hook, a commit whose configuration differs from the
+  previous one has its guard false (`rekey_guard_false`). Its keyed check
+  then establishes the new epoch's invariant with nothing assumed about the
+  old epoch (`rekey_commit_starts_epoch`).
+- **Keyless epochs.** `Key::load` finds a key only for the configuration
+  that the checkout's key file (or agent) holds. One audit run after a
+  rekey therefore checks the earlier epochs by envelope only, and says so
+  (`pushes_checked_by_envelope_only_warn_or_refuse_when_required`). The
+  authenticated conclusion is restricted to commits whose configuration has
+  a validated key. The theorem's keys are stored keys (`StoredKeysUnlocked`).
+  The private agent's key is not part of the statement (A6).
+
 ## What remains trusted
 
 These are the hypotheses of `transcrypt_product_assurance` and the

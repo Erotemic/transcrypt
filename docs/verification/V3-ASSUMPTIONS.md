@@ -52,7 +52,7 @@ one.
 | A10 | AES-SIV, Argon2id, SHA-256 security | ASSUMED (standard) |
 | A11 | A Git object id names exactly one content | ASSUMED (Git's hash) |
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
-| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`) |
+| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`): only the boundary remains |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
@@ -63,7 +63,7 @@ one.
 | A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
-| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s records authenticate at their paths (`RecordsAuthentic`, selection-independent) | Narrowed: use PROVED (model) (`hook_records_authentic`, `keyed_check_records_authentic`); the induction over keyed commits PROVED (model) with no policy or selection hypothesis (`keyed_history_authenticated_by_guard`, `config_unchanged_of_guard`, `records_authentic_of_checked_commit`); remaining: the commit step (A22, A11) and the start of history, now discharged by a keyed audit of the commit `HEAD` names (`audited_head_starts_keyed_history`, PROVED (model)) or a full keyed check; what remains of the start is the audit's own: its first commit's parent records when that parent lies outside the audited range (A13) |
+| A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s records authenticate at their paths (`RecordsAuthentic`, selection-independent) | Narrowed: use PROVED (model) (`hook_records_authentic`, `keyed_check_records_authentic`); the induction over keyed commits PROVED (model) with no policy or selection hypothesis (`keyed_history_authenticated_by_guard`, `config_unchanged_of_guard`, `records_authentic_of_checked_commit`); remaining: the commit step (A22, A11) and the start of history, now discharged by a keyed audit of the commit `HEAD` names (`audited_head_starts_keyed_history`, PROVED (model)) or a full keyed check; what remains of the start is the audit's own: its first commit's parent records when that parent lies outside the audited range (A13); one key per configuration across rekeys PROVED (model) (`epoch_history_authenticated`, `rekey_commit_starts_epoch`) |
 | A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS not yet run (its CI jobs have not been seen passing); REVIEWED |
 
 ## Detailed register
@@ -523,6 +523,22 @@ one.
   config whose key is fixed for the run, and settles only `Authenticate`
   and `Envelope`; reviewed and tested
   (`the_audit_authenticates_a_copied_record_at_its_new_path`), not modelled.
+- **Merges, branches and rekeys (2026-11-02).** `History.lean` composes
+  the one-commit theorem over the audit run's commit graph
+  (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`,
+  PROVED (model)). Each commit is compared with its first parent only, so
+  the invariant flows along first-parent edges, and nothing is used about a
+  merge's other parents: a second parent in the range is audited as its own
+  commit, and one outside it is audited by nothing. The order of the walk
+  does not matter (`first_parent_induction`: only the first-parent relation's
+  acyclicity, A11; TESTED `the_audit_does_not_depend_on_the_walk_order`,
+  where commit-date skew prints a commit before its parent). A
+  configuration change examines the whole tree (`AuditBase.Tree`), so each
+  epoch is checked under its own configuration's key, or keyless when this
+  checkout has none for it; the authenticated conclusion is restricted to
+  commits whose configuration has a validated key. What remains of A13 is
+  exactly the boundary: a first parent outside the range, keyed
+  (`KeyedBoundaryTrusted`) or keyless (`KeylessBoundaryTrusted`).
 - **Cost:** prefix reads only for changed unprotected files (whole tree only
   for a root commit or a config change); an unprotected file the parent
   holds is never read, even across an attribute change
@@ -1000,7 +1016,12 @@ one.
      range, is trusted (A13); an audit from the root trusts nothing.
   3. One key across the history (`Realizes inst prims σ` fixed); a rekey
      changes the committed configuration, so the next guard is `false` and
-     the check trusts nothing.
+     the check trusts nothing. Since 2026-11-02 this is no longer a
+     restriction: `epoch_history_authenticated` (PROVED (model),
+     `History.lean`) takes one key per configuration, `rekey_guard_false`
+     proves the guard `false` at a configuration change, and
+     `rekey_commit_starts_epoch` the new epoch's invariant with nothing
+     assumed about the old epoch.
   4. The adapter's run is as `HookEvidence`, `HookContracts` and
      `HookAnswers` say (A4): the loop and the three answers.
 - The policy part of the guard is now defence in depth: the configuration

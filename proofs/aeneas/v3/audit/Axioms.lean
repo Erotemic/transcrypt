@@ -194,6 +194,16 @@ open Transcrypt.V3Verification
 #print axioms keyed_audit_chain_authenticated
 -- ProductAssurance
 #print axioms transcrypt_product_assurance
+-- History
+#print axioms keyed_audit_run_authenticated
+#print axioms keyless_audit_run_enveloped
+#print axioms first_parent_induction
+#print axioms keyed_dag_audit_authenticated
+#print axioms keyless_dag_audit_enveloped
+#print axioms rekey_guard_false
+#print axioms rekey_commit_starts_epoch
+#print axioms epoch_history_authenticated
+#print axioms transcrypt_product_assurance_dag
 -- spec (V3Policy)
 #print axioms Transcrypt.V3Policy.opensTo_unique
 #print axioms Transcrypt.V3Policy.seal_opens
