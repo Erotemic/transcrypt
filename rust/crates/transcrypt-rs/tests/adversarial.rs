@@ -1943,3 +1943,50 @@ fn audits_read_no_unchanged_unprotected_file() {
     let err = run_fails(&repo, bin(), &["audit", "HEAD"], None);
     assert!(err.contains("public.txt") && err.contains("missing or not a blob"), "{err}");
 }
+
+/// The audit does not depend on the order `rev-list` prints commits in (the
+/// DAG theorem `keyed_dag_audit_authenticated` assumes only that the
+/// first-parent relation is acyclic). With skewed commit dates, `Y` is
+/// printed before its first parent `X`, which introduces the attribute rule
+/// that protects `y.txt`; the merge on top drops `y.txt`, so only `Y`'s own
+/// audit, against the not-yet-audited `X`'s attributes, can refuse its
+/// plaintext.
+#[test]
+fn the_audit_does_not_depend_on_the_walk_order() {
+    let mut scratch = Scratch::new("auditorder");
+    let repo = scratch.repo("repo");
+    let base = rev(&repo, "HEAD");
+    let tree_with = |extra: &[(&str, &[u8])]| {
+        let mut listing = String::from_utf8(run(&repo, "git", &["ls-tree", "HEAD"], None)).unwrap();
+        for (path, content) in extra {
+            let oid = String::from_utf8(run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(content))).unwrap();
+            listing = listing.lines().filter(|l| !l.ends_with(&format!("\t{path}")))
+                .map(|l| format!("{l}\n")).collect();
+            listing.push_str(&format!("{REGULAR_FILE_MODE} blob {}\t{path}\n", oid.trim()));
+        }
+        String::from_utf8(run(&repo, "git", &["mktree"], Some(listing.as_bytes()))).unwrap().trim().to_owned()
+    };
+    let at = |date: &str, tree: &str, parents: &[&str]| {
+        let mut args = vec!["commit-tree", tree, "-m", date];
+        for p in parents { args.extend(["-p", *p]); }
+        let out = Command::new("git").current_dir(&repo).args(&args)
+            .env("GIT_COMMITTER_DATE", format!("{date} +0000")).env("GIT_AUTHOR_DATE", format!("{date} +0000"))
+            .output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let mut attributes = fs::read(repo.join(".gitattributes")).unwrap();
+    attributes.extend_from_slice(b"*.txt transcrypt\n");
+    let tree_x = tree_with(&[(".gitattributes", &attributes)]);
+    let tree_y = tree_with(&[(".gitattributes", &attributes), ("y.txt", b"PLAINTEXT\n")]);
+    let x = at("1700000050", &tree_x, &[&base]);
+    let p1 = at("1700000100", &tree_x, &[&x]);
+    let y = at("1700000001", &tree_y, &[&x]);
+    let merge = at("1700000200", &tree_x, &[&p1, &y]);
+    let order = String::from_utf8(run(&repo, "git", &["rev-list", "--reverse", &merge, "--not", &base], None)).unwrap();
+    let order: Vec<&str> = order.lines().collect();
+    let position = |c: &str| order.iter().position(|o| *o == c).unwrap();
+    assert!(position(&y) < position(&x), "the walk must print Y before its parent X: {order:?}");
+    let err = run_fails(&repo, bin(), &["audit", &merge, "--not", &base], None);
+    assert!(err.contains("y.txt") && err.contains("not v3 ciphertext"), "{err}");
+}
