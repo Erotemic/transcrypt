@@ -471,6 +471,14 @@ one.
 - **Consequence:** plaintext published.
 - **Evidence:** TESTED (pre-push refuses a `--no-verify` plaintext commit; a
   keyless `audit` in a never-unlocked clone refuses its plaintext commit).
+- **Keyless pre-push is visible (2026-11-02).** A pre-push audit that could
+  not authenticate every record (locked, or history under a configuration
+  whose key is gone after a `rekey`) checked envelopes only; it says so on
+  stderr, and refuses the push when `transcrypt.requireAuthenticatedPush` is
+  set (a value Git cannot read as a boolean counts as set). TESTED:
+  `pushes_checked_by_envelope_only_warn_or_refuse_when_required`. The
+  setting is local configuration: like the hook itself it binds this
+  checkout, not someone who controls it.
 - **What a keyed audit establishes (2026-11-02).** The audit checks each
   commit against its first parent: the entries `diff-tree` lists, or the
   whole tree for a root commit, a config change or an attribute change.

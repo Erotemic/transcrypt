@@ -1310,3 +1310,49 @@ fn octopus_merges_check_every_incoming_commit() {
     assert!(is_record(&committed(&repo, "three.secret")));
     run(&repo, bin(), &["verify-index"], None);
 }
+
+/// A push whose records the pre-push hook cannot all authenticate (history
+/// from before a rekey, whose key this checkout no longer has; or a locked
+/// checkout) passes with a warning that says only envelopes were checked,
+/// and is refused once `transcrypt.requireAuthenticatedPush` is set. A
+/// fully authenticated push says nothing; a setting Git cannot read as a
+/// boolean counts as set.
+#[test]
+fn pushes_checked_by_envelope_only_warn_or_refuse_when_required() {
+    let mut scratch = Scratch::new("strictpush");
+    let repo = scratch.repo("repo");
+    for remote in ["origin", "fresh", "strict", "misspelt"] {
+        run(&scratch.root, "git", &["init", "-q", "--bare", &format!("{remote}.git")], None);
+        run(&repo, "git", &["remote", "add", remote, &format!("../{remote}.git")], None);
+    }
+    let push = |remote: &str, branch: &str|
+        exec(&repo, "git", &["push", "-q", remote, &format!("HEAD:refs/heads/{branch}")], None);
+    let stderr = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).into_owned();
+    let out = push("origin", "main");
+    assert!(out.status.success() && !stderr(&out).contains("envelope only"), "{}", stderr(&out));
+    // After a rekey, history new to `fresh` holds the old configuration,
+    // whose key this checkout no longer has.
+    run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    let out = push("fresh", "main");
+    assert!(out.status.success() && stderr(&out).contains("envelope only")
+        && stderr(&out).contains("transcrypt.requireAuthenticatedPush"), "{}", stderr(&out));
+    for (remote, value) in [("strict", "true"), ("misspelt", "yes-please")] {
+        run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", value], None);
+        let out = push(remote, "main");
+        assert!(!out.status.success() && stderr(&out).contains("refusing to push"), "{value}: {}", stderr(&out));
+    }
+    // `origin` has the old history: only commits under the new key are new.
+    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "true"], None);
+    let out = push("origin", "main");
+    assert!(out.status.success() && !stderr(&out).contains("envelope only"), "{}", stderr(&out));
+    // Locked, nothing can be authenticated.
+    fs::write(repo.join("a.secret"), b"after the rekey\n").unwrap();
+    commit(&repo, &["a.secret"], "keyed");
+    run(&repo, bin(), &["lock"], None);
+    let out = push("origin", "main");
+    assert!(!out.status.success() && stderr(&out).contains("refusing to push"), "{}", stderr(&out));
+    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "false"], None);
+    let out = push("origin", "main");
+    assert!(out.status.success() && stderr(&out).contains("envelope only"), "{}", stderr(&out));
+}

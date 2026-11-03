@@ -504,6 +504,35 @@ pub(crate) fn pre_push(repo: &Repository, remote: Option<&OsStr>) -> Result<(), 
             revs.push(format!("--remotes={name}").into());
         }
     }
-    audit(repo, &revs, true, None).map(|_| ())
-        .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-rs audit`"))
+    let audited = audit(repo, &revs, true, None)
+        .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-rs audit`"))?;
+    if audited.authenticated { return Ok(()); }
+    // Some records were checked for their envelope only: this checkout is
+    // locked, or the pushed history holds a configuration it has no key
+    // for (before a rekey). Say so, and refuse when the repository asks for
+    // authenticated pushes.
+    let unchecked = "the pushed history's records were checked for their v3 envelope only, not \
+        authenticated: this checkout is locked or has no key for an older configuration";
+    if require_authenticated_push(repo) {
+        return Err(format!("{unchecked}, and {REQUIRE_AUTHENTICATED_PUSH} is set\nrefusing to push; \
+            unlock, or run `transcrypt-rs audit` with the key of every configuration pushed"));
+    }
+    eprintln!("transcrypt-rs: warning: {unchecked}; set `git config {REQUIRE_AUTHENTICATED_PUSH} true` \
+        to refuse such pushes");
+    Ok(())
+}
+
+/// The Git setting that makes the pre-push hook refuse a push whose
+/// records it could not all authenticate with the key.
+pub(crate) const REQUIRE_AUTHENTICATED_PUSH: &str = "transcrypt.requireAuthenticatedPush";
+
+/// Whether `REQUIRE_AUTHENTICATED_PUSH` is true in any config scope. A
+/// value Git cannot read as a boolean counts as true: a misspelt setting
+/// must not silently weaken the check.
+fn require_authenticated_push(repo: &Repository) -> bool {
+    match git(repo, &["config", "--get", REQUIRE_AUTHENTICATED_PUSH]) {
+        Err(_) => false,
+        Ok(_) => git(repo, &["config", "--bool", "--get", REQUIRE_AUTHENTICATED_PUSH])
+            .map_or(true, |value| value.trim_ascii_end() != b"false"),
+    }
 }

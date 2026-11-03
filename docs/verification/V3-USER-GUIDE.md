@@ -227,7 +227,11 @@ catch this:
 
 - The `pre-push` hook installed by `init`/`unlock` audits every commit you
   push, including merges, rebases and `--no-verify` commits. A merge commit
-  is also verified before it is made (`pre-merge-commit`).
+  is also verified before it is made (`pre-merge-commit`). When it cannot
+  authenticate every pushed record (the checkout is locked, or the push
+  carries history from before a `rekey`, whose key you no longer have), it
+  still checks every envelope, and warns that it did no more. To refuse such
+  pushes instead, set `git config transcrypt.requireAuthenticatedPush true`.
 - `transcrypt-rs audit <rev-list arguments>` needs no key. Run it in CI or a
   server hook to refuse plaintext from any checkout. Each commit is judged
   by its own `.gitattributes`. Without the key, the audit checks that every
