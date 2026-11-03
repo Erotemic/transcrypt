@@ -343,7 +343,7 @@ anything about commits outside a keyed history (A13).
 
 * **PROVED (source-derived):** every decision listed in the tables above;
   all are theorems about the generated translation of the production core
-  (the 182 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
+  (the 184 theorems of the ledger `proofs/aeneas/v3/PROOF-STATUS.md`,
   standard axioms only:
   `bash proofs/aeneas/check-v3-axioms.sh`).
 * **PROVED (model):** the per-entry composition `hook_entry_checked` and

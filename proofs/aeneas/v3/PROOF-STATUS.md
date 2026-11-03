@@ -7,7 +7,7 @@ translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 program equality `record_envelope_prefix_ok_record` are `WP.spec` triples,
 so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;
-`bash proofs/aeneas/check-v3-axioms.sh` confirms that all 182 theorems listed in
+`bash proofs/aeneas/check-v3-axioms.sh` confirms that all 184 theorems listed in
 `audit/Axioms.lean` (those named in the table below) use only `propext`,
 `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
 `axiom`, `native_decide` or `bv_decide` occurs in any verification module

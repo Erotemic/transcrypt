@@ -209,6 +209,8 @@ open Transcrypt.V3Verification
 #print axioms rekey_guard_false
 #print axioms rekey_commit_starts_epoch
 #print axioms epoch_history_authenticated
+#print axioms storedEpochKeys_some
+#print axioms storedEpochKeys_none
 #print axioms transcrypt_product_assurance_dag
 -- spec (V3Policy)
 #print axioms Transcrypt.V3Policy.opensTo_unique
