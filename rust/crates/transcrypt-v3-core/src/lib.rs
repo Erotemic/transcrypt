@@ -1167,6 +1167,22 @@ pub fn staged_verdict<E: StagedEvidence>(
     }
 }
 
+/// The verdict on entry `i` under its check, for the configuration `id`:
+/// its blob is read first when the check reads it (`reads_blob`), and a
+/// failed read refuses; then `staged_verdict` on the blob read.
+pub fn read_verdict<E: StagedEvidence>(
+    evidence: &mut E,
+    i: usize,
+    check: StagedCheck,
+    id: &[u8; ID_LEN],
+) -> Result<(), StagedRefusal> {
+    if reads_blob(check) && !evidence.read(i) {
+        Err(StagedRefusal::Unanswered)
+    } else {
+        staged_verdict(&*evidence, i, check, evidence.blob(), id)
+    }
+}
+
 /// The pre-commit hook's final check of the whole index listing (`index`,
 /// `index_ends`), for the configuration `id`: every entry, in order, gets
 /// its check (`staged_check`, with the run's `flags`, `in_head`,
@@ -1190,10 +1206,7 @@ pub fn index_verdict<E: StagedEvidence>(
     let mut i = 0;
     while i < index_ends.len() {
         let check = staged_check(index, index_ends, i, flags, in_head, in_parent, keyed, incremental, guard);
-        if reads_blob(check) && !evidence.read(i) {
-            return Err((i, StagedRefusal::Unanswered));
-        }
-        match staged_verdict(&*evidence, i, check, evidence.blob(), id) {
+        match read_verdict(evidence, i, check, id) {
             Ok(()) => i += 1,
             Err(refusal) => return Err((i, refusal)),
         }
@@ -2133,6 +2146,88 @@ pub fn audit_check(entry: AuditedEntry, path: &[u8], keyed: bool, base: AuditBas
     } else {
         Some(StagedCheck::Skip)
     }
+}
+
+/// What the audit knows about the examined entries of one commit besides
+/// their facts (`AuditedEntry`), and which records it checked earlier in the
+/// run.
+pub trait AuditedEntries {
+    /// The path of examined entry `i`.
+    fn path(&self, i: usize) -> &[u8];
+    /// Whether entry `i`'s blob, at its path and under this commit's
+    /// configuration, passed a selected entry's check earlier in the run
+    /// (`passed`).
+    fn checked(&self, i: usize) -> bool;
+    /// Record that entry `i` passed a selected entry's check.
+    fn passed(&mut self, i: usize);
+}
+
+/// Why the audit refuses an examined entry of a commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditRefusal {
+    /// A selected path that is not a regular file (`audit_check` is `None`).
+    NotRegular,
+    /// The entry's check refused it (`staged_verdict`), or its blob could
+    /// not be read.
+    Verdict(StagedRefusal),
+}
+
+/// Whether an earlier pass of the same record settles `check`: a record
+/// enters the audit's cache (`AuditedEntries::passed`) only once a selected
+/// entry's check accepted it, under a configuration whose key is fixed for
+/// the run, so the blob has that configuration's envelope and, when the
+/// configuration is keyed, opened at that path. That settles `Authenticate`
+/// (asked only when keyed) and `Envelope`, which ask nothing else;
+/// `EnvelopeNotMoved` also asks about this commit's deletions, and the
+/// checks of unprotected files are never cached.
+pub fn settled_by_cache(check: StagedCheck) -> bool {
+    match check {
+        StagedCheck::Protected(EntryCheck::Authenticate) => true,
+        StagedCheck::Protected(EntryCheck::Envelope) => true,
+        StagedCheck::Protected(EntryCheck::EnvelopeNotMoved) => false,
+        StagedCheck::Skip => false,
+        StagedCheck::NotRecord => false,
+        StagedCheck::AuthenticateIfRecord => false,
+    }
+}
+
+/// The audit's check of the examined entries of one commit (`entries`, with
+/// their paths from `evidence`), from `base`, for the configuration `id`:
+/// every entry, in order, gets its check (`audit_check`; a selected path
+/// that is not a regular file refuses), is passed unread when an earlier
+/// pass of the same record settles that check (`settled_by_cache` and
+/// `checked`), and otherwise has its blob read when the check reads it
+/// (`reads_blob`; a failed read refuses) and must pass (`staged_verdict`);
+/// a selected entry that passed is recorded (`passed`). The first refusal
+/// stops the check and names the entry's position.
+pub fn commit_verdict<E: StagedEvidence + AuditedEntries>(
+    evidence: &mut E,
+    entries: &[AuditedEntry],
+    keyed: bool,
+    base: AuditBase,
+    id: &[u8; ID_LEN],
+) -> Result<(), (usize, AuditRefusal)> {
+    let mut i = 0;
+    while i < entries.len() {
+        match audit_check(entries[i], evidence.path(i), keyed, base) {
+            None => return Err((i, AuditRefusal::NotRegular)),
+            Some(check) => {
+                let settled = settled_by_cache(check) && evidence.checked(i);
+                if !settled {
+                    match read_verdict(evidence, i, check, id) {
+                        Ok(()) => {
+                            if reads_blob(check) {
+                                evidence.passed(i);
+                            }
+                        }
+                        Err(refusal) => return Err((i, AuditRefusal::Verdict(refusal))),
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

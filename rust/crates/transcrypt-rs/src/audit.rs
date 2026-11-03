@@ -17,8 +17,8 @@ use crate::{
         push_index_record, read_record, tree_files, Attributes, Mode, ObjectId, Repository, Staged, SHORT_OUTPUT_LIMIT},
 };
 use transcrypt_v3_core::{
-    audit_check, is_object_id, is_reserved_path, reads_blob, staged_verdict, AuditBase, AuditedEntry, EntryCheck,
-    StagedCheck, StagedEvidence, StagedRefusal, ATTRIBUTES_NAME, ID_LEN,
+    commit_verdict, is_object_id, is_reserved_path, AuditBase, AuditRefusal, AuditedEntries, AuditedEntry,
+    StagedEvidence, StagedRefusal, ATTRIBUTES_NAME, ID_LEN,
 };
 
 /// The longest `git rev-list --parents` line read: a commit id and its
@@ -323,94 +323,76 @@ fn check_drift(repo: &Repository, policy: &AttributeIndex, commit: &str, id: &[u
     Ok(())
 }
 
-/// Whether the cache settles `check` for an entry whose blob, config and
-/// path it holds. The cache (`AuditState::checked`) gains an entry only after
-/// a selected entry's check passed (`StagedCheck::Protected`), under a config
-/// whose key is fixed for the run: so the blob has that config's envelope
-/// and, when the config is keyed, opened at that path. That settles
-/// `Authenticate` (asked only when keyed) and `Envelope`, which ask nothing
-/// else; `EnvelopeNotMoved` also asks about this commit's deletions, and the
-/// checks of unprotected files are never cached.
-fn settled_by_cache(check: StagedCheck) -> bool {
-    match check {
-        StagedCheck::Protected(EntryCheck::Authenticate) => true,
-        StagedCheck::Protected(EntryCheck::Envelope) => true,
-        StagedCheck::Protected(EntryCheck::EnvelopeNotMoved) => false,
-        StagedCheck::Skip => false,
-        StagedCheck::NotRecord => false,
-        StagedCheck::AuthenticateIfRecord => false,
-    }
-}
-
 /// Check every examined entry of the commit under its config `config_oid`
-/// (`audit_check`, then `staged_verdict`), each fact about the entry itself;
-/// `moved` names, for messages, the deleted path a moved blob came from.
+/// with one call of the verified `commit_verdict` (for each entry, in order,
+/// `audit_check`, then, unless an earlier pass of the same record settles
+/// it, `staged_verdict`), each fact about the entry itself; `moved` names,
+/// for messages, the deleted path a moved blob came from.
 fn check_entries<'e>(repo: &Repository, state: &mut AuditState, commit: &str, config_oid: &ObjectId, base: AuditBase,
     examined: impl Iterator<Item = (&'e Staged, AuditedEntry)>, moved: &HashMap<&ObjectId, &[u8]>) -> Result<(), String>
 {
-    let CommittedConfig { id, key } = &state.configs[config_oid];
-    for (entry, facts) in examined {
-        let Some(check) = audit_check(facts, &entry.path, key.is_some(), base) else {
-            return Err(format!("{}: protected path is not a regular file", at(commit, &entry.path)));
-        };
-        let checked = CheckedRecord { oid: entry.oid.clone(), config_oid: config_oid.clone(), path: entry.path.clone() };
-        if settled_by_cache(check) && state.checked.contains(&checked) { continue; }
-        let mut evidence = AuditEvidence {
-            repo, key: key.as_ref(), id, entry, moved: facts.moved, blob: Vec::new(), read: false,
-            unopened: RefCell::new(None), failure: RefCell::new(None),
-        };
-        // The audit's evidence is about this one entry (position 0).
-        let verdict = if reads_blob(check) && !evidence.read(0) {
-            Err(StagedRefusal::Unanswered)
-        } else {
-            staged_verdict(&evidence, 0, check, evidence.blob(), id)
-        };
-        if let Err(refusal) = verdict {
-            return Err(audit_refusal(refusal, commit, &evidence, moved.get(&entry.oid).copied()));
-        }
-        // Recorded only now that the check passed (see `settled_by_cache`).
-        if let StagedCheck::Protected(_) = check {
-            state.checked.insert(checked);
-            state.records += 1;
-        }
+    let AuditState { configs, checked, records, authenticated, .. } = state;
+    let CommittedConfig { id, key } = &configs[config_oid];
+    let (entries, facts): (Vec<&Staged>, Vec<AuditedEntry>) = examined.unzip();
+    let mut evidence = CommitEvidence {
+        repo, key: key.as_ref(), id, entries: &entries, facts: &facts, config_oid, checked, records,
+        blob: Vec::new(), read: None, unopened: RefCell::new(None), failure: RefCell::new(None),
+    };
+    match commit_verdict(&mut evidence, &facts, key.is_some(), base, id) {
+        Ok(()) => {},
+        Err((i, AuditRefusal::NotRegular)) =>
+            return Err(format!("{}: protected path is not a regular file", at(commit, &entries[i].path))),
+        Err((i, AuditRefusal::Verdict(refusal))) =>
+            return Err(audit_refusal(refusal, commit, &evidence, i, moved.get(&entries[i].oid).copied())),
     }
-    state.authenticated &= key.is_some();
+    *authenticated &= key.is_some();
     Ok(())
 }
 
-/// The audit's answers about one examined entry for the verified
-/// `staged_verdict`, each about the entry's own blob (by object id) and path,
-/// computed only when asked.
-struct AuditEvidence<'a> {
+/// The audit's evidence about the examined entries of one commit for the
+/// verified `commit_verdict` and `staged_verdict`, each answer about entry
+/// `i`'s own blob (by object id) and path, computed only when asked; and the
+/// run's cache of checked records.
+struct CommitEvidence<'a> {
     repo: &'a Repository,
     key: Option<&'a Key>,
     id: &'a [u8; ID_LEN],
-    entry: &'a Staged,
-    /// Whether the blob is that of a path the commit deletes.
-    moved: bool,
-    /// The blob, once `read` read it.
+    entries: &'a [&'a Staged],
+    facts: &'a [AuditedEntry],
+    config_oid: &'a ObjectId,
+    /// The records whose selected entry's check passed in this run (each
+    /// blob once per config and path), and how many.
+    checked: &'a mut HashSet<CheckedRecord>,
+    records: &'a mut usize,
+    /// The blob `read` read last, and the entry it is the blob of.
     blob: Vec<u8>,
-    read: bool,
+    read: Option<usize>,
     /// Why the blob did not open, for the message.
     unopened: RefCell<Option<String>>,
     /// Why an answer could not be found (a failed read), for the message.
     failure: RefCell<Option<String>>,
 }
 
-impl AuditEvidence<'_> {
+impl CommitEvidence<'_> {
     /// The answer `find` gives; if it fails, `None`, with the failure kept.
     fn answer(&self, find: impl FnOnce() -> Result<bool, String>) -> Option<bool> {
         find().map_err(|e| self.failure.replace(Some(e))).ok()
     }
+
+    /// The cache's key for entry `i`: its blob, the config and its path.
+    fn record(&self, i: usize) -> CheckedRecord {
+        let entry = self.entries[i];
+        CheckedRecord { oid: entry.oid.clone(), config_oid: self.config_oid.clone(), path: entry.path.clone() }
+    }
 }
 
-impl StagedEvidence for AuditEvidence<'_> {
+impl StagedEvidence for CommitEvidence<'_> {
     /// The blob by its object id.
-    fn read(&mut self, _: usize) -> bool {
-        match git_blob(self.repo, &self.entry.oid) {
+    fn read(&mut self, i: usize) -> bool {
+        match git_blob(self.repo, &self.entries[i].oid) {
             Ok(blob) => {
                 self.blob = blob;
-                self.read = true;
+                self.read = Some(i);
                 true
             },
             Err(e) => {
@@ -425,23 +407,24 @@ impl StagedEvidence for AuditEvidence<'_> {
     }
 
     /// Its size and first bytes, decided by `record_envelope_prefix_ok`.
-    fn is_record(&self, _: usize) -> Option<bool> {
-        self.answer(|| crate::git::is_record(self.repo, &self.entry.oid, self.id))
+    fn is_record(&self, i: usize) -> Option<bool> {
+        self.answer(|| crate::git::is_record(self.repo, &self.entries[i].oid, self.id))
     }
 
     /// `Key::open` at the entry's path.
-    fn opens(&self, _: usize) -> Option<bool> {
+    fn opens(&self, i: usize) -> Option<bool> {
         let Some(key) = self.key else { return Some(false) };
+        let entry = self.entries[i];
         let read;
-        let record = if self.read {
+        let record = if self.read == Some(i) {
             &self.blob
         } else {
-            match git_blob(self.repo, &self.entry.oid) {
+            match git_blob(self.repo, &entry.oid) {
                 Ok(blob) => { read = blob; &read },
                 Err(e) => return self.answer(|| Err(e)),
             }
         };
-        match key.open(&self.entry.path, record) {
+        match key.open(&entry.path, record) {
             Ok(_) => Some(true),
             Err(e) => {
                 self.unopened.replace(Some(e));
@@ -451,25 +434,48 @@ impl StagedEvidence for AuditEvidence<'_> {
     }
 
     /// Moved: the blob of a path this commit deletes.
-    fn elsewhere(&self, _: usize) -> Option<bool> {
-        Some(self.moved)
+    fn elsewhere(&self, i: usize) -> Option<bool> {
+        Some(self.facts[i].moved)
     }
 }
 
-/// The message for the verified refusal of `evidence`'s entry in `commit`;
-/// `from`: the deleted path its blob came from, if any.
-fn audit_refusal(refusal: StagedRefusal, commit: &str, evidence: &AuditEvidence, from: Option<&[u8]>) -> String {
-    let here = at(commit, &evidence.entry.path);
+impl AuditedEntries for CommitEvidence<'_> {
+    fn path(&self, i: usize) -> &[u8] {
+        &self.entries[i].path
+    }
+
+    /// The cache gains a record only through `passed`, which the verified
+    /// `commit_verdict` calls once a selected entry's check accepted it,
+    /// under a config whose key is fixed for the run (see the core's
+    /// `settled_by_cache`).
+    fn checked(&self, i: usize) -> bool {
+        self.checked.contains(&self.record(i))
+    }
+
+    fn passed(&mut self, i: usize) {
+        let record = self.record(i);
+        self.checked.insert(record);
+        *self.records += 1;
+    }
+}
+
+/// The message for the verified refusal of `evidence`'s entry `i` in
+/// `commit`; `from`: the deleted path its blob came from, if any.
+fn audit_refusal(refusal: StagedRefusal, commit: &str, evidence: &CommitEvidence, i: usize, from: Option<&[u8]>)
+    -> String
+{
+    let here = at(commit, &evidence.entries[i].path);
+    let moved = evidence.facts[i].moved;
     let from = from.map(String::from_utf8_lossy).unwrap_or_default();
     let unopened = || evidence.unopened.take().unwrap_or_default();
     match refusal {
         StagedRefusal::Plaintext | StagedRefusal::OtherConfig | StagedRefusal::Envelope =>
             format!("{here}: not v3 ciphertext for its configuration (plaintext?)"),
         StagedRefusal::Moved => moved_here(&here, &from),
-        StagedRefusal::Authentication if evidence.moved => moved_here(&here, &from),
+        StagedRefusal::Authentication if moved => moved_here(&here, &from),
         StagedRefusal::Authentication => format!("{here}: {}", unopened()),
         StagedRefusal::UnprotectedRecord => moved_away(&here, &from),
-        StagedRefusal::UnprotectedForgery if evidence.moved => moved_away(&here, &from),
+        StagedRefusal::UnprotectedForgery if moved => moved_away(&here, &from),
         StagedRefusal::UnprotectedForgery => format!("{here}: not protected, but holds a record of its \
             configuration that does not open there ({}): a forgery, or a record copied from another path, \
             which an attribute change would protect unauthenticated", unopened()),

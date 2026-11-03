@@ -179,8 +179,10 @@ What remains assumed:
 `diff-tree` lists, or the whole tree for a root commit, a config change or
 an attribute change. Each examined entry is checked by the extracted
 `audit_check` (`audit_check_spec`), which chooses a check in the hook's
-vocabulary, and the extracted `staged_verdict`; the model `auditPlan` only
-sequences the two. With the key a selected entry is authenticated; an
+vocabulary, and the extracted `staged_verdict`, inside the extracted loop
+`commit_verdict` that the adapter calls once per commit
+(`commit_verdict_accepts`: an accepted call checked every examined
+position). With the key a selected entry is authenticated; an
 unprotected file the parent holds exactly is trusted from the parent only
 while the config is unchanged (`AuditBase.Parent`); any other unprotected
 file is authenticated if it is a record of the commit's config.
@@ -203,11 +205,14 @@ file is authenticated if it is a record of the commit's config.
 
 Its contracts: `AuditContracts` (every non-reserved entry not examined is
 the parent's exactly, and only while the config is unchanged; the facts
-`audit_check` receives and the blobs read are Git's: A20, A19, A11, A21),
-`AuditAnswers` (A4), `AuditSelectionAgrees` (A19: the adapter examines the
-whole tree when an attribute file changes) and `Realizes` (A5). The
-adapter's per-run cache of checked records (`settled_by_cache`) is
-reviewed and tested, not modelled.
+`audit_check` receives are Git's: A20, A19), `AuditAnswers` (A4, A11, A21:
+the blobs read, the paths, the three answers, and the per-run cache of
+checked records: a record it reports as checked has this configuration's
+envelope and, with the key, opens at its path), `AuditSelectionAgrees`
+(A19: the adapter examines the whole tree when an attribute file changes)
+and `Realizes` (A5). Which checks the cache may settle (`settled_by_cache`)
+and that a record is recorded only after its selected entry's check
+passed are the core's.
 
 ### How the proof goes
 

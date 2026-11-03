@@ -43,7 +43,7 @@ one.
 | A1 | Protocol decision core is correct | PROVED |
 | A2 | Wire codec matches the spec | PROVED |
 | A3 | Charon/Aeneas/hax translation and Lean are sound | ASSUMED (pinned, reproduced) |
-| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs, each entry's check (`staged_check`), its acceptance (`staged_verdict`) and the loop over every index entry (`index_verdict`, `index_verdict_accepts`) are verified functions; what remains on the hook's check is one call (`HookAccepted`: the run's inputs, refuse unless `Ok`) and the evidence's answers about each entry's own blob and path (`HookAnswers`) |
+| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs, each entry's check (`staged_check`), its acceptance (`staged_verdict`) and the loop over every index entry (`index_verdict`, `index_verdict_accepts`), as the audit's over every examined entry of a commit (`commit_verdict`, `commit_verdict_accepts`), are verified functions; what remains on these checks is one call each (`HookAccepted`, `AuditAccepted`: the run's inputs, refuse unless `Ok`) and the evidence's answers about each entry's own blob and path (`HookAnswers`, `AuditAnswers`) |
 | A5 | `Keyed` realizes the primitive contract | TESTED (differential vs OpenSSL, exhaustive tampering) |
 | A6 | Private-mode credential agent relays core results faithfully | TESTED + REVIEWED; same-UID ACCEPTED RISK (optional mode) |
 | A7 | Git semantics | TESTED on Git 2.43; ASSUMED otherwise |
@@ -223,8 +223,12 @@ one.
   - **PROVED (audit per-entry check, 2026-11-02).** The audit's check of
     each examined entry of a commit is the core's `audit_check`
     (`audit_check_spec` = `AuditCheckOf`), in the hook's vocabulary, decided
-    by the same `staged_verdict`; the Lean model `auditPlan` only sequences
-    the two (`Audit.lean`). The adapter's earlier separate checks (the
+    by the same `staged_verdict`, over every examined entry by the core's
+    loop `commit_verdict` (`commit_verdict_accepts`, 2026-11-02; the
+    handwritten Lean model `auditPlan` is gone), which also decides which
+    checks the run's cache of checked records may settle
+    (`settled_by_cache`, now core code) and records an entry only after its
+    selected entry's check passed. The adapter's earlier separate checks (the
     protected-record loop, the move-away refusal) are gone; what remains
     adapter code there is the drift check (`check_drift`, refuse-only) and
     the policy checks.
@@ -248,14 +252,19 @@ one.
     function, A6), on the blob `read` read for `i` or one read for it;
     `elsewhere(i)` is the verified `blob_elsewhere` on the run's ordered
     listings; each is `None` exactly when it could not be found;
-  - on the audit path (`audit_commit`, `check_entries`): the facts passed
-    to `audit_check` (`AuditContracts`: `held` is "not listed by
+  - on the audit path (`audit_commit`, `check_entries`): one call of
+    `commit_verdict` per commit with the examined entries' facts
+    (`AuditAccepted`, `AuditContracts`: `held` is "not listed by
     `diff-tree`", `moved` is "the blob of a path `diff-tree` lists as
     deleted", `selected` is `check-attr` against the commit's attribute
-    files, A19, A20), the choice of `AuditBase` (`Parent` only when
-    `diff-tree` does not list the config), the three answers
-    (`AuditAnswers`: `elsewhere` is `moved`), and the checked-record cache
-    (`settled_by_cache`);
+    files, A19, A20), refusing unless it returns `Ok`; the choice of
+    `AuditBase` (`Parent` only when `diff-tree` does not list the config);
+    the evidence (`AuditAnswers`, `CommitEvidence`: each position's path,
+    blob read by its object id and three answers, `elsewhere` being
+    `moved`); and the checked-record cache's answer (`checked` true only
+    for a blob, config and path recorded by `passed`, under a config whose
+    key is fixed for the run, so it has the envelope and, keyed, opened at
+    that path);
   - the rewrite of `ls-tree` records to index records (`tree_record`, A20);
   - sorting the object orders (`Listing::object_order`; a wrong order is
     refused by the verified `object_order_ok`, so this only fails closed)
@@ -530,11 +539,14 @@ one.
   trusted: its records are assumed to authenticate (it was audited when it
   was pushed, or is deliberately excluded). An audit from the root
   (`transcrypt-rs audit`, default `HEAD`) trusts nothing. Within a run the
-  adapter checks each (blob, config, path) once (`settled_by_cache`): an
-  entry is recorded only after a selected entry's check passed, under a
-  config whose key is fixed for the run, and settles only `Authenticate`
-  and `Envelope`; reviewed and tested
-  (`the_audit_authenticates_a_copied_record_at_its_new_path`), not modelled.
+  adapter checks each (blob, config, path) once: the core's
+  `commit_verdict` records an entry (`passed`) only after a selected
+  entry's check passed, and lets the cache settle only `Authenticate` and
+  `Envelope` (`settled_by_cache`); that a cache hit means what the record's
+  pass established (same blob, config and path, the config's key fixed for
+  the run) is the evidence contract `AuditAnswers.checked`: reviewed and
+  tested (`the_audit_authenticates_a_copied_record_at_its_new_path`,
+  `commit_verdict_checks_every_examined_entry_in_order`).
 - **Cost:** prefix reads only for changed unprotected files (whole tree only
   for a root commit or a config change); an unprotected file the parent
   holds is never read, even across an attribute change

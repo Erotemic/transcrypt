@@ -488,7 +488,9 @@ theorem hook_entry_checked {E : Type} {inst : StagedEvidence E} {pinst : V3Primi
   rw [hxk] at hmH hmP
   have hfx := hook_flag hgit hk
   rw [hxk] at hfx
-  obtain ⟨s, check, record, hs, hc, hrd, hb, hv⟩ := hacc
+  obtain ⟨s0, check, s, hs0, hc, hrv⟩ := hacc
+  obtain ⟨hs, hacc'⟩ := read_verdict_ok good hans.read_good hs0 hrv
+  obtain ⟨hrd, record, hb, hv⟩ := hacc' rfl
   have hcheck := spec_result (staged_check_spec hL k hk run.flags run.inHead run.inParent
     (by rw [Slice.length, hook_flags hgit, List.length_map]) hHl hPl keyed incremental run.samePolicy) hc
   rw [hxk] at hcheck
@@ -497,8 +499,7 @@ theorem hook_entry_checked {E : Type} {inst : StagedEvidence E} {pinst : V3Primi
   have hblob : run.flags.val[k.val]! = true → g.blob x.oid = some (sliceBytes record) := by
     intro hf
     obtain ⟨e, rfl⟩ := (stagedCheckOf_reads hcheck).mpr hf
-    obtain ⟨s0, hs0, hr0⟩ := hrd rfl
-    exact hans.read s0 k s x record hs0 hx hr0 hb
+    exact hans.read s0 k s x record hs0 hx (hrd rfl) hb
   -- A record `is_record` denied has no envelope.
   have hnot : inst.is_record s k = ok (some false) → RecordAuthentic σ (wireBytes config) g x := by
     intro hr

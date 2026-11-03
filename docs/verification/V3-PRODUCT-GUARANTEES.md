@@ -358,8 +358,10 @@ defence in depth.
   tested boundary: it cannot be pushed through the pre-push hook).
 - **The audit's adapter** reports what Git lists: every entry it does not
   examine is the parent's exactly, and its selection of such an entry is
-  the parent's (`AuditContracts`, `AuditSelectionAgrees`; A19, A20). Its
-  per-run cache of checked records is tested, not modelled.
+  the parent's (`AuditContracts`, `AuditSelectionAgrees`; A19, A20). It
+  calls the extracted loop `commit_verdict` once per commit, and its
+  per-run cache of checked records answers truthfully (`AuditAnswers`);
+  which checks the cache may settle is the core's.
 - **The adapter** answers the verdict's three questions truthfully (A4).
 
 ## What remains trusted
@@ -374,11 +376,13 @@ boundaries it does not cross. Each is defined in
 - **The primitives and their security** (A9, A10): RustCrypto computes
   AES-SIV, Argon2id and SHA-256 correctly, and they are secure. A10 also
   covers the check value detecting a damaged key.
-- **The adapter around the core** (A4): it runs the loops of the hook and
-  the audit over every entry and answers truthfully (`HookAnswers`,
-  `AuditAnswers`, `RecordEvidence`), and the filters write what the core
-  returned. The loops, `smudgeModel` and the audit's record cache are
-  models or tests, not extracted code.
+- **The adapter around the core** (A4): it calls the core's loops over the
+  index and over each audited commit once with the run's inputs and obeys
+  the result (`HookAccepted`, `AuditAccepted`), and its evidence answers
+  truthfully (`HookAnswers`, `AuditAnswers`, `RecordEvidence`); the filters
+  write what the core returned. The loops are extracted code
+  (`index_verdict_accepts`, `commit_verdict_accepts`); `smudgeModel` and the
+  meaning of the evidence's answers are models or tests.
 - **Git** (A11, A19–A21, A23): its listings, attribute answers, object reads
   and sequencing state are what the contracts say.
 - **Git commits the checked index** (A22), so each step is a

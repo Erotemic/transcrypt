@@ -963,13 +963,20 @@ struct Answers {
     read: std::vec::Vec<u8>,
     /// For each entry: reads, then `is_record`, `opens` and `elsewhere`.
     asked: core::cell::RefCell<std::vec::Vec<[usize; 4]>>,
+    /// The audit's view: each entry's path, whether an earlier pass checked
+    /// it, and how often `passed` recorded it.
+    paths: std::vec::Vec<std::vec::Vec<u8>>,
+    cached: std::vec::Vec<bool>,
+    passed: std::vec::Vec<usize>,
 }
 
 impl Answers {
     fn new(record: Option<bool>, opens: Option<bool>, elsewhere: Option<bool>,
         blobs: std::vec::Vec<Option<std::vec::Vec<u8>>>) -> Answers {
-        let asked = core::cell::RefCell::new(std::vec![[0; 4]; blobs.len()]);
-        Answers { record, opens, elsewhere, blobs, read: std::vec::Vec::new(), asked }
+        let n = blobs.len();
+        let asked = core::cell::RefCell::new(std::vec![[0; 4]; n]);
+        Answers { record, opens, elsewhere, blobs, read: std::vec::Vec::new(), asked,
+            paths: std::vec![b"a.env".to_vec(); n], cached: std::vec![false; n], passed: std::vec![0; n] }
     }
 
     fn ask(&self, i: usize, question: usize, answer: Option<bool>) -> Option<bool> {
@@ -1000,6 +1007,18 @@ impl StagedEvidence for Answers {
     }
     fn elsewhere(&self, i: usize) -> Option<bool> {
         self.ask(i, 3, self.elsewhere)
+    }
+}
+
+impl AuditedEntries for Answers {
+    fn path(&self, i: usize) -> &[u8] {
+        &self.paths[i]
+    }
+    fn checked(&self, i: usize) -> bool {
+        self.cached[i]
+    }
+    fn passed(&mut self, i: usize) {
+        self.passed[i] += 1;
     }
 }
 
@@ -1106,6 +1125,60 @@ fn index_verdict_checks_every_entry_in_order() {
     // An empty index passes without a question.
     let mut answers = Answers::new(None, None, None, std::vec::Vec::new());
     assert_eq!(index_verdict(&mut answers, &[], &[], &[], &[], &[], true, false, false, &id), Ok(()));
+}
+
+/// `commit_verdict` checks every examined entry of a commit, in order: a
+/// selected path that is not a regular file refuses; a selected entry is
+/// read and authenticated (keyed) unless an earlier pass of the same record
+/// settles its check, and is recorded once it passed; nothing after the
+/// first refusal is read or asked; the last entry is checked too.
+#[test]
+fn commit_verdict_checks_every_examined_entry_in_order() {
+    use StagedRefusal::*;
+    let m = Mock { key: 9 };
+    let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+    let id = m.config_id(&config);
+    let record = seal(&m, &config, b"a.env", b"secret").unwrap();
+    let selected = AuditedEntry { regular: true, selected: true, held: false, moved: false };
+    let unprotected = AuditedEntry { regular: true, selected: false, held: false, moved: false };
+    let link = AuditedEntry { regular: false, selected: true, held: false, moved: false };
+    let blobs = |n: usize| (0..n).map(|_| Some(record.clone())).collect::<std::vec::Vec<_>>();
+    let run = |answers: &mut Answers, entries: &[AuditedEntry], keyed: bool|
+        commit_verdict(answers, entries, keyed, AuditBase::Parent, &id);
+    // Keyed: the selected entries authenticate, the unprotected one is asked whether it is a record.
+    let entries = [selected, unprotected, selected];
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), blobs(3));
+    assert_eq!(run(&mut answers, &entries, true), Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[1, 0, 1, 0], [0, 1, 0, 0], [1, 0, 1, 0]]);
+    assert_eq!(answers.passed, [1, 0, 1]);
+    // An earlier pass settles `Authenticate`: nothing is read or asked, nothing recorded again.
+    let mut answers = Answers::new(Some(false), Some(false), Some(false), blobs(3));
+    answers.cached = std::vec![true, false, true];
+    assert_eq!(run(&mut answers, &entries, true), Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[0; 4], [0, 1, 0, 0], [0; 4]]);
+    assert_eq!(answers.passed, [0, 0, 0]);
+    // Without the key the move check is not settled by an earlier pass.
+    let mut answers = Answers::new(Some(false), Some(false), Some(true), blobs(1));
+    answers.cached = std::vec![true];
+    assert_eq!(run(&mut answers, &[selected], false), Err((0, AuditRefusal::Verdict(Moved))));
+    // The last entry is checked: one that does not open is refused at its position.
+    let mut answers = Answers::new(Some(false), Some(false), Some(false), blobs(3));
+    answers.cached = std::vec![true, false, false];
+    assert_eq!(run(&mut answers, &entries, true), Err((2, AuditRefusal::Verdict(Authentication))));
+    // A selected symlink refuses, and nothing after a refusal is asked.
+    let mut answers = Answers::new(Some(true), Some(false), Some(false), blobs(3));
+    assert_eq!(run(&mut answers, &[unprotected, link, selected], true), Err((0, AuditRefusal::Verdict(UnprotectedForgery))));
+    assert_eq!(answers.asked.borrow()[1..], [[0; 4], [0; 4]]);
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), blobs(3));
+    assert_eq!(run(&mut answers, &[selected, link, selected], true), Err((1, AuditRefusal::NotRegular)));
+    assert_eq!(answers.asked.borrow()[2], [0; 4]);
+    // A blob that cannot be read refuses; reserved metadata is never checked.
+    let mut answers = Answers::new(Some(false), Some(true), Some(false), std::vec![None]);
+    assert_eq!(run(&mut answers, &[selected], true), Err((0, AuditRefusal::Verdict(Unanswered))));
+    let mut answers = Answers::new(Some(true), Some(false), Some(false), std::vec![None]);
+    answers.paths = std::vec![b".transcrypt/config".to_vec()];
+    assert_eq!(run(&mut answers, &[link], true), Ok(()));
+    assert_eq!(*answers.asked.borrow(), [[0; 4]]);
 }
 
 /// `held_records` holds an entry only when the other listing has the same

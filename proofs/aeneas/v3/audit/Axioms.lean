@@ -152,10 +152,16 @@ open Transcrypt.V3Verification
 #print axioms reads_blob_spec
 #print axioms stagedCheckOf_reads
 #print axioms staged_verdict_ok
+#print axioms read_verdict_ok
 #print axioms loop_ok_of
+#print axioms usize_succ
 #print axioms index_verdict_body_ok
 #print axioms index_verdict_accepts
 #print axioms audit_check_spec
+#print axioms slice_index_usize_ok
+#print axioms settled_by_cache_spec
+#print axioms commit_verdict_body_ok
+#print axioms commit_verdict_accepts
 -- EndToEnd
 #print axioms not_envelope_of_prefix
 #print axioms hook_membership
@@ -182,9 +188,8 @@ open Transcrypt.V3Verification
 #print axioms repair_never_launders
 #print axioms stored_key_binds_file_operations
 -- Audit
-#print axioms auditPlan_accepts
-#print axioms auditEntry_accepted
 #print axioms audit_entry_checked
+#print axioms audit_checked
 #print axioms keyed_audit_records_authentic
 #print axioms keyed_audit_selection_authentic
 #print axioms keyed_audit_authenticates_commit
