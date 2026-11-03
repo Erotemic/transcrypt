@@ -29,13 +29,14 @@ pass='long correct horse battery staple benchmark passphrase'
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Median wall time of RUNS runs of SETUP (untimed) then STEP, in seconds.
+# Median wall time of RUNS runs of the function SETUP (untimed) then the
+# function STEP, in seconds.
 median() {
 	local name=$1 setup=$2 step=$3 times=() run start end
 	for ((run = 0; run < runs; run++)); do
-		eval "$setup" >/dev/null 2>&1
+		"$setup" >/dev/null 2>&1
 		start=$(date +%s.%N)
-		eval "$step" >/dev/null 2>&1
+		"$step" >/dev/null 2>&1
 		end=$(date +%s.%N)
 		times+=("$(echo "$end - $start" | bc)")
 	done
@@ -62,26 +63,50 @@ repository() {
 echo "binary: $bin"
 echo "runs: $runs (median)"
 
+# The timed steps and their setups, on the repository `$repo`; `n` numbers
+# the edits so that each run changes something.
+n=0
+none() { :; }
+edit_unprotected() {
+	n=$((n + 1))
+	echo "edit $n" >"$repo/d/f1.txt"
+	git -C "$repo" add d/f1.txt
+}
+edit_protected() {
+	n=$((n + 1))
+	echo "edit $n" >"$repo/d/s1.secret"
+	git -C "$repo" add d/s1.secret
+}
+moved=d/s2.secret
+move_protected() {
+	n=$((n + 1))
+	git -C "$repo" mv "$moved" "d/moved-$n.secret"
+	moved=d/moved-$n.secret
+}
+rewrite_all() {
+	local j
+	n=$((n + 1))
+	for ((j = 0; j < 60000; j++)); do echo "rewrite $n $j" >"$repo/d/f$j.txt"; done
+	git -C "$repo" add -A
+}
+restart_merge() {
+	git -C "$repo" reset -q --hard main
+	git -C "$repo" merge -q --no-commit --no-ff incoming
+}
+commit() { git -C "$repo" commit -qm step; }
+status() { git -C "$repo" status --porcelain; }
+verify_index() { (cd "$repo" && "$bin" verify-index); }
+
 repo=$work/small
 repository "$repo" 10000 300
-n=0
-median "10k/300: commit, unprotected edit" \
-	'n=$((n + 1)); echo "edit $n" >"$repo/d/f1.txt"; git -C "$repo" add d/f1.txt' \
-	'git -C "$repo" commit -qm edit'
-median "10k/300: commit, protected edit" \
-	'n=$((n + 1)); echo "edit $n" >"$repo/d/s1.secret"; git -C "$repo" add d/s1.secret' \
-	'git -C "$repo" commit -qm edit'
-moved=d/s2.secret
-median "10k/300: git mv protected + commit" \
-	'n=$((n + 1)); git -C "$repo" mv "$moved" "d/moved-$n.secret"; moved=d/moved-$n.secret' \
-	'git -C "$repo" commit -qm move'
-median "10k/300: git status" ':' 'git -C "$repo" status --porcelain'
+median "10k/300: commit, unprotected edit" edit_unprotected commit
+median "10k/300: commit, protected edit" edit_protected commit
+median "10k/300: git mv protected + commit" move_protected commit
+median "10k/300: git status" none status
 
 repo=$work/large
 repository "$repo" 60000 0
-median "60k: verify-index after rewriting all" \
-	'n=$((n + 1)); for ((j = 0; j < 60000; j++)); do echo "rewrite $n $j" >"$repo/d/f$j.txt"; done; git -C "$repo" add -A' \
-	'(cd "$repo" && "$bin" verify-index)'
+median "60k: verify-index after rewriting all" rewrite_all verify_index
 
 repo=$work/merge
 repository "$repo" 1 0
@@ -91,6 +116,4 @@ git -C "$repo" add -A
 git -C "$repo" commit -qm incoming
 git -C "$repo" checkout -q main 2>/dev/null
 (cd "$repo" && "$bin" lock >/dev/null 2>&1)
-median "locked merge of 10k protected: verify-index" \
-	'git -C "$repo" reset -q --hard main; git -C "$repo" merge -q --no-commit --no-ff incoming' \
-	'(cd "$repo" && "$bin" verify-index)'
+median "locked merge of 10k protected: verify-index" restart_merge verify_index
