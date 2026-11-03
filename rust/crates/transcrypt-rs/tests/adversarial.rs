@@ -1795,6 +1795,9 @@ fn ordinary_commits_read_no_unchanged_unprotected_file() {
     fs::write(repo.join("public.txt"), b"an unprotected file\n").unwrap();
     commit(&repo, &["public.txt"], "public");
     let oid = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD:public.txt"], None)).unwrap();
+    // Git for Windows' default `core.autocrlf` makes Git itself read the
+    // index blob of a racily clean file to check it for CRLF.
+    run(&repo, "git", &["config", "core.autocrlf", "false"], None);
     let (dir, file) = oid.trim().split_at(2);
     let object = repo.join(".git/objects").join(dir).join(file);
     fs::remove_file(&object).unwrap();
@@ -1928,6 +1931,9 @@ fn audits_read_no_unchanged_unprotected_file() {
     commit(&repo, &["public.txt"], "public");
     let oid = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD:public.txt"], None)).unwrap();
     run(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    // Git for Windows' default `core.autocrlf` makes Git itself read the
+    // index blob of a racily clean file to check it for CRLF.
+    run(&repo, "git", &["config", "core.autocrlf", "false"], None);
     let (dir, file) = oid.trim().split_at(2);
     let object = repo.join(".git/objects").join(dir).join(file);
     fs::remove_file(&object).unwrap();
