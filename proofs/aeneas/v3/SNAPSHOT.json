@@ -3,7 +3,7 @@
   "generated": {
     "V3Wire/Assumptions/FunsExternal.lean": "64053f683eedf8dadb8268c2c143996dd8e86d3eb6af74cc95d7f2ea152c24fd",
     "V3Wire/Extraction.lean": "0b3238ef0d9482c14de3debc5334af60a9628ddd1ae37839f5faec14eb62e21d",
-    "V3Wire/Extraction/Funs.lean": "4e745981be320d3a5e8e55afd5bfa3e6b74fe683ee05fa7680616e597ef63d50",
+    "V3Wire/Extraction/Funs.lean": "02a51b60af78bc22aa7402a8e5f7b3239153b2cd8b8e565064365fc82c7d6cd4",
     "V3Wire/Extraction/FunsExternal.lean": "8b2b1665885a66ad131c1f4614b4cc1256896849a83db3f136fb40583599a202",
     "V3Wire/Extraction/FunsExternal_Template.lean": "1e1c62cbc9c8d0f35aa25d8a4002280804dd2ae3c1e54d79aae4a1143aa1031d",
     "V3Wire/Extraction/Types.lean": "a4d76712ce1bfb2cad588320fa19c71572b9437312302905410761e13e71b462",
@@ -21,7 +21,7 @@
   "purpose": "Production Rust v3 wire-codec generated Lean, not a crypto proof",
   "sources": {
     "rust/crates/transcrypt-v3-core/Cargo.toml": "6f10bc05329cd4b7df5087568563aa3a488a3608058e655232eb0708bc22f09a",
-    "rust/crates/transcrypt-v3-core/hax.toml": "8ba5172b4f4f1169997c8f48231ec054a3d917b822aad163d936cc2a35f25c4e",
-    "rust/crates/transcrypt-v3-core/src/lib.rs": "efd8a3e1285b4e791ab9085d25c0165b9d618c98cf571cfa80bed90b6af5266e"
+    "rust/crates/transcrypt-v3-core/hax.toml": "b2a4744f18a5d3262cabbbdbb2fa90f26db0380ad61c4eb49abf5a29db3d91e7",
+    "rust/crates/transcrypt-v3-core/src/lib.rs": "fa30d85c1b76b193ecdc48a847563e89a8480048e1ccb5cbff33647dc835f5b6"
   }
 }

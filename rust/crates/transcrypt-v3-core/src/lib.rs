@@ -2230,6 +2230,43 @@ pub fn commit_verdict<E: StagedEvidence + AuditedEntries>(
     Ok(())
 }
 
+/// The audit with the key, whose checks `commit_needs_no_key` consults.
+const KEYED_AUDIT: bool = true;
+
+/// Whether the keyed audit of the examined entries of one commit
+/// (`entries`, with their paths from `evidence`), from `base`, needs the key
+/// for none of them. The keyless audit calls it once `commit_verdict`
+/// accepted the commit: when it is true, the commit keeps the keyed audit's
+/// invariant (`RecordsAuthentic`) given its parent's, though no record was
+/// opened. An entry needs no key when its keyed check (`audit_check` with
+/// the key) is `Skip`, or `AuthenticateIfRecord` and its blob is no record
+/// of this configuration (`is_record` answers `Some(false)`). Every other
+/// entry needs it: a selected one (`Protected`, or `None`: refused), a
+/// record or an unanswered `is_record`, and `NotRecord`, which the keyed
+/// audit never chooses. The first entry that needs the key stops the loop.
+pub fn commit_needs_no_key<E: StagedEvidence + AuditedEntries>(
+    evidence: &E,
+    entries: &[AuditedEntry],
+    base: AuditBase,
+) -> bool {
+    let mut i = 0;
+    while i < entries.len() {
+        match audit_check(entries[i], evidence.path(i), KEYED_AUDIT, base) {
+            Some(StagedCheck::Skip) => {}
+            Some(StagedCheck::AuthenticateIfRecord) => match evidence.is_record(i) {
+                Some(false) => {}
+                Some(true) => return false,
+                None => return false,
+            },
+            Some(StagedCheck::NotRecord) => return false,
+            Some(StagedCheck::Protected(_)) => return false,
+            None => return false,
+        }
+        i += 1;
+    }
+    true
+}
+
 #[cfg(test)]
 extern crate std;
 

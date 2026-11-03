@@ -464,6 +464,123 @@ theorem keyless_audit_checks_envelopes {E : Type} (g : GitState) (c : AuditedCom
     (audit_checked (σ := σ) (fun h => by cases h) hid hcon hans hplan hx).selected hs hnr
   exact ⟨hreg, content, hc', hkl rfl⟩
 
+/-! ## A keyless audit that needed no key -/
+
+/-- **The keyless audit needed no key** (`check_entries` in `audit.rs`):
+    once the keyless `commit_verdict` accepted the commit, the adapter asks
+    the verified `commit_needs_no_key`, on the evidence state that call
+    returned, whether the keyed audit would have needed the key for any
+    examined entry, and it answered `true` (otherwise the run counts as
+    checked by envelope only). -/
+def KeylessNeedsNoKey {E : Type} (ans : StagedEvidence E) (cache : AuditedEntries E) (id : Std.Array U8 16#usize)
+    (base : AuditBase) (run : AuditedRun E) : Prop :=
+  ∀ s, commit_verdict ans cache run.start run.facts false base id = ok (core.result.Result.Ok (), s) →
+    commit_needs_no_key ans cache s run.facts base = ok true
+
+/-- **An examined entry that needs no key.** Under the audit's contracts,
+    if examined position `k`, whose entry is `x`, needs no key in a `good`
+    evidence state (`NeedsNoKeyAt`), then the commit's attributes do not
+    select `x` unless it is metadata, and if `x` is a regular, non-reserved
+    file its blob is no record of this configuration, or the audit trusted
+    it from the parent, which holds it exactly. Nothing is opened, so no key
+    and no suite realization is needed: any suite `σ` whose id is the
+    configuration's will do. -/
+theorem needs_no_key_entry {E : Type} {ans : StagedEvidence E} {cache : AuditedEntries E}
+    {pinst : V3Primitives P} {prims : P}
+    {config : Std.Array U8 55#usize} {id : Std.Array U8 16#usize} {g : GitState} {c : AuditedCommit}
+    {base : AuditBase} {run : AuditedRun E} {keyed : Bool} {good : E → Prop}
+    (hid : wireBytes id = σ.digest16 (wireBytes config))
+    (hcon : AuditContracts c base run) (hans : AuditAnswersIn ans cache pinst prims config id keyed g run good)
+    {s : E} (hs : good s) {k : Usize} {x : Entry} (hx : run.entries[k.val]? = some x)
+    (hnk : NeedsNoKeyAt ans cache s run.facts base k) :
+    (Selected (c.filter x.path) → ¬ Reserved x.path → False) ∧
+    (Selectable x → RecordAuthentic σ (wireBytes config) g x ∨ (base = .Parent ∧ x ∈ c.parent)) := by
+  obtain ⟨path, a, hp, ha, hcheck⟩ := hnk
+  have hspec := fun c' (h : audit_check a path true base = ok c') =>
+    spec_result (audit_check_spec a path true base) h
+  rw [hans.path s k x path hs hx hp] at hspec
+  have hreg := hcon.regular k.val x a hx ha
+  have hsel := hcon.selected k.val x a hx ha
+  have hunsel : a.selected = false → Selected (c.filter x.path) → False := fun hf hs' => by
+    rw [hsel.mpr hs'] at hf; cases hf
+  rcases hcheck with hskip | ⟨hair, hrec⟩
+  · -- Skip, with the key: metadata, a symlink or submodule, or trusted from the parent.
+    have hc := hspec _ hskip
+    simp only [AuditCheckOf] at hc
+    refine ⟨fun hs' hnr => ?_, fun ⟨hxr, hnr⟩ => ?_⟩
+    · rcases hc with hr | ⟨hf, -⟩
+      · exact hnr hr
+      · exact hunsel hf hs'
+    · rcases hc with hr | ⟨-, hn | ⟨hh, hb⟩ | ⟨hkf, -⟩⟩
+      · exact absurd hr hnr
+      · rw [hreg.mpr hxr] at hn; cases hn
+      · exact Or.inr ⟨hb, (hcon.held k.val x a hx ha).mp hh⟩
+      · cases hkf
+  · -- AuthenticateIfRecord, and the blob is no record: nothing to authenticate.
+    obtain ⟨-, hf, -, -, -⟩ := hspec _ hair
+    refine ⟨fun hs' _ => hunsel hf hs', fun _ => Or.inl ?_⟩
+    obtain ⟨content, hc', hpre⟩ := spec_result (hans.is_record s k x hs hx) hrec rfl
+    exact ⟨content, hc', fun henv => absurd (hid ▸ henv) (not_envelope_of_prefix hpre)⟩
+
+/-- **A keyless audit that needed no key authenticates the commit.** Assume
+    the audit's contracts (`AuditContracts`, A20, A19) and its evidence
+    without the key (`AuditAnswers`: the paths and the `is_record` answers,
+    A4, A11, A21). If the keyless audit accepted the commit (`AuditAccepted`)
+    and the verified `commit_needs_no_key` then answered `true`
+    (`KeylessNeedsNoKey`), the commit keeps both invariants of the keyed
+    audit under every suite `σ` whose id is the configuration's (A5:
+    `config_id`), with no key and no `Realizes`, since no record is opened:
+
+    * **its records authenticate** (`RecordsAuthentic`), given the parent's
+      under `σ` when the audit trusted the parent (`AuditBase.Parent`): an
+      examined regular, non-reserved file is no record of the configuration
+      or is the parent's exactly;
+    * **its selection authenticates** (`SelectionAuthentic`), given the
+      parent's selection `pfilter` under `σ` and its agreement on the
+      entries the audit did not examine (`AuditSelectionAgrees`, A19): an
+      examined selected entry always needs the key, so every selected entry
+      is the parent's.
+
+    The `is_record` answer is trusted as for the keyed audit (A4, A21). -/
+theorem keyless_audit_needing_no_key_authenticates {E : Type} (g : GitState) (c : AuditedCommit) (base : AuditBase)
+    (run : AuditedRun E) (ans : StagedEvidence E) (cache : AuditedEntries E) (pinst : V3Primitives P) (prims : P)
+    (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize)
+    (hid : wireBytes id = σ.digest16 (wireBytes config))
+    (hcon : AuditContracts c base run)
+    (hans : AuditAnswers ans cache pinst prims config id false g run)
+    (hplan : AuditAccepted ans cache id false base run)
+    (hnokey : KeylessNeedsNoKey ans cache id base run)
+    (hparent : base = .Parent → RecordsAuthentic σ (wireBytes config) g c.parent)
+    (pfilter : List Nat → List Nat)
+    (hpsel : base = .Parent → SelectionAuthentic σ (wireBytes config) g pfilter c.parent)
+    (hagree : AuditSelectionAgrees c run pfilter) :
+    RecordsAuthentic σ (wireBytes config) g c.tree ∧ SelectionAuthentic σ (wireBytes config) g c.filter c.tree := by
+  obtain ⟨good, hans⟩ := hans
+  obtain ⟨s, hv⟩ := hplan
+  have hs : good s := commit_verdict_ends_good good hans.read_good hans.passed_good hans.start hv
+  have hall := commit_needs_no_key_true (hnokey s hv)
+  -- Every examined entry needs no key.
+  have hentry : ∀ x ∈ run.entries, (Selected (c.filter x.path) → ¬ Reserved x.path → False) ∧
+      (Selectable x → RecordAuthentic σ (wireBytes config) g x ∨ (base = .Parent ∧ x ∈ c.parent)) := by
+    intro x hx
+    obtain ⟨p, hp, rfl⟩ := List.getElem_of_mem hx
+    have hpf : p < run.facts.length := by rw [run.facts_len]; exact hp
+    have hpk : p < 2 ^ UScalarTy.Usize.numBits := by
+      have := run.facts.property; scalar_tac
+    exact needs_no_key_entry hid hcon hans hs (k := Usize.ofNatCore p hpk) (by simp [Usize.ofNatCore])
+      (hall _ (by simpa [Usize.ofNatCore] using hpf))
+  refine ⟨fun y hy hsel => ?_, fun x hx hs' hnr => ?_⟩
+  · rcases hcon.covers y hy hsel.2 with hex | ⟨hb, hyp⟩
+    · rcases (hentry y hex).2 hsel with h | ⟨hb, hyp⟩
+      · exact h
+      · exact hparent hb _ hyp hsel
+    · exact hparent hb y hyp hsel
+  · by_cases hex : x ∈ run.entries
+    · exact ((hentry x hex).1 hs' hnr).elim
+    · rcases hcon.covers x hx hnr with hex' | ⟨hb, hxp⟩
+      · exact absurd hex' hex
+      · exact hpsel hb x hxp (hagree x hx hnr hex ▸ hs') hnr
+
 /-! ## The start of a keyed history -/
 
 /-- The commit's tree commits `config` as the regular file

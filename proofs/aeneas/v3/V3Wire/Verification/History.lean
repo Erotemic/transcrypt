@@ -31,7 +31,11 @@ single-commit theorems over both, without re-proving them.
   parent outside the range). `keyless_dag_audit_enveloped`: every audited
   commit whose configuration has no key in this checkout has the envelope of
   its configuration at every selected path (`SelectionEnveloped`); nothing
-  is authenticated there (A14).
+  is authenticated there (A14), unless no record needed opening:
+  `keyless_dag_audit_authenticated`, when every such commit's verified
+  `commit_needs_no_key` answered `true` (the adapter's condition for
+  reporting the run authenticated), gives `AuditedCommitAuthentic` under
+  every suite with the configuration's id.
 * **The hook across a rekey.** `rekey_guard_false`: a commit whose
   configuration differs from the previous one is checked with the guard
   `false`, so `rekey_commit_starts_epoch` establishes the new epoch's
@@ -40,9 +44,9 @@ single-commit theorems over both, without re-proving them.
 * **Top level.** `transcrypt_product_assurance_dag`.
 
 Each accepted run of the verified core enters only through its bundle
-(`KeyedAudit`, `KeylessAudit`, `KeyedCommit`); `keyed_audit_run_authenticated`
-and `keyless_audit_run_enveloped` are the only proofs that open an audit
-bundle.
+(`KeyedAudit`, `KeylessAudit`, `KeyedCommit`); `keyed_audit_run_authenticated`,
+`keyless_audit_run_enveloped` and `keyless_audit_run_authenticated` are the
+only proofs that open an audit bundle.
 -/
 
 open CoreModels Aeneas
@@ -132,6 +136,25 @@ theorem keyless_audit_run_enveloped {A : Type} {aans : StagedEvidence A} {acache
   · rcases ha.contracts.covers x hx hnr with hex' | ⟨hb, hxp⟩
     · exact absurd hex' hex
     · exact hparent hb x hxp (hagree x hx hnr hex ▸ hs) hnr
+
+/-- **One keyless audit run that needed no key.**
+    `keyless_audit_needing_no_key_authenticates` for an accepted
+    `KeylessAudit` whose verified `commit_needs_no_key` answered `true`
+    (`KeylessNeedsNoKey`): both invariants hold under every suite `σ` with
+    the configuration's id, given the first parent's under `σ` when the
+    audit trusted the parent. -/
+theorem keyless_audit_run_authenticated {A : Type} {aans : StagedEvidence A} {acache : AuditedEntries A}
+    {σ₀ σ : Suite} {g : GitState} {r : AuditRun A}
+    (ha : KeylessAudit aans acache inst σ₀ g r) (hnokey : KeylessNeedsNoKey aans acache r.id r.base r.run)
+    (hσ : σ.digest16 (wireBytes r.config) = σ₀.digest16 (wireBytes r.config))
+    (pfilter : List Nat → List Nat)
+    (hparent : r.base = .Parent → RecordsAuthentic σ (wireBytes r.config) g r.commit.parent ∧
+      SelectionAuthentic σ (wireBytes r.config) g pfilter r.commit.parent)
+    (hagree : AuditSelectionAgrees r.commit r.run pfilter) :
+    AuditedCommitAuthentic σ (wireBytes r.config) g r.commit := by
+  obtain ⟨prims, hans⟩ := ha.answers
+  exact keyless_audit_needing_no_key_authenticates (σ := σ) g _ _ _ aans acache inst prims _ _ (ha.id.trans hσ.symm)
+    ha.contracts hans ha.accepted hnokey (fun hb => (hparent hb).1) pfilter (fun hb => (hparent hb).2) hagree
 
 /-! ## The audited range as a commit graph -/
 
@@ -276,6 +299,62 @@ theorem keyless_dag_audit_enveloped {C A : Type} (aans : StagedEvidence A) (acac
           exact ih p hp hfp (by simpa [AuditedRange.config, hcfg] using hk))
         hs.selection
     · exact keyless_audit_run_enveloped ha _ (fun hb => hboundary c hc p hfp hp hb hk) (fun _ _ _ _ => rfl)
+
+/-- **A13: the trusted boundary, for a configuration without a key whose
+    records the audit vouches for.** A commit of the range whose
+    configuration has no key here, whose first parent lies outside the
+    range and that the audit trusted from that parent, has a parent whose
+    records and selection (under the commit's attributes) authenticate under
+    every suite with the configuration's id: the same trust as
+    `KeyedBoundaryTrusted`, for the suite of a key this checkout lacks. -/
+def KeylessBoundaryAuthentic {C A : Type} (keys : EpochKeys P) (σ₀ : Suite) (g : GitState) (d : AuditedRange C A) :
+    Prop :=
+  ∀ c ∈ d.commits, ∀ p, d.firstParent c = some p → p ∉ d.commits → (d.run c).base = .Parent →
+    keys (d.config c) = none → ∀ σ : Suite, σ.digest16 (d.config c) = σ₀.digest16 (d.config c) →
+      RecordsAuthentic σ (d.config c) g (d.run c).commit.parent ∧
+      SelectionAuthentic σ (d.config c) g (d.run c).commit.filter (d.run c).commit.parent
+
+/-- **The keyless audit of a commit graph that needed no key.** Under the
+    graph of `keyless_dag_audit_enveloped`, if every commit whose
+    configuration has no key here was accepted by the keyless audit and its
+    verified `commit_needs_no_key` answered `true` (`KeylessNeedsNoKey`:
+    what the adapter requires before it reports the run authenticated), with
+    the boundary `KeylessBoundaryAuthentic` (A13), then every such commit
+    keeps both audit invariants (`AuditedCommitAuthentic`) under every suite
+    with its configuration's id, so under the suite of that configuration's
+    real key: no record of it needed opening. A configuration change
+    examines the whole tree, where any selected entry needs the key, so
+    such a commit selects nothing outside metadata. -/
+theorem keyless_dag_audit_authenticated {C A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A)
+    (keys : EpochKeys P) (σ₀ : Suite) (g : GitState) (d : AuditedRange C A) (hedges : FirstParentEdges d)
+    (haudits : ∀ c ∈ d.commits, keys (d.config c) = none → KeylessAudit aans acache inst σ₀ g (d.run c))
+    (hnokey : ∀ c ∈ d.commits, keys (d.config c) = none →
+      KeylessNeedsNoKey aans acache (d.run c).id (d.run c).base (d.run c).run)
+    (hboundary : KeylessBoundaryAuthentic keys σ₀ g d) :
+    ∀ c ∈ d.commits, keys (d.config c) = none → ∀ σ : Suite, σ.digest16 (d.config c) = σ₀.digest16 (d.config c) →
+      AuditedCommitAuthentic σ (d.config c) g (d.run c).commit := by
+  refine first_parent_induction d hedges.acyclic _ fun c hc ih hk σ hσ => ?_
+  have ha := haudits c hc hk
+  have hn := hnokey c hc hk
+  cases hfp : d.firstParent c with
+  | none =>
+    have hroot := hedges.root c hc hfp
+    exact keyless_audit_run_authenticated ha hn hσ _
+      (fun _ => ⟨(fun x hx => by rw [hroot] at hx; cases hx), (fun x hx => by rw [hroot] at hx; cases hx)⟩)
+      (fun _ _ _ _ => rfl)
+  | some p =>
+    by_cases hp : p ∈ d.commits
+    · -- The first parent is audited: the same configuration when trusted, so also keyless.
+      have hs := hedges.step c hc p hp hfp
+      exact keyless_audit_run_authenticated ha hn hσ (d.run p).commit.filter (fun hb => by
+          have hcfg : (d.run c).config = (d.run p).config := hs.config hb
+          rw [hs.parent, hcfg]
+          exact ih p hp hfp (by simpa [AuditedRange.config, hcfg] using hk) σ
+            (by simpa [AuditedRange.config, hcfg] using hσ))
+        hs.selection
+    · -- The first parent lies outside the range: trusted (A13).
+      exact keyless_audit_run_authenticated ha hn hσ _ (fun hb => hboundary c hc p hfp hp hb hk σ hσ)
+        (fun _ _ _ _ => rfl)
 
 /-! ## The pre-commit history across a rekey -/
 

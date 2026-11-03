@@ -162,6 +162,9 @@ open Transcrypt.V3Verification
 #print axioms settled_by_cache_spec
 #print axioms commit_verdict_body_ok
 #print axioms commit_verdict_accepts
+#print axioms commit_verdict_ends_good
+#print axioms commit_needs_no_key_body_ok
+#print axioms commit_needs_no_key_true
 -- EndToEnd
 #print axioms not_envelope_of_prefix
 #print axioms hook_membership
@@ -194,6 +197,8 @@ open Transcrypt.V3Verification
 #print axioms keyed_audit_selection_authentic
 #print axioms keyed_audit_authenticates_commit
 #print axioms keyless_audit_checks_envelopes
+#print axioms needs_no_key_entry
+#print axioms keyless_audit_needing_no_key_authenticates
 #print axioms config_of_guard_head
 #print axioms audited_head_starts_keyed_history
 #print axioms audited_head_keyed_history_authenticated
@@ -203,9 +208,11 @@ open Transcrypt.V3Verification
 -- History
 #print axioms keyed_audit_run_authenticated
 #print axioms keyless_audit_run_enveloped
+#print axioms keyless_audit_run_authenticated
 #print axioms first_parent_induction
 #print axioms keyed_dag_audit_authenticated
 #print axioms keyless_dag_audit_enveloped
+#print axioms keyless_dag_audit_authenticated
 #print axioms rekey_guard_false
 #print axioms rekey_commit_starts_epoch
 #print axioms epoch_history_authenticated

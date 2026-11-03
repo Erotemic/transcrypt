@@ -1181,6 +1181,69 @@ fn commit_verdict_checks_every_examined_entry_in_order() {
     assert_eq!(*answers.asked.borrow(), [[0; 4]]);
 }
 
+/// `commit_needs_no_key` follows the keyed audit's check of each entry, on
+/// every combination of facts, base, path and `is_record` answer: an entry
+/// needs no key exactly when its keyed check is `Skip`, or
+/// `AuthenticateIfRecord` and `is_record` answers `Some(false)`; `is_record`
+/// is asked only for `AuthenticateIfRecord`, and nothing else is ever asked
+/// or read.
+#[test]
+fn commit_needs_no_key_follows_the_keyed_check() {
+    use StagedCheck::*;
+    const KEYED: bool = true;
+    for bits in 0..(1u32 << 6) {
+        let bit = |k: u32| bits & (1 << k) != 0;
+        let entry = AuditedEntry { regular: bit(0), selected: bit(1), held: bit(2), moved: bit(3) };
+        let base = if bit(4) { AuditBase::Parent } else { AuditBase::Tree };
+        let path: &[u8] = if bit(5) { b".transcrypt/config" } else { b"a.env" };
+        for record in [Some(false), Some(true), None] {
+            let mut answers = Answers::new(record, Some(true), Some(false), std::vec![None]);
+            answers.paths = std::vec![path.to_vec()];
+            let check = audit_check(entry, path, KEYED, base);
+            let expected = match check {
+                Some(Skip) => true,
+                Some(AuthenticateIfRecord) => record == Some(false),
+                _ => false,
+            };
+            assert_eq!(commit_needs_no_key(&answers, &[entry], base), expected, "{bits:b} {record:?}");
+            let asked_record = (check == Some(AuthenticateIfRecord)) as usize;
+            assert_eq!(*answers.asked.borrow(), [[0, asked_record, 0, 0]], "{bits:b} {record:?}");
+        }
+    }
+}
+
+/// `commit_needs_no_key` checks every examined entry, in order, and stops
+/// at the first that needs the key: an unprotected file with no record and
+/// one the parent holds need none; a selected entry, a record and an
+/// unanswered `is_record` need it, the last entry included; no entries need
+/// nothing.
+#[test]
+fn commit_needs_no_key_checks_every_entry_until_one_needs_it() {
+    let selected = AuditedEntry { regular: true, selected: true, held: true, moved: false };
+    let unprotected = AuditedEntry { regular: true, selected: false, held: false, moved: false };
+    let held = AuditedEntry { regular: true, selected: false, held: true, moved: false };
+    let blobs = |n: usize| (0..n).map(|_| None).collect::<std::vec::Vec<_>>();
+    let answers = Answers::new(Some(false), None, None, blobs(3));
+    assert!(commit_needs_no_key(&answers, &[unprotected, held, unprotected], AuditBase::Parent));
+    assert_eq!(*answers.asked.borrow(), [[0, 1, 0, 0], [0; 4], [0, 1, 0, 0]]);
+    // From the whole tree nothing is trusted: the held file is asked too.
+    let answers = Answers::new(Some(false), None, None, blobs(3));
+    assert!(commit_needs_no_key(&answers, &[unprotected, held, unprotected], AuditBase::Tree));
+    assert_eq!(*answers.asked.borrow(), [[0, 1, 0, 0], [0, 1, 0, 0], [0, 1, 0, 0]]);
+    // A selected entry needs the key, even one the parent holds; nothing after it is asked.
+    let answers = Answers::new(Some(false), None, None, blobs(3));
+    assert!(!commit_needs_no_key(&answers, &[held, selected, unprotected], AuditBase::Parent));
+    assert_eq!(*answers.asked.borrow(), [[0; 4], [0; 4], [0; 4]]);
+    // A record, or an unanswered question, at the last entry needs the key.
+    for record in [Some(true), None] {
+        let answers = Answers::new(record, None, None, blobs(3));
+        assert!(!commit_needs_no_key(&answers, &[held, held, unprotected], AuditBase::Parent));
+        assert_eq!(*answers.asked.borrow(), [[0; 4], [0; 4], [0, 1, 0, 0]]);
+    }
+    let answers = Answers::new(None, None, None, blobs(0));
+    assert!(commit_needs_no_key(&answers, &[], AuditBase::Tree));
+}
+
 /// `held_records` holds an entry only when the other listing has the same
 /// record: a symlink staged as a file, or a file made executable, with the
 /// same blob is held by `held_entries` but not by `held_records`.

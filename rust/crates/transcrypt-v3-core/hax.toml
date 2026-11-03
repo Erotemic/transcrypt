@@ -38,6 +38,7 @@ include = [
   "transcrypt_v3_core::audit_check",
   "transcrypt_v3_core::settled_by_cache",
   "transcrypt_v3_core::commit_verdict",
+  "transcrypt_v3_core::commit_needs_no_key",
   "transcrypt_v3_core::parse_index_entry",
   "transcrypt_v3_core::encode_frame_header",
   "transcrypt_v3_core::decode_frame_header",

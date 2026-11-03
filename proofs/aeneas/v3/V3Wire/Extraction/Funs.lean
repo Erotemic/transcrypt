@@ -3729,4 +3729,71 @@ def commit_verdict
   commit_verdict_loop StagedEvidenceInst AuditedEntriesInst evidence entries
     keyed base id 0#usize
 
+/-- [transcrypt_v3_core::KEYED_AUDIT]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2234:0-2234:31 -/
+@[global_simps, irreducible] def KEYED_AUDIT : Bool := true
+
+/-- [transcrypt_v3_core::commit_needs_no_key]: loop body 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-2268:1
+    Visibility: public -/
+@[rust_loop_body]
+def commit_needs_no_key_loop.body
+  {E : Type} (StagedEvidenceInst : StagedEvidence E) (AuditedEntriesInst :
+  AuditedEntries E) (evidence : E) (entries : Slice AuditedEntry)
+  (base : AuditBase) (i : Std.Usize) :
+  RustM (ControlFlow Std.Usize Bool)
+  := do
+  let i1 ← core.slice.Slice.len entries
+  if i < i1
+  then
+    let ae ← Slice.index_usize entries i
+    let s ← AuditedEntriesInst.path evidence i
+    let o ← audit_check ae s KEYED_AUDIT base
+    match o with
+    | core.option.Option.None => ok (done false)
+    | core.option.Option.Some sc =>
+      match sc with
+      | StagedCheck.Skip => let i2 ← i + 1#usize
+                            ok (cont i2)
+      | StagedCheck.NotRecord => ok (done false)
+      | StagedCheck.AuthenticateIfRecord =>
+        let o1 ← StagedEvidenceInst.is_record evidence i
+        match o1 with
+        | core.option.Option.None => ok (done false)
+        | core.option.Option.Some b =>
+          if b
+          then ok (done false)
+          else let i2 ← i + 1#usize
+               ok (cont i2)
+      | StagedCheck.Protected _ => ok (done false)
+  else ok (done true)
+
+/-- [transcrypt_v3_core::commit_needs_no_key]: loop 0:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1:0-2268:1
+    Visibility: public -/
+@[rust_loop]
+def commit_needs_no_key_loop
+  {E : Type} (StagedEvidenceInst : StagedEvidence E) (AuditedEntriesInst :
+  AuditedEntries E) (evidence : E) (entries : Slice AuditedEntry)
+  (base : AuditBase) (i : Std.Usize) :
+  RustM Bool
+  := do
+  loop
+    (fun i1 => commit_needs_no_key_loop.body StagedEvidenceInst
+      AuditedEntriesInst evidence entries base i1)
+    i
+
+/-- [transcrypt_v3_core::commit_needs_no_key]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2247:0-2268:1
+    Visibility: public -/
+@[reducible]
+def commit_needs_no_key
+  {E : Type} (StagedEvidenceInst : StagedEvidence E) (AuditedEntriesInst :
+  AuditedEntries E) (evidence : E) (entries : Slice AuditedEntry)
+  (base : AuditBase) :
+  RustM Bool
+  := do
+  commit_needs_no_key_loop StagedEvidenceInst AuditedEntriesInst evidence
+    entries base 0#usize
+
 end transcrypt_v3_core

@@ -645,7 +645,7 @@ def CommitLoopStep {E : Type} (inst : StagedEvidence E) (cache : AuditedEntries 
   | .cont (t, i2) => (good t ∧ ∀ k : Usize, k.val < i2.val →
       CommitPositionAccepted inst cache good entries keyed base id k) ∧
       entries.length - i2.val < entries.length - i.val
-  | .done (res, _) => res = core.result.Result.Ok () → ∀ k : Usize, k.val < entries.length →
+  | .done (res, t) => res = core.result.Result.Ok () → good t ∧ ∀ k : Usize, k.val < entries.length →
       CommitPositionAccepted inst cache good entries keyed base id k
 
 /-- One step of `commit_verdict`'s loop at position `i`, after every earlier
@@ -769,8 +769,8 @@ theorem commit_verdict_body_ok {E : Type} {inst : StagedEvidence E} {cache : Aud
   · rename_i hil
     simp only [ok.injEq] at h
     subst h
-    intro _ k hk
-    exact hprev k (by scalar_tac)
+    intro _
+    exact ⟨hs, fun k hk => hprev k (by scalar_tac)⟩
 
 /-- **The audit's loop checks every examined entry.** If `commit_verdict`
     accepted, on evidence whose states satisfy `good` from the start state
@@ -796,6 +796,160 @@ theorem commit_verdict_accepts {E : Type} {inst : StagedEvidence E} {cache : Aud
   rintro ⟨s, i⟩ r ⟨hs, hprev⟩ hb
   have := commit_verdict_body_ok good hread hpassed s i r hs hprev hb
   rcases r with ⟨t, i2⟩ | ⟨res, t⟩
+  · exact this
+  · exact fun hres => (this hres).2
+
+/-- **The audit's loop ends in a good evidence state.** If `commit_verdict`
+    accepted, on evidence whose states satisfy `good` from the start state
+    `ev` on (a property every `read` and `passed` keeps), the state it
+    returned satisfies `good`: the state the adapter then asks
+    `commit_needs_no_key` about. -/
+theorem commit_verdict_ends_good {E : Type} {inst : StagedEvidence E} {cache : AuditedEntries E}
+    (good : E → Prop)
+    (hread : ∀ s k b s', good s → inst.read s k = ok (b, s') → good s')
+    (hpassed : ∀ s k s', good s → cache.passed s k = ok s' → good s')
+    {ev ev' : E} (hev : good ev) {entries : Slice AuditedEntry} {keyed : Bool} {base : AuditBase}
+    {id : Std.Array U8 16#usize}
+    (h : commit_verdict inst cache ev entries keyed base id = ok (core.result.Result.Ok (), ev')) :
+    good ev' := by
+  unfold commit_verdict commit_verdict_loop at h
+  refine loop_ok_of (fun x : E × Usize => entries.length - x.2.val)
+    (fun x => good x.1 ∧ ∀ k : Usize, k.val < x.2.val →
+      CommitPositionAccepted inst cache good entries keyed base id k)
+    (fun y => y.1 = core.result.Result.Ok () → good y.2)
+    ?_ (ev, 0#usize) _ ⟨hev, fun k hk => absurd hk (by simp)⟩ h rfl
+  rintro ⟨s, i⟩ r ⟨hs, hprev⟩ hb
+  have := commit_verdict_body_ok good hread hpassed s i r hs hprev hb
+  rcases r with ⟨t, i2⟩ | ⟨res, t⟩
+  · exact this
+  · exact fun hres => (this hres).1
+
+/-! ## `commit_needs_no_key`: whether a keyless audit needed the key -/
+
+/-- **The keyed audit needs no key at examined position `k`**: in the
+    evidence state `s`, the path the evidence gave for `k` and the entry's
+    facts get the keyed check (`audit_check` with the key) `Skip`, or
+    `AuthenticateIfRecord` with `is_record` at `k` answering `some false`. -/
+def NeedsNoKeyAt {E : Type} (inst : StagedEvidence E) (cache : AuditedEntries E) (s : E)
+    (entries : Slice AuditedEntry) (base : AuditBase) (k : Usize) : Prop :=
+  ∃ (path : Slice U8) (facts : AuditedEntry), cache.path s k = ok path ∧ entries.val[k.val]? = some facts ∧
+    (audit_check facts path true base = ok (some .Skip) ∨
+      (audit_check facts path true base = ok (some .AuthenticateIfRecord) ∧ inst.is_record s k = ok (some false)))
+
+/-- What one step of `commit_needs_no_key`'s loop from position `i` leaves:
+    it moves on to `i2` with every position below `i2` needing no key and
+    less of the entries left, or stops, returning `true` only with every
+    position needing no key. -/
+def NoKeyStep {E : Type} (inst : StagedEvidence E) (cache : AuditedEntries E) (s : E)
+    (entries : Slice AuditedEntry) (base : AuditBase) (i : Usize) : ControlFlow Usize Bool → Prop
+  | .cont i2 => (∀ k : Usize, k.val < i2.val → NeedsNoKeyAt inst cache s entries base k) ∧
+      entries.length - i2.val < entries.length - i.val
+  | .done b => b = true → ∀ k : Usize, k.val < entries.length → NeedsNoKeyAt inst cache s entries base k
+
+/-- One step of `commit_needs_no_key`'s loop at position `i`, after every
+    earlier position needed no key (`NoKeyStep`). -/
+theorem commit_needs_no_key_body_ok {E : Type} {inst : StagedEvidence E} {cache : AuditedEntries E}
+    {s : E} {entries : Slice AuditedEntry} {base : AuditBase} (i : Usize) (r : ControlFlow Usize Bool)
+    (hprev : ∀ k : Usize, k.val < i.val → NeedsNoKeyAt inst cache s entries base k)
+    (h : commit_needs_no_key_loop.body inst cache s entries base i = ok r) :
+    NoKeyStep inst cache s entries base i r := by
+  unfold commit_needs_no_key_loop.body at h
+  simp only [core.slice.Slice.len, rust_primitives.slice.slice_length, bind_tc_ok] at h
+  split at h
+  · rename_i hil
+    have hilt : i.val < entries.length := by scalar_tac
+    cases hix : Slice.index_usize entries i with
+    | fail _ => rw [hix] at h; simp at h
+    | div => rw [hix] at h; simp at h
+    | ok facts =>
+    rw [hix] at h
+    simp only [bind_tc_ok] at h
+    have hfacts := slice_index_usize_ok hix
+    cases hp : cache.path s i with
+    | fail _ => rw [hp] at h; simp at h
+    | div => rw [hp] at h; simp at h
+    | ok path =>
+    rw [hp] at h
+    simp only [bind_tc_ok] at h
+    have hkeyed : KEYED_AUDIT = true := by unfold KEYED_AUDIT; rfl
+    rw [hkeyed] at h
+    cases ha : audit_check facts path true base with
+    | fail _ => rw [ha] at h; simp at h
+    | div => rw [ha] at h; simp at h
+    | ok o =>
+    rw [ha] at h
+    simp only [bind_tc_ok] at h
+    -- Moving on with position `i` needing no key.
+    have hmove : NeedsNoKeyAt inst cache s entries base i →
+        (do
+          let i2 ← i + 1#usize
+          ok (cont i2) : RustM (ControlFlow Usize Bool)) = ok r → NoKeyStep inst cache s entries base i r := by
+      intro hpos hstep
+      cases hi2 : i + 1#usize with
+      | fail _ => rw [hi2] at hstep; simp at hstep
+      | div => rw [hi2] at hstep; simp at hstep
+      | ok i2 =>
+        rw [hi2] at hstep
+        simp only [bind_tc_ok, ok.injEq] at hstep
+        subst hstep
+        have hi2v := usize_succ hi2
+        refine ⟨fun k hk => ?_, by omega⟩
+        by_cases hki : k.val = i.val
+        · have hkeq : k = i := UScalar.eq_of_val_eq hki
+          subst hkeq
+          exact hpos
+        · exact hprev k (by omega)
+    rcases o with _ | c
+    · simp only [ok.injEq] at h
+      subst h
+      simp [NoKeyStep]
+    · rcases c with _ | _ | _ | ec
+      · exact hmove ⟨path, facts, hp, hfacts, Or.inl ha⟩ h
+      · simp only [ok.injEq] at h
+        subst h
+        simp [NoKeyStep]
+      · cases hr : inst.is_record s i with
+        | fail _ => rw [hr] at h; simp at h
+        | div => rw [hr] at h; simp at h
+        | ok o1 =>
+        rw [hr] at h
+        simp only [bind_tc_ok] at h
+        rcases o1 with _ | b
+        · simp only [ok.injEq] at h
+          subst h
+          simp [NoKeyStep]
+        · cases b
+          · simp only [Bool.false_eq_true, if_false] at h
+            exact hmove ⟨path, facts, hp, hfacts, Or.inr ⟨ha, hr⟩⟩ h
+          · simp only [if_true, ok.injEq] at h
+            subst h
+            simp [NoKeyStep]
+      · simp only [ok.injEq] at h
+        subst h
+        simp [NoKeyStep]
+  · rename_i hil
+    simp only [ok.injEq] at h
+    subst h
+    intro _ k hk
+    exact hprev k (by scalar_tac)
+
+/-- **A `true` answer: no examined entry needs the key.** If
+    `commit_needs_no_key` returned `true` from the evidence state `s`, every
+    examined position needs no key (`NeedsNoKeyAt`): its keyed check is
+    `Skip`, or `AuthenticateIfRecord` with `is_record` answering
+    `some false`. -/
+theorem commit_needs_no_key_true {E : Type} {inst : StagedEvidence E} {cache : AuditedEntries E}
+    {s : E} {entries : Slice AuditedEntry} {base : AuditBase}
+    (h : commit_needs_no_key inst cache s entries base = ok true) :
+    ∀ k : Usize, k.val < entries.length → NeedsNoKeyAt inst cache s entries base k := by
+  unfold commit_needs_no_key commit_needs_no_key_loop at h
+  refine loop_ok_of (fun i : Usize => entries.length - i.val)
+    (fun i => ∀ k : Usize, k.val < i.val → NeedsNoKeyAt inst cache s entries base k)
+    (fun b => b = true → ∀ k : Usize, k.val < entries.length → NeedsNoKeyAt inst cache s entries base k)
+    ?_ 0#usize _ (fun k hk => absurd hk (by simp)) h rfl
+  intro i r hprev hb
+  have := commit_needs_no_key_body_ok i r hprev hb
+  rcases r with i2 | b
   · exact this
   · exact this
 
