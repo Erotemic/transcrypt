@@ -219,7 +219,24 @@ one.
     longer iterates positions, chooses whether to read, or decides that a
     failed read refuses (earlier a `failure` cell the adapter checked after
     each verdict); the handwritten Lean loop `hookPlan` and its per-entry
-    list `HookChecks` are gone.
+    list `HookChecks` are gone. Mutations (2026-11-02, extracted with the
+    pinned workflow, reverted): `index_verdict` skipping the last entry,
+    returning `Ok` after the first accepted entry, or moving past an `Err`
+    verdict, and `commit_verdict` moving past an `Err` verdict, each make the
+    Lean build fail in `index_verdict_body_ok` or `commit_verdict_body_ok`
+    (so `index_verdict_accepts`, `commit_verdict_accepts` and every theorem
+    above them is not built; the failures are of the proof against the
+    changed extracted code), and each is also caught by the core tests
+    `index_verdict_checks_every_entry_in_order` and
+    `commit_verdict_checks_every_examined_entry_in_order`. The adapter's
+    side is TESTED, not proved: `check_staged` ignoring `index_verdict`'s
+    `Err` fails 21 tests (among them
+    `foreign_truncated_and_plaintext_index_entries_fail_closed`,
+    `newly_protected_files_are_authenticated_by_the_hook`), passing it
+    `HEAD`'s selection flags instead of the index's fails 86, and the audit
+    ignoring `commit_verdict`'s `Err` fails 17 (among them
+    `pre_push_and_audit_refuse_plaintext_in_history`,
+    `the_keyed_audit_authenticates_records_at_unprotected_paths`).
   - **PROVED (audit per-entry check, 2026-11-02).** The audit's check of
     each examined entry of a commit is the core's `audit_check`
     (`audit_check_spec` = `AuditCheckOf`), in the hook's vocabulary, decided
