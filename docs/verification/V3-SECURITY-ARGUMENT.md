@@ -230,12 +230,15 @@ Every step is a theorem about the Aeneas translation of the production
 | Without the key: the envelope | `record_envelope_ok` (`record_envelope_ok_spec`) | `EnvelopeOk` |
 | Object replies are for the requested id and announced size | `parse_batch_header`, `blob_read` (`parse_batch_header_spec`, `blob_read_spec`) | `BatchHeader`, `blobReadSpec` |
 
-`hookPlan` is the loop in `transcrypt_rs::lifecycle::check_staged`: each
-iteration (`hookEntry`) is exactly the generated `staged_check` followed by
-the generated `staged_verdict`; it decides nothing itself. That the Rust loop
-visits every entry with these calls, reads the blob when `reads_blob` says
-so, and answers the verdict's questions truthfully (`HookAnswers`) is what
-remains of A4 here (reviewed, tested).
+The loop over the index is the generated `index_verdict`, which
+`transcrypt_rs::lifecycle::check_staged` calls once: `index_verdict_accepts`
+proves that when it returns `Ok`, every position was checked by
+`staged_check` with the run's inputs, its blob read for it when
+`reads_blob` says so, and passed by `staged_verdict`. What remains of A4
+here (reviewed, tested) is that the adapter makes that one call with the
+run's inputs and refuses unless it returns `Ok` (`HookAccepted`), and that
+its evidence reads each entry's blob and answers the verdict's questions
+truthfully about that entry (`HookAnswers`).
 
 ## Theorem 2: the hook repairs only local changes
 
@@ -321,7 +324,7 @@ anything about commits outside a keyed history (A13).
 | `Realizes inst prims σ` | the primitives compute AES-SIV / SHA-256 | A5 (with A9) | TESTED (vectors, differential) |
 | `hid : wireBytes id = σ.digest16 config` | the configuration id is the suite's digest | A5 | TESTED (vectors) |
 | `hcfg : ConfigCommitted g config` | the configuration used is the staged `.transcrypt/config` | A4 | REVIEWED + TESTED (`check_staged` compares the staged blob with it) |
-| `run : HookEvidence g E`, `hookPlan … = ok true`, `HookAnswers` (the three answers to `staged_verdict`); `RepairContracts` (Theorem 2: `provenance`, `decision`, and `record`, what each reported `RecordClass` means, `RecordEvidence`) | the adapter called the verified functions on these inputs, reports its evidence about each blob truthfully and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
+| `run : HookEvidence g E`, `HookAccepted` (the one call of `index_verdict` returned `Ok`), `HookAnswers` (the blob reads and the three answers to `staged_verdict`); `RepairContracts` (Theorem 2: `provenance`, `decision`, and `record`, what each reported `RecordClass` means, `RecordEvidence`) | the adapter called the verified functions on these inputs, reports its evidence about each blob truthfully and acted on their results | A4 | REVIEWED + TESTED; the functions PROVED |
 | Git commits `g.index` | the commit is the index the hook checked last | A22 (refines A7) | TESTED (every pre-commit test) |
 | `RepairContracts.incoming`, `.lazy` (Theorem 2) | the incoming commits are those named by the sequencing state | A23 | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | `HeadAuthentic` (corollary; only for an incremental check) | `HEAD`'s selected entries authenticate | A24 (selection form) | REVIEWED + TESTED (keyed audit, A13) |

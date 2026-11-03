@@ -43,7 +43,7 @@ one.
 | A1 | Protocol decision core is correct | PROVED |
 | A2 | Wire codec matches the spec | PROVED |
 | A3 | Charon/Aeneas/hax translation and Lean are sound | ASSUMED (pinned, reproduced) |
-| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs, each entry's check (`staged_check`) and its acceptance (`staged_verdict`) are verified functions; what remains is the loop and three answers (`HookAnswers`) |
+| A4 | Adapter invokes the core correctly and obeys it | Narrowed: structural (object-id snapshot, stamps, literal Git paths) + PROVED (model, incl. the end-to-end hook theorems) + REVIEWED + TESTED; the hook's inputs, each entry's check (`staged_check`), its acceptance (`staged_verdict`) and the loop over every index entry (`index_verdict`, `index_verdict_accepts`) are verified functions; what remains on the hook's check is one call (`HookAccepted`: the run's inputs, refuse unless `Ok`) and the evidence's answers about each entry's own blob and path (`HookAnswers`) |
 | A5 | `Keyed` realizes the primitive contract | TESTED (differential vs OpenSSL, exhaustive tampering) |
 | A6 | Private-mode credential agent relays core results faithfully | TESTED + REVIEWED; same-UID ACCEPTED RISK (optional mode) |
 | A7 | Git semantics | TESTED on Git 2.43; ASSUMED otherwise |
@@ -185,9 +185,9 @@ one.
     `is_attributes_file`) is deleted; its `.transcrypt/config` constant is
     the core's.
   - **PROVED (per-entry check, 2026-11-02).** The hook's final check of
-    every index entry, protected or not, is decided by the core, and the
-    Lean model of the loop only sequences the extracted functions:
-    `hookEntry` is `staged_check` followed by `staged_verdict`. The core
+    every index entry, protected or not, is decided by the core: each
+    position is `staged_check` followed by `staged_verdict` (since the next
+    item, inside the extracted loop `index_verdict`). The core
     decides which check an entry gets (`staged_check`, `staged_check_spec`
     = `StagedCheckOf`: a protected entry as `entry_check` says, settled
     only under the guard and when `HEAD` and `HEAD^1` hold its exact
@@ -199,11 +199,27 @@ one.
     the adapter three questions through the trait `StagedEvidence`, each only
     when its check needs it (visible in the extracted code, not a theorem;
     tested by `staged_verdicts_accept_only_what_their_check_requires`):
-    `is_record`, `opens`, `elsewhere`. The earlier handwritten acceptance
+    `is_record`, `opens`, `elsewhere`, each about the position it is asked
+    for. The earlier handwritten acceptance
     model (`hookEntry` with its own `open_record` call and `EntryAccepted`),
     the adapter's conjunction `settled = same_policy && in_head[i] &&
     in_parent[i]`, and the adapter's refusal of a record staged at an
     unprotected name are gone: all three are the core's now.
+  - **PROVED (the hook's loop, 2026-11-02).** The loop over the index is
+    the core's `index_verdict`, which the hook calls once
+    (`Listing::index_verdict`, with the snapshot's own bytes and ends):
+    `index_verdict_accepts` proves that if it returned `Ok`, every position
+    of the listing, in order, was checked by `staged_check` with the run's
+    `flags`, `in_head`, `in_parent`, `keyed`, `incremental` and guard, had
+    its blob read for that position exactly when `reads_blob` says so, and
+    passed `staged_verdict` (`PositionAccepted`); the first refusal stops it.
+    The answers are fallible in their type (`Option<bool>`): an answer the
+    adapter could not find is `None`, which the verdict refuses
+    (`StagedRefusal::Unanswered`), as is a failed read. So the adapter no
+    longer iterates positions, chooses whether to read, or decides that a
+    failed read refuses (earlier a `failure` cell the adapter checked after
+    each verdict); the handwritten Lean loop `hookPlan` and its per-entry
+    list `HookChecks` are gone.
   - **PROVED (audit per-entry check, 2026-11-02).** The audit's check of
     each examined entry of a commit is the core's `audit_check`
     (`audit_check_spec` = `AuditCheckOf`), in the hook's vocabulary, decided
@@ -214,20 +230,24 @@ one.
     the policy checks.
 - **Residual:** the adapter Rust itself is not proved. On the pre-commit
   path what remains reviewed and tested, not proved, is:
-  - the loop of `check_staged` (`HookEvidence`, `HookChecks`): for every
-    index position, in order, it calls `staged_check` with the run's
-    `flags`, `in_head` and `in_parent` (`held_records`), `key.is_some()`,
-    `incremental` and the guard; reads the entry's blob by its object id
-    when `reads_blob` says so (`HookContracts.objects`); calls
-    `staged_verdict`; and refuses on `Err` or when an answer could not be
-    found (a failed read);
-  - the three answers (`HookAnswers`), each about the entry's own blob and
-    path: `is_record` is `record_envelope_prefix_ok` of the blob's size and
-    first `ENVELOPE_PREFIX_LEN` bytes (A21 for the bytes); `opens` is
+  - the one call of the hook's check (`HookAccepted`, `HookEvidence`):
+    `check_staged` calls `index_verdict` once, with the parsed index
+    snapshot (its own bytes and ends, through `Listing`), the run's `flags`
+    (`parse_listing_attrs`), `in_head` and `in_parent` (`held_records`),
+    `key.is_some()`, `incremental`, the guard (`policy_unchanged`) and the
+    id of the configuration it compared with the staged
+    `.transcrypt/config`, and refuses the commit unless it returns `Ok`;
+  - the evidence (`HookAnswers`, `IndexEvidence` in `check_staged`), in
+    every state the run passes through (`HookAnswersIn`'s `good`, kept by
+    `read`), about position `i`'s own entry: `read(i)` reads that entry's
+    blob by its object id and `blob` returns it (A11, A21); `is_record(i)`
+    is `record_envelope_prefix_ok` of the blob's size and first
+    `ENVELOPE_PREFIX_LEN` bytes (A21 for the bytes); `opens(i)` is
     `Key::open` at the entry's path (the core's `open_record` with the stored
     key's primitives, A17, A5; in private mode the agent's call of the same
-    function, A6); `elsewhere` is the verified `blob_elsewhere` on the run's
-    ordered listings;
+    function, A6), on the blob `read` read for `i` or one read for it;
+    `elsewhere(i)` is the verified `blob_elsewhere` on the run's ordered
+    listings; each is `None` exactly when it could not be found;
   - on the audit path (`audit_commit`, `check_entries`): the facts passed
     to `audit_check` (`AuditContracts`: `held` is "not listed by
     `diff-tree`", `moved` is "the blob of a path `diff-tree` lists as
@@ -1152,7 +1172,7 @@ axioms. Statement details: [PROOF-STATUS](../../proofs/aeneas/v3/PROOF-STATUS.md
 | Which key a configuration is used with: the stored file's own key bytes, only for the config they authenticate (relative to `KeyScheduleRealizes`) | `authenticate_key_spec`, `unlock_stored_key_spec`, `stored_key_binds_file_operations` |
 | `cat-file --batch` reply framing | `parse_batch_header_spec`, `batchHeader_unique`, `blob_read_spec` |
 | Each entry's final check and its acceptance, decided by the core | `staged_check_spec`, `held_records_spec`, `reads_blob_spec`, `staged_verdict_ok`; composed in `hook_entry_checked` |
-| End to end: the hook accepts only authenticated ciphertext at the selected paths | `hook_accepts_only_authenticated_ciphertext` (with `hookPlan_accepts`, `hook_entry_checked`) |
+| End to end: the hook accepts only authenticated ciphertext at the selected paths | `hook_accepts_only_authenticated_ciphertext` (with `index_verdict_accepts`, `hook_entry_checked`) |
 | The A24 history: every keyed commit's records authenticate, whatever selects paths | `hook_records_authentic`, `keyed_check_records_authentic`, `records_authentic_of_checked_commit`, `config_unchanged_of_guard`, `keyed_history_authenticated_by_guard` (model) |
 | Index record parsing | `parse_index_entry_spec` |
 | Git filter-protocol packet lengths | `decode_pkt_len_spec` |
@@ -1181,7 +1201,7 @@ verified decision that gates it:
 | `unlock` / `init` | `authenticate_key` / `initialize_config` then `authenticate_key` (`ValidatedKey::unlock` / `initialize`) | config bytes / fresh salt | `Ok`, before any persistent effect |
 | Index and tree listings | `parse_listing` (whole listing: records, object ids), then `listing_fields` per entry | `ls-files --stage -z`, or `ls-tree -r -z` records rewritten to that shape (path copied verbatim) | `true` (else refuse) |
 | Object reads | `is_object_id`, then `parse_batch_header` and `blob_read` | oid from the parsed snapshot | `true`; one `cat-file --batch` per process; header exactly `<oid> blob <size>` (canonical decimal), `Read` only within 16 MiB, trailing LF checked |
-| `verify-index` and the hook's check | `parse_listing_attrs`, `first_unselectable`, `held_records`, `policy_unchanged`, then for every entry `staged_check`, `reads_blob` and `staged_verdict`, which asks `is_record` (`record_envelope_prefix_ok`), `opens` (`open_record` via `Key::open`) and `elsewhere` (`blob_elsewhere`) only as needed | snapshot listing; blobs by oid | `Ok` for every entry, no answer failed |
+| `verify-index` and the hook's check | `parse_listing_attrs`, `first_unselectable`, `held_records`, `policy_unchanged`, then one call of `index_verdict`: for every entry `staged_check`, `reads_blob` and `staged_verdict`, which asks `is_record` (`record_envelope_prefix_ok`), `opens` (`open_record` via `Key::open`) and `elsewhere` (`blob_elsewhere`) only as needed | snapshot listing; blobs by oid | `Ok` (a failed read or answer is `None` and refused by the core) |
 | `hydrate` publish | agent `Decrypt`, then `hydrate_action`, all entries before any write; stamp equality | blob by snapshot oid; worktree bytes and stamp via held dirfd | `Ok(Publish)` for all; `Keep` untouched |
 | `lock` flush | agent `Encrypt` (reseal), then `lock_action`; stamp equality | worktree bytes and stamp, blob by oid, reseal output | `Ok(Flush)`; `Keep` untouched |
 | Re-index after hydrate/lock | none (bookkeeping); listing compared with the verified snapshot afterwards | verified protected paths, raw, via `update-index -z --stdin` | listing unchanged |

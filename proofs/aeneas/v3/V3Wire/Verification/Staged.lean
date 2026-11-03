@@ -8,9 +8,12 @@ import V3Wire.Verification.Codec
 Functional refinement of the pre-commit hook's final check of each index
 entry: `held_records` (whether `HEAD` and `HEAD^1` hold an entry's exact
 record), `staged_check` (which check an entry gets, `StagedCheckOf`),
-`reads_blob` (whether the check reads the blob) and `staged_verdict`
+`reads_blob` (whether the check reads the blob), `staged_verdict`
 (whether the entry passes, `VerdictOk`, from the blob and the adapter's
-answers through `StagedEvidence`, each asked only when the check needs it).
+answers through `StagedEvidence`, each asked only when the check needs it)
+and `index_verdict`, the loop over the whole index that the hook calls once
+(`index_verdict_accepts`: if it accepted, every position was checked with the
+run's inputs and passed, `PositionAccepted`).
 -/
 
 open CoreModels Aeneas
@@ -267,43 +270,46 @@ theorem stagedCheckOf_reads {x : Entry} {protected_ inHead inParent keyed increm
 
 /-! ## `staged_verdict` -/
 
-/-- What an accepted verdict says about one entry, by its check: the
-    adapter's answers (`StagedEvidence`) that the verdict asked for, and the
-    envelope of the blob `record` for configuration id `id`. -/
-def VerdictOk {E : Type} (inst : StagedEvidence E) (ev : E) (record : Slice U8)
+/-- What an accepted verdict says about entry `i`, by its check: the
+    adapter's answers (`StagedEvidence`, in the evidence state `ev`) that the
+    verdict asked for, each found (`some`), and the envelope of the blob
+    `record` for configuration id `id`. -/
+def VerdictOk {E : Type} (inst : StagedEvidence E) (ev : E) (i : Usize) (record : Slice U8)
     (id : Std.Array U8 16#usize) : StagedCheck → Prop
   | .Skip => True
-  | .NotRecord => inst.is_record ev = ok false
-  | .AuthenticateIfRecord => inst.is_record ev = ok false ∨ inst.opens ev = ok true
-  | .Protected .Authenticate => inst.opens ev = ok true
+  | .NotRecord => inst.is_record ev i = ok (some false)
+  | .AuthenticateIfRecord => inst.is_record ev i = ok (some false) ∨ inst.opens ev i = ok (some true)
+  | .Protected .Authenticate => inst.opens ev i = ok (some true)
   | .Protected .Envelope => EnvelopeOk (sliceBytes record) (wireBytes id)
-  | .Protected .EnvelopeNotMoved => EnvelopeOk (sliceBytes record) (wireBytes id) ∧ inst.elsewhere ev = ok false
+  | .Protected .EnvelopeNotMoved => EnvelopeOk (sliceBytes record) (wireBytes id) ∧ inst.elsewhere ev i = ok (some false)
 
-/-- **The verdict.** If `staged_verdict` accepted an entry, the answers it
-    asked for and the blob's envelope are as its check requires
-    (`VerdictOk`). -/
-theorem staged_verdict_ok {E : Type} (inst : StagedEvidence E) (ev : E) (check : StagedCheck)
+/-- **The verdict.** If `staged_verdict` accepted entry `i`, the answers it
+    asked for were found and are as its check requires, and so is the blob's
+    envelope (`VerdictOk`). -/
+theorem staged_verdict_ok {E : Type} (inst : StagedEvidence E) (ev : E) (i : Usize) (check : StagedCheck)
     (record : Slice U8) (id : Std.Array U8 16#usize)
-    (h : staged_verdict inst ev check record id = ok (core.result.Result.Ok ())) :
-    VerdictOk inst ev record id check := by
+    (h : staged_verdict inst ev i check record id = ok (core.result.Result.Ok ())) :
+    VerdictOk inst ev i record id check := by
   unfold staged_verdict at h
   rcases check with _ | _ | _ | c
   · trivial
   · simp only [VerdictOk]
-    cases hr : inst.is_record ev with
-    | ok b => rw [hr] at h; cases b <;> simp_all
+    cases hr : inst.is_record ev i with
+    | ok o => rw [hr] at h; rcases o with _ | b <;> [simp at h; (cases b <;> simp_all)]
     | fail _ => rw [hr] at h; simp at h
     | div => rw [hr] at h; simp at h
   · simp only [VerdictOk]
-    cases hr : inst.is_record ev with
-    | ok b =>
+    cases hr : inst.is_record ev i with
+    | ok o =>
       rw [hr] at h
-      cases b
-      · exact Or.inl rfl
-      · cases ho : inst.opens ev with
-        | ok b1 => rw [ho] at h; cases b1 <;> simp_all
-        | fail _ => rw [ho] at h; simp at h
-        | div => rw [ho] at h; simp at h
+      rcases o with _ | b
+      · simp at h
+      · cases b
+        · exact Or.inl rfl
+        · cases ho : inst.opens ev i with
+          | ok o1 => rw [ho] at h; rcases o1 with _ | b1 <;> [simp at h; (cases b1 <;> simp_all)]
+          | fail _ => rw [ho] at h; simp at h
+          | div => rw [ho] at h; simp at h
     | fail _ => rw [hr] at h; simp at h
     | div => rw [hr] at h; simp at h
   · obtain ⟨r, hr, -⟩ := WP.spec_imp_exists (parse_file_header_spec record)
@@ -318,8 +324,8 @@ theorem staged_verdict_ok {E : Type} (inst : StagedEvidence E) (ev : E) (check :
         unfold protected_verdict at h
         rcases c with _ | _ | _
         · simp only [VerdictOk]
-          cases ho : inst.opens ev with
-          | ok b1 => rw [ho] at h; cases b1 <;> simp_all
+          cases ho : inst.opens ev i with
+          | ok o1 => rw [ho] at h; rcases o1 with _ | b1 <;> [simp at h; (cases b1 <;> simp_all)]
           | fail _ => rw [ho] at h; simp at h
           | div => rw [ho] at h; simp at h
         · obtain ⟨b1, hb1, hpost⟩ := WP.spec_imp_exists (record_envelope_ok_spec record id)
@@ -333,11 +339,210 @@ theorem staged_verdict_ok {E : Type} (inst : StagedEvidence E) (ev : E) (check :
           · simp at h
           · simp only [if_true] at h
             refine ⟨hpost.mp rfl, ?_⟩
-            cases he : inst.elsewhere ev with
-            | ok b2 => rw [he] at h; cases b2 <;> simp_all
+            cases he : inst.elsewhere ev i with
+            | ok o2 => rw [he] at h; rcases o2 with _ | b2 <;> [simp at h; (cases b2 <;> simp_all)]
             | fail _ => rw [he] at h; simp at h
             | div => rw [he] at h; simp at h
     · simp at h
+
+/-! ## `index_verdict`: the hook's check of every index entry -/
+
+/-- **Partial correctness of a loop.** If `loop body x` returned `y` and every
+    step of `body` from a state satisfying `inv` either stops with a result
+    satisfying `post` or continues to a state satisfying `inv` with a smaller
+    `measure`, then `y` satisfies `post`. -/
+theorem loop_ok_of {α β : Type} {body : α → RustM (ControlFlow α β)} (measure : α → Nat) (inv : α → Prop)
+    (post : β → Prop)
+    (hbody : ∀ x r, inv x → body x = ok r → match r with
+      | .cont x' => inv x' ∧ measure x' < measure x
+      | .done y => post y) :
+    ∀ x y, inv x → loop body x = ok y → post y := by
+  intro x
+  induction hm : measure x using Nat.strong_induction_on generalizing x with
+  | _ n ih =>
+    intro y hx h
+    rw [loop] at h
+    cases hb : body x with
+    | ok r =>
+      rw [hb] at h
+      have hstep := hbody x r hx hb
+      cases r with
+      | cont x' => exact ih (measure x') (hm ▸ hstep.2) x' rfl y hstep.1 h
+      | done y' =>
+        simp only [ok.injEq] at h
+        subst h
+        exact hstep
+    | fail e => rw [hb] at h; simp at h
+    | div => rw [hb] at h; simp at h
+
+/-- **What the check of position `k` was** in a run of `index_verdict` whose
+    evidence states satisfy `good`: in an evidence state `s` with `good s`,
+    the entry got its check `c` (`staged_check` on the run's inputs at `k`),
+    the verdict was given the blob `record` (`blob s`), read for entry `k`
+    when the check reads a blob (`read` at `k`, from a `good` state, returned
+    `true` and gave `s`), and the verdict accepted entry `k`
+    (`staged_verdict`). -/
+def PositionAccepted {E : Type} (inst : StagedEvidence E) (good : E → Prop) (index : Slice U8)
+    (ends : Slice Usize) (flags inHead inParent : Slice Bool) (keyed incremental guard : Bool)
+    (id : Std.Array U8 16#usize) (k : Usize) : Prop :=
+  ∃ (s : E) (c : StagedCheck) (record : Slice U8), good s ∧
+    staged_check index ends k flags inHead inParent keyed incremental guard = ok c ∧
+    (reads_blob c = ok true → ∃ s0, good s0 ∧ inst.read s0 k = ok (true, s)) ∧
+    inst.blob s = ok record ∧
+    staged_verdict inst s k c record id = ok (core.result.Result.Ok ())
+
+/-- What one step of `index_verdict`'s loop from position `i` leaves: it moves
+    on to `i2` in a `good` state with every position below `i2` accepted and
+    less of the listing left, or stops, accepting only with every position
+    accepted. -/
+def IndexStep {E : Type} (inst : StagedEvidence E) (good : E → Prop) (index : Slice U8) (ends : Slice Usize)
+    (flags inHead inParent : Slice Bool) (keyed incremental guard : Bool) (id : Std.Array U8 16#usize)
+    (i : Usize) : ControlFlow (E × Usize) ((core.result.Result Unit (Usize × StagedRefusal)) × E) → Prop
+  | .cont (t, i2) => (good t ∧ ∀ k : Usize, k.val < i2.val →
+      PositionAccepted inst good index ends flags inHead inParent keyed incremental guard id k) ∧
+      ends.length - i2.val < ends.length - i.val
+  | .done (res, _) => res = core.result.Result.Ok () → ∀ k : Usize, k.val < ends.length →
+      PositionAccepted inst good index ends flags inHead inParent keyed incremental guard id k
+
+/-- One step of `index_verdict`'s loop at position `i`, after every earlier
+    position was accepted (`IndexStep`): position `i` is accepted if the
+    loop moves on, and the loop stops accepting only past the last
+    position. -/
+theorem index_verdict_body_ok {E : Type} {inst : StagedEvidence E} (good : E → Prop)
+    (hread : ∀ s k b s', good s → inst.read s k = ok (b, s') → good s')
+    {index : Slice U8} {ends : Slice Usize} {flags inHead inParent : Slice Bool}
+    {keyed incremental guard : Bool} {id : Std.Array U8 16#usize} (s : E) (i : Usize)
+    (r : ControlFlow (E × Usize) ((core.result.Result Unit (Usize × StagedRefusal)) × E))
+    (hs : good s)
+    (hprev : ∀ k : Usize, k.val < i.val →
+      PositionAccepted inst good index ends flags inHead inParent keyed incremental guard id k)
+    (h : index_verdict_loop.body inst index ends flags inHead inParent keyed incremental guard id s i = ok r) :
+    IndexStep inst good index ends flags inHead inParent keyed incremental guard id i r := by
+  unfold index_verdict_loop.body at h
+  simp only [core.slice.Slice.len, rust_primitives.slice.slice_length, bind_tc_ok] at h
+  split at h
+  · rename_i hil
+    have hilt : i.val < ends.length := by scalar_tac
+    -- The verdict at `i` in state `t` on blob `record`, and the step it leads to.
+    have hnext : ∀ (c : StagedCheck) (t : E) (record : Slice U8) (v : core.result.Result Unit StagedRefusal),
+        staged_check index ends i flags inHead inParent keyed incremental guard = ok c →
+        good t → (reads_blob c = ok true → ∃ s0, good s0 ∧ inst.read s0 i = ok (true, t)) →
+        inst.blob t = ok record → staged_verdict inst t i c record id = ok v →
+        (match v with
+          | core.result.Result.Ok _ => do
+            let i2 ← i + 1#usize
+            ok (cont (t, i2))
+          | core.result.Result.Err refusal => ok (done (core.result.Result.Err (i, refusal), t)) :
+            RustM (ControlFlow (E × Usize) ((core.result.Result Unit (Usize × StagedRefusal)) × E))) = ok r →
+        IndexStep inst good index ends flags inHead inParent keyed incremental guard id i r := by
+      intro c t record v hc ht hrd hb hv hstep
+      rcases v with ⟨⟩ | refusal
+      · have hadd := UScalar.add_equiv i 1#usize
+        cases hi2 : i + 1#usize with
+        | fail _ => rw [hi2] at hstep; simp at hstep
+        | div => rw [hi2] at hstep; simp at hstep
+        | ok i2 =>
+          rw [hi2] at hstep hadd
+          simp only [bind_tc_ok, ok.injEq] at hstep
+          subst hstep
+          obtain ⟨-, hi2v, -⟩ := hadd
+          refine ⟨⟨ht, fun k hk => ?_⟩, by scalar_tac⟩
+          by_cases hki : k.val = i.val
+          · have hkeq : k = i := UScalar.eq_of_val_eq hki
+            subst hkeq
+            exact ⟨t, c, record, ht, hc, hrd, hb, hv⟩
+          · exact hprev k (by scalar_tac)
+      · simp only [ok.injEq] at hstep
+        subst hstep
+        simp [IndexStep]
+    cases hc : staged_check index ends i flags inHead inParent keyed incremental guard with
+    | fail _ => rw [hc] at h; simp at h
+    | div => rw [hc] at h; simp at h
+    | ok c =>
+    rw [hc] at h
+    simp only [bind_tc_ok] at h
+    cases hrb : reads_blob c with
+    | fail _ => rw [hrb] at h; simp at h
+    | div => rw [hrb] at h; simp at h
+    | ok b =>
+    rw [hrb] at h
+    simp only [bind_tc_ok] at h
+    cases b
+    · -- No blob read: the verdict in the current state.
+      simp only [Bool.false_eq_true, if_false] at h
+      cases hb : inst.blob s with
+      | fail _ => rw [hb] at h; simp at h
+      | div => rw [hb] at h; simp at h
+      | ok record =>
+      rw [hb] at h
+      simp only [bind_tc_ok] at h
+      cases hv : staged_verdict inst s i c record id with
+      | fail _ => rw [hv] at h; simp at h
+      | div => rw [hv] at h; simp at h
+      | ok v =>
+      rw [hv] at h
+      simp only [bind_tc_ok] at h
+      exact hnext c s record v hc hs (fun h' => absurd (hrb.symm.trans h') (by simp)) hb hv h
+    · -- The blob read for entry `i`, then the verdict in the state the read left.
+      simp only [if_true] at h
+      cases hr : inst.read s i with
+      | fail _ => rw [hr] at h; simp at h
+      | div => rw [hr] at h; simp at h
+      | ok p =>
+      obtain ⟨b1, t⟩ := p
+      rw [hr] at h
+      simp only [bind_tc_ok] at h
+      have ht : good t := hread s i b1 t hs hr
+      cases b1
+      · simp at h
+        subst h
+        simp [IndexStep]
+      · simp at h
+        cases hb : inst.blob t with
+        | fail _ => rw [hb] at h; simp at h
+        | div => rw [hb] at h; simp at h
+        | ok record =>
+        rw [hb] at h
+        simp only [bind_tc_ok] at h
+        cases hv : staged_verdict inst t i c record id with
+        | fail _ => rw [hv] at h; simp at h
+        | div => rw [hv] at h; simp at h
+        | ok v =>
+        rw [hv] at h
+        simp only [bind_tc_ok] at h
+        exact hnext c t record v hc ht (fun _ => ⟨s, hs, hr⟩) hb hv h
+  · rename_i hil
+    simp only [ok.injEq] at h
+    subst h
+    intro _ k hk
+    exact hprev k (by scalar_tac)
+
+/-- **The hook's loop checks every entry.** If `index_verdict` accepted, on
+    evidence whose states satisfy `good` from the start state `ev` on (a
+    property every `read` keeps), then every position of the index listing
+    was accepted (`PositionAccepted`): checked by `staged_check` with the
+    run's inputs at that position, its blob read for that position when the
+    check reads one, and passed by `staged_verdict`. -/
+theorem index_verdict_accepts {E : Type} {inst : StagedEvidence E} (good : E → Prop)
+    (hread : ∀ s k b s', good s → inst.read s k = ok (b, s') → good s')
+    {ev ev' : E} (hev : good ev) {index : Slice U8} {ends : Slice Usize} {flags inHead inParent : Slice Bool}
+    {keyed incremental guard : Bool} {id : Std.Array U8 16#usize}
+    (h : index_verdict inst ev index ends flags inHead inParent keyed incremental guard id =
+      ok (core.result.Result.Ok (), ev')) :
+    ∀ k : Usize, k.val < ends.length →
+      PositionAccepted inst good index ends flags inHead inParent keyed incremental guard id k := by
+  unfold index_verdict index_verdict_loop at h
+  refine loop_ok_of (fun x : E × Usize => ends.length - x.2.val)
+    (fun x => good x.1 ∧ ∀ k : Usize, k.val < x.2.val →
+      PositionAccepted inst good index ends flags inHead inParent keyed incremental guard id k)
+    (fun y => y.1 = core.result.Result.Ok () → ∀ k : Usize, k.val < ends.length →
+      PositionAccepted inst good index ends flags inHead inParent keyed incremental guard id k)
+    ?_ (ev, 0#usize) _ ⟨hev, fun k hk => absurd hk (by simp)⟩ h rfl
+  rintro ⟨s, i⟩ r ⟨hs, hprev⟩ hb
+  have := index_verdict_body_ok good hread s i r hs hprev hb
+  rcases r with ⟨t, i2⟩ | ⟨res, t⟩
+  · exact this
+  · exact this
 
 /-! ## `audit_check` -/
 

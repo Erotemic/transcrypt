@@ -5,8 +5,7 @@
 use std::{cell::RefCell, collections::{HashMap, HashSet}, env, fs, io, path::{Path, PathBuf}};
 use zeroize::Zeroizing;
 use transcrypt_v3_core::{
-    hydrate_action, is_reserved_path, lock_action, needs_record, parse_file_header, reads_blob, record_envelope_ok,
-    repair_plan, staged_verdict,
+    hydrate_action, is_reserved_path, lock_action, needs_record, parse_file_header, record_envelope_ok, repair_plan,
     HydrateAction, LockAction, RecordClass, RepairPlan, StagedEvidence, StagedRefusal, ATTRIBUTES_NAME, ID_LEN,
 };
 use crate::{
@@ -108,7 +107,8 @@ pub(crate) fn check_index(repo: &Repository, key: Option<&Key>) -> Result<Verifi
 /// `--amend` makes it the parent); `verify-index`, `lock`, `rekey`, merge
 /// commits and the audit still authenticate everything. The verified core
 /// decides each entry's check (`staged_check`) and whether it passes
-/// (`staged_verdict`); this reads what the check needs (`EntryEvidence`).
+/// (`staged_verdict`), for every entry in order (`index_verdict`); this
+/// answers what the checks ask (`IndexEvidence`).
 fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Listing, key: Option<&Key>, incremental: bool)
     -> Result<Verified, String>
 {
@@ -144,22 +144,16 @@ fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Lis
     let guard = snapshot.listing.policy_unchanged(head, &parent);
     // The keyless move check looks blobs up by object id (`blob_elsewhere`),
     // in orders built at most once.
-    let ordered = RefCell::new(None);
-    for (i, staged) in entries.iter().enumerate() {
-        let check = snapshot.listing.staged_check(i, flags, &in_head, &in_parent, key.is_some(), incremental, guard);
-        let record = if reads_blob(check) { Some(git_blob(repo, &staged.oid)?) } else { None };
-        let evidence = EntryEvidence {
-            repo, key, id: &id, i, staged, record: record.as_deref(), index: &snapshot.listing, head, parent: &parent,
-            ordered: &ordered, unopened: RefCell::new(None), failure: RefCell::new(None),
-        };
-        let verdict = staged_verdict(&evidence, check, record.as_deref().unwrap_or_default(), &id);
-        // An answer that could not be found refuses, whatever the verdict.
-        if let Some(failure) = evidence.failure.take() {
-            return Err(failure);
-        }
-        if let Err(refusal) = verdict {
-            return Err(refusal_message(refusal, &evidence));
-        }
+    let mut evidence = IndexEvidence {
+        repo, key, id: &id, index: &snapshot.listing, head, parent: &parent,
+        ordered: RefCell::new(None), blob: Vec::new(), read: None, unopened: RefCell::new(None),
+        failure: RefCell::new(None),
+    };
+    // Every entry, in order, by the verified `index_verdict`.
+    let verdict = snapshot.listing.index_verdict(&mut evidence, flags, &in_head, &in_parent, key.is_some(), incremental,
+        guard, &id);
+    if let Err((i, refusal)) = verdict {
+        return Err(refusal_message(refusal, &evidence, &entries[i]));
     }
     check_drift(repo, &id, &snapshot, &in_head, head, &parent)?;
     let Snapshot { listing, flags } = snapshot;
@@ -168,79 +162,99 @@ fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Lis
     Ok(Verified { listing, protected })
 }
 
-/// The adapter's answers about entry `i` of the index (`staged`) for the
-/// verified `staged_verdict`, each about the entry's own blob (by object
-/// id) and path, computed only when asked.
-struct EntryEvidence<'a, 'l> {
+/// The adapter's answers about the entries of the index (`index`) for the
+/// verified `index_verdict` and `staged_verdict`, each about entry `i`'s own
+/// blob (by object id) and path, computed only when asked.
+struct IndexEvidence<'a, 'l> {
     repo: &'a Repository,
     key: Option<&'a Key>,
     id: &'a [u8; ID_LEN],
-    i: usize,
-    staged: &'a Staged,
-    /// The blob, when the check read it (`reads_blob`).
-    record: Option<&'a [u8]>,
     index: &'l Listing,
     head: &'l Listing,
     parent: &'l Listing,
-    ordered: &'a RefCell<Option<[OrderedListing<'l>; 3]>>,
+    ordered: RefCell<Option<[OrderedListing<'l>; 3]>>,
+    /// The blob `read` read last, and the entry it is the blob of.
+    blob: Vec<u8>,
+    read: Option<usize>,
     /// Why the blob did not open, for the message.
     unopened: RefCell<Option<String>>,
-    /// Why an answer could not be found (a failed read): the check refuses.
+    /// Why an answer could not be found (a failed read), for the message.
     failure: RefCell<Option<String>>,
 }
 
-impl EntryEvidence<'_, '_> {
-    /// The answer `find` gives; if it fails, `false`, with the failure kept.
-    fn answer(&self, find: impl FnOnce() -> Result<bool, String>) -> bool {
-        find().unwrap_or_else(|e| {
-            self.failure.replace(Some(e));
-            false
-        })
+impl IndexEvidence<'_, '_> {
+    /// The answer `find` gives; if it fails, `None`, with the failure kept.
+    fn answer(&self, find: impl FnOnce() -> Result<bool, String>) -> Option<bool> {
+        find().map_err(|e| self.failure.replace(Some(e))).ok()
+    }
+
+    fn entry(&self, i: usize) -> &Staged {
+        &self.index.entries()[i]
     }
 }
 
-impl StagedEvidence for EntryEvidence<'_, '_> {
-    /// Its size and first bytes, decided by `record_envelope_prefix_ok`.
-    fn is_record(&self) -> bool {
-        self.answer(|| is_record(self.repo, &self.staged.oid, self.id))
-    }
-
-    /// `Key::open` at the entry's path: `open_record` with the stored key,
-    /// or the agent's.
-    fn opens(&self) -> bool {
-        let Some(key) = self.key else { return false };
-        let read;
-        let record = match self.record {
-            Some(record) => record,
-            None => match git_blob(self.repo, &self.staged.oid) {
-                Ok(blob) => { read = blob; &read },
-                Err(e) => return self.answer(|| Err(e)),
+impl StagedEvidence for IndexEvidence<'_, '_> {
+    /// The blob by its object id.
+    fn read(&mut self, i: usize) -> bool {
+        match git_blob(self.repo, &self.entry(i).oid) {
+            Ok(blob) => {
+                self.blob = blob;
+                self.read = Some(i);
+                true
             },
-        };
-        match key.open(&self.staged.path, record) {
-            Ok(_) => true,
             Err(e) => {
-                self.unopened.replace(Some(e));
+                self.failure.replace(Some(e));
                 false
             },
         }
     }
 
+    fn blob(&self) -> &[u8] {
+        &self.blob
+    }
+
+    /// Its size and first bytes, decided by `record_envelope_prefix_ok`.
+    fn is_record(&self, i: usize) -> Option<bool> {
+        self.answer(|| is_record(self.repo, &self.entry(i).oid, self.id))
+    }
+
+    /// `Key::open` at the entry's path: `open_record` with the stored key,
+    /// or the agent's.
+    fn opens(&self, i: usize) -> Option<bool> {
+        let Some(key) = self.key else { return Some(false) };
+        let staged = self.entry(i);
+        let read;
+        let record = if self.read == Some(i) {
+            &self.blob
+        } else {
+            match git_blob(self.repo, &staged.oid) {
+                Ok(blob) => { read = blob; &read },
+                Err(e) => return self.answer(|| Err(e)),
+            }
+        };
+        match key.open(&staged.path, record) {
+            Ok(_) => Some(true),
+            Err(e) => {
+                self.unopened.replace(Some(e));
+                Some(false)
+            },
+        }
+    }
+
     /// The verified `blob_elsewhere`.
-    fn elsewhere(&self) -> bool {
+    fn elsewhere(&self, i: usize) -> Option<bool> {
         self.answer(|| {
             let mut ordered = self.ordered.borrow_mut();
             let [index, head, parent] = get_or_try_init(&mut ordered, || -> Result<_, String> {
                 Ok([self.index.ordered()?, self.head.ordered()?, self.parent.ordered()?])
             })?;
-            Ok(index.blob_elsewhere(self.i, head, parent))
+            Ok(index.blob_elsewhere(i, head, parent))
         })
     }
 }
 
-/// The message for the verified refusal of `evidence`'s entry.
-fn refusal_message(refusal: StagedRefusal, evidence: &EntryEvidence) -> String {
-    let staged = evidence.staged;
+/// The message for the verified refusal of entry `staged` of `evidence`.
+fn refusal_message(refusal: StagedRefusal, evidence: &IndexEvidence, staged: &Staged) -> String {
     let name = staged.name();
     let unopened = || evidence.unopened.take().unwrap_or_default();
     match refusal {
@@ -265,6 +279,8 @@ fn refusal_message(refusal: StagedRefusal, evidence: &EntryEvidence) -> String {
             configuration that does not open there ({}): a record moved without re-encryption, or a forgery, \
             which an attribute change would protect unauthenticated. Remove it, or stage its plaintext",
             unopened()),
+        StagedRefusal::Unanswered => format!("staged {name}: {}",
+            evidence.failure.take().unwrap_or_else(|| "cannot be read".into())),
     }
 }
 

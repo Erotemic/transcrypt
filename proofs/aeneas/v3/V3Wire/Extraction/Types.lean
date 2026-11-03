@@ -184,7 +184,7 @@ inductive StagedCheck where
 | Protected : EntryCheck → StagedCheck
 
 /-- [transcrypt_v3_core::Fields]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1298:0-1304:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1345:0-1351:1
     Visibility: public -/
 structure Fields where
   start : Std.Usize
@@ -194,15 +194,17 @@ structure Fields where
   regular : Bool
 
 /-- Trait declaration: [transcrypt_v3_core::StagedEvidence]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1045:0-1056:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1047:0-1065:1
     Visibility: public -/
 structure StagedEvidence (Self : Type) where
-  is_record : Self → RustM Bool
-  opens : Self → RustM Bool
-  elsewhere : Self → RustM Bool
+  read : Self → Std.Usize → RustM (Bool × Self)
+  blob : Self → RustM (Slice Std.U8)
+  is_record : Self → Std.Usize → RustM (core.option.Option Bool)
+  opens : Self → Std.Usize → RustM (core.option.Option Bool)
+  elsewhere : Self → Std.Usize → RustM (core.option.Option Bool)
 
 /-- [transcrypt_v3_core::StagedRefusal]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1060:0-1078:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1069:0-1089:1
     Visibility: public -/
 @[discriminant isize]
 inductive StagedRefusal where
@@ -213,9 +215,10 @@ inductive StagedRefusal where
 | Moved : StagedRefusal
 | UnprotectedRecord : StagedRefusal
 | UnprotectedForgery : StagedRefusal
+| Unanswered : StagedRefusal
 
 /-- [transcrypt_v3_core::StoredKey]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1831:0-1843:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1878:0-1890:1
     Visibility: public -/
 @[discriminant isize]
 inductive StoredKey where
@@ -225,13 +228,13 @@ inductive StoredKey where
 | Unlocked : StoredKey
 
 /-- Trait declaration: [transcrypt_v3_core::V3KeySchedule]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1869:0-1873:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1916:0-1920:1
     Visibility: public -/
 structure V3KeySchedule (Self : Type) where
   from_key : Slice Std.U8 → RustM (core.option.Option Self)
 
 /-- [transcrypt_v3_core::BlobRead]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2003:0-2010:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2050:0-2057:1
     Visibility: public -/
 @[discriminant isize]
 inductive BlobRead where
@@ -240,7 +243,7 @@ inductive BlobRead where
 | TooLarge : BlobRead
 
 /-- [transcrypt_v3_core::AuditBase]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2026:0-2036:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2073:0-2083:1
     Visibility: public -/
 @[discriminant isize]
 inductive AuditBase where
@@ -248,7 +251,7 @@ inductive AuditBase where
 | Parent : AuditBase
 
 /-- [transcrypt_v3_core::AuditedEntry]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2041:0-2051:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2088:0-2098:1
     Visibility: public -/
 structure AuditedEntry where
   regular : Bool

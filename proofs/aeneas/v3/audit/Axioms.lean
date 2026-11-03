@@ -152,10 +152,11 @@ open Transcrypt.V3Verification
 #print axioms reads_blob_spec
 #print axioms stagedCheckOf_reads
 #print axioms staged_verdict_ok
+#print axioms loop_ok_of
+#print axioms index_verdict_body_ok
+#print axioms index_verdict_accepts
 #print axioms audit_check_spec
 -- EndToEnd
-#print axioms hookPlan_accepts
-#print axioms hookEntry_accepted
 #print axioms not_envelope_of_prefix
 #print axioms hook_membership
 #print axioms hook_entry_checked

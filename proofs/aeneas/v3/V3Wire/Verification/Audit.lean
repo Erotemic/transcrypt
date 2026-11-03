@@ -83,7 +83,7 @@ def auditEntry {E : Type} (ans : StagedEvidence E) (id : Std.Array U8 16#usize) 
   match c with
   | none => ok false
   | some check => do
-    let r ← staged_verdict ans e.evidence check e.record id
+    let r ← staged_verdict ans e.evidence 0#usize check e.record id
     match r with
     | core.result.Result.Ok _ => ok true
     | core.result.Result.Err _ => ok false
@@ -121,7 +121,7 @@ theorem auditPlan_accepts {E : Type} {ans : StagedEvidence E} {id : Std.Array U8
 theorem auditEntry_accepted {E : Type} {ans : StagedEvidence E} {id : Std.Array U8 16#usize} {keyed : Bool}
     {base : AuditBase} {e : AuditEntry E} (h : auditEntry ans id keyed base e = ok true) :
     ∃ check, audit_check e.facts e.path keyed base = ok (some check) ∧
-      staged_verdict ans e.evidence check e.record id = ok (core.result.Result.Ok ()) := by
+      staged_verdict ans e.evidence 0#usize check e.record id = ok (core.result.Result.Ok ()) := by
   unfold auditEntry at h
   cases hc : audit_check e.facts e.path keyed base with
   | ok c =>
@@ -131,7 +131,7 @@ theorem auditEntry_accepted {E : Type} {ans : StagedEvidence E} {id : Std.Array 
     · simp at h
     · refine ⟨check, rfl, ?_⟩
       dsimp only at h
-      cases hv : staged_verdict ans e.evidence check e.record id with
+      cases hv : staged_verdict ans e.evidence 0#usize check e.record id with
       | ok r =>
         rw [hv] at h
         rcases r with ⟨⟩ | x
@@ -189,14 +189,14 @@ structure AuditContracts {E : Type} (g : GitState) (c : AuditedCommit) (base : A
 structure AuditAnswers {E : Type} (ans : StagedEvidence E) (pinst : V3Primitives P) (prims : P)
     (config : Std.Array U8 55#usize) (id : Std.Array U8 16#usize) (g : GitState) (es : List (AuditEntry E)) :
     Prop where
-  is_record : ∀ e ∈ es, ans.is_record e.evidence ⦃ b => b = false → ∃ content, g.blob e.entry.oid = some content ∧
+  is_record : ∀ e ∈ es, ans.is_record e.evidence 0#usize ⦃ o => o = some false → ∃ content, g.blob e.entry.oid = some content ∧
       (maxRecord < content.length ∨ ∃ (size : Usize) (pre : Slice U8), size.val = content.length ∧
         sliceBytes pre = content.take Transcrypt.V3Wire.fileMinLen ∧
         record_envelope_prefix_ok size pre id = ok false) ⦄
-  opens : ∀ e ∈ es, ans.opens e.evidence ⦃ b => b = true → ∃ (path record buf out : Slice U8),
+  opens : ∀ e ∈ es, ans.opens e.evidence 0#usize ⦃ o => o = some true → ∃ (path record buf out : Slice U8),
       sliceBytes path = e.entry.path ∧ GitObject g e.entry.oid record ∧
       open_record pinst prims config path record buf = ok (core.result.Result.Ok (), out) ⦄
-  elsewhere : ∀ e ∈ es, ans.elsewhere e.evidence ⦃ b => b = e.facts.moved ⦄
+  elsewhere : ∀ e ∈ es, ans.elsewhere e.evidence 0#usize ⦃ o => o = some e.facts.moved ⦄
 
 /-- **A19, for the audit.** The audit's selection of every non-reserved
     entry it did not examine is `pfilter`'s, the selection of the parent's
@@ -247,11 +247,11 @@ theorem audit_entry_checked {E : Type} {ans : StagedEvidence E} {pinst : V3Primi
   obtain ⟨check, hc, hv⟩ := auditEntry_accepted hacc
   have hcheck := spec_result (audit_check_spec e.facts e.path keyed base) hc
   rw [hcon.path e he] at hcheck
-  have hverdict := staged_verdict_ok ans e.evidence check e.record id hv
+  have hverdict := staged_verdict_ok ans e.evidence 0#usize check e.record id hv
   have hreg := hcon.regular e he
   have hsel := hcon.selected e he
   -- An accepted `opens` answer: the blob authenticates at the entry's path.
-  have hopen : ans.opens e.evidence = ok true → keyed = true →
+  have hopen : ans.opens e.evidence 0#usize = ok (some true) → keyed = true →
       ∃ content, g.blob e.entry.oid = some content ∧ AuthenticatedAt σ (wireBytes config) e.entry content := by
     intro ho hk
     obtain ⟨path, record, buf, out, hpath, hobj, hop⟩ := spec_result (hans.opens e he) ho rfl
@@ -259,7 +259,7 @@ theorem audit_entry_checked {E : Type} {ans : StagedEvidence E} {pinst : V3Primi
     rw [hpath] at hor
     exact ⟨_, hobj, _, hor⟩
   -- A record `is_record` denied has no envelope.
-  have hnot : ans.is_record e.evidence = ok false → RecordAuthentic σ (wireBytes config) g e.entry := by
+  have hnot : ans.is_record e.evidence 0#usize = ok (some false) → RecordAuthentic σ (wireBytes config) g e.entry := by
     intro hr
     obtain ⟨content, hc', hpre⟩ := spec_result (hans.is_record e he) hr rfl
     exact ⟨content, hc', fun henv => absurd (hid ▸ henv) (not_envelope_of_prefix hpre)⟩
@@ -320,6 +320,7 @@ theorem audit_entry_checked {E : Type} {ans : StagedEvidence E} {pinst : V3Primi
       obtain ⟨henv, hel⟩ := hverdict
       have hmv : e.facts.moved = false := by
         have := spec_result (hans.elsewhere e he) hel
+        simp only [Option.some.injEq] at this
         exact this.symm
       have hnd : e.entry.oid ∉ c.deleted := fun hd => by
         rw [(hcon.moved e he).mpr hd] at hmv; cases hmv

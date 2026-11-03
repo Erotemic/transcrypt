@@ -1038,21 +1038,30 @@ pub fn reads_blob(check: StagedCheck) -> bool {
     }
 }
 
-/// What the final check knows about one staged entry besides its blob. The
-/// adapter answers each question about the entry's own blob and path, and
-/// `staged_verdict` asks only what its check needs, so an expensive answer
-/// (a read, a decryption, a lookup by object id) is computed only then.
+/// What the final check knows about the entries of one snapshot besides
+/// their listing. The adapter answers each question about entry `i`'s own
+/// blob (by object id) and path, and `staged_verdict` asks only what its
+/// check needs, so an expensive answer (a read, a decryption, a lookup by
+/// object id) is computed only then. An answer the adapter cannot find (a
+/// failed read) is `None`, which refuses the entry.
 pub trait StagedEvidence {
-    /// Whether the blob has this configuration's envelope: the adapter reads
-    /// its size and first `ENVELOPE_PREFIX_LEN` bytes and decides with
-    /// `record_envelope_prefix_ok`.
-    fn is_record(&self) -> bool;
-    /// Whether the blob authenticates at the entry's path under the
+    /// Read entry `i`'s whole blob, which `blob` then returns; `false` if it
+    /// cannot be read. Asked only when the check reads the blob
+    /// (`reads_blob`).
+    fn read(&mut self, i: usize) -> bool;
+    /// The blob the last successful `read` read.
+    fn blob(&self) -> &[u8];
+    /// Whether entry `i`'s blob has this configuration's envelope: the
+    /// adapter reads its size and first `ENVELOPE_PREFIX_LEN` bytes and
+    /// decides with `record_envelope_prefix_ok`.
+    fn is_record(&self, i: usize) -> Option<bool>;
+    /// Whether entry `i`'s blob authenticates at its path under the
     /// configuration (`open_record`, with the key).
-    fn opens(&self) -> bool;
-    /// Whether the blob is at another path of the index, `HEAD` or `HEAD^1`
-    /// (`blob_elsewhere`).
-    fn elsewhere(&self) -> bool;
+    fn opens(&self, i: usize) -> Option<bool>;
+    /// Whether entry `i`'s blob is at another path of the index, `HEAD` or
+    /// `HEAD^1` (`blob_elsewhere`), or, in the audit, is the blob of a path
+    /// the commit deletes.
+    fn elsewhere(&self, i: usize) -> Option<bool>;
 }
 
 /// Why the final check refuses an entry.
@@ -1075,24 +1084,25 @@ pub enum StagedRefusal {
     /// An unprotected file that is a record of this configuration and does
     /// not authenticate at its path.
     UnprotectedForgery,
+    /// An answer the check needs could not be found (a failed read).
+    Unanswered,
 }
 
-/// The check of a protected entry whose blob `record` has the header of
+/// The check of protected entry `i`, whose blob `record` has the header of
 /// this configuration `id`.
 fn protected_verdict<E: StagedEvidence>(
     evidence: &E,
+    i: usize,
     check: EntryCheck,
     record: &[u8],
     id: &[u8; ID_LEN],
 ) -> Result<(), StagedRefusal> {
     match check {
-        EntryCheck::Authenticate => {
-            if evidence.opens() {
-                Ok(())
-            } else {
-                Err(StagedRefusal::Authentication)
-            }
-        }
+        EntryCheck::Authenticate => match evidence.opens(i) {
+            Some(true) => Ok(()),
+            Some(false) => Err(StagedRefusal::Authentication),
+            None => Err(StagedRefusal::Unanswered),
+        },
         EntryCheck::Envelope => {
             if record_envelope_ok(record, id) {
                 Ok(())
@@ -1103,55 +1113,92 @@ fn protected_verdict<E: StagedEvidence>(
         EntryCheck::EnvelopeNotMoved => {
             if !record_envelope_ok(record, id) {
                 Err(StagedRefusal::Envelope)
-            } else if evidence.elsewhere() {
-                Err(StagedRefusal::Moved)
             } else {
-                Ok(())
+                match evidence.elsewhere(i) {
+                    Some(false) => Ok(()),
+                    Some(true) => Err(StagedRefusal::Moved),
+                    None => Err(StagedRefusal::Unanswered),
+                }
             }
         }
     }
 }
 
-/// Whether one staged entry passes its check (`staged_check`), for the
+/// Whether entry `i` passes its check (`staged_check`), for the
 /// configuration `id`. `record` is the entry's blob when the check reads it
 /// (`reads_blob`), and is not used otherwise. `evidence` is asked only what
 /// the check needs: `is_record` only of an unprotected entry, `opens` only
 /// to authenticate (an unprotected entry only once it is a record), and
 /// `elsewhere` only of an entry checked without the key that has the
-/// envelope.
+/// envelope. An answer that could not be found refuses (`Unanswered`).
 pub fn staged_verdict<E: StagedEvidence>(
     evidence: &E,
+    i: usize,
     check: StagedCheck,
     record: &[u8],
     id: &[u8; ID_LEN],
 ) -> Result<(), StagedRefusal> {
     match check {
         StagedCheck::Skip => Ok(()),
-        StagedCheck::NotRecord => {
-            if evidence.is_record() {
-                Err(StagedRefusal::UnprotectedRecord)
-            } else {
-                Ok(())
-            }
-        }
-        StagedCheck::AuthenticateIfRecord => {
-            if !evidence.is_record() || evidence.opens() {
-                Ok(())
-            } else {
-                Err(StagedRefusal::UnprotectedForgery)
-            }
-        }
+        StagedCheck::NotRecord => match evidence.is_record(i) {
+            Some(false) => Ok(()),
+            Some(true) => Err(StagedRefusal::UnprotectedRecord),
+            None => Err(StagedRefusal::Unanswered),
+        },
+        StagedCheck::AuthenticateIfRecord => match evidence.is_record(i) {
+            Some(false) => Ok(()),
+            Some(true) => match evidence.opens(i) {
+                Some(true) => Ok(()),
+                Some(false) => Err(StagedRefusal::UnprotectedForgery),
+                None => Err(StagedRefusal::Unanswered),
+            },
+            None => Err(StagedRefusal::Unanswered),
+        },
         StagedCheck::Protected(entry) => match parse_file_header(record) {
             Err(_) => Err(StagedRefusal::Plaintext),
             Ok(found) => {
                 if bytes_eq(&found, id) {
-                    protected_verdict(evidence, entry, record, id)
+                    protected_verdict(evidence, i, entry, record, id)
                 } else {
                     Err(StagedRefusal::OtherConfig)
                 }
             }
         },
     }
+}
+
+/// The pre-commit hook's final check of the whole index listing (`index`,
+/// `index_ends`), for the configuration `id`: every entry, in order, gets
+/// its check (`staged_check`, with the run's `flags`, `in_head`,
+/// `in_parent`, `keyed`, `incremental` and `guard`), its blob is read when
+/// the check reads it (`reads_blob`; a failed read refuses), and it must
+/// pass (`staged_verdict`). The first refusal stops the check and names the
+/// entry's position.
+#[allow(clippy::too_many_arguments)]
+pub fn index_verdict<E: StagedEvidence>(
+    evidence: &mut E,
+    index: &[u8],
+    index_ends: &[usize],
+    flags: &[bool],
+    in_head: &[bool],
+    in_parent: &[bool],
+    keyed: bool,
+    incremental: bool,
+    guard: bool,
+    id: &[u8; ID_LEN],
+) -> Result<(), (usize, StagedRefusal)> {
+    let mut i = 0;
+    while i < index_ends.len() {
+        let check = staged_check(index, index_ends, i, flags, in_head, in_parent, keyed, incremental, guard);
+        if reads_blob(check) && !evidence.read(i) {
+            return Err((i, StagedRefusal::Unanswered));
+        }
+        match staged_verdict(&*evidence, i, check, evidence.blob(), id) {
+            Ok(()) => i += 1,
+            Err(refusal) => return Err((i, refusal)),
+        }
+    }
+    Ok(())
 }
 
 /// Length of a pkt-line header: the packet length in hexadecimal digits.

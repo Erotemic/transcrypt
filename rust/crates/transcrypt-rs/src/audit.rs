@@ -355,20 +355,16 @@ fn check_entries<'e>(repo: &Repository, state: &mut AuditState, commit: &str, co
         };
         let checked = CheckedRecord { oid: entry.oid.clone(), config_oid: config_oid.clone(), path: entry.path.clone() };
         if settled_by_cache(check) && state.checked.contains(&checked) { continue; }
-        let record = if reads_blob(check) {
-            Some(git_blob(repo, &entry.oid).map_err(|e| format!("{}: {e}", at(commit, &entry.path)))?)
-        } else {
-            None
-        };
-        let evidence = AuditEvidence {
-            repo, key: key.as_ref(), id, entry, moved: facts.moved, record: record.as_deref(),
+        let mut evidence = AuditEvidence {
+            repo, key: key.as_ref(), id, entry, moved: facts.moved, blob: Vec::new(), read: false,
             unopened: RefCell::new(None), failure: RefCell::new(None),
         };
-        let verdict = staged_verdict(&evidence, check, record.as_deref().unwrap_or_default(), id);
-        // An answer that could not be found refuses, whatever the verdict.
-        if let Some(failure) = evidence.failure.take() {
-            return Err(format!("{}: {failure}", at(commit, &entry.path)));
-        }
+        // The audit's evidence is about this one entry (position 0).
+        let verdict = if reads_blob(check) && !evidence.read(0) {
+            Err(StagedRefusal::Unanswered)
+        } else {
+            staged_verdict(&evidence, 0, check, evidence.blob(), id)
+        };
         if let Err(refusal) = verdict {
             return Err(audit_refusal(refusal, commit, &evidence, moved.get(&entry.oid).copied()));
         }
@@ -392,49 +388,71 @@ struct AuditEvidence<'a> {
     entry: &'a Staged,
     /// Whether the blob is that of a path the commit deletes.
     moved: bool,
-    /// The blob, when the check read it (`reads_blob`).
-    record: Option<&'a [u8]>,
+    /// The blob, once `read` read it.
+    blob: Vec<u8>,
+    read: bool,
     /// Why the blob did not open, for the message.
     unopened: RefCell<Option<String>>,
-    /// Why an answer could not be found (a failed read): the check refuses.
+    /// Why an answer could not be found (a failed read), for the message.
     failure: RefCell<Option<String>>,
 }
 
-impl StagedEvidence for AuditEvidence<'_> {
-    /// Its size and first bytes, decided by `record_envelope_prefix_ok`.
-    fn is_record(&self) -> bool {
-        crate::git::is_record(self.repo, &self.entry.oid, self.id).unwrap_or_else(|e| {
-            self.failure.replace(Some(e));
-            false
-        })
+impl AuditEvidence<'_> {
+    /// The answer `find` gives; if it fails, `None`, with the failure kept.
+    fn answer(&self, find: impl FnOnce() -> Result<bool, String>) -> Option<bool> {
+        find().map_err(|e| self.failure.replace(Some(e))).ok()
     }
+}
 
-    /// `Key::open` at the entry's path.
-    fn opens(&self) -> bool {
-        let Some(key) = self.key else { return false };
-        let read;
-        let record = match self.record {
-            Some(record) => record,
-            None => match git_blob(self.repo, &self.entry.oid) {
-                Ok(blob) => { read = blob; &read },
-                Err(e) => {
-                    self.failure.replace(Some(e));
-                    return false;
-                },
+impl StagedEvidence for AuditEvidence<'_> {
+    /// The blob by its object id.
+    fn read(&mut self, _: usize) -> bool {
+        match git_blob(self.repo, &self.entry.oid) {
+            Ok(blob) => {
+                self.blob = blob;
+                self.read = true;
+                true
             },
-        };
-        match key.open(&self.entry.path, record) {
-            Ok(_) => true,
             Err(e) => {
-                self.unopened.replace(Some(e));
+                self.failure.replace(Some(e));
                 false
             },
         }
     }
 
+    fn blob(&self) -> &[u8] {
+        &self.blob
+    }
+
+    /// Its size and first bytes, decided by `record_envelope_prefix_ok`.
+    fn is_record(&self, _: usize) -> Option<bool> {
+        self.answer(|| crate::git::is_record(self.repo, &self.entry.oid, self.id))
+    }
+
+    /// `Key::open` at the entry's path.
+    fn opens(&self, _: usize) -> Option<bool> {
+        let Some(key) = self.key else { return Some(false) };
+        let read;
+        let record = if self.read {
+            &self.blob
+        } else {
+            match git_blob(self.repo, &self.entry.oid) {
+                Ok(blob) => { read = blob; &read },
+                Err(e) => return self.answer(|| Err(e)),
+            }
+        };
+        match key.open(&self.entry.path, record) {
+            Ok(_) => Some(true),
+            Err(e) => {
+                self.unopened.replace(Some(e));
+                Some(false)
+            },
+        }
+    }
+
     /// Moved: the blob of a path this commit deletes.
-    fn elsewhere(&self) -> bool {
-        self.moved
+    fn elsewhere(&self, _: usize) -> Option<bool> {
+        Some(self.moved)
     }
 }
 
@@ -455,6 +473,8 @@ fn audit_refusal(refusal: StagedRefusal, commit: &str, evidence: &AuditEvidence,
         StagedRefusal::UnprotectedForgery => format!("{here}: not protected, but holds a record of its \
             configuration that does not open there ({}): a forgery, or a record copied from another path, \
             which an attribute change would protect unauthenticated", unopened()),
+        StagedRefusal::Unanswered => format!("{here}: {}",
+            evidence.failure.take().unwrap_or_else(|| "cannot be read".into())),
     }
 }
 

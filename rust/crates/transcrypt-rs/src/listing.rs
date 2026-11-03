@@ -6,10 +6,9 @@
 
 use std::fmt;
 use transcrypt_v3_core::{
-    blob_elsewhere, entry_provenance, first_unselectable, held_entries, held_records, listing_fields, next_move_source,
-    object_order_ok, parse_listing as parse_listing_ends, parse_listing_attrs, policy_unchanged, staged_check, Provenance,
-    StagedCheck, EXECUTABLE_MODE,
-    OID_START, REGULAR_MODE,
+    blob_elsewhere, entry_provenance, first_unselectable, held_entries, held_records, index_verdict, listing_fields,
+    next_move_source, object_order_ok, parse_listing as parse_listing_ends, parse_listing_attrs, policy_unchanged,
+    Provenance, StagedEvidence, StagedRefusal, EXECUTABLE_MODE, ID_LEN, OID_START, REGULAR_MODE,
 };
 use crate::git::{git_records, ObjectId, MODE_LEN};
 
@@ -184,15 +183,19 @@ impl Listing {
         policy_unchanged(&self.bytes, &self.ends, &head.bytes, &head.ends, &parent.bytes, &parent.ends)
     }
 
-    /// How the pre-commit hook's final check examines entry `i` (the
-    /// verified `staged_check`), from Git's selection `flags`, whether
-    /// `HEAD` and `HEAD^1` hold each entry (`records_in`), whether the check is
-    /// `keyed` and `incremental`, and the settled `guard` (`policy_unchanged`).
+    /// The pre-commit hook's final check of this listing (the index) under
+    /// the configuration `id` (the verified `index_verdict`): every entry, in
+    /// order, checked as `staged_check` says from Git's selection `flags`,
+    /// whether `HEAD` and `HEAD^1` hold each entry (`records_in`), whether the
+    /// check is `keyed` and `incremental`, and the settled `guard`
+    /// (`policy_unchanged`), and passed by `staged_verdict` on `evidence`'s
+    /// answers; or the position of the first entry refused, and why.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn staged_check(&self, i: usize, flags: &[bool], in_head: &[bool], in_parent: &[bool], keyed: bool,
-        incremental: bool, guard: bool) -> StagedCheck
+    pub(crate) fn index_verdict<E: StagedEvidence>(&self, evidence: &mut E, flags: &[bool], in_head: &[bool],
+        in_parent: &[bool], keyed: bool, incremental: bool, guard: bool, id: &[u8; ID_LEN])
+        -> Result<(), (usize, StagedRefusal)>
     {
-        staged_check(&self.bytes, &self.ends, i, flags, in_head, in_parent, keyed, incremental, guard)
+        index_verdict(evidence, &self.bytes, &self.ends, flags, in_head, in_parent, keyed, incremental, guard, id)
     }
 
     /// Where the content of entry `i` came from (the verified
