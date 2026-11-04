@@ -1,9 +1,14 @@
 name: Tests
 
+# Documentation-only changes run nothing: no job reads docs/ or Markdown
+# (the two specification files bundled by export_v3_proof_inputs.py are not
+# checked here).
 on:
   push:
     branches: [master, "work/**"]
+    paths-ignore: ["**/*.md", "docs/**", "visualizations/**"]
   pull_request:
+    paths-ignore: ["**/*.md", "docs/**", "visualizations/**"]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +24,30 @@ env:
   RUST_TOOLCHAIN: "1.98.0"
 
 jobs:
+  plan:
+    # Which matrix to run. A push to a work/** branch runs one Linux leg of
+    # every check. The full matrix (macOS, Windows, arm64, Ubuntu 22.04, the
+    # BSD VMs and the release archives) runs for pull requests, master,
+    # manual runs, and a push whose last commit message contains [ci full].
+    # The macOS arm64 runners are scarce; they are what failed to be acquired.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.tier.outputs.full }}
+    steps:
+      - id: tier
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          full=true
+          if [ "$EVENT" = push ] && [ "$REF" != refs/heads/master ]; then
+            case "$MESSAGE" in *"[ci full]"*) ;; *) full=false ;; esac
+          fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "Full matrix: $full" >> "$GITHUB_STEP_SUMMARY"
+
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -42,12 +71,13 @@ jobs:
 
   test:
     # The Bash implementation (v2) and its v3 Bats suites.
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-15]
+        os: ${{ fromJSON(needs.plan.outputs.full == 'true' && '["ubuntu-22.04","ubuntu-24.04","macos-15"]' || '["ubuntu-24.04"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Bash 4.4 or later (macOS ships 3.2, which Bash v2 cannot run on)
@@ -81,12 +111,13 @@ jobs:
     # ubuntu-22.04 has Git 2.34, the oldest Git the adapter supports. Windows
     # builds with the MSVC toolchain here (releases cross-build with mingw;
     # the release workflow tests that binary on Windows).
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.plan.outputs.full == 'true' && '["ubuntu-24.04","ubuntu-22.04","ubuntu-24.04-arm","macos-latest","windows-latest"]' || '["ubuntu-24.04"]') }}
     defaults:
       run:
         shell: bash
@@ -144,6 +175,8 @@ jobs:
   freebsd:
     # The v3 suite and the legacy-v2 parity on FreeBSD (in a VM on a Linux
     # runner), as an unprivileged user like the other runners.
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -175,6 +208,8 @@ jobs:
     # The v3 suite and the legacy-v2 parity on NetBSD (in a VM on a Linux
     # runner, as its unprivileged `runner` user). NetBSD sends SIGPIPE to the
     # whole process, which the adapter's writes must survive.
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -201,6 +236,8 @@ jobs:
     # The v3 suite on OpenBSD (in a VM), with OpenBSD's own Rust package:
     # Rust has no rustup toolchain for OpenBSD. The tests that first build a
     # repository with Bash transcrypt (v2) are skipped there (no `head -c`).
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -223,6 +260,8 @@ jobs:
     # The release archives, built exactly as a release is (scripts/
     # build-release.sh), with the suite run against the static binary on
     # each architecture.
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -273,12 +312,13 @@ jobs:
     # record which cryptographic primitives the allowed Bash/OpenSSL runtime
     # can compute per platform, including process-argv inspection.
     # Non-cryptographic by design: no user secrets, $TMPDIR only.
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-15]
+        os: ${{ fromJSON(needs.plan.outputs.full == 'true' && '["ubuntu-22.04","ubuntu-24.04","macos-15"]' || '["ubuntu-24.04"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Print openssl version
@@ -289,12 +329,13 @@ jobs:
   proof-base64-lean:
     # Independent Lean check of equivalent pure bit-vector obligations, and
     # the v3 policy specification, on each OS (the BSDs: bsd-proofs.yml).
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.plan.outputs.full == 'true' && '["ubuntu-24.04","macos-latest","windows-latest"]' || '["ubuntu-24.04"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: leanprover/lean-action@v1
@@ -307,12 +348,13 @@ jobs:
     # The tracked definitions come from the production Rust v3 codec. Compile
     # them together with the independent specification and imported theorems,
     # on each OS that Lean supports (the BSDs: bsd-proofs.yml).
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.plan.outputs.full == 'true' && '["ubuntu-24.04","macos-latest","windows-latest"]' || '["ubuntu-24.04"]') }}
     defaults:
       run:
         shell: bash

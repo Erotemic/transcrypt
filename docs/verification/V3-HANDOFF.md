@@ -384,7 +384,12 @@ have not yet been seen to pass; no Mac was available to run them locally.
 - Snapshot verify/compare.
 - Tracked Lean build; axiom audit (see PROOF-STATUS).
 
-Pushes are the owner's.
+Pushes are the owner's. CI is tiered (`.github/workflows/run-bats-core-tests.yml`,
+job `plan`): a push to a `work/**` branch runs one Linux leg of every check
+(about a quarter of the full run's runner time); pull requests, `master`,
+manual runs and a push whose last commit message contains `[ci full]` run
+the full matrix (macOS, Windows, arm64, Ubuntu 22.04, the BSD VMs, the
+release archives). Documentation-only pushes run nothing.
 
 ## Next tasks (resume after each checkpoint)
 
