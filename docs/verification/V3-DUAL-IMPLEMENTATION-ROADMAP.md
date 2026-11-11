@@ -1,8 +1,10 @@
 # Transcrypt v3: Bash/OpenSSL and Rust parity program
 
-**Status:** Maintainer-directed target, 2026-11-11. Planning only: the independent
-Bash v3 implementation and new Rust profiles have **not** been implemented or
-verified. This plan supersedes the *deferral* of Bash v3 in earlier roadmaps;
+**Status:** Updated 2026-11-11. The first independent Bash v3 **profile-2**
+reference implementation exists at `contrib/v3/transcrypt-bash`, with exact
+independent byte vectors and basic Git lifecycle tests. Rust P2/P3 support,
+full cross-backend parity, formal extension, and OpenSSL 3.0.13 qualification
+remain outstanding. This plan supersedes the *deferral* of Bash v3 in earlier roadmaps;
 it does not supersede the byte-exact, frozen
 [profile-1 specification](specs/V3-AUTHENTICATED-P0.md) or the existing
 [Rust proof ledger](V3-PROOF-COVERAGE.md).
@@ -82,8 +84,8 @@ not substitute another algorithm or allow a plaintext write.
 | Planned profile | KDF | Authenticated encryption | Bash + OpenSSL 3.0.13 | Rust | Status |
 | --- | --- | --- | --- | --- | --- |
 | **P1 — preserved Rust** | Argon2id v19, m=65536 KiB, t=3, p=1, 64-byte output | AES-256-CMAC-SIV (RFC 5297), path/config AAD | Not supported by 3.0 CLI KDF | Existing | Frozen `TCFG3 00 01` / `TV3F 00 01` |
-| **P2 — portable preferred** | scrypt (fixed `N,r,p,maxmem`, 32-byte salt, 64-byte output) | Same AES-256-CMAC-SIV construction and AAD contract | Target | Implement | **Proposed**, parameters and identifier not frozen |
-| **P3 — portable fallback** | PBKDF2-HMAC-SHA256 (fixed work factor, 32-byte salt, 64-byte output) | Same AES-256-CMAC-SIV construction and AAD contract | Target | Implement | **Proposed**, parameters and identifier not frozen |
+| **P2 — portable preferred** | scrypt (fixed `N,r,p,maxmem`, 32-byte salt, 64-byte output) | Same AES-256-CMAC-SIV construction and AAD contract | Target | Implement | **Implemented in Bash**; profile-2 bytes and parameters documented in [P2 spec](specs/V3-PORTABLE-P2.md); Rust pending |
+| **P3 — portable fallback** | PBKDF2-HMAC-SHA256 (fixed work factor, 32-byte salt, 64-byte output) | Same AES-256-CMAC-SIV construction and AAD contract | Target | Implement | **Implemented in Bash**; profile-2 bytes and parameters documented in [P2 spec](specs/V3-PORTABLE-P2.md); Rust pending |
 
 P2 is the intended **Bash default** once memory and time are benchmarked on
 OpenSSL 3.0.13. P1 remains available and may remain the Rust default; do not
@@ -94,9 +96,9 @@ proof-of-capability on that actual CLI and a review of its KDF and SIV
 composition; a version string alone is insufficient. Compatibility describes
 *capabilities*, not a moral ranking of implementations.
 
-The suite identifiers in the table are **planning labels**, not new on-disk
-values. Allocate immutable new discriminator/profile bytes only in a
-separately reviewed profile specification. The existing 55-byte P1 config,
+P2 now uses frozen experimental bytes `TCFG3 00 02` and `TV3F 00 02`,
+with KDF `scrypt(N=32768,r=8,p=1,dkLen=64)` and 32-byte salt; see the
+[P2 wire contract](specs/V3-PORTABLE-P2.md). P3 remains a planning label. Future profiles require new discriminators and their own reviewed wire contracts. The existing 55-byte P1 config,
 22-byte file header, salt, domain separation, path byte rules and key-check
 semantics stay unchanged. Other profiles may reuse the general layout **only
 if** the independently frozen spec assigns unambiguous bytes and KDF
@@ -303,3 +305,24 @@ recovery property has a source-derived Rust proof or a clearly identified
 external assumption, and a corresponding Bash empirical conformance case.
 Any residual feature differences are explicit capability distinctions or
 failing items, not hidden exceptions to the parity claim.
+
+## Implementation checkpoint (2026-11-11)
+
+- **D1/P2:** The `openssl kdf` SCRYPT control is lowercase `n:`; `N:` was
+  rejected by testing. AES-SIV is assembled using `openssl mac` AES-CMAC
+  and `openssl enc -aes-256-ctr`. Eight independently generated Python
+  scrypt/AESSIV byte vectors pass with OpenSSL 3.5.5, including non-UTF-8
+  paths, 0/1/15/16/17-byte messages, and binary data. Run the same suite
+  on the maintainer's OpenSSL **3.0.13** to qualify that target.
+- **D2/P2:** The profile-2 wire contract and experimental discriminators
+  are recorded in [V3-PORTABLE-P2.md](specs/V3-PORTABLE-P2.md). P1 is
+  unchanged. P3 remains a proposal.
+- **D5 (partial):** Bash can initialize, install filters/hooks, unlock,
+  protect/unprotect, encrypt/decrypt, lock, hydrate, rebind after rename,
+  rekey, verify staged blobs, audit committed trees with current or
+  historical keys, reject plaintext intermediate commits through pre-push,
+  and run diff/merge drivers. The [Bash guide](../../contrib/v3/README-BASH.md) lists limitations.
+- **Still required:** D3 Rust P2 implementation; D4 proof extension; D5
+  Bash v2 migration and conflict/clone robustness; D6 bidirectional Rust
+  conformance and publication fault matrix; D7 target-version and platform
+  qualification. Do **not** claim empirical feature parity yet.

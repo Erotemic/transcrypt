@@ -54,3 +54,14 @@ for incompatible default behaviors.
 
 The maintainer's current product direction controls what *should* be built;
 actual code and executed evidence control claims about what *is* built.
+
+## Portable Bash reference implementation (2026-11-11)
+
+`contrib/v3/transcrypt-bash` now implements **profile 2** with a separately
+versioned scrypt/AES-SIV protocol; keep profile 1 byte-exact and Rust-only
+on OpenSSL 3.0. `tests/v3/bash/test_reference.sh` checks independent fixed
+byte vectors and a real-Git lifecycle. Run it when changing the Bash
+backend. This is a partial implementation of the dual-implementation
+roadmap, **not** evidence of Rust/Bash parity or a completed Lean proof.
+Do not add local-process isolation obligations merely to make the Bash path
+look like Rust; prioritize authenticated Git publication and recovery.

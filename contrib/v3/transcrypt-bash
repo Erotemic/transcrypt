@@ -1,0 +1,694 @@
+#!/usr/bin/env bash
+# Standalone Transcrypt v3 Bash/OpenSSL reference, portable profile 2.
+# Ciphertext/config bytes are compatible with RFC 5297 SIV; see profile spec.
+# Runtime depends only on Bash, Git, OpenSSL 3.0, and standard Unix utilities.
+set -euo pipefail
+export LC_ALL=C
+
+readonly TC_CONFIG_MAGIC=54434647330002  # TCFG3 00 02
+readonly TC_RECORD_MAGIC=545633460002  # TV3F 00 02
+readonly TC_MAX_PLAINTEXT=16777216
+readonly TC_SCRYPT_N=32768
+readonly TC_SCRYPT_R=8
+readonly TC_SCRYPT_P=1
+readonly TC_SCRYPT_MAXMEM=67108864
+TC_SCRIPT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")
+TC_TMP=''
+TC_REKEY_TEMP_INDEX=''
+TC_ROOT=''
+TC_CONFIG=''
+TC_CONFIG_ID=''
+TC_KEY=''
+TC_K1=''
+TC_K2=''
+TC_RESULT=''
+
+transcrypt_bash_fail() { printf 'transcrypt-bash: %s\n' "$*" >&2; exit 1; }
+transcrypt_bash_log() { printf 'transcrypt-bash: %s\n' "$*" >&2; }
+transcrypt_bash_workspace() {
+    [[ -n "$TC_TMP" ]] && return
+    TC_TMP=$(mktemp -d "${TMPDIR:-/tmp}/transcrypt-bash.XXXXXXXX") || transcrypt_bash_fail 'mktemp failed'
+    chmod 700 "$TC_TMP"
+    trap 'rm -rf -- "$TC_TMP"; if [[ -n "$TC_REKEY_TEMP_INDEX" ]]; then rm -f -- "$TC_REKEY_TEMP_INDEX"; fi' EXIT
+}
+transcrypt_bash_require_tools() {
+    local cmd
+    for cmd in git openssl od tr head tail wc mktemp chmod mkdir cp cmp mv rm grep; do
+        command -v "$cmd" >/dev/null 2>&1 || transcrypt_bash_fail "missing required command: $cmd"
+    done
+}
+transcrypt_bash_file_hex() { od -An -tx1 -v <"$1" | tr -d ' \n'; }
+transcrypt_bash_text_hex() { printf %s "$1" | od -An -tx1 -v | tr -d ' \n'; }
+transcrypt_bash_hex_bytes() {
+    local hex=$1 i
+    [[ $((${#hex}%2)) -eq 0 && "$hex" != *[!0-9a-fA-F]* ]] || transcrypt_bash_fail 'invalid hex input'
+    for ((i=0;i<${#hex};i+=2)); do printf '%b' "\\x${hex:i:2}"; done
+}
+transcrypt_bash_file_size() { wc -c <"$1" | tr -d ' '; }
+transcrypt_bash_xor_block() {
+    local a=$1 b=$2 i octet
+    [[ ${#a} -eq 32 && ${#b} -eq 32 ]] || transcrypt_bash_fail 'internal xor length'
+    TC_RESULT=''
+    for ((i=0;i<32;i+=2)); do
+        printf -v octet '%02x' "$((16#${a:i:2} ^ 16#${b:i:2}))"
+        TC_RESULT+=$octet
+    done
+}
+transcrypt_bash_double_block() {
+    local hex=$1 i b carry=0 octet
+    [[ ${#hex} -eq 32 ]] || transcrypt_bash_fail 'internal doubling length'
+    TC_RESULT=''
+    for ((i=30;i>=0;i-=2)); do
+        b=$((16#${hex:i:2}))
+        printf -v octet '%02x' "$((((b<<1)&255)|carry))"
+        TC_RESULT=$octet$TC_RESULT
+        carry=$((b>>7))
+    done
+    if ((carry)); then
+        printf -v octet '%02x' "$((16#${TC_RESULT:30:2} ^ 0x87))"
+        TC_RESULT=${TC_RESULT:0:30}$octet
+    fi
+}
+transcrypt_bash_cmac_file() {
+    local mac
+    mac=$(openssl mac -cipher AES-256-CBC -macopt "hexkey:$TC_K1" -in "$1" CMAC) || transcrypt_bash_fail 'OpenSSL AES-CMAC failed'
+    mac=${mac,,}
+    [[ ${#mac} -eq 32 && "$mac" != *[!0-9a-f]* ]] || transcrypt_bash_fail 'malformed CMAC output'
+    TC_RESULT=$mac
+}
+# Implements RFC 5297 S2V with two or three separately framed AAD inputs.
+# The ciphertext and all intermediate binary values remain on file descriptors.
+transcrypt_bash_s2v() {
+    local plain=$1 domain=$2 config_ad=$3 path=${4-} d mac size end pad
+    transcrypt_bash_hex_bytes 00000000000000000000000000000000 >"$TC_TMP/zero"
+    transcrypt_bash_cmac_file "$TC_TMP/zero"; d=$TC_RESULT
+    printf %s "$domain" >"$TC_TMP/domain"
+    transcrypt_bash_cmac_file "$TC_TMP/domain"; mac=$TC_RESULT
+    transcrypt_bash_double_block "$d"; transcrypt_bash_xor_block "$TC_RESULT" "$mac"; d=$TC_RESULT
+    transcrypt_bash_cmac_file "$config_ad"; mac=$TC_RESULT
+    transcrypt_bash_double_block "$d"; transcrypt_bash_xor_block "$TC_RESULT" "$mac"; d=$TC_RESULT
+    if [[ $# -eq 4 ]]; then
+        printf %s "$path" >"$TC_TMP/ad-path"
+        transcrypt_bash_cmac_file "$TC_TMP/ad-path"; mac=$TC_RESULT
+        transcrypt_bash_double_block "$d"; transcrypt_bash_xor_block "$TC_RESULT" "$mac"; d=$TC_RESULT
+    fi
+    size=$(transcrypt_bash_file_size "$plain")
+    if ((size>=16)); then
+        head -c "$((size-16))" "$plain" >"$TC_TMP/s2v-input"
+        tail -c 16 "$plain" >"$TC_TMP/s2v-end"
+        end=$(transcrypt_bash_file_hex "$TC_TMP/s2v-end")
+        transcrypt_bash_xor_block "$end" "$d"
+        transcrypt_bash_hex_bytes "$TC_RESULT" >>"$TC_TMP/s2v-input"
+    else
+        transcrypt_bash_double_block "$d"
+        pad=$(transcrypt_bash_file_hex "$plain")80
+        while ((${#pad}<32)); do pad+=00; done
+        transcrypt_bash_xor_block "$TC_RESULT" "$pad"
+        transcrypt_bash_hex_bytes "$TC_RESULT" >"$TC_TMP/s2v-input"
+    fi
+    transcrypt_bash_cmac_file "$TC_TMP/s2v-input"
+}
+transcrypt_bash_ctr_file() {
+    local tag=$1 infile=$2 outfile=$3 iv=$tag pos octet
+    for pos in 16 24; do
+        printf -v octet '%02x' "$((16#${iv:pos:2}&127))"
+        iv=${iv:0:pos}$octet${iv:pos+2}
+    done
+    openssl enc -aes-256-ctr -nosalt -K "$TC_K2" -iv "$iv" -in "$infile" -out "$outfile" || transcrypt_bash_fail 'OpenSSL AES-CTR failed'
+}
+transcrypt_bash_use_key() {
+    TC_KEY=$1
+    [[ ${#TC_KEY} -eq 128 && "$TC_KEY" != *[!0-9a-f]* ]] || transcrypt_bash_fail 'invalid 64-byte key'
+    TC_K1=${TC_KEY:0:64}
+    TC_K2=${TC_KEY:64:64}
+}
+transcrypt_bash_derive_scrypt() {
+    local password=$1 salt=$2 passhex
+    passhex=$(transcrypt_bash_text_hex "$password")
+    [[ -n "$passhex" ]] || transcrypt_bash_fail 'empty passphrase'
+    openssl kdf -binary -keylen 64 \
+        -kdfopt "hexpass:$passhex" -kdfopt "hexsalt:$salt" \
+        -kdfopt "n:$TC_SCRYPT_N" -kdfopt "r:$TC_SCRYPT_R" \
+        -kdfopt "p:$TC_SCRYPT_P" -kdfopt "maxmem_bytes:$TC_SCRYPT_MAXMEM" \
+        SCRYPT >"$TC_TMP/derived" || transcrypt_bash_fail 'OpenSSL scrypt KDF failed; requires a compatible provider'
+    transcrypt_bash_use_key "$(transcrypt_bash_file_hex "$TC_TMP/derived")"
+}
+transcrypt_bash_check_config_auth() {
+    local config=$1 tag
+    [[ $(transcrypt_bash_file_size "$config") -eq 55 ]] || transcrypt_bash_fail 'invalid 55-byte config'
+    head -c 39 "$config" >"$TC_TMP/config-prefix"
+    tail -c 16 "$config" >"$TC_TMP/config-auth"
+    tag=$(transcrypt_bash_file_hex "$TC_TMP/config-auth")
+    : >"$TC_TMP/empty"
+    transcrypt_bash_s2v "$TC_TMP/empty" transcrypt/v3/config "$TC_TMP/config-prefix"
+    [[ "$TC_RESULT" == "$tag" ]] || transcrypt_bash_fail 'wrong password or corrupt committed config'
+}
+transcrypt_bash_config_profile() {
+    local file=$1 len magic
+    len=$(transcrypt_bash_file_size "$file")
+    [[ $len -eq 55 ]] || transcrypt_bash_fail 'invalid configuration length'
+    head -c 7 "$file" >"$TC_TMP/config-magic"
+    magic=$(transcrypt_bash_file_hex "$TC_TMP/config-magic")
+    case "$magic" in
+        "$TC_CONFIG_MAGIC") return 0 ;;
+        54434647330001) transcrypt_bash_fail 'profile 1 is Rust-only with OpenSSL 3.0.13 (Argon2id)' ;;
+        54434647330003) transcrypt_bash_fail 'profile 3 is reserved and not implemented by this backend' ;;
+        *) transcrypt_bash_fail "unknown/malformed config profile: $magic" ;;
+    esac
+}
+transcrypt_bash_load_config() {
+    TC_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || transcrypt_bash_fail 'not in a Git worktree'
+    TC_CONFIG=$TC_ROOT/.transcrypt/config
+    [[ -f "$TC_CONFIG" && ! -L "$TC_CONFIG" ]] || transcrypt_bash_fail 'missing or symlinked .transcrypt/config; run init'
+    transcrypt_bash_workspace
+    transcrypt_bash_config_profile "$TC_CONFIG"
+    TC_CONFIG_ID=$(openssl dgst -sha256 -binary "$TC_CONFIG" | head -c 16 | od -An -tx1 -v | tr -d ' \n')
+    [[ ${#TC_CONFIG_ID} -eq 32 ]] || transcrypt_bash_fail 'config digest failed'
+}
+transcrypt_bash_key_filename() {
+    local dir
+    dir=$(git rev-parse --git-common-dir) || transcrypt_bash_fail 'missing Git common directory'
+    [[ $dir == /* ]] || dir=$TC_ROOT/$dir
+    printf '%s/transcrypt-v3/bash-key-p2' "$dir"
+}
+transcrypt_bash_store_key() {
+    local dest tmp
+    dest=$(transcrypt_bash_key_filename)
+    mkdir -p -- "${dest%/*}"; chmod 700 "${dest%/*}"
+    tmp=$dest.tmp.$$
+    (umask 077; cat "$TC_CONFIG" >"$tmp"; transcrypt_bash_hex_bytes "$TC_KEY" >>"$tmp")
+    chmod 600 "$tmp"; mv -f -- "$tmp" "$dest"
+}
+transcrypt_bash_try_key() {
+    local file
+    file=$(transcrypt_bash_key_filename)
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    [[ $(transcrypt_bash_file_size "$file") -eq 119 ]] || transcrypt_bash_fail 'invalid stored key length'
+    head -c 55 "$file" >"$TC_TMP/stored-config"
+    cmp -s "$TC_CONFIG" "$TC_TMP/stored-config" || return 1
+    tail -c 64 "$file" >"$TC_TMP/stored-key"
+    transcrypt_bash_use_key "$(transcrypt_bash_file_hex "$TC_TMP/stored-key")"
+    transcrypt_bash_check_config_auth "$TC_CONFIG"
+}
+transcrypt_bash_require_key() { transcrypt_bash_try_key || transcrypt_bash_fail 'repository is locked; run unlock'; }
+transcrypt_bash_valid_git_path() {
+    local path=$1
+    [[ -n $path && ${#path} -le 4096 && "$path" != /* && "$path" != */ && "$path" != *'//'*
+        && "$path" != '.' && "$path" != '..' && "$path" != './'* && "$path" != '../'*
+        && "$path" != *'/./'* && "$path" != *'/../'* && "$path" != *'/.' && "$path" != *'/..' ]] || transcrypt_bash_fail 'noncanonical protected Git path'
+    [[ "$path" != .gitattributes && "$path" != */.gitattributes && "$path" != .gitmodules && "$path" != .transcrypt/* ]] || transcrypt_bash_fail 'Git metadata cannot be protected'
+}
+transcrypt_bash_check_record_header() {
+    local file=$1 size magic id
+    size=$(transcrypt_bash_file_size "$file")
+    ((size>=38 && size<=TC_MAX_PLAINTEXT+38)) || transcrypt_bash_fail 'malformed or oversized v3 ciphertext'
+    head -c 6 "$file" >"$TC_TMP/record-magic"
+    magic=$(transcrypt_bash_file_hex "$TC_TMP/record-magic")
+    [[ "$magic" == "$TC_RECORD_MAGIC" ]] || transcrypt_bash_fail "invalid or unsupported encrypted header ($magic)"
+    head -c 22 "$file" | tail -c 16 >"$TC_TMP/record-id"
+    id=$(transcrypt_bash_file_hex "$TC_TMP/record-id")
+    [[ "$id" == "$TC_CONFIG_ID" ]] || transcrypt_bash_fail 'ciphertext references another configuration; explicit re-encryption needed'
+}
+transcrypt_bash_encrypt_file() {
+    local path=$1 plaintext=$2 output=$3 size tag
+    transcrypt_bash_valid_git_path "$path"
+    size=$(transcrypt_bash_file_size "$plaintext")
+    ((size<=TC_MAX_PLAINTEXT)) || transcrypt_bash_fail 'plaintext exceeds 16 MiB'
+    transcrypt_bash_s2v "$plaintext" transcrypt/v3/file "$TC_CONFIG" "$path"
+    tag=$TC_RESULT
+    transcrypt_bash_ctr_file "$tag" "$plaintext" "$TC_TMP/body"
+    { transcrypt_bash_hex_bytes "$TC_RECORD_MAGIC$TC_CONFIG_ID$tag"; cat "$TC_TMP/body"; } >"$output"
+}
+transcrypt_bash_decrypt_file() {
+    local path=$1 record=$2 output=$3 size tag bodylen
+    transcrypt_bash_valid_git_path "$path"
+    transcrypt_bash_check_record_header "$record"
+    head -c 38 "$record" | tail -c 16 >"$TC_TMP/record-tag"
+    tag=$(transcrypt_bash_file_hex "$TC_TMP/record-tag")
+    size=$(transcrypt_bash_file_size "$record")
+    bodylen=$((size-38))
+    if ((bodylen)); then tail -c "$bodylen" "$record" >"$TC_TMP/body"; else : >"$TC_TMP/body"; fi
+    transcrypt_bash_ctr_file "$tag" "$TC_TMP/body" "$TC_TMP/unauthenticated"
+    transcrypt_bash_s2v "$TC_TMP/unauthenticated" transcrypt/v3/file "$TC_CONFIG" "$path"
+    [[ "$TC_RESULT" == "$tag" ]] || transcrypt_bash_fail "authentication failed: '$path' (path/key/tag mismatch)"
+    cp -- "$TC_TMP/unauthenticated" "$output"
+}
+transcrypt_bash_filter() {
+    local action=$1 path=$2
+    transcrypt_bash_load_config
+    transcrypt_bash_valid_git_path "$path"
+    cat >"$TC_TMP/filter-input"
+    if [[ $action == clean ]]; then
+        if [[ $(transcrypt_bash_file_size "$TC_TMP/filter-input") -ge 4 ]]; then
+            head -c 4 "$TC_TMP/filter-input" >"$TC_TMP/probe"
+            if [[ $(transcrypt_bash_file_hex "$TC_TMP/probe") == 54563346 ]]; then
+                transcrypt_bash_check_record_header "$TC_TMP/filter-input"
+                if transcrypt_bash_try_key; then
+                    transcrypt_bash_decrypt_file "$path" "$TC_TMP/filter-input" "$TC_TMP/probe-plain"
+                fi
+                cat "$TC_TMP/filter-input"; return
+            fi
+        fi
+        transcrypt_bash_require_key
+        transcrypt_bash_encrypt_file "$path" "$TC_TMP/filter-input" "$TC_TMP/output"
+    else
+        transcrypt_bash_check_record_header "$TC_TMP/filter-input"
+        if transcrypt_bash_try_key; then
+            transcrypt_bash_decrypt_file "$path" "$TC_TMP/filter-input" "$TC_TMP/output"
+        else
+            cp -- "$TC_TMP/filter-input" "$TC_TMP/output"
+        fi
+    fi
+    cat "$TC_TMP/output"
+}
+transcrypt_bash_read_passphrase() {
+    local source=${1-} confirm=${2-} pass again
+    if [[ ${TRANSCRYPT_PASSWORD+x} ]]; then pass=$TRANSCRYPT_PASSWORD
+    elif [[ $source == --password-stdin ]]; then
+        IFS= read -r pass || [[ -n ${pass-} ]] || transcrypt_bash_fail 'no password on stdin'
+    else
+        [[ -t 0 ]] || transcrypt_bash_fail 'set TRANSCRYPT_PASSWORD or use --password-stdin'
+        read -r -s -p 'Passphrase: ' pass; printf '\n' >&2
+        if [[ $confirm == confirm ]]; then
+            read -r -s -p 'Confirm: ' again; printf '\n' >&2
+            [[ $pass == "$again" ]] || transcrypt_bash_fail 'password confirmation mismatch'
+        fi
+    fi
+    [[ ${#pass} -ge 1 && ${#pass} -le 4096 ]] || transcrypt_bash_fail 'passphrase must contain 1..4096 non-NUL bytes'
+    TC_PASSWORD=$pass
+}
+transcrypt_bash_write_new_config() {
+    local salt tag
+    salt=$(head -c 32 /dev/urandom | od -An -tx1 -v | tr -d ' \n')
+    transcrypt_bash_derive_scrypt "$TC_PASSWORD" "$salt"
+    transcrypt_bash_hex_bytes "$TC_CONFIG_MAGIC$salt" >"$TC_TMP/config-prefix"
+    : >"$TC_TMP/empty"
+    transcrypt_bash_s2v "$TC_TMP/empty" transcrypt/v3/config "$TC_TMP/config-prefix"
+    tag=$TC_RESULT
+    transcrypt_bash_hex_bytes "$TC_CONFIG_MAGIC$salt$tag" >"$TC_TMP/new-config"
+}
+transcrypt_bash_unlock() {
+    transcrypt_bash_load_config
+    transcrypt_bash_read_passphrase "${1-}"
+    head -c 39 "$TC_CONFIG" | tail -c 32 >"$TC_TMP/config-salt"
+    transcrypt_bash_derive_scrypt "$TC_PASSWORD" "$(transcrypt_bash_file_hex "$TC_TMP/config-salt")"
+    unset TC_PASSWORD
+    transcrypt_bash_check_config_auth "$TC_CONFIG"
+    transcrypt_bash_store_key
+    transcrypt_bash_log 'unlocked; key stored outside Git worktree'
+}
+transcrypt_bash_lock() {
+    transcrypt_bash_load_config
+    local file
+    file=$(transcrypt_bash_key_filename)
+    [[ ! -L $file ]] || transcrypt_bash_fail 'refusing symlinked local key path'
+    rm -f -- "$file"
+    transcrypt_bash_log 'locked; worktree left intact'
+}
+transcrypt_bash_install() {
+    transcrypt_bash_load_config
+    local command hooks dest name
+    printf -v command '%q' "$TC_SCRIPT"
+    git config --local filter.transcrypt-v3.clean "$command clean %f"
+    git config --local filter.transcrypt-v3.smudge "$command smudge %f"
+    git config --local filter.transcrypt-v3.required true
+    git config --local diff.transcrypt-v3.command "$command diff"
+    git config --local merge.transcrypt-v3.driver "$command merge %O %A %B %P"
+    hooks=$(git config --get core.hooksPath || true)
+    if [[ -n $hooks ]]; then [[ $hooks == /* ]] || hooks=$TC_ROOT/$hooks
+    else
+        hooks=$(git rev-parse --git-path hooks)
+        [[ $hooks == /* ]] || hooks=$TC_ROOT/$hooks
+    fi
+    mkdir -p -- "$hooks"
+    for name in pre-commit pre-push pre-merge-commit; do
+        dest=$hooks/$name
+        if [[ -e $dest ]] && ! grep -q '# transcrypt-bash-v3 hook' "$dest"; then
+            transcrypt_bash_fail "existing hook at $dest; refusing overwrite (filters installed)"
+        fi
+        { printf '%s\n' '#!/bin/sh' '# transcrypt-bash-v3 hook'
+          if [[ $name == pre-push ]]; then printf 'exec %s pre-push\n' "$command"
+          else printf 'exec %s verify-index\n' "$command"; fi
+        } >"$dest"
+        chmod 755 "$dest"
+    done
+    transcrypt_bash_log 'installed local filters and safety hooks'
+}
+transcrypt_bash_init() {
+    TC_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || transcrypt_bash_fail 'not in Git'
+    [[ $PWD == "$TC_ROOT" ]] || transcrypt_bash_fail 'run init at repository root'
+    [[ ! -e .transcrypt ]] || transcrypt_bash_fail 'repository already has .transcrypt'
+    local source=''
+    if [[ ${1-} == --profile ]]; then
+        [[ $# -ge 2 && $2 == v3-scrypt-aes256-siv ]] || transcrypt_bash_fail 'Bash supports --profile v3-scrypt-aes256-siv; profile 1 remains Rust-only'
+        shift 2
+    fi
+    if [[ ${1-} == --password-stdin ]]; then source=--password-stdin; shift; fi
+    transcrypt_bash_read_passphrase "$source" confirm
+    [[ ${#TC_PASSWORD} -ge 12 ]] || transcrypt_bash_fail 'new passphrase must contain at least 12 bytes'
+    transcrypt_bash_write_new_config
+    unset TC_PASSWORD
+    mkdir -m 755 .transcrypt
+    cp -- "$TC_TMP/new-config" .transcrypt/config
+    TC_CONFIG=$TC_ROOT/.transcrypt/config
+    TC_CONFIG_ID=$(openssl dgst -sha256 -binary "$TC_CONFIG" | head -c 16 | od -An -tx1 -v | tr -d ' \n')
+    transcrypt_bash_store_key
+    if ! grep -q '^\[attr\]transcrypt ' .gitattributes 2>/dev/null; then
+        printf '\n%s\n' '[attr]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text' >>.gitattributes
+    fi
+    git add -- .transcrypt/config .gitattributes
+    transcrypt_bash_install
+    if (($#)); then transcrypt_bash_protect "$@"; fi
+    transcrypt_bash_log 'initialized portable profile 2 (scrypt + AES-256-SIV)'
+}
+# Read Git's three NUL-delimited fields without losing raw filename bytes.
+transcrypt_bash_attr() {
+    local path=$1 source=${2:---cached} answer name value
+    if [[ $source == -- ]]; then
+        { IFS= read -r -d '' answer && IFS= read -r -d '' name && IFS= read -r -d '' value; } \
+            < <(git check-attr -z filter -- "$path") || transcrypt_bash_fail 'git check-attr failure'
+    else
+        { IFS= read -r -d '' answer && IFS= read -r -d '' name && IFS= read -r -d '' value; } \
+            < <(git check-attr --cached -z filter -- "$path") || transcrypt_bash_fail 'git check-attr failure'
+    fi
+    [[ "$answer" == "$path" && "$name" == filter && "$value" == transcrypt-v3 ]]
+}
+transcrypt_bash_protect() {
+    transcrypt_bash_load_config; transcrypt_bash_require_key
+    (($#)) || transcrypt_bash_fail 'protect needs patterns'
+    local pattern path
+    cp -- "$TC_ROOT/.gitattributes" "$TC_TMP/attrs-original"
+    for pattern in "$@"; do
+        [[ -n $pattern && "$pattern" != *$'\n'* && "$pattern" != *$'\r'* && "$pattern" != *' '* && "$pattern" != '#'* && "$pattern" != '!'* ]] || transcrypt_bash_fail 'only simple Git attribute patterns supported'
+        printf '%s transcrypt\n' "$pattern" >>"$TC_ROOT/.gitattributes"
+    done
+    git ls-files -z >"$TC_TMP/protect-paths" || transcrypt_bash_fail 'cannot enumerate paths'
+    { printf '%s\0' .gitattributes .gitmodules .transcrypt/config; cat "$TC_TMP/protect-paths"; } >"$TC_TMP/paths-check"
+    while IFS= read -r -d '' path; do
+        if transcrypt_bash_attr "$path" '--' ; then
+            if [[ $path == .gitattributes || $path == */.gitattributes || $path == .gitmodules || $path == .transcrypt/* ]]; then
+                cp -- "$TC_TMP/attrs-original" "$TC_ROOT/.gitattributes"
+                transcrypt_bash_fail "pattern selects reserved Git metadata: $path"
+            fi
+        fi
+    done <"$TC_TMP/paths-check"
+    git add -- .gitattributes
+    while IFS= read -r -d '' path; do
+        if transcrypt_bash_attr "$path"; then
+            transcrypt_bash_valid_git_path "$path"
+            [[ -f "$TC_ROOT/$path" && ! -L "$TC_ROOT/$path" ]] || continue
+            git add --renormalize -- "$path"
+        fi
+    done <"$TC_TMP/protect-paths"
+    transcrypt_bash_log 'protection rules and existing tracked blobs staged; prior plaintext history remains'
+}
+transcrypt_bash_unprotect() {
+    transcrypt_bash_load_config; transcrypt_bash_require_key
+    (($#)) || transcrypt_bash_fail 'unprotect requires patterns'
+    local pattern line path found=0 remove
+    local -a patterns=("$@")
+    : >"$TC_TMP/selected-paths"; : >"$TC_TMP/attrs-new"
+    git ls-files -z >"$TC_TMP/all-paths" || transcrypt_bash_fail 'cannot enumerate paths'
+    while IFS= read -r -d '' path; do
+        if transcrypt_bash_attr "$path"; then printf '%s\0' "$path" >>"$TC_TMP/selected-paths"; fi
+    done <"$TC_TMP/all-paths"
+    while IFS= read -r line || [[ -n $line ]]; do
+        remove=0
+        for pattern in "${patterns[@]}"; do
+            if [[ $line == "$pattern transcrypt" ]]; then remove=1; ((found+=1)); break; fi
+        done
+        if (( ! remove )); then printf '%s\n' "$line" >>"$TC_TMP/attrs-new"; fi
+    done <"$TC_ROOT/.gitattributes"
+    ((found)) || transcrypt_bash_fail 'no matching rule to unprotect'
+    cp -- "$TC_TMP/attrs-new" "$TC_ROOT/.gitattributes"
+    git add -- .gitattributes
+    while IFS= read -r -d '' path; do
+        if ! transcrypt_bash_attr "$path"; then
+            [[ -f "$TC_ROOT/$path" && ! -L "$TC_ROOT/$path" ]] || transcrypt_bash_fail "missing worktree file: $path"
+            git add --renormalize -- "$path"
+            transcrypt_bash_log "UNPROTECTED: '$path' will be committed as plaintext"
+        fi
+    done <"$TC_TMP/selected-paths"
+}
+transcrypt_bash_verify_index() {
+    transcrypt_bash_load_config; transcrypt_bash_require_key
+    local entry path mode oid stage count=0
+    git show :.transcrypt/config >"$TC_TMP/index-config" 2>/dev/null || transcrypt_bash_fail 'staged v3 config is missing'
+    cmp -s "$TC_CONFIG" "$TC_TMP/index-config" || transcrypt_bash_fail 'staged v3 config differs from authenticated worktree config'
+    if transcrypt_bash_attr .transcrypt/config; then transcrypt_bash_fail 'v3 config is selected for encryption'; fi
+    git ls-files --stage -z >"$TC_TMP/index-entries" || transcrypt_bash_fail 'cannot list index'
+    while IFS= read -r -d '' entry; do
+        path=${entry#*$'\t'}; mode=${entry%% *}
+        oid=${entry#* }; oid=${oid%% *}
+        stage=${entry%$'\t'*}; stage=${stage##* }
+        [[ $stage == 0 ]] || transcrypt_bash_fail "unmerged index: $path"
+        if transcrypt_bash_attr "$path"; then
+            transcrypt_bash_valid_git_path "$path"
+            [[ $mode == 100644 || $mode == 100755 ]] || transcrypt_bash_fail "protected nonregular file: $path"
+            git cat-file blob "$oid" >"$TC_TMP/index-record"
+            transcrypt_bash_decrypt_file "$path" "$TC_TMP/index-record" "$TC_TMP/index-plaintext"
+            ((count+=1))
+        fi
+    done <"$TC_TMP/index-entries"
+    transcrypt_bash_log "authenticated $count protected staged Git blobs"
+}
+# Verify a historical snapshot using its own committed config. The normal
+# key is used for today's config; rotation saves prior keys locally for audits.
+transcrypt_bash_audit() {
+    local rev=${1:-HEAD} entry path oid mode count=0 configid keyfile historical
+    transcrypt_bash_load_config
+    git rev-parse --verify "$rev^{commit}" >/dev/null || transcrypt_bash_fail 'invalid revision'
+    git show "$rev:.transcrypt/config" >"$TC_TMP/tree-config" 2>/dev/null || transcrypt_bash_fail "revision $rev has no published v3 config; inspect or rewrite its history before pushing"
+    transcrypt_bash_config_profile "$TC_TMP/tree-config"
+    configid=$(openssl dgst -sha256 -binary "$TC_TMP/tree-config" | head -c 16 | od -An -tx1 -v | tr -d ' \n')
+    if cmp -s "$TC_CONFIG" "$TC_TMP/tree-config"; then
+        transcrypt_bash_require_key
+    else
+        keyfile=$(transcrypt_bash_key_filename).previous-$configid
+        [[ -f "$keyfile" && ! -L "$keyfile" && $(transcrypt_bash_file_size "$keyfile") -eq 119 ]] || transcrypt_bash_fail "no historical profile-2 key for $rev (config $configid)"
+        head -c 55 "$keyfile" >"$TC_TMP/stored-historical"
+        cmp -s "$TC_TMP/stored-historical" "$TC_TMP/tree-config" || transcrypt_bash_fail 'historical key/config mismatch'
+        tail -c 64 "$keyfile" >"$TC_TMP/historical-key"
+        transcrypt_bash_use_key "$(transcrypt_bash_file_hex "$TC_TMP/historical-key")"
+        TC_CONFIG=$TC_TMP/tree-config
+        TC_CONFIG_ID=$configid
+        transcrypt_bash_check_config_auth "$TC_CONFIG"
+    fi
+    GIT_INDEX_FILE="$TC_TMP/audit-index" git read-tree "$rev" || transcrypt_bash_fail 'cannot inspect commit attributes'
+    export GIT_INDEX_FILE="$TC_TMP/audit-index"
+    git ls-tree -rz "$rev" >"$TC_TMP/tree-entries" || transcrypt_bash_fail 'cannot list tree'
+    while IFS= read -r -d '' entry; do
+        path=${entry#*$'\t'}; mode=${entry%% *}
+        oid=${entry%$'\t'*}; oid=${oid##* }
+        if transcrypt_bash_attr "$path"; then
+            transcrypt_bash_valid_git_path "$path"
+            [[ $mode == 100644 || $mode == 100755 ]] || transcrypt_bash_fail "protected nonregular tree file: $path"
+            git cat-file blob "$oid" >"$TC_TMP/audit-record"
+            transcrypt_bash_decrypt_file "$path" "$TC_TMP/audit-record" "$TC_TMP/audit-plaintext"
+            ((count+=1))
+        fi
+    done <"$TC_TMP/tree-entries"
+    transcrypt_bash_log "authenticated $count protected Git objects in $rev (committed config and attributes)"
+}
+# The Git pre-push protocol provides each ref update over stdin. Inspect every
+# outgoing commit, not merely HEAD, so a later fixed tree does not conceal
+# an earlier plaintext commit sent in the same push.
+transcrypt_bash_pre_push() {
+    local localref localoid remoteref remoteoid rev count=0
+    while read -r localref localoid remoteref remoteoid; do
+        [[ -n ${localref-} && -n ${localoid-} ]] || continue
+        [[ $localoid != 0000000000000000000000000000000000000000 ]] || continue
+        if [[ $remoteoid != 0000000000000000000000000000000000000000 ]] && git cat-file -e "$remoteoid^{commit}" 2>/dev/null; then
+            git rev-list "$localoid" "^$remoteoid" >"$TC_TMP/outgoing" || transcrypt_bash_fail 'cannot enumerate outgoing history'
+        else
+            git rev-list "$localoid" >"$TC_TMP/outgoing" || transcrypt_bash_fail 'cannot enumerate initial pushed history'
+        fi
+        while IFS= read -r rev; do
+            "$TC_SCRIPT" audit "$rev" || transcrypt_bash_fail "push rejected: unsafe or unauditable outgoing revision $rev"
+            ((count+=1))
+        done <"$TC_TMP/outgoing"
+    done
+    transcrypt_bash_log "pre-push authenticated $count outgoing commits"
+}
+transcrypt_bash_hydrate() {
+    transcrypt_bash_load_config; transcrypt_bash_require_key
+    local path count=0
+    git ls-files -z >"$TC_TMP/paths" || transcrypt_bash_fail 'cannot list tracked paths'
+    while IFS= read -r -d '' path; do
+        if transcrypt_bash_attr "$path"; then
+            transcrypt_bash_valid_git_path "$path"
+            [[ -f "$TC_ROOT/$path" && ! -L "$TC_ROOT/$path" ]] || continue
+            [[ $(transcrypt_bash_file_size "$TC_ROOT/$path") -ge 6 ]] || continue
+            head -c 6 "$TC_ROOT/$path" >"$TC_TMP/probe"
+            [[ $(transcrypt_bash_file_hex "$TC_TMP/probe") == "$TC_RECORD_MAGIC" ]] || continue
+            transcrypt_bash_decrypt_file "$path" "$TC_ROOT/$path" "$TC_TMP/hydrated"
+            cat "$TC_TMP/hydrated" >"$TC_ROOT/$path"
+            ((count+=1))
+        fi
+    done <"$TC_TMP/paths"
+    transcrypt_bash_log "hydrated $count working-tree files"
+}
+transcrypt_bash_rebind() {
+    transcrypt_bash_load_config; transcrypt_bash_require_key
+    local path count=0
+    git ls-files -z >"$TC_TMP/paths" || transcrypt_bash_fail 'cannot list paths'
+    while IFS= read -r -d '' path; do
+        if transcrypt_bash_attr "$path"; then
+            transcrypt_bash_valid_git_path "$path"
+            [[ -f "$TC_ROOT/$path" && ! -L "$TC_ROOT/$path" ]] || continue
+            git add --renormalize -- "$path"
+            ((count+=1))
+        fi
+    done <"$TC_TMP/paths"
+    transcrypt_bash_log "rebound $count protected paths"
+}
+transcrypt_bash_rekey() {
+    transcrypt_bash_load_config; transcrypt_bash_require_key
+    git diff --quiet && git diff --cached --quiet || transcrypt_bash_fail 'commit current changes before rekey'
+    local oldid=$TC_CONFIG_ID oldconfig=$TC_CONFIG indexfile entry mode oid path newoid count=0 idx=0 keyfile
+    indexfile=$(git rev-parse --git-path index)
+    [[ $indexfile == /* ]] || indexfile=$TC_ROOT/$indexfile
+    [[ -f $indexfile ]] || transcrypt_bash_fail 'Git index missing'
+    git ls-files --stage -z >"$TC_TMP/entries" || transcrypt_bash_fail 'cannot list index'
+    : >"$TC_TMP/rekey-paths"
+    while IFS= read -r -d '' entry; do
+        path=${entry#*$'\t'}; mode=${entry%% *}
+        oid=${entry#* }; oid=${oid%% *}
+        if transcrypt_bash_attr "$path"; then
+            transcrypt_bash_valid_git_path "$path"
+            [[ $mode == 100644 || $mode == 100755 ]] || transcrypt_bash_fail 'cannot rekey nonregular file'
+            git cat-file blob "$oid" >"$TC_TMP/current"
+            transcrypt_bash_decrypt_file "$path" "$TC_TMP/current" "$TC_TMP/oldplain-$count"
+            printf '%s\0%s\0' "$mode" "$path" >>"$TC_TMP/rekey-paths"
+            ((count+=1))
+        fi
+    done <"$TC_TMP/entries"
+    transcrypt_bash_read_passphrase "${1-}" confirm
+    [[ ${#TC_PASSWORD} -ge 12 ]] || transcrypt_bash_fail 'new passphrase must contain at least 12 bytes'
+    transcrypt_bash_write_new_config; unset TC_PASSWORD
+    TC_CONFIG=$TC_TMP/new-config
+    TC_CONFIG_ID=$(openssl dgst -sha256 -binary "$TC_CONFIG" | head -c 16 | od -An -tx1 -v | tr -d ' \n')
+    transcrypt_bash_check_config_auth "$TC_CONFIG"
+    TC_REKEY_TEMP_INDEX=$(mktemp "$indexfile.transcrypt-bash.XXXXXXXX")
+    cp -- "$indexfile" "$TC_REKEY_TEMP_INDEX"
+    while IFS= read -r -d '' mode && IFS= read -r -d '' path; do
+        transcrypt_bash_encrypt_file "$path" "$TC_TMP/oldplain-$idx" "$TC_TMP/newrecord"
+        newoid=$(git hash-object -w --stdin <"$TC_TMP/newrecord")
+        GIT_INDEX_FILE="$TC_REKEY_TEMP_INDEX" git update-index --add --cacheinfo "$mode" "$newoid" "$path"
+        ((idx+=1))
+    done <"$TC_TMP/rekey-paths"
+    newoid=$(git hash-object -w --stdin <"$TC_CONFIG")
+    GIT_INDEX_FILE="$TC_REKEY_TEMP_INDEX" git update-index --add --cacheinfo 100644 "$newoid" .transcrypt/config
+    keyfile=$(transcrypt_bash_key_filename)
+    cp -- "$keyfile" "$keyfile.previous-$oldid"; chmod 600 "$keyfile.previous-$oldid"
+    mv -f -- "$TC_REKEY_TEMP_INDEX" "$indexfile"; TC_REKEY_TEMP_INDEX=''
+    cp -- "$TC_CONFIG" "$oldconfig"; TC_CONFIG=$oldconfig
+    transcrypt_bash_store_key
+    transcrypt_bash_log "staged full rekey of $count protected files; commit before continuing"
+}
+# Git may hand an external diff driver smudged plaintext temp paths.
+# Use Git blob OIDs for authoritative authenticated input when available.
+transcrypt_bash_diff_side() {
+    local path=$1 tempfile=$2 oid=$3 output=$4
+    if git cat-file -e "$oid^{blob}" 2>/dev/null; then
+        git cat-file blob "$oid" >"$TC_TMP/diff-record"
+        transcrypt_bash_decrypt_file "$path" "$TC_TMP/diff-record" "$output"
+    elif [[ -f "$tempfile" ]]; then
+        # New/unstaged worktree side: Git may not have written its blob yet.
+        # The diff is a local display, never a publication acceptance gate.
+        cp -- "$tempfile" "$output"
+    else
+        : >"$output"
+    fi
+}
+transcrypt_bash_diff() {
+    (($#==7)) || transcrypt_bash_fail 'diff driver expects seven Git arguments'
+    local path=$1 status
+    transcrypt_bash_load_config; transcrypt_bash_require_key
+    transcrypt_bash_valid_git_path "$path"
+    transcrypt_bash_diff_side "$path" "$2" "$3" "$TC_TMP/diff-a"
+    transcrypt_bash_diff_side "$path" "$5" "$6" "$TC_TMP/diff-b"
+    git diff --no-index -- "$TC_TMP/diff-a" "$TC_TMP/diff-b" || {
+        status=$?
+        [[ $status -eq 1 ]] || return "$status"
+    }
+}
+transcrypt_bash_merge() {
+    (($#==4)) || transcrypt_bash_fail 'merge driver expects base ours theirs path'
+    local base=$1 ours=$2 theirs=$3 path=$4
+    transcrypt_bash_load_config; transcrypt_bash_require_key
+    transcrypt_bash_decrypt_file "$path" "$base" "$TC_TMP/base"
+    transcrypt_bash_decrypt_file "$path" "$ours" "$TC_TMP/ours"
+    transcrypt_bash_decrypt_file "$path" "$theirs" "$TC_TMP/theirs"
+    if ! git merge-file -p -- "$TC_TMP/ours" "$TC_TMP/base" "$TC_TMP/theirs" >"$TC_TMP/merged"; then
+        transcrypt_bash_log "merge conflict for $path; no plaintext conflict markers emitted"
+        return 1
+    fi
+    transcrypt_bash_encrypt_file "$path" "$TC_TMP/merged" "$TC_TMP/merged-record"
+    cat "$TC_TMP/merged-record" >"$ours"
+}
+transcrypt_bash_status() {
+    transcrypt_bash_load_config
+    printf 'profile: v3-scrypt-aes256-siv (2)\nbackend: Bash/OpenSSL\nopenssl: %s\nconfig-id: %s\n' "$(openssl version)" "$TC_CONFIG_ID"
+    if transcrypt_bash_try_key; then printf 'unlocked: yes\n'; else printf 'unlocked: no\n'; fi
+}
+transcrypt_bash_help() {
+    cat <<'HELP'
+transcrypt-bash (reference portable Transcrypt v3 profile 2)
+  init [--profile v3-scrypt-aes256-siv] [--password-stdin] [PATTERN ...]
+  install                install local Git filters and protection hooks after clone
+  unlock [--password-stdin] / lock
+  protect PATTERN ... / unprotect PATTERN ...
+  hydrate                open ciphertext files in a previously locked checkout
+  rebind                 re-clean protected paths after rename/move
+  rekey [--password-stdin]    stage a new config and encrypted blobs
+  clean PATH / smudge PATH    Git binary-safe filters
+  encrypt PATH / decrypt PATH  raw authenticated stdin/stdout conversion
+  verify-index / audit [REV]  validate staged or committed encrypted objects
+  pre-push               Git hook: verify every outgoing commit
+  diff / merge           configured external Git drivers
+  profile [--list] / status / doctor / help
+Passphrase: TRANSCRYPT_PASSWORD or --password-stdin; initialized passwords >=12 bytes.
+Profile 1 (Argon2id) remains available only in Rust on OpenSSL 3.0.
+Parity gaps: legacy v2 migration, private agent, cross-language Rust profile 2.
+HELP
+}
+transcrypt_bash_main() {
+    local command=${1:-help} path
+    shift || true
+    transcrypt_bash_require_tools; transcrypt_bash_workspace
+    case "$command" in
+        help|-h|--help) transcrypt_bash_help ;;
+        init) transcrypt_bash_init "$@" ;;
+        install) transcrypt_bash_install ;;
+        unlock) transcrypt_bash_unlock "${1-}" ;;
+        lock) transcrypt_bash_lock ;;
+        protect) transcrypt_bash_protect "$@" ;;
+        unprotect) transcrypt_bash_unprotect "$@" ;;
+        hydrate) transcrypt_bash_hydrate ;;
+        rebind) transcrypt_bash_rebind ;;
+        rekey) transcrypt_bash_rekey "${1-}" ;;
+        clean|smudge) (($#==1)) || transcrypt_bash_fail "usage: $command PATH"; transcrypt_bash_filter "$command" "$1" ;;
+        encrypt|decrypt)
+            (($#==1)) || transcrypt_bash_fail "usage: $command PATH"
+            path=$1; transcrypt_bash_load_config; transcrypt_bash_require_key
+            cat >"$TC_TMP/input"
+            if [[ $command == encrypt ]]; then transcrypt_bash_encrypt_file "$path" "$TC_TMP/input" "$TC_TMP/output"
+            else transcrypt_bash_decrypt_file "$path" "$TC_TMP/input" "$TC_TMP/output"; fi
+            cat "$TC_TMP/output" ;;
+        verify-index) transcrypt_bash_verify_index ;;
+        audit) transcrypt_bash_audit "${1:-HEAD}" ;;
+        pre-push) transcrypt_bash_pre_push ;;
+        diff) transcrypt_bash_diff "$@" ;;
+        merge) transcrypt_bash_merge "$@" ;;
+        status|profile)
+            if [[ ${1-} == --list ]]; then
+                printf '%s\n' 'p1: Argon2id/AES-SIV: Rust-only (OpenSSL 3.0)' 'p2: scrypt/AES-SIV: Bash supported; Rust pending' 'p3: PBKDF2/AES-SIV: reserved, unimplemented'
+            else transcrypt_bash_status; fi ;;
+        doctor)
+            transcrypt_bash_status
+            printf '%s\n' 'Publication security: SIV authentication and Git staged-object verification.' 'This script assumes a trusted local machine; process arguments may contain derived keys.' 'Published profile-2 Rust interoperability and full lifecycle parity remain outstanding.' ;;
+        *) transcrypt_bash_fail "unknown command $command (see help)" ;;
+    esac
+}
+transcrypt_bash_main "$@"

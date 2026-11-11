@@ -12,6 +12,15 @@ to v3 remains an explicit one-time migration (`transcrypt-rs migrate` today),
 not legacy binary compatibility. The tables below describe the **current
 v2-to-Rust-v3** mapping, not achieved Bash-v3 parity.
 
+**Current Bash v3 checkpoint:** `contrib/v3/transcrypt-bash` implements
+portable P2 scrypt/AES-SIV and basic Git lifecycle, using independent
+[profile-2 vectors](../../tests/v3/bash/portable-p2-vectors.tsv).
+[Implementation guide](../../contrib/v3/README-BASH.md) and
+[exact profile spec](specs/V3-PORTABLE-P2.md). Rust P2 and bidirectional
+feature parity are not yet implemented; the tables below remain the
+legacy-v2 to Rust-P1 crosswalk.
+
+
 ## Commands
 
 | Bash `transcrypt` | `transcrypt-rs` | Notes |

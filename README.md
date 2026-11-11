@@ -26,10 +26,12 @@ them with your entire team or complicate your workflow.
 > See the [dual-implementation roadmap](docs/verification/V3-DUAL-IMPLEMENTATION-ROADMAP.md)
 > and
 > [independent-review disposition](docs/verification/V3-REVIEW-TRIAGE.md).
-> An independent source review also reproduced a **Bash v2 plaintext-staging
+> The independent Bash **profile-2 reference is now implemented**, but
+> Rust profile-2 support, full interoperability and OpenSSL 3.0.13 tests
+> are outstanding. An independent source review also reproduced a **Bash v2 plaintext-staging
 > bypass**; consult that disposition for legacy remediation and migration
-> guidance. The portable Bash v3 and shared profiles are **planned**, not
-> implemented; the released Bash command below still describes v2.
+> guidance. The released top-level `transcrypt` command below still
+> describes legacy Bash v2.
 >
 > **Experimental secure-first Rust v3:** a separate authenticated Rust
 > implementation and Lean/Aeneas verification project are under active
@@ -40,6 +42,20 @@ them with your entire team or complicate your workflow.
 > [proof coverage ledger](docs/verification/V3-PROOF-COVERAGE.md), the
 > [assumption register](docs/verification/V3-ASSUMPTIONS.md) and the
 > [continuation handoff](docs/verification/V3-HANDOFF.md).
+
+
+### Portable v3 Bash reference (experimental)
+
+A standalone Bash/OpenSSL reference implementation is available at
+[`contrib/v3/transcrypt-bash`](contrib/v3/transcrypt-bash), with an
+[installation/workflow guide](contrib/v3/README-BASH.md) and a
+[fixed profile-2 wire specification](docs/verification/specs/V3-PORTABLE-P2.md).
+It targets OpenSSL 3.0.13 (testing so far on 3.5.5), independently composes
+scrypt + AES-256-SIV, and runs real Git encryption/filter workflows.
+The existing Rust **profile 1** (Argon2id/AES-SIV) remains available and
+unchanged. Rust support for portable profile 2 and complete Bash/Rust
+feature parity remain future work; see the
+[dual-implementation roadmap](docs/verification/V3-DUAL-IMPLEMENTATION-ROADMAP.md).
 
 ## Overview
 

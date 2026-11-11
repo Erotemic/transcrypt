@@ -16,7 +16,8 @@ Rust v3 **profile 1**, with Argon2id + AES-256-CMAC-SIV and its original
 `TCFG3 00 01` and `TV3F 00 01` discriminators. The new
 [Bash/Rust parity roadmap](../V3-DUAL-IMPLEMENTATION-ROADMAP.md) proposes
 **separate, new** scrypt and PBKDF2 AES-SIV profiles for OpenSSL 3.0.13.
-Their IDs and exact KDF transcripts are **not yet specified**; no reader
+The new [portable profile-2 specification](V3-PORTABLE-P2.md) now assigns
+`TCFG3 00 02` and `TV3F 00 02` with its own exact scrypt transcript; no reader
 may infer them from these P1 bytes. This document must not be altered to
 retrofit Bash compatibility.
 
