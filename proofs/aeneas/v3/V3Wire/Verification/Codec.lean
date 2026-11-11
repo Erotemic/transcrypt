@@ -20,7 +20,8 @@ open RustM ControlFlow
 namespace Transcrypt.V3Verification
 
 open transcrypt_v3_core
-open Transcrypt.V3Wire (fileMagicLen idLen configMagicLen saltLen tagLen configLen fileHeaderLen fileMinLen)
+open Transcrypt.V3Wire (fileMagicLen idLen configFamilyLen configMagicLen saltLen tagLen configLen fileHeaderLen
+  fileMinLen)
 
 /-! ## File header encoder -/
 
@@ -74,19 +75,71 @@ theorem encode_file_header_bytes (id : Std.Array U8 16#usize) :
 
 /-! ## Config encoder -/
 
+/-! ## Profiles -/
+
+/-- The production profile byte. -/
+@[step]
+theorem profile_byte_spec (p : Profile) : profile_byte p ⦃ b => b = profileU8 p ⦄ := by
+  unfold profile_byte
+  rcases p with _ | _ | _ <;> simp [profileU8, PROFILE_ARGON2ID, PROFILE_SCRYPT, PROFILE_PBKDF2]
+
+/-- The production profile decoder is the specification's `profileOfByte`,
+    and a profile it returns is the one whose byte it read. -/
+@[step]
+theorem profile_of_byte_spec (b : U8) : profile_of_byte b ⦃ r => match r with
+    | core.option.Option.None => Transcrypt.V3Wire.profileOfByte b.val = none
+    | core.option.Option.Some p =>
+        Transcrypt.V3Wire.profileOfByte b.val = some (profileSpec p) ∧ b = profileU8 p ⦄ := by
+  unfold profile_of_byte
+  have h1 : (1#u8 : U8).val = 1 := rfl
+  have h2 : (2#u8 : U8).val = 2 := rfl
+  have h3 : (3#u8 : U8).val = 3 := rfl
+  simp only [PROFILE_ARGON2ID, PROFILE_SCRYPT, PROFILE_PBKDF2]
+  split
+  · rename_i h
+    simp only [WP.spec_ok]
+    exact ⟨by rw [h]; rfl, h⟩
+  · rename_i hn1
+    have hv1 : b.val ≠ 1 := fun hv => hn1 (UScalar.eq_of_val_eq (by rw [hv, h1]))
+    split
+    · rename_i h
+      simp only [WP.spec_ok]
+      exact ⟨by rw [h]; rfl, h⟩
+    · rename_i hn2
+      have hv2 : b.val ≠ 2 := fun hv => hn2 (UScalar.eq_of_val_eq (by rw [hv, h2]))
+      split
+      · rename_i h
+        simp only [WP.spec_ok]
+        exact ⟨by rw [h]; rfl, h⟩
+      · rename_i hn3
+        have hv3 : b.val ≠ 3 := fun hv => hn3 (UScalar.eq_of_val_eq (by rw [hv, h3]))
+        simp only [WP.spec_ok]
+        simp [Transcrypt.V3Wire.profileOfByte, hv1, hv2, hv3]
+
+theorem Copied.of_agree {out base A B : List U8} {dst srcOff n : Nat}
+    (h : Copied out base A dst srcOff n) (hab : ∀ k, k < n → A[srcOff + k]! = B[srcOff + k]!) :
+    Copied out base B dst srcOff n := by
+  refine ⟨h.1, fun k hk => ?_⟩
+  rw [h.2 k hk]
+  split
+  · rename_i hr; exact hab _ (by omega)
+  · rfl
+
+/-! ## Config encoder -/
+
 theorem encode_config_prefix_loop0_spec (base out : Std.Array U8 39#usize) (i : Usize)
-    (hi : i.val ≤ configMagicLen) (h : Copied out.val base.val CONFIG_MAGIC.val 0 0 i.val) :
-    encode_config_prefix_loop0 out i ⦃ r => Copied r.val base.val CONFIG_MAGIC.val 0 0 configMagicLen ⦄ := by
+    (hi : i.val ≤ configFamilyLen) (h : Copied out.val base.val CONFIG_FAMILY.val 0 0 i.val) :
+    encode_config_prefix_loop0 out i ⦃ r => Copied r.val base.val CONFIG_FAMILY.val 0 0 configFamilyLen ⦄ := by
   unfold encode_config_prefix_loop0
-  apply copy_loop (val := fun o : Std.Array U8 39#usize => o.val) (bound := configMagicLen) _ _ _ _ _ _ _ _ hi h
+  apply copy_loop (val := fun o : Std.Array U8 39#usize => o.val) (bound := configFamilyLen) _ _ _ _ _ _ _ _ hi h
   intro o j hj hc
   unfold_v3_bytes
   unfold encode_config_prefix_loop0.body
-  simp_len
+  have hF := CONFIG_FAMILY_LEN_val
+  have := CONFIG_FAMILY_length
   step*
-  have := CONFIG_MAGIC_length
-  refine ⟨i3_post, by omega, ?_⟩
-  rw [a_post, i3_post]
+  refine ⟨i2_post, by omega, ?_⟩
+  rw [a_post, i2_post]
   apply Copied.array_step hc (by simp)
   · simp_all [getElem!_pos]
   · simp; omega
@@ -101,12 +154,12 @@ theorem encode_config_prefix_loop1_spec (base out : Std.Array U8 39#usize) (src 
   unfold encode_config_prefix_loop1.body
   have hsrc : src.length = 32 := by simp
   have ho : o.length = 39 := by simp
-  simp_len
+  have hM := CONFIG_MAGIC_LEN_val
   have hID := SALT_LEN_val
   step*
   refine ⟨j1_post, by omega, ?_⟩
   rw [a_post, j1_post]
-  apply Copied.array_step hc (by rw [i2_post, s_post]; simp)
+  apply Copied.array_step hc (by rw [i1_post]; simp [hM])
   · simp_all [getElem!_pos]
   · simp; omega
 
@@ -147,23 +200,39 @@ theorem encode_config_loop1_spec (base out : Std.Array U8 55#usize) (src : Std.A
   · simp_all [getElem!_pos]
   · simp; omega
 
-/-- The production config-prefix encoder emits the magic followed by the salt. -/
+/-- The production config-prefix encoder emits the profile's magic (family
+    marker and profile byte) followed by the salt. -/
 @[step]
-theorem encode_config_prefix_bytes (salt : Std.Array U8 32#usize) :
-    encode_config_prefix salt ⦃ out => out.val = CONFIG_MAGIC.val ++ salt.val ⦄ := by
+theorem encode_config_prefix_bytes (profile : Profile) (salt : Std.Array U8 32#usize) :
+    encode_config_prefix profile salt ⦃ out => out.val = configMagicU8 profile ++ salt.val ⦄ := by
   unfold encode_config_prefix
   step with encode_config_prefix_loop0_spec (Array.repeat 39#usize 0#u8) as ⟨ o0, h0 ⟩
   · exact Copied.zero _ _ _ _
-  step with encode_config_prefix_loop1_spec o0 o0 salt as ⟨ o1, h1 ⟩
+  step with profile_byte_spec as ⟨ b, hb ⟩
+  have hF := CONFIG_FAMILY_LEN_val
+  step as ⟨ o1, ho1 ⟩
+  have h1 : Copied o1.val (Array.repeat 39#usize 0#u8).val (configMagicU8 profile) 0 0 configMagicLen := by
+    have hm : Copied o0.val (Array.repeat 39#usize 0#u8).val (configMagicU8 profile) 0 0 configFamilyLen :=
+      Copied.of_agree h0 (fun k hk => by
+        unfold_v3_bytes
+        simp only [configMagicU8, Nat.zero_add]
+        rw [List.getElem!_append_left _ _ _ (by simp; omega)])
+    rw [ho1]
+    have := Copied.array_step (p := CONFIG_FAMILY_LEN) (x := b) hm (by simp [hF]) (by
+      unfold_v3_bytes
+      simp [configMagicU8, hb]) (by unfold_v3_bytes; simp)
+    simpa using this
+  step with encode_config_prefix_loop1_spec o1 o1 salt as ⟨ o2, h2 ⟩
   · exact Copied.zero _ _ _ _
-  exact copied_concat h0 h1 (by simp) (by simp) (by simp; rfl)
+  exact copied_concat h1 h2 (by simp [configMagicU8_length]) (by simp) (by simp; rfl)
 
-/-- The production config encoder emits magic, salt and verifier tag. -/
+/-- The production config encoder emits the profile's magic, salt and
+    verifier tag. -/
 @[step]
 theorem encode_config_bytes (c : Config) :
-    encode_config c ⦃ out => out.val = CONFIG_MAGIC.val ++ c.salt.val ++ c.tag.val ⦄ := by
+    encode_config c ⦃ out => out.val = configMagicU8 c.profile ++ c.salt.val ++ c.tag.val ⦄ := by
   unfold encode_config
-  step with encode_config_prefix_bytes c.salt as ⟨ p, hp ⟩
+  step with encode_config_prefix_bytes c.profile c.salt as ⟨ p, hp ⟩
   step with encode_config_loop0_spec (Array.repeat 55#usize 0#u8) (Array.repeat 55#usize 0#u8) p as ⟨ o0, h0 ⟩
   · exact Copied.zero _ _ _ _
   step with encode_config_loop1_spec o0 o0 c.tag as ⟨ o1, h1 ⟩
@@ -206,16 +275,15 @@ theorem decode_config_exact_loop0_spec (input : Std.Array U8 55#usize)
   unfold decode_config_exact_loop0.body
   have hsrc : input.length = 55 := by simp
   have ho : o.length = 32 := by simp
-  simp_len
   have hID := SALT_LEN_val
+  have hM := CONFIG_MAGIC_LEN_val
   step*
-  have hs : s.len.val = 7 := by simp [s_post]
   have hk32 : k.val < 32 := by scalar_tac
   refine ⟨j1_post, by omega, ?_⟩
   rw [a_post, j1_post]
   apply Copied.array_step hc (by simp)
-  · rw [i2_post2, getElem!_pos input.val (7 + k.val) (by simp; omega)]
-    simp only [i1_post, hs]
+  · rw [i1_post2, getElem!_pos input.val (7 + k.val) (by simp; omega)]
+    simp only [i_post, hM]
   · simp; omega
 
 theorem decode_config_exact_loop1_spec (input : Std.Array U8 55#usize)
@@ -302,6 +370,7 @@ theorem decode_file_header_exact_spec (input : Std.Array U8 22#usize) :
     decode_file_header_exact input ⦃ r => match r with
       | core.result.Result.Ok id => input.val = FILE_MAGIC.val ++ id.val
       | core.result.Result.Err FormatError.Magic => input.val.take Transcrypt.V3Wire.fileMagicLen ≠ FILE_MAGIC.val
+      | core.result.Result.Err FormatError.Profile => False
       | core.result.Result.Err FormatError.Length => False ⦄ := by
   unfold decode_file_header_exact
   unfold_v3_bytes
@@ -316,27 +385,58 @@ theorem decode_file_header_exact_spec (input : Std.Array U8 22#usize) :
       (by simpa using h1)
   · simpa using take_ne_of_not_matches (fun h => ‹¬b = true› (hb.2 (hm.2 h)))
 
-/-- The production exact config decoder accepts exactly the magic followed by
-    an arbitrary salt and tag, and returns them. -/
+/-- The production exact config decoder accepts exactly a profile's magic
+    followed by an arbitrary salt and tag, and returns the profile, salt and
+    tag. A wrong family marker and an unknown profile byte are refused. -/
 @[step]
 theorem decode_config_exact_spec (input : Std.Array U8 55#usize) :
     decode_config_exact input ⦃ r => match r with
-      | core.result.Result.Ok c => input.val = CONFIG_MAGIC.val ++ c.salt.val ++ c.tag.val
-      | core.result.Result.Err FormatError.Magic => input.val.take Transcrypt.V3Wire.configMagicLen ≠ CONFIG_MAGIC.val
+      | core.result.Result.Ok c => input.val = configMagicU8 c.profile ++ c.salt.val ++ c.tag.val
+      | core.result.Result.Err FormatError.Magic =>
+          input.val.take Transcrypt.V3Wire.configFamilyLen ≠ CONFIG_FAMILY.val
+      | core.result.Result.Err FormatError.Profile =>
+          Transcrypt.V3Wire.profileOfByte (input.val[Transcrypt.V3Wire.configFamilyLen]!).val = none
       | core.result.Result.Err FormatError.Length => False ⦄ := by
   unfold decode_config_exact
   unfold_v3_bytes
   simp only [lift, bind_tc_ok]
   step with matches_at_spec as ⟨ b, hb ⟩
-  have hm := matches_magic_iff input.val CONFIG_MAGIC.val (by simp)
+  have hm := matches_magic_iff input.val CONFIG_FAMILY.val (by simp)
   simp only [sliceBytes, Array.to_slice, Slice.length] at hb hm
+  have hF := CONFIG_FAMILY_LEN_val
   split
-  · step with decode_config_exact_loop0_spec input (Array.repeat 32#usize 0#u8) as ⟨ s1, h1 ⟩
-    · exact Copied.zero _ _ _ _
-    step with decode_config_exact_loop1_spec input (Array.repeat 16#usize 0#u8) as ⟨ t1, h2 ⟩
-    · exact Copied.zero _ _ _ _
-    exact eq_append3_of_matches_copied (by simp) (by simpa using hm.1 (hb.1 ‹_›))
-      (by simpa using h1) (by unfold_v3_bytes; simpa using h2)
+  · step as ⟨ _, pb, hpb0 ⟩
+    have hpb : pb = input.val[configFamilyLen]! := by
+      rw [getElem!_pos input.val configFamilyLen (by unfold_v3_bytes; simp)]; simpa [hF] using hpb0
+    step with profile_of_byte_spec as ⟨ o, ho ⟩
+    rcases o with _ | profile
+    · simp only [WP.spec_ok]
+      rw [hpb] at ho
+      exact ho
+    · obtain ⟨_, hbyte⟩ := ho
+      step with decode_config_exact_loop0_spec input (Array.repeat 32#usize 0#u8) as ⟨ s1, h1 ⟩
+      · exact Copied.zero _ _ _ _
+      step with decode_config_exact_loop1_spec input (Array.repeat 16#usize 0#u8) as ⟨ t1, h2 ⟩
+      · exact Copied.zero _ _ _ _
+      have hmagic : MatchesUpTo input.val (configMagicU8 profile) 0 (configMagicU8 profile).length := by
+        have hfam := hm.1 (hb.1 ‹_›)
+        intro k hk
+        rw [configMagicU8_length] at hk
+        by_cases hk6 : k < 6
+        · have := hfam k (by simpa using hk6)
+          simp only [configMagicU8]
+          rw [List.getElem!_append_left _ _ _ (by simpa using hk6)]
+          exact this
+        · have hk' : k = 6 := by omega
+          subst hk'
+          simp only [configMagicU8, Nat.zero_add]
+          rw [List.getElem!_append_right _ _ _ (by simp)]
+          simp only [CONFIG_FAMILY_length, Nat.sub_self]
+          rw [← hbyte, hpb]
+          unfold_v3_bytes
+          simp
+      exact eq_append3_of_matches_copied (by simp [configMagicU8_length]) hmagic
+        (by simpa [configMagicU8_length] using h1) (by unfold_v3_bytes; simpa [configMagicU8_length] using h2)
   · simpa using take_ne_of_not_matches (fun h => ‹¬b = true› (hb.2 (hm.2 h)))
 
 /-! ## Slice-boundary parsers -/
@@ -379,32 +479,41 @@ theorem parse_file_header_loop_spec (input : Slice U8) (hlen : fileHeaderLen ≤
   · rw [i1_post2, Nat.zero_add, getElem!_pos input.val k.val i1]
   · simp; omega
 
-theorem config_shape_of_eq {l : List U8} (salt : Std.Array U8 32#usize)
-    (tag : Std.Array U8 16#usize) (h : l = CONFIG_MAGIC.val ++ salt.val ++ tag.val) :
+theorem config_shape_of_eq {l : List U8} (profile : Profile) (salt : Std.Array U8 32#usize)
+    (tag : Std.Array U8 16#usize) (h : l = configMagicU8 profile ++ salt.val ++ tag.val) :
     Transcrypt.V3Wire.decodeConfigShape (l.map (fun b => b.val)) =
-      some (wireBytes salt, wireBytes tag) := by
+      some (profileSpec profile, wireBytes salt, wireBytes tag) := by
   have hm : l.map (fun b => b.val) =
-      Transcrypt.V3Wire.encodeConfig (wireBytes salt) (wireBytes tag) := by
-    rw [h, Transcrypt.V3Wire.encodeConfig, ← extracted_config_magic_matches_spec]
+      Transcrypt.V3Wire.encodeConfig (profileSpec profile) (wireBytes salt) (wireBytes tag) := by
+    rw [h, Transcrypt.V3Wire.encodeConfig, ← configMagicU8_bytes]
     simp [wireBytes]
   rw [hm]
-  exact Transcrypt.V3Wire.decode_config_encode _ _ (by simp [wireBytes]) (by simp [wireBytes])
+  exact Transcrypt.V3Wire.decode_config_encode _ _ _ (by simp [wireBytes]) (by simp [wireBytes])
 
-theorem config_shape_none_of_take {l : List U8} (h : l.take configMagicLen ≠ CONFIG_MAGIC.val) :
+theorem config_shape_none_of_take {l : List U8} (h : l.take configFamilyLen ≠ CONFIG_FAMILY.val) :
     Transcrypt.V3Wire.decodeConfigShape (l.map (fun b => b.val)) = none := by
   apply Transcrypt.V3Wire.config_wrong_magic
   intro heq
   apply h
   apply map_val_injective
-  rw [List.map_take, heq, ← extracted_config_magic_matches_spec]
+  rw [List.map_take, heq, ← extracted_config_family_matches_spec]
   rfl
+
+theorem config_shape_none_of_profile {l : List U8}
+    (h : Transcrypt.V3Wire.profileOfByte (l[configFamilyLen]!).val = none) (hl : configFamilyLen < l.length) :
+    Transcrypt.V3Wire.decodeConfigShape (l.map (fun b => b.val)) = none := by
+  apply Transcrypt.V3Wire.config_unknown_profile
+  rw [getElem!_pos l configFamilyLen hl] at h
+  simpa [List.getD_eq_getElem?_getD, hl] using h
 
 @[step]
 theorem parse_config_spec (input : Slice U8) :
     parse_config input ⦃ r => match r with
       | core.result.Result.Ok c => Transcrypt.V3Wire.decodeConfigShape (sliceBytes input) =
-          some (wireBytes c.salt, wireBytes c.tag)
+          some (profileSpec c.profile, wireBytes c.salt, wireBytes c.tag)
       | core.result.Result.Err FormatError.Magic => input.length = Transcrypt.V3Wire.configLen ∧
+          Transcrypt.V3Wire.decodeConfigShape (sliceBytes input) = none
+      | core.result.Result.Err FormatError.Profile => input.length = Transcrypt.V3Wire.configLen ∧
           Transcrypt.V3Wire.decodeConfigShape (sliceBytes input) = none
       | core.result.Result.Err FormatError.Length => input.length ≠ Transcrypt.V3Wire.configLen ⦄ := by
   unfold parse_config
@@ -428,8 +537,10 @@ theorem parse_config_spec (input : Slice U8) :
   unfold sliceBytes
   rw [← hrin]
   match r with
-  | core.result.Result.Ok c => exact config_shape_of_eq c.salt c.tag hr
+  | core.result.Result.Ok c => exact config_shape_of_eq c.profile c.salt c.tag hr
   | core.result.Result.Err FormatError.Magic => exact ⟨h55, config_shape_none_of_take hr⟩
+  | core.result.Result.Err FormatError.Profile =>
+    exact ⟨h55, config_shape_none_of_profile hr (by unfold_v3_bytes; simp)⟩
   | core.result.Result.Err FormatError.Length => exact hr.elim
 
 theorem file_shape_of_take {l : List U8} (id : Std.Array U8 16#usize) (hlen : fileMinLen ≤ l.length)
@@ -467,6 +578,7 @@ theorem parse_file_header_spec (input : Slice U8) :
           some (wireBytes id)
       | core.result.Result.Err FormatError.Magic => Transcrypt.V3Wire.fileMinLen ≤ input.length ∧
           Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes input) = none
+      | core.result.Result.Err FormatError.Profile => False
       | core.result.Result.Err FormatError.Length => input.length < Transcrypt.V3Wire.fileMinLen ⦄ := by
   unfold parse_file_header FILE_MIN_LEN
   unfold_v3_bytes
@@ -490,6 +602,7 @@ theorem parse_file_header_spec (input : Slice U8) :
     | core.result.Result.Err FormatError.Magic =>
       refine ⟨h38, file_shape_none_of_take ?_⟩
       rwa [List.take_take, Nat.min_eq_left (by decide)] at hr
+    | core.result.Result.Err FormatError.Profile => exact hr.elim
     | core.result.Result.Err FormatError.Length => exact hr.elim
 
 /-! ## Spec-facing corollaries -/
@@ -507,32 +620,39 @@ theorem encode_file_header_refines (id : Std.Array U8 16#usize) :
 /-- The production config encoder refines the independent `encodeConfig`. -/
 theorem encode_config_refines (c : Config) :
     encode_config c ⦃ out =>
-      wireBytes out = Transcrypt.V3Wire.encodeConfig (wireBytes c.salt) (wireBytes c.tag) ⦄ := by
+      wireBytes out = Transcrypt.V3Wire.encodeConfig (profileSpec c.profile) (wireBytes c.salt) (wireBytes c.tag) ⦄ := by
   apply WP.spec_mono (encode_config_bytes c)
   intro out h
-  rw [Transcrypt.V3Wire.encodeConfig, ← extracted_config_magic_matches_spec]
+  rw [Transcrypt.V3Wire.encodeConfig, ← configMagicU8_bytes]
   simp [wireBytes, h]
 
 /-- Production roundtrip: decoding an encoded config yields the same config. -/
 theorem decode_config_exact_encode_config (c : Config) :
     (do let out ← encode_config c; decode_config_exact out) ⦃ r =>
       r = core.result.Result.Ok c ⦄ := by
-  step with encode_config_bytes c as ⟨ out, hout ⟩
+  step with encode_config_refines c as ⟨ out, hout ⟩
   step with decode_config_exact_spec out as ⟨ r, hr ⟩
+  have hdec := Transcrypt.V3Wire.decode_config_encode (profileSpec c.profile) (wireBytes c.salt) (wireBytes c.tag)
+    (by simp [wireBytes]) (by simp [wireBytes])
   rcases r with c' | e
-  · simp only [hout, List.append_assoc] at hr
-    have h2 := List.append_cancel_left hr
-    obtain ⟨hs, ht⟩ := List.append_inj h2 (by simp)
-    obtain ⟨cs, ct⟩ := c
-    obtain ⟨cs', ct'⟩ := c'
-    simp only at hs ht
-    have : cs = cs' := Subtype.ext hs
-    have : ct = ct' := Subtype.ext ht
-    subst_vars
-    rfl
-  · cases e
+  · have h' := config_shape_of_eq c'.profile c'.salt c'.tag hr
+    have hw : out.val.map (fun b => b.val) = wireBytes out := rfl
+    rw [hw, hout, hdec] at h'
+    simp only [Option.some.injEq, Prod.mk.injEq] at h'
+    obtain ⟨hp, hs, ht⟩ := h'
+    obtain ⟨cp, cs, ct⟩ := c
+    obtain ⟨cp', cs', ct'⟩ := c'
+    simp only at hp hs ht
+    rw [profileSpec_injective hp, wireBytes_injective hs, wireBytes_injective ht]
+  · have hw : out.val.map (fun b => b.val) = wireBytes out := rfl
+    cases e
     · exact hr.elim
-    · exact absurd (by rw [hout, List.append_assoc]; simp) hr
+    · have := config_shape_none_of_take hr
+      rw [hw, hout, hdec] at this
+      cases this
+    · have := config_shape_none_of_profile hr (by unfold_v3_bytes; simp)
+      rw [hw, hout, hdec] at this
+      cases this
 
 /-- Production roundtrip: decoding an encoded file header yields the same id. -/
 theorem decode_file_header_exact_encode_file_header (id : Std.Array U8 16#usize) :
@@ -548,6 +668,7 @@ theorem decode_file_header_exact_encode_file_header (id : Std.Array U8 16#usize)
   · cases e
     · exact hr.elim
     · exact absurd (by rw [hout]; simp) hr
+    · exact hr.elim
 
 /-- Public slice-boundary roundtrip for configs: the production parser
     recovers exactly the config the production encoder serialized. -/
@@ -557,16 +678,19 @@ theorem parse_config_encode_config (c : Config) :
   step with encode_config_refines c as ⟨ out, hout ⟩
   step with parse_config_spec out.to_slice as ⟨ r, hr ⟩
   have hsb : sliceBytes out.to_slice = wireBytes out := rfl
-  have hdec := Transcrypt.V3Wire.decode_config_encode (wireBytes c.salt) (wireBytes c.tag)
+  have hdec := Transcrypt.V3Wire.decode_config_encode (profileSpec c.profile) (wireBytes c.salt) (wireBytes c.tag)
     (by simp [wireBytes]) (by simp [wireBytes])
   rw [hsb, hout, hdec] at hr
   rcases r with c' | e
   · simp only [Option.some.injEq, Prod.mk.injEq] at hr
-    obtain ⟨hs, ht⟩ := hr
-    obtain ⟨cs, ct⟩ := c
-    obtain ⟨cs', ct'⟩ := c'
-    simp only at hs ht
-    rw [wireBytes_injective hs, wireBytes_injective ht]
+    obtain ⟨hp, hs, ht⟩ := hr
+    obtain ⟨cp, cs, ct⟩ := c
+    obtain ⟨cp', cs', ct'⟩ := c'
+    simp only at hp hs ht
+    rw [profileSpec_injective hp.symm, wireBytes_injective hs, wireBytes_injective ht]
   · cases e
     · simp at hr; exact absurd rfl hr
     · simp at hr
+    · simp at hr
+
+end Transcrypt.V3Verification

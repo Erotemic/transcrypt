@@ -8,9 +8,10 @@ use std::{fs, path::Path};
 
 /// The crate items that pair key material with a configuration, or use
 /// such a pairing, without `ValidatedKey`.
-const KEY_LEVEL: [&str; 10] = [
+const KEY_LEVEL: [&str; 14] = [
     "Keyed", "V3Primitives", "V3KeySchedule", "derive_key", "seal_record", "open_record",
     "authenticate_config", "authenticate_key", "unlock_stored_key", "initialize_config",
+    "RustKdf", "V3Kdf", "derive_profile_key", "derive_config_key",
 ];
 
 /// Whether `name` occurs in `line` as a whole identifier.

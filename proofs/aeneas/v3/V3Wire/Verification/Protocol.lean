@@ -54,14 +54,14 @@ structure Realizes {P : Type} (inst : V3Primitives P) (prims : P) (s : Suite) : 
 variable {P : Type} {inst : V3Primitives P} {prims : P} {σ : Suite}
 
 /-- A freshly initialized configuration authenticates and has the exact
-    55-byte layout of the spec. -/
+    55-byte layout of the spec, with the requested profile. -/
 @[step]
-theorem initialize_config_spec (h : Realizes inst prims σ) (salt : Std.Array U8 32#usize) :
-    initialize_config inst prims salt ⦃ r => match r with
+theorem initialize_config_spec (h : Realizes inst prims σ) (profile : Profile) (salt : Std.Array U8 32#usize) :
+    initialize_config inst prims profile salt ⦃ r => match r with
       | core.result.Result.Ok cfg =>
           ConfigAuthentic σ (wireBytes cfg) ∧
-          wireBytes cfg = Transcrypt.V3Wire.encodeConfig (wireBytes salt)
-            (σ.siv [configDomain, Transcrypt.V3Wire.configMagic ++ wireBytes salt] [])
+          wireBytes cfg = Transcrypt.V3Wire.encodeConfig (profileSpec profile) (wireBytes salt)
+            (σ.siv [configDomain, Transcrypt.V3Wire.configMagic (profileSpec profile) ++ wireBytes salt] [])
       | core.result.Result.Err e => e = Refusal.Primitive ⦄ := by
   unfold initialize_config
   step with encode_config_prefix_bytes as ⟨ pre, hpre ⟩
@@ -70,31 +70,33 @@ theorem initialize_config_spec (h : Realizes inst prims σ) (salt : Std.Array U8
   split
   · rename_i hb
     step with encode_config_refines as ⟨ cfg, hcfg ⟩
-    have hpre' : wireBytes pre = Transcrypt.V3Wire.configMagic ++ wireBytes salt := by
+    have hpre' : wireBytes pre = Transcrypt.V3Wire.configMagic (profileSpec profile) ++ wireBytes salt := by
       simp only [wireBytes, hpre, List.map_append]
-      rw [← extracted_config_magic_matches_spec]; rfl
-    have ht : wireBytes tag = σ.siv [configDomain, Transcrypt.V3Wire.configMagic ++ wireBytes salt] [] := by
+      rw [configMagicU8_bytes]
+    have ht : wireBytes tag =
+        σ.siv [configDomain, Transcrypt.V3Wire.configMagic (profileSpec profile) ++ wireBytes salt] [] := by
       rw [htag hb, hpre']
-    refine ⟨⟨wireBytes salt, wireBytes tag, ?_, ?_⟩, ?_⟩
+    refine ⟨⟨profileSpec profile, wireBytes salt, wireBytes tag, ?_, ?_⟩, ?_⟩
     · rw [hcfg]
-      exact Transcrypt.V3Wire.decode_config_encode _ _ (by simp [wireBytes]) (by simp [wireBytes])
+      exact Transcrypt.V3Wire.decode_config_encode _ _ _ (by simp [wireBytes]) (by simp [wireBytes])
     · simpa using ht.symm
     · simpa [ht] using hcfg
   · simp
 
-theorem configAuthentic_iff {cfg : Std.Array U8 55#usize} {salt : Std.Array U8 32#usize}
-    {tag : Std.Array U8 16#usize} (h : cfg.val = CONFIG_MAGIC.val ++ salt.val ++ tag.val) :
+theorem configAuthentic_iff {cfg : Std.Array U8 55#usize} {profile : Profile} {salt : Std.Array U8 32#usize}
+    {tag : Std.Array U8 16#usize} (h : cfg.val = configMagicU8 profile ++ salt.val ++ tag.val) :
     ConfigAuthentic σ (wireBytes cfg) ↔
-      σ.siv [configDomain, Transcrypt.V3Wire.configMagic ++ wireBytes salt] [] = wireBytes tag := by
-  have hshape := config_shape_of_eq salt tag h
+      σ.siv [configDomain, Transcrypt.V3Wire.configMagic (profileSpec profile) ++ wireBytes salt] [] =
+        wireBytes tag := by
+  have hshape := config_shape_of_eq profile salt tag h
   constructor
-  · rintro ⟨salt', tag', hs, ht⟩
-    have : (wireBytes salt, wireBytes tag) = (salt', tag') := by
+  · rintro ⟨p', salt', tag', hs, ht⟩
+    have : (profileSpec profile, wireBytes salt, wireBytes tag) = (p', salt', tag') := by
       rw [← Option.some.injEq]; rw [← hshape]; exact hs
     simp only [Prod.mk.injEq] at this
-    rw [this.1, this.2]; exact ht
+    rw [this.1, this.2.1, this.2.2]; exact ht
   · intro ht
-    exact ⟨wireBytes salt, wireBytes tag, hshape, ht⟩
+    exact ⟨profileSpec profile, wireBytes salt, wireBytes tag, hshape, ht⟩
 
 /-- `authenticate_config` accepts exactly the authentic configurations:
     `Ok` iff the 55 bytes parse and the tag verifies under the held key. -/
@@ -102,7 +104,7 @@ theorem configAuthentic_iff {cfg : Std.Array U8 55#usize} {salt : Std.Array U8 3
 theorem authenticate_config_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#usize) :
     authenticate_config inst prims config ⦃ r => match r with
       | core.result.Result.Ok c =>
-          ConfigAuthentic σ (wireBytes config) ∧ config.val = CONFIG_MAGIC.val ++ c.salt.val ++ c.tag.val
+          ConfigAuthentic σ (wireBytes config) ∧ config.val = configMagicU8 c.profile ++ c.salt.val ++ c.tag.val
       | core.result.Result.Err Refusal.Config =>
           Transcrypt.V3Wire.decodeConfigShape (wireBytes config) = none
       | core.result.Result.Err Refusal.ConfigAuthentication => ¬ ConfigAuthentic σ (wireBytes config)
@@ -112,9 +114,9 @@ theorem authenticate_config_spec (h : Realizes inst prims σ) (config : Std.Arra
   rcases r with c | e
   · simp only at hr ⊢
     step with encode_config_prefix_bytes as ⟨ pre, hpre ⟩
-    have hpre' : wireBytes pre = Transcrypt.V3Wire.configMagic ++ wireBytes c.salt := by
+    have hpre' : wireBytes pre = Transcrypt.V3Wire.configMagic (profileSpec c.profile) ++ wireBytes c.salt := by
       simp only [wireBytes, hpre, List.map_append]
-      rw [← extracted_config_magic_matches_spec]; rfl
+      rw [configMagicU8_bytes]
     step with h.open_config pre c.tag as ⟨ b, hb ⟩
     rw [hpre'] at hb
     split
@@ -127,6 +129,7 @@ theorem authenticate_config_spec (h : Realizes inst prims σ) (config : Std.Arra
     cases e
     · exact hr.elim
     · exact config_shape_none_of_take hr
+    · exact config_shape_none_of_profile hr (by unfold_v3_bytes; simp)
 
 /-! ## Record sealing and opening -/
 
@@ -242,6 +245,7 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
       | Err e =>
         cases e with
         | Magic => exact r1_post.2
+        | Profile => exact r1_post.elim
         | Length => exact Transcrypt.V3Wire.file_truncated _ (by rw [sliceBytes_length]; exact r1_post)
     have hcanon : CanonicalProtectedPath (sliceBytes path) := b_post.1 ‹b = true›
     step with h.config_id config as ⟨ cid, hcid ⟩
@@ -276,7 +280,7 @@ theorem seal_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
   · have hr := ‹r = core.result.Result.Err refusal›
     subst hr
     cases refusal <;> simp only at r_post ⊢
-    · intro ⟨salt, tag, hs, _⟩; rw [r_post] at hs; cases hs
+    · intro ⟨_, salt, tag, hs, _⟩; rw [r_post] at hs; cases hs
     · exact r_post
 
 /-- The zeroing loop run when authentication fails. -/
@@ -405,11 +409,12 @@ theorem open_record_spec (h : Realizes inst prims σ) (config : Std.Array U8 55#
     rename_i e _
     cases e with
     | Magic => exact r1_post.2
+    | Profile => exact r1_post.elim
     | Length => exact Transcrypt.V3Wire.file_truncated _ (by rw [sliceBytes_length]; exact r1_post)
   · have hr := ‹r = core.result.Result.Err refusal›
     subst hr
     cases refusal <;> simp only at r_post ⊢
-    · intro ⟨salt, tag, hs, _⟩; rw [r_post] at hs; cases hs
+    · intro ⟨_, salt, tag, hs, _⟩; rw [r_post] at hs; cases hs
     · exact r_post
 
 /-! ## Credential agent authorization -/

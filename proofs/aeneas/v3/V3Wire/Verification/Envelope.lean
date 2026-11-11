@@ -172,6 +172,7 @@ theorem record_envelope_prefix_ok_spec (size : Usize) («prefix» : Slice U8) (i
           | Magic =>
             simp only at hr
             rw [hr.2]; simp
+          | Profile => simp at hr
           | Length =>
             simp only at hr
             rw [Transcrypt.V3Wire.file_truncated _ (by rw [hbl]; exact hr)]
@@ -313,6 +314,7 @@ theorem smudge_action_spec (blob : Slice U8) (id : Std.Array U8 16#usize) (unloc
       have hnone : Transcrypt.V3Wire.decodeFileHeaderShape (sliceBytes blob) = none := by
         cases e with
         | Magic => exact hr.2
+        | Profile => exact hr.elim
         | Length => exact Transcrypt.V3Wire.file_truncated _ (by rw [hbl]; exact hr)
       simp [WP.spec_ok, hnone, hle]
 

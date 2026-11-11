@@ -4,7 +4,9 @@ use super::*;
 
 #[test]
 fn literal_lengths_are_the_field_sums() {
-    assert_eq!(CONFIG_PREFIX_LEN, CONFIG_MAGIC.len() + SALT_LEN);
+    assert_eq!(CONFIG_FAMILY_LEN, CONFIG_FAMILY.len());
+    assert_eq!(CONFIG_MAGIC_LEN, CONFIG_FAMILY_LEN + size_of::<u8>());
+    assert_eq!(CONFIG_PREFIX_LEN, CONFIG_MAGIC_LEN + SALT_LEN);
     assert_eq!(CONFIG_LEN, CONFIG_PREFIX_LEN + TAG_LEN);
     assert_eq!(FILE_HEADER_LEN, FILE_MAGIC.len() + ID_LEN);
     assert_eq!(FRAME_CONFIG_START, size_of::<u8>());
@@ -18,28 +20,114 @@ fn literal_lengths_are_the_field_sums() {
     assert_eq!(KEY_FILE_LEN, KEY_CHECK_START + KEY_CHECK_LEN);
 }
 
+const PROFILES: [Profile; 3] = [Profile::Argon2id, Profile::Scrypt, Profile::Pbkdf2];
+
 #[test]
 fn config_codec_roundtrip_strict_length_and_magic() {
     let salt = core::array::from_fn(|i| i as u8);
     let tag = core::array::from_fn(|i| (255 - i) as u8);
-    let config = Config { salt, tag };
-    let bytes = encode_config(&config);
-    assert_eq!(decode_config_exact(&bytes), Ok(config));
-    assert_eq!(parse_config(&bytes), Ok(config));
-    for n in 0..CONFIG_LEN {
-        assert_eq!(parse_config(&bytes[..n]), Err(FormatError::Length));
+    for profile in PROFILES {
+        let config = Config { profile, salt, tag };
+        let bytes = encode_config(&config);
+        assert_eq!(bytes[..CONFIG_FAMILY_LEN], CONFIG_FAMILY);
+        assert_eq!(bytes[CONFIG_FAMILY_LEN], profile_byte(profile));
+        assert_eq!(decode_config_exact(&bytes), Ok(config));
+        assert_eq!(parse_config(&bytes), Ok(config));
+        for n in 0..CONFIG_LEN {
+            assert_eq!(parse_config(&bytes[..n]), Err(FormatError::Length));
+        }
+        let mut extended = bytes.to_vec();
+        extended.push(1);
+        assert_eq!(parse_config(&extended), Err(FormatError::Length));
+        // Each byte of the family marker must be enforced, with no
+        // exceptions for offset 5 and no fallback to older formats.
+        for pos in 0..CONFIG_FAMILY_LEN {
+            let mut modified = bytes;
+            modified[pos] ^= 1;
+            assert_eq!(decode_config_exact(&modified), Err(FormatError::Magic));
+            assert_eq!(parse_config(&modified), Err(FormatError::Magic));
+        }
+        // Every profile byte but the three known ones is refused.
+        for byte in 0..=u8::MAX {
+            let mut modified = bytes;
+            modified[CONFIG_FAMILY_LEN] = byte;
+            match profile_of_byte(byte) {
+                Some(other) => assert_eq!(decode_config_exact(&modified).map(|c| c.profile), Ok(other)),
+                None => assert_eq!(decode_config_exact(&modified), Err(FormatError::Profile)),
+            }
+        }
     }
-    let mut extended = bytes.to_vec();
-    extended.push(1);
-    assert_eq!(parse_config(&extended), Err(FormatError::Length));
-    // Each byte of the version marker must be enforced, with no
-    // exceptions for offsets 5 or 6 and no fallback to older formats.
-    for pos in 0..CONFIG_MAGIC.len() {
-        let mut modified = bytes;
-        modified[pos] ^= 1;
-        assert_eq!(decode_config_exact(&modified), Err(FormatError::Magic));
-        assert_eq!(parse_config(&modified), Err(FormatError::Magic));
+}
+
+#[test]
+fn profile_one_config_bytes_are_unchanged() {
+    // The original v3 marker, before profiles had names.
+    let salt = [0x5a; SALT_LEN];
+    let tag = [0xa5; TAG_LEN];
+    let bytes = encode_config(&Config { profile: Profile::Argon2id, salt, tag });
+    assert_eq!(&bytes[..CONFIG_MAGIC_LEN], b"TCFG3\0\x01");
+}
+
+#[test]
+fn profiles_fix_their_key_derivation() {
+    assert_eq!(
+        profile_kdf(Profile::Argon2id),
+        Kdf::Argon2id { memory_kib: 65536, passes: 3, lanes: 1 }
+    );
+    assert_eq!(profile_kdf(Profile::Scrypt), Kdf::Scrypt { log_n: 15, r: 8, p: 1 });
+    assert_eq!(profile_kdf(Profile::Pbkdf2), Kdf::Pbkdf2Sha256 { rounds: 600_000 });
+    for profile in PROFILES {
+        assert_eq!(profile_of_byte(profile_byte(profile)), Some(profile));
     }
+    assert_eq!(profile_of_byte(0), None);
+    assert_eq!(profile_of_byte(4), None);
+}
+
+#[test]
+fn passphrase_rules() {
+    for profile in PROFILES {
+        assert!(!passphrase_ok(profile, b""));
+        assert!(passphrase_ok(profile, &[b'x'; MAX_PASSPHRASE]));
+        assert!(!passphrase_ok(profile, &[b'x'; MAX_PASSPHRASE + 1]));
+    }
+    assert!(passphrase_ok(Profile::Argon2id, b"with\0nul"));
+    assert!(!passphrase_ok(Profile::Scrypt, b"with\0nul"));
+    assert!(!passphrase_ok(Profile::Pbkdf2, b"\0"));
+}
+
+struct RecordingKdf(core::cell::Cell<Option<Kdf>>, bool);
+
+impl V3Kdf for RecordingKdf {
+    fn derive(&self, kdf: Kdf, passphrase: &[u8], salt: &[u8; SALT_LEN], key: &mut [u8; KEY_LEN]) -> bool {
+        self.0.set(Some(kdf));
+        key[0] = passphrase[0];
+        key[1] = salt[0];
+        self.1
+    }
+}
+
+#[test]
+fn derivation_follows_the_configuration_profile() {
+    for profile in PROFILES {
+        let config = encode_config(&Config { profile, salt: [9; SALT_LEN], tag: [0; TAG_LEN] });
+        let kdf = RecordingKdf(core::cell::Cell::new(None), true);
+        let mut key = [0u8; KEY_LEN];
+        assert_eq!(derive_config_key(&kdf, &config, b"pass", &mut key), Ok(profile));
+        assert_eq!(kdf.0.get(), Some(profile_kdf(profile)));
+        assert_eq!(key[..2], [b'p', 9]);
+        // A failing derivation is a refusal, never a fallback.
+        let failing = RecordingKdf(core::cell::Cell::new(None), false);
+        assert_eq!(derive_config_key(&failing, &config, b"pass", &mut key), Err(Refusal::Primitive));
+        // A refused passphrase reaches no derivation.
+        let unused = RecordingKdf(core::cell::Cell::new(None), true);
+        assert_eq!(derive_config_key(&unused, &config, b"", &mut key), Err(Refusal::Passphrase));
+        assert_eq!(unused.0.get(), None);
+    }
+    let mut unknown = encode_config(&Config { profile: Profile::Scrypt, salt: [9; SALT_LEN], tag: [0; TAG_LEN] });
+    unknown[CONFIG_FAMILY_LEN] = 4;
+    let kdf = RecordingKdf(core::cell::Cell::new(None), true);
+    assert_eq!(derive_config_key(&kdf, &unknown, b"pass", &mut [0u8; KEY_LEN]), Err(Refusal::Config));
+    assert_eq!(kdf.0.get(), None);
 }
 
 #[test]
@@ -160,7 +248,7 @@ fn canonical_path_policy() {
 #[test]
 fn sealed_records_are_bound_to_config_and_path() {
     let m = Mock { key: 9 };
-    let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+    let config = initialize_config(&m, Profile::Argon2id, &[3u8; SALT_LEN]).unwrap();
     assert!(authenticate_config(&m, &config).is_ok());
     assert_eq!(authenticate_config(&Mock { key: 10 }, &config), Err(Refusal::ConfigAuthentication));
     let mut bad = config;
@@ -178,7 +266,7 @@ fn sealed_records_are_bound_to_config_and_path() {
         assert_eq!(seal(&m, &config, b"../a.secret", pt), Err(Refusal::Path));
         assert_eq!(open(&m, &config, b".gitattributes", &rec), Err(Refusal::Path));
     }
-    let other = initialize_config(&m, &[4u8; SALT_LEN]).unwrap();
+    let other = initialize_config(&m, Profile::Argon2id, &[4u8; SALT_LEN]).unwrap();
     let rec = seal(&m, &config, b"a.secret", b"x").unwrap();
     assert_eq!(open(&m, &other, b"a.secret", &rec), Err(Refusal::ConfigMismatch));
     assert_eq!(open(&m, &config, b"a.secret", &rec[..FILE_MIN_LEN - 1]), Err(Refusal::Envelope));
@@ -190,7 +278,7 @@ fn sealed_records_are_bound_to_config_and_path() {
 #[test]
 fn lifecycle_actions_never_discard_unknown_bytes() {
     let m = Mock { key: 1 };
-    let config = initialize_config(&m, &[5u8; SALT_LEN]).unwrap();
+    let config = initialize_config(&m, Profile::Argon2id, &[5u8; SALT_LEN]).unwrap();
     let rec = seal(&m, &config, b"a.secret", b"plain").unwrap();
     assert_eq!(hydrate_action(&rec, &rec, b"plain"), Ok(HydrateAction::Publish));
     assert_eq!(hydrate_action(b"plain", &rec, b"plain"), Ok(HydrateAction::Keep));
@@ -857,7 +945,7 @@ fn stored_keys_select_the_file_key_for_the_config_it_authenticates() {
     let mut key = [0u8; KEY_LEN];
     key[KEY_LEN - 1] = 9;
     assert_eq!(mock_key(&key), 9);
-    let config = initialize_config(&Mock { key: 9 }, &[3u8; SALT_LEN]).unwrap();
+    let config = initialize_config(&Mock { key: 9 }, Profile::Argon2id, &[3u8; SALT_LEN]).unwrap();
     let check = seal_key_check(&Mock { key: 9 }, &config).unwrap();
     let file = [&config[..], &key[..], &check[..]].concat();
     let (m, cfg) = unlock_stored_key::<Mock>(true, &file, &config).unwrap();
@@ -866,9 +954,9 @@ fn stored_keys_select_the_file_key_for_the_config_it_authenticates() {
     assert!(key_check_opens(&Mock { key: 9 }, &config, &check));
     // Another config (stored or current), another key, a damaged or
     // absent file: never unlocked, and the state is `stored_key_state`'s.
-    let other = initialize_config(&Mock { key: 10 }, &[3u8; SALT_LEN]).unwrap();
+    let other = initialize_config(&Mock { key: 10 }, Profile::Argon2id, &[3u8; SALT_LEN]).unwrap();
     // A config the same key authenticates, but not the one the file names.
-    let sibling = initialize_config(&Mock { key: 9 }, &[4u8; SALT_LEN]).unwrap();
+    let sibling = initialize_config(&Mock { key: 9 }, Profile::Argon2id, &[4u8; SALT_LEN]).unwrap();
     assert_ne!(sibling, config);
     let mut wrong_key = key;
     wrong_key[KEY_LEN - 1] = 10;
@@ -1029,7 +1117,7 @@ impl AuditedEntries for Answers {
 fn staged_verdicts_accept_only_what_their_check_requires() {
     use StagedRefusal::*;
     let m = Mock { key: 9 };
-    let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+    let config = initialize_config(&m, Profile::Argon2id, &[3u8; SALT_LEN]).unwrap();
     let id = m.config_id(&config);
     let record = seal(&m, &config, b"a.env", b"secret").unwrap();
     let mut other = record.clone();
@@ -1083,7 +1171,7 @@ fn staged_verdicts_accept_only_what_their_check_requires() {
 fn index_verdict_checks_every_entry_in_order() {
     use StagedRefusal::*;
     let m = Mock { key: 9 };
-    let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+    let config = initialize_config(&m, Profile::Argon2id, &[3u8; SALT_LEN]).unwrap();
     let id = m.config_id(&config);
     let record = seal(&m, &config, b"a.env", b"secret").unwrap();
     // A protected entry, an unprotected file staged since `HEAD`, a
@@ -1136,7 +1224,7 @@ fn index_verdict_checks_every_entry_in_order() {
 fn commit_verdict_checks_every_examined_entry_in_order() {
     use StagedRefusal::*;
     let m = Mock { key: 9 };
-    let config = initialize_config(&m, &[3u8; SALT_LEN]).unwrap();
+    let config = initialize_config(&m, Profile::Argon2id, &[3u8; SALT_LEN]).unwrap();
     let id = m.config_id(&config);
     let record = seal(&m, &config, b"a.env", b"secret").unwrap();
     let selected = AuditedEntry { regular: true, selected: true, held: false, moved: false };

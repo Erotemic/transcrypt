@@ -30,8 +30,8 @@ structure Suite where
 /-- The committed config authenticates under the suite's key: its tag is the
     AES-SIV encryption of the empty plaintext under `[configDomain, prefix]`. -/
 def ConfigAuthentic (s : Suite) (config : List Nat) : Prop :=
-  ∃ salt tag, decodeConfigShape config = some (salt, tag) ∧
-    s.siv [configDomain, configMagic ++ salt] [] = tag
+  ∃ p salt tag, decodeConfigShape config = some (p, salt, tag) ∧
+    s.siv [configDomain, configMagic p ++ salt] [] = tag
 
 /-- The record that `clean` must produce. -/
 def sealedRecord (s : Suite) (config path pt : List Nat) : List Nat :=

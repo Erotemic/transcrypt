@@ -15,7 +15,7 @@ namespace Transcrypt.V3Verification
     matching against the production constants' numeric `X_val` facts. It
     does nothing where no such name occurs. -/
 macro "unfold_v3_bytes" : tactic =>
-  `(tactic| try simp only [Transcrypt.V3Wire.configMagicLen, Transcrypt.V3Wire.fileMagicLen,
+  `(tactic| try simp only [Transcrypt.V3Wire.configMagicLen, Transcrypt.V3Wire.configFamilyLen, Transcrypt.V3Wire.fileMagicLen,
     Transcrypt.V3Wire.saltLen, Transcrypt.V3Wire.tagLen, Transcrypt.V3Wire.idLen,
     Transcrypt.V3Wire.configLen, Transcrypt.V3Wire.fileHeaderLen, Transcrypt.V3Wire.fileMinLen,
     Transcrypt.V3Policy.tab, Transcrypt.V3Policy.lf,

@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
-use transcrypt_rs::ValidatedKey;
+use transcrypt_rs::{Profile, ValidatedKey};
 use transcrypt_v3_core::{parse_file_header, record_envelope_ok, ATTRIBUTES_NAME, SALT_LEN};
 use crate::{
     attributes::{edit_attributes, filter_overrides, protect, restore_worktree_attributes, worktree_attributes},
@@ -237,7 +237,7 @@ pub(crate) fn activate(repo: &Repository, key: &ValidatedKey, mode: KeyMode) -> 
 /// `.gitattributes`, filters and hooks, the key stored (or the private
 /// agent started), and then `protect` for each pattern.
 pub(crate) fn init(repo: &Repository, args: &InitArgs) -> Result<(), String> {
-    let rollback = init_with_rollback(repo, args.mode, |new| passphrase(args.password_stdin, new))?;
+    let rollback = init_with_rollback(repo, args.mode, args.profile, |new| passphrase(args.password_stdin, new))?;
     if !args.patterns.is_empty() {
         if let Err(e) = protect(repo, &args.patterns) {
             rollback.run(repo);
@@ -280,11 +280,11 @@ impl Rollback {
     }
 }
 
-/// A fresh salt and the config and key it gives with `password`.
-pub(crate) fn new_config(password: &[u8]) -> Result<ValidatedKey, String> {
+/// A fresh salt and the config of `profile` and key it gives with `password`.
+pub(crate) fn new_config(profile: Profile, password: &[u8]) -> Result<ValidatedKey, String> {
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|_| "OS randomness unavailable")?;
-    ValidatedKey::initialize(password, &salt)
+    ValidatedKey::initialize(profile, password, &salt)
 }
 
 /// Whether `.transcrypt` exists but `HEAD` has no config: an interrupted
@@ -300,7 +300,7 @@ pub(crate) fn uncommitted_setup(repo: &Repository, committed: &str) -> Result<bo
 /// and taking the passphrase from `password` (told whether it is a new
 /// one); on failure everything is rolled back, on success the caller gets the
 /// rollback for later steps.
-pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode,
+pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode, profile: Profile,
     password: impl FnOnce(bool) -> Result<Zeroizing<Vec<u8>>, String>) -> Result<Rollback, String>
 {
     // An existing config not yet in `HEAD` is an interrupted `init`: rerunning
@@ -315,7 +315,7 @@ pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode,
     let key = match &interrupted {
         Some(existing) => ValidatedKey::unlock(&password, existing).map_err(|e| format!("{e}: an interrupted \
             init left .transcrypt/config under another passphrase; rerun with that one, or start over: {START_OVER}"))?,
-        None => new_config(&password)?,
+        None => new_config(profile, &password)?,
     };
     let config = key.config();
     let rollback = Rollback {
@@ -432,6 +432,9 @@ pub(crate) fn status(repo: &Repository) -> Result<(), String> {
     };
     let id = transcrypt_rs::config_id(&config);
     println!("repository: v3 config {}", short_id(&id));
+    if let Ok(profile) = transcrypt_rs::config_profile(&config) {
+        println!("profile:    {}", transcrypt_rs::profile_description(profile));
+    }
     let unlock = credential::lookup(repo, &config)?;
     println!("key:        {}", match &unlock {
         Unlock::Unlocked(key) if !key.private() => "unlocked (stored in .git/transcrypt-v3/key)",
@@ -556,7 +559,14 @@ pub(crate) fn doctor(repo: &Repository) -> Result<(), String> {
         println!("{} {what}", if ok { "ok  " } else { "FAIL" });
     };
     let config = load_config(repo);
-    report(config.is_ok(), "committed .transcrypt/config is a valid v3 config");
+    report(config.is_ok(), &match &config {
+        Ok(bytes) => match transcrypt_rs::config_profile(bytes) {
+            Ok(profile) => format!("committed .transcrypt/config is a valid v3 config of {}",
+                transcrypt_rs::profile_description(profile)),
+            Err(e) => e,
+        },
+        Err(e) => format!("committed .transcrypt/config: {e}"),
+    });
     let unlock = match &config {
         Ok(config) => Some(credential::lookup(repo, config)?),
         Err(_) => None,

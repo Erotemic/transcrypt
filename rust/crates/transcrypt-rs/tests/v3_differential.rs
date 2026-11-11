@@ -2,7 +2,7 @@
 //! AES-SIV and Argon2id) against independent implementations: OpenSSL
 //! AES-SIV and reference Argon2id, via `tests/v3/reference/differential.py`.
 //! No Python is needed to run these Rust tests.
-use transcrypt_rs::{derive_key, Keyed, ValidatedKey, KEY_SIZE};
+use transcrypt_rs::{derive_key, Keyed, Profile, ValidatedKey, KEY_SIZE};
 use transcrypt_v3_core::{V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_HEADER_LEN, FILE_MIN_LEN, SALT_LEN, TAG_LEN};
 
 mod common;
@@ -104,7 +104,7 @@ fn argon2id_matches_the_reference_implementation() {
         let c: Vec<&str> = line.split('\t').collect();
         let [name, password, salt, key] = c[..] else { panic!("malformed case: {line}") };
         let salt: [u8; SALT_LEN] = hex(salt).try_into().unwrap();
-        assert_eq!(&derive_key(&hex(password), &salt).unwrap()[..], &hex(key)[..], "{name}");
+        assert_eq!(&derive_key(Profile::Argon2id, &hex(password), &salt).unwrap()[..], &hex(key)[..], "{name}");
     }
 }
 

@@ -4,6 +4,7 @@
 //! `help` and `version` take nothing and are answered by `main.rs` first.
 
 use std::{ffi::OsString, time::Duration};
+use transcrypt_rs::Profile;
 
 /// A command that works in a worktree's repository, with its arguments.
 pub(crate) enum Command {
@@ -26,7 +27,8 @@ pub(crate) enum Command {
     Hydrate { auto: bool },
     Init(InitArgs),
     Unlock(UnlockArgs),
-    Rekey { password_stdin: bool },
+    /// `rekey`; with a profile, also convert to it.
+    Rekey { password_stdin: bool, profile: Option<Profile> },
     Migrate(MigrateArgs),
     Reencrypt(ReencryptArgs),
     /// `.gitattributes` patterns, at least one.
@@ -60,9 +62,11 @@ impl KeyMode {
     }
 }
 
-/// `init [--password-stdin] [--private [--timeout=DURATION]] [PATTERN...]`.
+/// `init [--password-stdin] [--profile=NAME] [--private [--timeout=DURATION]] [PATTERN...]`.
 pub(crate) struct InitArgs {
     pub(crate) password_stdin: bool,
+    /// The new configuration's profile (default: Argon2id, profile 1).
+    pub(crate) profile: Profile,
     pub(crate) mode: KeyMode,
     pub(crate) patterns: Vec<OsString>,
 }
@@ -75,9 +79,10 @@ pub(crate) struct UnlockArgs {
     pub(crate) hydrate: bool,
 }
 
-/// `migrate [--password-stdin] [--private]`.
+/// `migrate [--password-stdin] [--profile=NAME] [--private]`.
 pub(crate) struct MigrateArgs {
     pub(crate) password_stdin: bool,
+    pub(crate) profile: Profile,
     pub(crate) mode: KeyMode,
 }
 
@@ -169,6 +174,9 @@ impl Command {
     }
 }
 
+/// The profile of a new configuration unless `--profile` names another.
+pub(crate) const DEFAULT_PROFILE: Profile = Profile::Argon2id;
+
 /// Git passes the pre-push hook the remote's name and URL.
 const PRE_PUSH_ARGUMENTS: usize = 2;
 
@@ -177,11 +185,16 @@ const PRE_PUSH_ARGUMENTS: usize = 2;
 fn parse_passphrase_command(action: &str, args: &[OsString]) -> Result<Command, String> {
     let (mut password_stdin, mut private, mut hydrate, mut yes) = (false, false, true, false);
     let mut idle = None;
+    let mut profile = None;
     let mut patterns = Vec::new();
     for arg in args {
         let flag = arg.to_str();
         if let (Some(duration), "init" | "unlock") = (flag.and_then(|f| f.strip_prefix("--timeout=")), action) {
             idle = Some(parse_duration(duration)?);
+            continue;
+        }
+        if let (Some(name), "init" | "rekey" | "migrate") = (flag.and_then(|f| f.strip_prefix("--profile=")), action) {
+            profile = Some(transcrypt_rs::parse_profile(name)?);
             continue;
         }
         match (flag, action) {
@@ -200,10 +213,10 @@ fn parse_passphrase_command(action: &str, args: &[OsString]) -> Result<Command, 
         (false, Some(_)) => return Err("--timeout applies to the private mode: use it with --private".into()),
     };
     Ok(match action {
-        "init" => Command::Init(InitArgs { password_stdin, mode, patterns }),
+        "init" => Command::Init(InitArgs { password_stdin, profile: profile.unwrap_or(DEFAULT_PROFILE), mode, patterns }),
         "unlock" => Command::Unlock(UnlockArgs { password_stdin, mode, hydrate }),
-        "rekey" => Command::Rekey { password_stdin },
-        "migrate" => Command::Migrate(MigrateArgs { password_stdin, mode }),
+        "rekey" => Command::Rekey { password_stdin, profile },
+        "migrate" => Command::Migrate(MigrateArgs { password_stdin, profile: profile.unwrap_or(DEFAULT_PROFILE), mode }),
         _ => Command::Reencrypt(ReencryptArgs { password_stdin, yes }),
     })
 }
@@ -224,7 +237,7 @@ impl AuditArgs {
 }
 
 pub(crate) const USAGE: &str ="usage: transcrypt-rs init|protect|unprotect|unlock|status|doctor|lock|rekey|hydrate|\
-    verify-index|audit|migrate|uninstall|help|version (clean, smudge, filter-process, diff, merge, pre-commit and \
+    verify-index|audit|migrate|uninstall|profiles|help|version (clean, smudge, filter-process, diff, merge, pre-commit and \
     pre-push are invoked by Git)";
 
 pub(crate) const HELP: &str = "\
@@ -246,8 +259,9 @@ Typical workflow
                             protect this checkout (non-zero exit if anything is missing)
   transcrypt-rs lock        replace plaintext by the committed ciphertext and forget the key;
                             refuses if any protected file has uncommitted changes
-  transcrypt-rs rekey       change the passphrase: a new config and every protected file
-                            re-encrypted, staged for you to commit
+  transcrypt-rs rekey [--profile=NAME]
+                            change the passphrase (and, with --profile, the profile): a new
+                            config and every protected file re-encrypted, staged to commit
   transcrypt-rs reencrypt [--yes]
                             re-encrypt staged files still encrypted under an earlier config
                             (cherry-picked or rebased across a rekey): lists them with the
@@ -260,6 +274,7 @@ Typical workflow
   transcrypt-rs uninstall   lock, then remove the filters and hooks from this checkout
   transcrypt-rs migrate     convert a repository protected by Bash transcrypt (v2): run it
                             where Bash transcrypt has decrypted the files; keeps your patterns
+  transcrypt-rs profiles    list the configuration profiles and which clients support them
   transcrypt-rs version     print the version (and, for release builds, the source commit)
 
 Options
@@ -270,10 +285,14 @@ Options
   --timeout=DURATION        (init, unlock, with --private) forget the key after that long
                             without use (90s, 15m, 2h); decrypted files stay until `lock`
   --no-hydrate              (unlock) leave ciphertext in the worktree
+  --profile=NAME            (init, migrate, rekey) the key derivation of a new config:
+                            argon2id (profile 1, the default, Rust only), scrypt (2) or
+                            pbkdf2 (3); 2 and 3 also work with the portable Bash client
 
 A file is protected when its .gitattributes pattern says `transcrypt` (or sets
 filter=transcrypt-v3). Each one is encrypted with AES-256-SIV under a key derived
-by Argon2id from the passphrase, bound to the repository config and its exact
+from the passphrase by the config's profile (Argon2id, scrypt or PBKDF2), bound to
+the repository config and its exact
 Git path. While unlocked, `git diff` shows decrypted changes, merges work like
 text, and `git mv` is re-encrypted for the new name when you commit. Equal
 plaintexts at the same path give equal ciphertexts. Filenames, sizes and
@@ -315,7 +334,7 @@ mod tests {
     fn commands_take_only_their_own_arguments() {
         let ninety_seconds = Some(Duration::from_secs(90 * SECOND));
         match parse("init --private a.env --timeout=90s --password-stdin b/**") {
-            Ok(Command::Init(InitArgs { password_stdin: true, mode: KeyMode::Private { idle }, patterns })) =>
+            Ok(Command::Init(InitArgs { password_stdin: true, mode: KeyMode::Private { idle }, patterns, .. })) =>
                 assert!(idle == ninety_seconds && patterns == ["a.env", "b/**"]),
             _ => panic!("init"),
         }
@@ -324,7 +343,12 @@ mod tests {
         assert!(matches!(parse("migrate --private"),
             Ok(Command::Migrate(MigrateArgs { mode: KeyMode::Private { idle: None }, .. }))));
         assert!(matches!(parse("reencrypt --yes"), Ok(Command::Reencrypt(ReencryptArgs { yes: true, .. }))));
-        assert!(matches!(parse("rekey --password-stdin"), Ok(Command::Rekey { password_stdin: true })));
+        assert!(matches!(parse("rekey --password-stdin"), Ok(Command::Rekey { password_stdin: true, profile: None })));
+        assert!(matches!(parse("rekey --profile=scrypt"), Ok(Command::Rekey { profile: Some(Profile::Scrypt), .. })));
+        assert!(matches!(parse("init --profile=3"), Ok(Command::Init(InitArgs { profile: Profile::Pbkdf2, .. }))));
+        assert!(matches!(parse("init"), Ok(Command::Init(InitArgs { profile: Profile::Argon2id, .. }))));
+        assert!(parse("init --profile=aes").is_err_and(|e| e.starts_with("unknown profile")));
+        assert!(parse("unlock --profile=scrypt").is_err_and(|e| e == "unlock: unknown option --profile=scrypt"));
         assert!(matches!(parse("hydrate --auto"), Ok(Command::Hydrate { auto: true })));
         assert!(matches!(parse("pre-push origin url"), Ok(Command::PrePush { remote: Some(_) })));
         assert!(matches!(parse("diff a.env old 1 100644 new 2 100644 b.env renamed"),

@@ -16,22 +16,39 @@
 //! Proofs name the generated loops (`*_loop0`, `*_loop1`, ...) by their order
 //! inside each function, so reordering loops renames them.
 
-/// Version marker of the committed public configuration.
-pub const CONFIG_MAGIC: [u8; 7] = *b"TCFG3\0\x01";
-/// Version marker that starts every encrypted file record.
+/// The configuration family marker `TCFG3\0`. The byte after it names the
+/// configuration's profile (`profile_of_byte`): the key-derivation function
+/// and its fixed parameters. Profile 1 (Argon2id) has the original bytes
+/// `TCFG3\0\x01`; the portable profiles 2 (scrypt) and 3 (PBKDF2) differ
+/// only in that byte. Every profile uses the same AES-256-CMAC-SIV records.
+pub const CONFIG_FAMILY: [u8; 6] = *b"TCFG3\0";
+/// Length of `CONFIG_FAMILY`, and the offset of the profile byte.
+pub const CONFIG_FAMILY_LEN: usize = 6;
+/// The profile byte of profile 1: Argon2id, the original v3 configuration.
+pub const PROFILE_ARGON2ID: u8 = 1;
+/// The profile byte of portable profile 2: scrypt.
+pub const PROFILE_SCRYPT: u8 = 2;
+/// The profile byte of portable profile 3: PBKDF2-HMAC-SHA256.
+pub const PROFILE_PBKDF2: u8 = 3;
+/// Version marker that starts every encrypted file record. It names the
+/// record format, which all profiles share; the record's configuration
+/// identifier binds it to one configuration, and so to one profile.
 pub const FILE_MAGIC: [u8; 6] = *b"TV3F\0\x01";
-/// Length of the public Argon2id salt.
+/// Length of the public key-derivation salt.
 pub const SALT_LEN: usize = 32;
 /// Length of an AES-SIV synthetic IV (the authentication tag).
 pub const TAG_LEN: usize = 16;
 /// Length of the keyless configuration identifier in a file header.
 pub const ID_LEN: usize = 16;
+/// The family marker and the profile byte (7 = 6 + 1).
+pub const CONFIG_MAGIC_LEN: usize = 7;
 // The three record lengths below are written as literals on purpose: a
 // literal constant translates to a plain Lean value, whereas a computed one
 // (like `FILE_MIN_LEN`) becomes an overflow-checked computation every proof
 // must step through. The test `literal_lengths_are_the_field_sums` checks
 // the sums.
-/// Authenticated part of the configuration: magic and salt (39 = 7 + 32).
+/// Authenticated part of the configuration: family, profile byte and salt
+/// (39 = 6 + 1 + 32).
 pub const CONFIG_PREFIX_LEN: usize = 39;
 /// Complete configuration: prefix and tag (55 = 39 + 16).
 pub const CONFIG_LEN: usize = 55;
@@ -45,25 +62,65 @@ pub const FILE_MIN_LEN: usize = FILE_HEADER_LEN + TAG_LEN;
 pub enum FormatError {
     Length,
     Magic,
+    /// A configuration of the v3 family whose profile byte names no profile
+    /// this core knows.
+    Profile,
+}
+
+/// A configuration profile: which key-derivation function, with which fixed
+/// parameters, turns the passphrase and the configuration's salt into the
+/// AES-SIV key. Nothing else differs between profiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// Profile 1: Argon2id (the original v3 configuration).
+    Argon2id,
+    /// Profile 2: scrypt, portable to the OpenSSL 3.0 command line.
+    Scrypt,
+    /// Profile 3: PBKDF2-HMAC-SHA256, portable to the OpenSSL 3.0 command line.
+    Pbkdf2,
+}
+
+/// The profile byte of `profile`.
+pub fn profile_byte(profile: Profile) -> u8 {
+    match profile {
+        Profile::Argon2id => PROFILE_ARGON2ID,
+        Profile::Scrypt => PROFILE_SCRYPT,
+        Profile::Pbkdf2 => PROFILE_PBKDF2,
+    }
+}
+
+/// The profile a profile byte names; `None` for every other byte.
+pub fn profile_of_byte(byte: u8) -> Option<Profile> {
+    if byte == PROFILE_ARGON2ID {
+        Some(Profile::Argon2id)
+    } else if byte == PROFILE_SCRYPT {
+        Some(Profile::Scrypt)
+    } else if byte == PROFILE_PBKDF2 {
+        Some(Profile::Pbkdf2)
+    } else {
+        None
+    }
 }
 
 /// All fields in the public configuration. `tag` is authenticated by the crypto adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
+    pub profile: Profile,
     pub salt: [u8; SALT_LEN],
     pub tag: [u8; TAG_LEN],
 }
 
-pub fn encode_config_prefix(salt: &[u8; SALT_LEN]) -> [u8; CONFIG_PREFIX_LEN] {
+pub fn encode_config_prefix(profile: Profile, salt: &[u8; SALT_LEN]) -> [u8; CONFIG_PREFIX_LEN] {
     let mut out = [0u8; CONFIG_PREFIX_LEN];
     let mut i = 0;
-    while i < CONFIG_MAGIC.len() {
-        out[i] = CONFIG_MAGIC[i];
+    while i < CONFIG_FAMILY_LEN {
+        out[i] = CONFIG_FAMILY[i];
         i += 1;
     }
+    out[CONFIG_FAMILY_LEN] = profile_byte(profile);
     let mut j = 0;
     while j < SALT_LEN {
-        out[CONFIG_MAGIC.len() + j] = salt[j];
+        out[CONFIG_MAGIC_LEN + j] = salt[j];
         j += 1;
     }
     out
@@ -71,7 +128,7 @@ pub fn encode_config_prefix(salt: &[u8; SALT_LEN]) -> [u8; CONFIG_PREFIX_LEN] {
 
 pub fn encode_config(config: &Config) -> [u8; CONFIG_LEN] {
     let mut out = [0u8; CONFIG_LEN];
-    let prefix = encode_config_prefix(&config.salt);
+    let prefix = encode_config_prefix(config.profile, &config.salt);
     let mut i = 0;
     while i < CONFIG_PREFIX_LEN {
         out[i] = prefix[i];
@@ -85,17 +142,23 @@ pub fn encode_config(config: &Config) -> [u8; CONFIG_LEN] {
     out
 }
 
-/// Decode the fixed-size committed config record: check the magic and split
-/// out salt and tag. Authentication is a separate step
-/// (`authenticate_config`) performed *after* this structural parse.
+/// Decode the fixed-size committed config record: check the family marker,
+/// read the profile byte and split out salt and tag. Authentication is a
+/// separate step (`authenticate_config`) performed *after* this structural
+/// parse. A configuration of an unknown profile is refused here, so no
+/// operation ever runs under a profile it does not know.
 pub fn decode_config_exact(input: &[u8; CONFIG_LEN]) -> Result<Config, FormatError> {
-    if !matches_at(input, 0, &CONFIG_MAGIC) {
+    if !matches_at(input, 0, &CONFIG_FAMILY) {
         return Err(FormatError::Magic);
     }
+    let profile = match profile_of_byte(input[CONFIG_FAMILY_LEN]) {
+        Some(profile) => profile,
+        None => return Err(FormatError::Profile),
+    };
     let mut salt = [0u8; SALT_LEN];
     let mut j = 0;
     while j < SALT_LEN {
-        salt[j] = input[CONFIG_MAGIC.len() + j];
+        salt[j] = input[CONFIG_MAGIC_LEN + j];
         j += 1;
     }
     let mut tag = [0u8; TAG_LEN];
@@ -104,12 +167,12 @@ pub fn decode_config_exact(input: &[u8; CONFIG_LEN]) -> Result<Config, FormatErr
         tag[k] = input[CONFIG_PREFIX_LEN + k];
         k += 1;
     }
-    Ok(Config { salt, tag })
+    Ok(Config { profile, salt, tag })
 }
 
-/// Reject unknown versions, truncated/extended metadata and malformed magic.
-/// This public slice boundary checks the length and delegates the content
-/// decision to `decode_config_exact`.
+/// Reject unknown versions and profiles, truncated/extended metadata and
+/// malformed magic. This public slice boundary checks the length and
+/// delegates the content decision to `decode_config_exact`.
 pub fn parse_config(input: &[u8]) -> Result<Config, FormatError> {
     if input.len() != CONFIG_LEN {
         return Err(FormatError::Length);
@@ -234,6 +297,8 @@ pub enum Refusal {
     /// A record of another configuration, or bytes that are no v3 record,
     /// where a record of this configuration is required.
     Foreign,
+    /// The passphrase is empty, too long, or has a byte the profile refuses.
+    Passphrase,
 }
 
 /// The cryptographic boundary. Implementations must realize exactly the
@@ -363,14 +428,19 @@ pub fn is_canonical_protected_path(path: &[u8]) -> bool {
     ok && !is_reserved_path(path)
 }
 
-/// Create the public configuration for a freshly derived key and salt.
-pub fn initialize_config<P: V3Primitives>(primitives: &P, salt: &[u8; SALT_LEN]) -> Result<[u8; CONFIG_LEN], Refusal> {
-    let prefix = encode_config_prefix(salt);
+/// Create the public configuration of `profile` for a freshly derived key
+/// (`derive_profile_key` of the same profile and salt) and salt.
+pub fn initialize_config<P: V3Primitives>(
+    primitives: &P,
+    profile: Profile,
+    salt: &[u8; SALT_LEN],
+) -> Result<[u8; CONFIG_LEN], Refusal> {
+    let prefix = encode_config_prefix(profile, salt);
     let mut tag = [0u8; TAG_LEN];
     if !primitives.seal_config(&prefix, &mut tag) {
         return Err(Refusal::Primitive);
     }
-    Ok(encode_config(&Config { salt: *salt, tag }))
+    Ok(encode_config(&Config { profile, salt: *salt, tag }))
 }
 
 /// Parse and authenticate the public configuration under the held key.
@@ -379,7 +449,7 @@ pub fn authenticate_config<P: V3Primitives>(primitives: &P, config: &[u8; CONFIG
         Ok(parsed) => parsed,
         Err(_) => return Err(Refusal::Config),
     };
-    let prefix = encode_config_prefix(&parsed.salt);
+    let prefix = encode_config_prefix(parsed.profile, &parsed.salt);
     if !primitives.open_config(&prefix, &parsed.tag) {
         return Err(Refusal::ConfigAuthentication);
     }
@@ -2269,6 +2339,112 @@ pub fn commit_needs_no_key<E: StagedEvidence + AuditedEntries>(
 
 #[cfg(test)]
 extern crate std;
+
+// ---------------------------------------------------------------------------
+// Profiles: which key-derivation function a configuration uses.
+// ---------------------------------------------------------------------------
+
+/// Argon2id memory of profile 1, in KiB (64 MiB).
+pub const ARGON2ID_MEMORY_KIB: u32 = 65536;
+/// Argon2id passes of profile 1.
+pub const ARGON2ID_PASSES: u32 = 3;
+/// Argon2id lanes of profile 1.
+pub const ARGON2ID_LANES: u32 = 1;
+/// scrypt cost of profile 2, as log2(N): N = 32768.
+pub const SCRYPT_LOG_N: u8 = 15;
+/// scrypt block size of profile 2.
+pub const SCRYPT_R: u32 = 8;
+/// scrypt parallelism of profile 2.
+pub const SCRYPT_P: u32 = 1;
+/// PBKDF2-HMAC-SHA256 iterations of profile 3.
+pub const PBKDF2_ROUNDS: u32 = 600000;
+/// Longest passphrase any profile accepts, in bytes.
+pub const MAX_PASSPHRASE: usize = 4096;
+
+/// A key-derivation function with all of its parameters. The output is
+/// always `KEY_LEN` bytes and the salt the configuration's `SALT_LEN` bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kdf {
+    /// Argon2id (version 0x13).
+    Argon2id { memory_kib: u32, passes: u32, lanes: u32 },
+    /// scrypt with N = 2^log_n.
+    Scrypt { log_n: u8, r: u32, p: u32 },
+    /// PBKDF2 with HMAC-SHA256.
+    Pbkdf2Sha256 { rounds: u32 },
+}
+
+/// The key-derivation function of `profile`, with its fixed parameters.
+/// Parameters are never read from a configuration: a configuration names
+/// a profile, and the profile fixes them.
+pub fn profile_kdf(profile: Profile) -> Kdf {
+    match profile {
+        Profile::Argon2id => Kdf::Argon2id { memory_kib: ARGON2ID_MEMORY_KIB, passes: ARGON2ID_PASSES, lanes: ARGON2ID_LANES },
+        Profile::Scrypt => Kdf::Scrypt { log_n: SCRYPT_LOG_N, r: SCRYPT_R, p: SCRYPT_P },
+        Profile::Pbkdf2 => Kdf::Pbkdf2Sha256 { rounds: PBKDF2_ROUNDS },
+    }
+}
+
+/// Whether `profile` accepts `passphrase`. Every profile requires one to
+/// `MAX_PASSPHRASE` bytes; the portable profiles also refuse NUL bytes,
+/// which a shell cannot carry. Profile 1 keeps its original rule.
+pub fn passphrase_ok(profile: Profile, passphrase: &[u8]) -> bool {
+    let n = passphrase.len();
+    if n == 0 || n > MAX_PASSPHRASE {
+        return false;
+    }
+    match profile {
+        Profile::Argon2id => true,
+        Profile::Scrypt | Profile::Pbkdf2 => find_byte(passphrase, 0, 0) == n,
+    }
+}
+
+/// The key-derivation boundary. An implementation must compute exactly the
+/// function `kdf` names, with exactly its parameters, of `passphrase` and
+/// `salt`, into `key`. Its correctness is a trusted assumption, like
+/// `V3Primitives`; which function it is asked for is decided here.
+pub trait V3Kdf {
+    fn derive(&self, kdf: Kdf, passphrase: &[u8], salt: &[u8; SALT_LEN], key: &mut [u8; KEY_LEN]) -> bool;
+}
+
+/// Derive the key of `profile` for `passphrase` and `salt`: the profile's
+/// own function (`profile_kdf`), once, or a refusal. There is no other
+/// function and no fallback.
+pub fn derive_profile_key<K: V3Kdf>(
+    kdf: &K,
+    profile: Profile,
+    passphrase: &[u8],
+    salt: &[u8; SALT_LEN],
+    key: &mut [u8; KEY_LEN],
+) -> Result<(), Refusal> {
+    if !passphrase_ok(profile, passphrase) {
+        return Err(Refusal::Passphrase);
+    }
+    if !kdf.derive(profile_kdf(profile), passphrase, salt, key) {
+        return Err(Refusal::Primitive);
+    }
+    Ok(())
+}
+
+/// Derive the key a passphrase gives for the public configuration
+/// `config`: the configuration is decoded first (an unknown profile is
+/// refused before any derivation), and its own profile and salt select the
+/// derivation. Returns the profile. The key still has to authenticate the
+/// configuration (`authenticate_key`).
+pub fn derive_config_key<K: V3Kdf>(
+    kdf: &K,
+    config: &[u8; CONFIG_LEN],
+    passphrase: &[u8],
+    key: &mut [u8; KEY_LEN],
+) -> Result<Profile, Refusal> {
+    let parsed = match decode_config_exact(config) {
+        Ok(parsed) => parsed,
+        Err(_) => return Err(Refusal::Config),
+    };
+    match derive_profile_key(kdf, parsed.profile, passphrase, &parsed.salt, key) {
+        Ok(()) => Ok(parsed.profile),
+        Err(refusal) => Err(refusal),
+    }
+}
 
 #[cfg(test)]
 mod tests;

@@ -1,20 +1,22 @@
-//! Exact v3 cryptographic primitives: Argon2id and deterministic AES-256-CMAC-SIV.
+//! Exact v3 cryptographic primitives: the profiles' key derivations
+//! (Argon2id, scrypt, PBKDF2-HMAC-SHA256) and deterministic AES-256-CMAC-SIV.
 //!
-//! This crate only *implements* the `V3Primitives` and `V3KeySchedule`
-//! traits of `transcrypt-v3-core` and derives keys. Every protocol decision
-//! (path policy, configuration authentication, which key a configuration is
-//! used with, envelope, configuration binding, release of plaintext) is made
-//! by the Aeneas-extracted core functions it calls. Files are sealed and
+//! This crate only *implements* the `V3Primitives`, `V3KeySchedule` and
+//! `V3Kdf` traits of `transcrypt-v3-core`. Every protocol decision (path
+//! policy, which key-derivation function and parameters a configuration's
+//! profile selects, configuration authentication, which key a configuration
+//! is used with, envelope, configuration binding, release of plaintext) is
+//! made by the Aeneas-extracted core functions it calls. Files are sealed and
 //! opened only through a `ValidatedKey`.
 //! Assumes RustCrypto primitive correctness. Research prototype, not audited.
 
 use aes_siv::{siv::Aes256Siv, KeyInit, Tag};
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use sha2::{Digest, Sha256};
-pub use transcrypt_v3_core::{StoredKey, MAX_FILE, MAX_PATH, MAX_RECORD};
+pub use transcrypt_v3_core::{Profile, StoredKey, MAX_FILE, MAX_PATH, MAX_RECORD};
 use transcrypt_v3_core::{
-    Refusal, V3KeySchedule, V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_MIN_LEN, ID_LEN, KEY_FILE_LEN, SALT_LEN,
-    TAG_LEN,
+    Kdf, Refusal, V3Kdf, V3KeySchedule, V3Primitives, CONFIG_LEN, CONFIG_PREFIX_LEN, FILE_MIN_LEN, ID_LEN, KEY_FILE_LEN,
+    KEY_LEN, SALT_LEN, TAG_LEN,
 };
 use zeroize::Zeroizing;
 
@@ -22,30 +24,86 @@ use zeroize::Zeroizing;
 pub const KIB: usize = 1024;
 pub const MIB: usize = 1024 * KIB;
 
-/// Argon2id memory: 64 MiB, in the KiB units Argon2 counts.
-pub const ARGON_MEMORY_KIB: u32 = 65_536;
-const _: () = assert!(ARGON_MEMORY_KIB as usize * KIB == 64 * MIB);
-pub const ARGON_PASSES: u32 = 3;
-pub const ARGON_LANES: u32 = 1;
 pub const KEY_SIZE: usize = 64;
+const _: () = assert!(KEY_SIZE == KEY_LEN);
 const CONFIG_DOMAIN: &[u8] = b"transcrypt/v3/config";
 const FILE_DOMAIN: &[u8] = b"transcrypt/v3/file";
 
 pub type SecretKey = Zeroizing<[u8; KEY_SIZE]>;
 
-pub fn derive_key(password: &[u8], salt: &[u8; SALT_LEN]) -> Result<SecretKey, String> {
-    if password.is_empty() {
-        return Err("empty passphrase refused".into());
+/// Every profile, in profile-byte order.
+pub const PROFILES: [Profile; 3] = [Profile::Argon2id, Profile::Scrypt, Profile::Pbkdf2];
+
+/// The name of `profile` on the command line and in diagnostics.
+pub fn profile_name(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Argon2id => "argon2id",
+        Profile::Scrypt => "scrypt",
+        Profile::Pbkdf2 => "pbkdf2",
     }
-    let params = Params::new(ARGON_MEMORY_KIB, ARGON_PASSES, ARGON_LANES, Some(KEY_SIZE))
-        .map_err(|_| "unsupported fixed Argon2id parameters")?;
-    // Argon2 frees its own working memory without wiping it, and those 64
-    // MiB determine the key. Supply memory that is zeroed when dropped.
-    let mut memory = Zeroizing::new(vec![Block::default(); params.block_count()]);
-    let kdf = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+}
+
+/// A human description of `profile`: its number, functions and parameters.
+pub fn profile_description(profile: Profile) -> String {
+    let number = transcrypt_v3_core::profile_byte(profile);
+    let kdf = match transcrypt_v3_core::profile_kdf(profile) {
+        Kdf::Argon2id { memory_kib, passes, lanes } => {
+            format!("Argon2id (m={} MiB, t={passes}, p={lanes})", memory_kib as usize * KIB / MIB)
+        }
+        Kdf::Scrypt { log_n, r, p } => format!("scrypt (N=2^{log_n}, r={r}, p={p})"),
+        Kdf::Pbkdf2Sha256 { rounds } => format!("PBKDF2-HMAC-SHA256 ({rounds} iterations)"),
+    };
+    let portable = match profile {
+        Profile::Argon2id => "Rust only",
+        Profile::Scrypt | Profile::Pbkdf2 => "Rust and the portable Bash/OpenSSL 3.0 client",
+    };
+    format!("profile {number} ({}): {kdf} + AES-256-SIV; {portable}", profile_name(profile))
+}
+
+/// The profile named `name` (its name or its number).
+pub fn parse_profile(name: &str) -> Result<Profile, String> {
+    PROFILES
+        .into_iter()
+        .find(|p| name == profile_name(*p) || name == transcrypt_v3_core::profile_byte(*p).to_string())
+        .ok_or_else(|| {
+            let names: Vec<_> = PROFILES.iter().map(|p| profile_name(*p)).collect();
+            format!("unknown profile {name:?}; choose one of: {}", names.join(", "))
+        })
+}
+
+/// The RustCrypto key derivations, one per `Kdf`, with exactly the
+/// parameters the core passes (it decides them from the profile).
+pub struct RustKdf;
+
+impl V3Kdf for RustKdf {
+    fn derive(&self, kdf: Kdf, password: &[u8], salt: &[u8; SALT_LEN], key: &mut [u8; KEY_LEN]) -> bool {
+        match kdf {
+            Kdf::Argon2id { memory_kib, passes, lanes } => {
+                let Ok(params) = Params::new(memory_kib, passes, lanes, Some(KEY_LEN)) else { return false };
+                // Argon2 frees its own working memory without wiping it, and
+                // those 64 MiB determine the key. Supply memory that is
+                // zeroed when dropped.
+                let mut memory = Zeroizing::new(vec![Block::default(); params.block_count()]);
+                let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+                argon.hash_password_into_with_memory(password, salt, &mut key[..], &mut memory[..]).is_ok()
+            }
+            Kdf::Scrypt { log_n, r, p } => {
+                let Ok(params) = scrypt::Params::new(log_n, r, p) else { return false };
+                scrypt::scrypt(password, salt, &params, &mut key[..]).is_ok()
+            }
+            Kdf::Pbkdf2Sha256 { rounds } => {
+                pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password, salt, rounds, &mut key[..]);
+                true
+            }
+        }
+    }
+}
+
+/// The key `password` derives with `profile` and `salt` (the core's
+/// `derive_profile_key`: the profile's function and parameters, or a refusal).
+pub fn derive_key(profile: Profile, password: &[u8], salt: &[u8; SALT_LEN]) -> Result<SecretKey, String> {
     let mut key = Zeroizing::new([0u8; KEY_SIZE]);
-    kdf.hash_password_into_with_memory(password, salt, &mut key[..], &mut memory[..])
-        .map_err(|_| "Argon2id failed")?;
+    transcrypt_v3_core::derive_profile_key(&RustKdf, profile, password, salt, &mut key).map_err(refusal)?;
     Ok(key)
 }
 
@@ -152,12 +210,13 @@ fn refusal(r: Refusal) -> String {
         Refusal::ConfigMismatch => "v3 ciphertext belongs to different public configuration",
         Refusal::Authentication => "v3 ciphertext authentication failed",
         Refusal::DoubleEncryption => "input already is v3 ciphertext; refusing double encryption",
-        Refusal::Primitive => "AES-SIV primitive failed",
+        Refusal::Primitive => "a cryptographic primitive (key derivation or AES-SIV) failed",
         Refusal::UnexpectedWorktree => "protected worktree differs from staged ciphertext and its plaintext",
         Refusal::Request => "unsupported agent request",
         Refusal::Index => "malformed or unmerged Git index entry",
         Refusal::Attribute => "unexpected git check-attr output",
         Refusal::Foreign => "not a v3 record of this configuration",
+        Refusal::Passphrase => "the passphrase is empty, longer than 4096 bytes, or contains a NUL byte this profile refuses",
     }
     .into()
 }
@@ -165,6 +224,27 @@ fn refusal(r: Refusal) -> String {
 /// The error for bytes that are no v3 configuration.
 pub fn invalid_config() -> String {
     refusal(Refusal::Config)
+}
+
+/// The profile of the public configuration `config_bytes`, or why it has none.
+pub fn config_profile(config_bytes: &[u8]) -> Result<Profile, String> {
+    transcrypt_v3_core::parse_config(config_bytes).map(|c| c.profile).map_err(|_| describe_config_error(config_bytes))
+}
+
+/// Why `config_bytes` is no configuration this program can use: an unknown
+/// profile of the v3 family is named as such (a newer Transcrypt may know it),
+/// anything else is invalid.
+pub fn describe_config_error(config_bytes: &[u8]) -> String {
+    match transcrypt_v3_core::parse_config(config_bytes) {
+        Err(transcrypt_v3_core::FormatError::Profile) => format!(
+            "this repository's .transcrypt/config uses profile {}, which this Transcrypt does not support \
+             (it supports {}); use a Transcrypt that supports it, nothing was changed",
+            config_bytes[transcrypt_v3_core::CONFIG_FAMILY_LEN],
+            PROFILES.iter().map(|p| format!("{} ({})", transcrypt_v3_core::profile_byte(*p), profile_name(*p)))
+                .collect::<Vec<_>>().join(", ")
+        ),
+        _ => invalid_config(),
+    }
 }
 
 /// A canonical Git-relative name is part of the authenticated cryptographic
@@ -215,18 +295,26 @@ impl ValidatedKey {
         Ok(ValidatedKey { config, keyed })
     }
 
-    /// The key `password` derives for `config_bytes` (with its salt), if it
-    /// authenticates it.
+    /// The key `password` derives for `config_bytes` (with its profile's
+    /// function and its salt, `derive_config_key`), if it authenticates it.
     pub fn unlock(password: &[u8], config_bytes: &[u8]) -> Result<Self, String> {
-        let config = transcrypt_v3_core::parse_config(config_bytes).map_err(|_| invalid_config())?;
-        ValidatedKey::authenticate(config_bytes, &*derive_key(password, &config.salt)?)
+        let config = *config_array(config_bytes)?;
+        let mut key = Zeroizing::new([0u8; KEY_SIZE]);
+        transcrypt_v3_core::derive_config_key(&RustKdf, &config, password, &mut key)
+            .map_err(|r| if r == Refusal::Config { describe_config_error(config_bytes) } else { refusal(r) })?;
+        ValidatedKey::authenticate(config_bytes, &key)
     }
 
-    /// A new configuration for `password` and `salt`, with its key.
-    pub fn initialize(password: &[u8], salt: &[u8; SALT_LEN]) -> Result<Self, String> {
-        let key = derive_key(password, salt)?;
-        let config = transcrypt_v3_core::initialize_config(&Keyed::new(&key), salt).map_err(refusal)?;
+    /// A new configuration of `profile` for `password` and `salt`, with its key.
+    pub fn initialize(profile: Profile, password: &[u8], salt: &[u8; SALT_LEN]) -> Result<Self, String> {
+        let key = derive_key(profile, password, salt)?;
+        let config = transcrypt_v3_core::initialize_config(&Keyed::new(&key), profile, salt).map_err(refusal)?;
         ValidatedKey::authenticate(&config, &key)
+    }
+
+    /// The profile of this key's configuration.
+    pub fn profile(&self) -> Profile {
+        config_profile(&self.config).expect("an authenticated configuration has a profile")
     }
 
     /// The stored key for configuration `current`, as the verified
@@ -315,7 +403,7 @@ mod tests {
 
     fn fixture() -> ValidatedKey {
         let salt = [7u8; SALT_LEN];
-        ValidatedKey::initialize(PASSPHRASE, &salt).unwrap()
+        ValidatedKey::initialize(Profile::Argon2id, PASSPHRASE, &salt).unwrap()
     }
 
     /// A stored key file for `config`: the config, the key, then the check
@@ -413,7 +501,7 @@ mod tests {
     #[test]
     fn stored_keys_validate_only_their_own_authentic_config() {
         let a = fixture();
-        let b = ValidatedKey::initialize(PASSPHRASE, &[8u8; SALT_LEN]).unwrap();
+        let b = ValidatedKey::initialize(Profile::Argon2id, PASSPHRASE, &[8u8; SALT_LEN]).unwrap();
         assert_ne!(a.config(), b.config());
         // The file `store` writes: the config, the key, its check value.
         let file_a = a.to_stored().unwrap();

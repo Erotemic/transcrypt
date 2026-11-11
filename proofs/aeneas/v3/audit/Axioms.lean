@@ -8,9 +8,13 @@ import V3Wire
 open Transcrypt.V3Verification
 
 -- Refinement
-#print axioms extracted_config_magic_matches_spec
+#print axioms extracted_config_family_matches_spec
 #print axioms extracted_file_magic_matches_spec
+#print axioms configMagicU8_bytes
 #print axioms extracted_magic_disjoint
+-- Codec: profiles
+#print axioms profile_byte_spec
+#print axioms profile_of_byte_spec
 -- Codec
 #print axioms encode_config_prefix_bytes
 #print axioms encode_config_bytes
@@ -242,3 +246,12 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.keyCheckValue_length
 #print axioms Transcrypt.V3Policy.keyCheckPath_reserved
 #print axioms Transcrypt.V3Policy.batchHeader_unique
+-- Profiles: key-derivation dispatch
+#print axioms profile_kdf_spec
+#print axioms passphrase_ok_spec
+#print axioms derive_profile_key_spec
+#print axioms derive_config_key_spec
+#print axioms derive_config_key_uses_config_profile
+#print axioms Transcrypt.V3Policy.configKey_uses_its_profile
+#print axioms Transcrypt.V3Policy.configKey_unknown_profile
+#print axioms Transcrypt.V3Policy.config_profile_bound

@@ -91,6 +91,12 @@ fn run() -> Result<(), String> {
         }
         return Ok(());
     }
+    if action == "profiles" {
+        for profile in transcrypt_rs::PROFILES {
+            println!("{}", transcrypt_rs::profile_description(profile));
+        }
+        return Ok(());
+    }
     os::harden_process()?;
     if action != "serve" {
         // The agent keeps ignoring SIGPIPE: a client may hang up mid-reply.
@@ -120,7 +126,7 @@ fn run() -> Result<(), String> {
         Command::Hydrate { auto: true } => auto_hydrate(&repo),
         Command::Init(args) => init(&repo, &args),
         Command::Unlock(args) => unlock(&repo, &args),
-        Command::Rekey { password_stdin } => rekey(&repo, password_stdin),
+        Command::Rekey { password_stdin, profile } => rekey(&repo, password_stdin, profile),
         Command::Migrate(args) => migrate::migrate(&repo, &args),
         Command::Reencrypt(args) => reencrypt(&repo, &args),
         Command::Protect(patterns) => protect(&repo, &patterns),
@@ -188,7 +194,7 @@ pub(crate) fn load_config(repo: &Repository) -> Result<Vec<u8>, String> {
             None => return Err("missing .transcrypt directory: run init or clone a v3 repository".into()),
         },
     };
-    transcrypt_v3_core::parse_config(&bytes).map_err(|_| "invalid v3 config grammar")?;
+    transcrypt_rs::config_profile(&bytes)?;
     Ok(bytes)
 }
 

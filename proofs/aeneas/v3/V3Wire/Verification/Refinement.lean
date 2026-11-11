@@ -24,12 +24,12 @@ namespace Transcrypt.V3Verification
 
 open transcrypt_v3_core
 
-/-! ## Version markers -/
+/-! ## Version markers and profiles -/
 
-/-- The actual translated Rust config magic agrees with the independent spec. -/
-theorem extracted_config_magic_matches_spec :
-    wireBytes transcrypt_v3_core.CONFIG_MAGIC = Transcrypt.V3Wire.configMagic := by
-  unfold wireBytes transcrypt_v3_core.CONFIG_MAGIC Transcrypt.V3Wire.configMagic
+/-- The actual translated Rust config family marker agrees with the independent spec. -/
+theorem extracted_config_family_matches_spec :
+    wireBytes transcrypt_v3_core.CONFIG_FAMILY = Transcrypt.V3Wire.configFamily := by
+  unfold wireBytes transcrypt_v3_core.CONFIG_FAMILY Transcrypt.V3Wire.configFamily
   decide
 
 /-- The actual translated Rust file magic agrees with the independent spec. -/
@@ -38,12 +38,46 @@ theorem extracted_file_magic_matches_spec :
   unfold wireBytes transcrypt_v3_core.FILE_MAGIC Transcrypt.V3Wire.fileMagic
   decide
 
-/-- The two production wire families cannot have the same version marker. -/
-theorem extracted_magic_disjoint :
-    wireBytes transcrypt_v3_core.CONFIG_MAGIC ≠
-      wireBytes transcrypt_v3_core.FILE_MAGIC := by
-  rw [extracted_config_magic_matches_spec, extracted_file_magic_matches_spec]
-  exact Transcrypt.V3Wire.magic_disjoint
+/-- A production profile, as the specification names it. -/
+def profileSpec : Profile → Transcrypt.V3Wire.Profile
+  | .Argon2id => .argon2id
+  | .Scrypt => .scrypt
+  | .Pbkdf2 => .pbkdf2
+
+theorem profileSpec_injective : Function.Injective profileSpec := by
+  intro a b h
+  cases a <;> cases b <;> simp_all [profileSpec]
+
+/-- The byte the production code writes for a profile. -/
+def profileU8 : Profile → U8
+  | .Argon2id => 1#u8
+  | .Scrypt => 2#u8
+  | .Pbkdf2 => 3#u8
+
+theorem profileU8_val (p : Profile) :
+    (profileU8 p).val = Transcrypt.V3Wire.profileByte (profileSpec p) := by
+  cases p <;> rfl
+
+/-- A profile's configuration magic in production bytes: the family marker
+    and the profile byte. -/
+def configMagicU8 (p : Profile) : List U8 := CONFIG_FAMILY.val ++ [profileU8 p]
+
+theorem configMagicU8_length (p : Profile) : (configMagicU8 p).length = 7 := by
+  simp [configMagicU8]
+
+/-- The production configuration magic of a profile is the specification's. -/
+theorem configMagicU8_bytes (p : Profile) :
+    (configMagicU8 p).map (fun b => b.val) = Transcrypt.V3Wire.configMagic (profileSpec p) := by
+  have h := extracted_config_family_matches_spec
+  unfold wireBytes at h
+  simp only [configMagicU8, List.map_append, h, Transcrypt.V3Wire.configMagic, List.map_cons,
+    List.map_nil, profileU8_val]
+
+/-- No production configuration magic is the record magic. -/
+theorem extracted_magic_disjoint (p : Profile) :
+    (configMagicU8 p).map (fun b => b.val) ≠ wireBytes transcrypt_v3_core.FILE_MAGIC := by
+  rw [configMagicU8_bytes, extracted_file_magic_matches_spec]
+  exact Transcrypt.V3Wire.magic_disjoint _
 
 /-! ## Numeric constants -/
 
@@ -51,6 +85,10 @@ theorem extracted_magic_disjoint :
 @[simp] theorem SALT_LEN_val : SALT_LEN.val = 32 := by simp [SALT_LEN]
 @[simp] theorem TAG_LEN_val : TAG_LEN.val = 16 := by simp [TAG_LEN]
 @[simp] theorem CONFIG_PREFIX_LEN_val : CONFIG_PREFIX_LEN.val = 39 := by simp [CONFIG_PREFIX_LEN]
+@[simp] theorem CONFIG_FAMILY_LEN_val : CONFIG_FAMILY_LEN.val = 6 := by simp [CONFIG_FAMILY_LEN]
+@[simp] theorem CONFIG_MAGIC_LEN_val : CONFIG_MAGIC_LEN.val = 7 := by simp [CONFIG_MAGIC_LEN]
+@[simp] theorem MAX_PASSPHRASE_val : MAX_PASSPHRASE.val = Transcrypt.V3Policy.maxPassphrase := by
+  simp [MAX_PASSPHRASE, Transcrypt.V3Policy.maxPassphrase]
 @[simp] theorem CONFIG_LEN_val : CONFIG_LEN.val = 55 := by simp [CONFIG_LEN]
 @[simp] theorem FILE_HEADER_LEN_val : FILE_HEADER_LEN.val = 22 := by simp [FILE_HEADER_LEN]
 @[simp] theorem MAX_PATH_val : MAX_PATH.val = Transcrypt.V3Policy.maxPath := by
@@ -137,11 +175,11 @@ theorem FILE_HEADER_LEN_matches_spec : FILE_HEADER_LEN.val = Transcrypt.V3Wire.f
 /-! ## Byte-array constants -/
 
 @[simp] theorem FILE_MAGIC_length : FILE_MAGIC.length = 6 := by simp
-@[simp] theorem CONFIG_MAGIC_length : CONFIG_MAGIC.length = 7 := by simp
+@[simp] theorem CONFIG_FAMILY_length : CONFIG_FAMILY.length = 6 := by simp
 theorem FILE_MAGIC_length_matches_spec : FILE_MAGIC.length = Transcrypt.V3Wire.fileMagicLen :=
   FILE_MAGIC_length
-theorem CONFIG_MAGIC_length_matches_spec : CONFIG_MAGIC.length = Transcrypt.V3Wire.configMagicLen :=
-  CONFIG_MAGIC_length
+theorem CONFIG_FAMILY_length_matches_spec : CONFIG_FAMILY.length = Transcrypt.V3Wire.configFamilyLen :=
+  CONFIG_FAMILY_length
 
 theorem METADATA_DIR_bytes :
     sliceBytes (Array.to_slice METADATA_DIR) = Transcrypt.V3Policy.metadataDir := by

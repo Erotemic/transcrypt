@@ -68,6 +68,13 @@ include = [
   "transcrypt_v3_core::unlock_stored_key",
   "transcrypt_v3_core::parse_batch_header",
   "transcrypt_v3_core::blob_read",
+  # Profiles: the key derivation a configuration selects.
+  "transcrypt_v3_core::profile_byte",
+  "transcrypt_v3_core::profile_of_byte",
+  "transcrypt_v3_core::profile_kdf",
+  "transcrypt_v3_core::passphrase_ok",
+  "transcrypt_v3_core::derive_profile_key",
+  "transcrypt_v3_core::derive_config_key",
 ]
 # hax 0.4.2 requires scenario outputs to remain *inside* the Rust workspace.
 # Two levels above this crate is rust/, the workspace root.

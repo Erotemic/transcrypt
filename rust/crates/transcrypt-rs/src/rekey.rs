@@ -2,7 +2,7 @@
 //! re-encrypted) and `reencrypt` (records still under an earlier config
 //! brought forward).
 
-use transcrypt_rs::ValidatedKey;
+use transcrypt_rs::{Profile, ValidatedKey};
 use transcrypt_v3_core::parse_file_header;
 use crate::{
     attributes::owned_paths,
@@ -27,9 +27,14 @@ type Id = [u8; transcrypt_v3_core::ID_LEN];
 /// symlink), and the credential switch to the new key. Commits made before
 /// keep their old records, readable with the old passphrase. The new one is
 /// read from stdin with `password_stdin`.
-pub(crate) fn rekey(repo: &Repository, password_stdin: bool) -> Result<(), String> {
+pub(crate) fn rekey(repo: &Repository, password_stdin: bool, profile: Option<Profile>) -> Result<(), String> {
     let old_config = load_config(repo)?;
     let old_key = Key::load(repo, &old_config)?.ok_or("unlock with the current passphrase first")?;
+    // The current profile unless one is named: a conversion is explicit.
+    let profile = match profile {
+        Some(profile) => profile,
+        None => transcrypt_rs::config_profile(&old_config)?,
+    };
     let password = passphrase(password_stdin, true)?;
     // No hydrate or lock may run meanwhile.
     let staging = staging_dir(repo)?;
@@ -48,7 +53,7 @@ pub(crate) fn rekey(repo: &Repository, password_stdin: bool) -> Result<(), Strin
         }
         plaintexts.push((staged, plaintext));
     }
-    let key = new_config(&password)?;
+    let key = new_config(profile, &password)?;
     let config = key.config();
     // The new records, written as Git objects, and one index update.
     let mut update = IndexUpdate::new(repo, Blobs::Records);
@@ -69,10 +74,10 @@ pub(crate) fn rekey(repo: &Repository, password_stdin: bool) -> Result<(), Strin
     drop(staging);
     // The worktree plaintext now cleans to the new staged records.
     reindex(repo, &index_listing(repo)?, &owned_paths(&verified.protected))?;
-    eprintln!("Rekeyed {} file(s); the new config and records are staged. Commit them now, e.g.\n  \
+    eprintln!("Rekeyed {} file(s) under {}; the new config and records are staged. Commit them now, e.g.\n  \
         git commit -m 'Rekey transcrypt-v3'\n\
         Earlier commits stay readable with the old passphrase: if it was exposed, change the secrets themselves.",
-        plaintexts.len());
+        plaintexts.len(), transcrypt_rs::profile_description(profile));
     Ok(())
 }
 

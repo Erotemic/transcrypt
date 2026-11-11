@@ -59,6 +59,8 @@ ENTRYPOINTS = (
     'next_move_source', 'blob_elsewhere', 'object_order_ok', 'bytes_lt', 'parse_listing_attrs',
     'first_unselectable',
     'stored_key_state', 'parse_batch_header', 'blob_read',
+    'profile_byte', 'profile_of_byte', 'profile_kdf', 'passphrase_ok',
+    'derive_profile_key', 'derive_config_key',
 )
 BAD = re.compile(r'\b(?:sorry|admit|axiom|native_decide|bv_decide)\b')
 

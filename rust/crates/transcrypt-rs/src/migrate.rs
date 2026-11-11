@@ -148,7 +148,7 @@ pub(crate) fn migrate(repo: &Repository, args: &MigrateArgs) -> Result<(), Strin
         }
         let _ = git(repo, &["reset", "-q", "--", "."]);
     };
-    let rollback = match init_with_rollback(repo, args.mode, |_| Ok(password)) {
+    let rollback = match init_with_rollback(repo, args.mode, args.profile, |_| Ok(password)) {
         Ok(rollback) => rollback,
         Err(e) if resuming => return Err(format!("{e}; rerun `transcrypt-rs migrate` to complete the conversion")),
         Err(e) => { restore_bash(); return Err(format!("{e}; the conversion was rolled back")); },

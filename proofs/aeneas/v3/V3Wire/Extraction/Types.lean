@@ -22,22 +22,33 @@ set_option maxRecDepth 2048
 namespace transcrypt_v3_core
 
 /-- [transcrypt_v3_core::FormatError]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 45:0-48:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 62:0-68:1
     Visibility: public -/
 @[discriminant isize]
 inductive FormatError where
 | Length : FormatError
 | Magic : FormatError
+| Profile : FormatError
+
+/-- [transcrypt_v3_core::Profile]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 74:0-81:1
+    Visibility: public -/
+@[discriminant isize]
+inductive Profile where
+| Argon2id : Profile
+| Scrypt : Profile
+| Pbkdf2 : Profile
 
 /-- [transcrypt_v3_core::Config]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 52:0-55:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 107:0-111:1
     Visibility: public -/
 structure Config where
+  profile : Profile
   salt : Array Std.U8 32#usize
   tag : Array Std.U8 16#usize
 
 /-- [transcrypt_v3_core::Refusal]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 207:0-237:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 270:0-302:1
     Visibility: public -/
 @[discriminant isize]
 inductive Refusal where
@@ -55,9 +66,10 @@ inductive Refusal where
 | Index : Refusal
 | Attribute : Refusal
 | Foreign : Refusal
+| Passphrase : Refusal
 
 /-- Trait declaration: [transcrypt_v3_core::V3Primitives]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 244:0-260:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 309:0-325:1
     Visibility: public -/
 structure V3Primitives (Self : Type) where
   seal_config : Self → Array Std.U8 39#usize → Array Std.U8 16#usize →
@@ -71,7 +83,7 @@ structure V3Primitives (Self : Type) where
   config_id : Self → Array Std.U8 55#usize → RustM (Array Std.U8 16#usize)
 
 /-- [transcrypt_v3_core::HydrateAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 470:0-475:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 540:0-545:1
     Visibility: public -/
 @[discriminant isize]
 inductive HydrateAction where
@@ -79,7 +91,7 @@ inductive HydrateAction where
 | Keep : HydrateAction
 
 /-- [transcrypt_v3_core::LockAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 491:0-496:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 561:0-566:1
     Visibility: public -/
 @[discriminant isize]
 inductive LockAction where
@@ -87,7 +99,7 @@ inductive LockAction where
 | Flush : LockAction
 
 /-- [transcrypt_v3_core::AgentOp]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 516:0-521:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 586:0-591:1
     Visibility: public -/
 @[discriminant isize]
 inductive AgentOp where
@@ -97,14 +109,14 @@ inductive AgentOp where
 | Stop : AgentOp
 
 /-- [transcrypt_v3_core::AttrRecord]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 562:0-567:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 632:0-637:1
     Visibility: public -/
 structure AttrRecord where
   «protected» : Bool
   next : Std.Usize
 
 /-- [transcrypt_v3_core::FrameHeader]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 662:0-666:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 732:0-736:1
     Visibility: public -/
 structure FrameHeader where
   opcode : Std.U8
@@ -112,14 +124,14 @@ structure FrameHeader where
   path_len : Std.U32
 
 /-- [transcrypt_v3_core::IndexEntry]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 714:0-720:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 784:0-790:1
     Visibility: public -/
 structure IndexEntry where
   regular : Bool
   path_start : Std.Usize
 
 /-- [transcrypt_v3_core::SmudgeAction]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 803:0-809:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 873:0-879:1
     Visibility: public -/
 @[discriminant isize]
 inductive SmudgeAction where
@@ -127,7 +139,7 @@ inductive SmudgeAction where
 | Keep : SmudgeAction
 
 /-- [transcrypt_v3_core::Provenance]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 837:0-850:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 907:0-920:1
     Visibility: public -/
 @[discriminant isize]
 inductive Provenance where
@@ -137,7 +149,7 @@ inductive Provenance where
 | Unknown : Provenance
 
 /-- [transcrypt_v3_core::RecordClass]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 854:0-866:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 924:0-936:1
     Visibility: public -/
 @[discriminant isize]
 inductive RecordClass where
@@ -147,7 +159,7 @@ inductive RecordClass where
 | Unusable : RecordClass
 
 /-- [transcrypt_v3_core::LeaveReason]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 870:0-876:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 940:0-946:1
     Visibility: public -/
 @[discriminant isize]
 inductive LeaveReason where
@@ -155,7 +167,7 @@ inductive LeaveReason where
 | OpensNowhere : LeaveReason
 
 /-- [transcrypt_v3_core::RepairPlan]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 880:0-890:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 950:0-960:1
     Visibility: public -/
 @[discriminant isize]
 inductive RepairPlan where
@@ -165,7 +177,7 @@ inductive RepairPlan where
 | Leave : LeaveReason → RepairPlan
 
 /-- [transcrypt_v3_core::EntryCheck]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 934:0-944:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1004:0-1014:1
     Visibility: public -/
 @[discriminant isize]
 inductive EntryCheck where
@@ -174,7 +186,7 @@ inductive EntryCheck where
 | EnvelopeNotMoved : EntryCheck
 
 /-- [transcrypt_v3_core::StagedCheck]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 971:0-986:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1041:0-1056:1
     Visibility: public -/
 @[discriminant isize]
 inductive StagedCheck where
@@ -184,7 +196,7 @@ inductive StagedCheck where
 | Protected : EntryCheck → StagedCheck
 
 /-- [transcrypt_v3_core::Fields]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1358:0-1364:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1428:0-1434:1
     Visibility: public -/
 structure Fields where
   start : Std.Usize
@@ -194,7 +206,7 @@ structure Fields where
   regular : Bool
 
 /-- Trait declaration: [transcrypt_v3_core::StagedEvidence]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1047:0-1065:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1117:0-1135:1
     Visibility: public -/
 structure StagedEvidence (Self : Type) where
   read : Self → Std.Usize → RustM (Bool × Self)
@@ -204,7 +216,7 @@ structure StagedEvidence (Self : Type) where
   elsewhere : Self → Std.Usize → RustM (core.option.Option Bool)
 
 /-- [transcrypt_v3_core::StagedRefusal]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1069:0-1089:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1139:0-1159:1
     Visibility: public -/
 @[discriminant isize]
 inductive StagedRefusal where
@@ -218,7 +230,7 @@ inductive StagedRefusal where
 | Unanswered : StagedRefusal
 
 /-- [transcrypt_v3_core::StoredKey]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1891:0-1903:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1961:0-1973:1
     Visibility: public -/
 @[discriminant isize]
 inductive StoredKey where
@@ -228,13 +240,13 @@ inductive StoredKey where
 | Unlocked : StoredKey
 
 /-- Trait declaration: [transcrypt_v3_core::V3KeySchedule]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1929:0-1933:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 1999:0-2003:1
     Visibility: public -/
 structure V3KeySchedule (Self : Type) where
   from_key : Slice Std.U8 → RustM (core.option.Option Self)
 
 /-- [transcrypt_v3_core::BlobRead]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2063:0-2070:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2133:0-2140:1
     Visibility: public -/
 @[discriminant isize]
 inductive BlobRead where
@@ -243,7 +255,7 @@ inductive BlobRead where
 | TooLarge : BlobRead
 
 /-- [transcrypt_v3_core::AuditBase]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2086:0-2096:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2156:0-2166:1
     Visibility: public -/
 @[discriminant isize]
 inductive AuditBase where
@@ -251,7 +263,7 @@ inductive AuditBase where
 | Parent : AuditBase
 
 /-- [transcrypt_v3_core::AuditedEntry]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2101:0-2111:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2171:0-2181:1
     Visibility: public -/
 structure AuditedEntry where
   regular : Bool
@@ -260,7 +272,7 @@ structure AuditedEntry where
   moved : Bool
 
 /-- Trait declaration: [transcrypt_v3_core::AuditedEntries]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2154:0-2163:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2224:0-2233:1
     Visibility: public -/
 structure AuditedEntries (Self : Type) where
   path : Self → Std.Usize → RustM (Slice Std.U8)
@@ -268,11 +280,27 @@ structure AuditedEntries (Self : Type) where
   passed : Self → Std.Usize → RustM Self
 
 /-- [transcrypt_v3_core::AuditRefusal]
-    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2167:0-2173:1
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2237:0-2243:1
     Visibility: public -/
 @[discriminant isize]
 inductive AuditRefusal where
 | NotRegular : AuditRefusal
 | Verdict : StagedRefusal → AuditRefusal
+
+/-- [transcrypt_v3_core::Kdf]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2367:0-2374:1
+    Visibility: public -/
+@[discriminant isize]
+inductive Kdf where
+| Argon2id : Std.U32 → Std.U32 → Std.U32 → Kdf
+| Scrypt : Std.U8 → Std.U32 → Std.U32 → Kdf
+| Pbkdf2Sha256 : Std.U32 → Kdf
+
+/-- Trait declaration: [transcrypt_v3_core::V3Kdf]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2405:0-2407:1
+    Visibility: public -/
+structure V3Kdf (Self : Type) where
+  derive : Self → Kdf → Slice Std.U8 → Array Std.U8 32#usize → Array
+    Std.U8 64#usize → RustM (Bool × (Array Std.U8 64#usize))
 
 end transcrypt_v3_core
