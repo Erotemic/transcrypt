@@ -1,6 +1,6 @@
 # D-01/D-02 feasibility evidence: deterministic AE in Bash/OpenSSL
 
-**Status: evidence, not a decision.** This page records what the allowed
+**Status: corrected feasibility evidence (2026-11-11), not completed Bash v3 conformance.** This page records what the allowed
 Bash runtime (the OpenSSL CLI, no extra runtime dependencies) can and cannot
 compute, with reproducible commands and process inspection. It informs the
 D-01 (algorithm) and D-02 (Bash feasibility) decisions in
@@ -31,23 +31,45 @@ the `enc` app does not take an authentication tag, so no standard AEAD
 (GCM/CCM/SIV) can be driven through it. This confirms the B2 concern in
 [07-audit-remediation.md](../07-audit-remediation.md).
 
-### F-2. AES-SIV (RFC 5297) is not implementable through this CLI surface
+### F-2. AES-SIV (RFC 5297) can be composed from CLI primitives
 
-- SIV mode is absent from `enc` (F-1).
-- The S2V primitive requires AES-CMAC. `openssl mac ... CMAC` fails on
-  **both 3.0.13 and 3.5.9** (`unsupported: Algorithm (AES-256 : 0)` — the
-  `mac` app cannot fetch a cipher for CMAC; the CMAC algorithm is registered
-  but unreachable through the CLI). This rules out CLI-side SIV on the
-  current 3.x line.
-- Even where CMAC works, its only key channel in the CLI is
-  `-macopt hexkey:<hex>` — the key is in **argv** (F-5).
+The previous **negative CMAC result was a faulty probe**, not an OpenSSL
+limitation. The probe specified `-cipher AES-256`; the supported cipher
+name is `AES-256-CBC`. On the target machine, **OpenSSL 3.0.13** returned
+`0020215DA5F0F80C30C12D5FF18F7F4A` for this command (reported by the
+maintainer on 2026-11-11):
 
-**Consequence:** a byte-exact RFC 5297 AES-SIV implementation is not
-achievable in the plain OpenSSL CLI without either (a) exposing a derived
-CMAC key in argv, (b) adding a non-CLI runtime (forbidden by D-00), or
-(c) changing the supported-platform policy. The Rust implementation *can*
-compute SIV in-process with an audited library; the question is whether the
-Bash implementation can meet the same wire bytes.
+```bash
+printf test | openssl mac -cipher AES-256-CBC \
+  -macopt hexkey:0000000000000000000000000000000000000000000000000000000000000000 CMAC
+```
+
+The same vector was independently reproduced with OpenSSL 3.5.5. OpenSSL's
+3.0 `mac` documentation names AES-256-CBC as a valid CMAC cipher. `enc`
+still does not expose AES-SIV as one switch (F-1), so a Bash port must
+compose **RFC 5297 S2V with CMAC** and **AES-256-CTR** in binary-safe
+Bash/CLI operations. CMAC accepts a derived key via
+`-macopt hexkey:<hex>` (argv exposure, accepted under the new threat model).
+The complete S2V composition, counter-bit masking, empty records, binary
+handling and wire equivalence still require a tested prototype; **this is
+feasibility, not an implemented Bash v3 or a cryptographic review**.
+
+**Follow-up:** fix `contrib/verification/d02-openssl-cli-probe.sh`'s CMAC
+cipher argument and replace the negative result with a positive known-answer
+probe in the D1 work package. This docs-only change does not alter the
+script, so older probe output remains stale until that task lands.
+
+### F-2a. Portable 64-byte scrypt derivation is an OpenSSL 3.0 path
+
+The OpenSSL 3.0 `kdf` CLI exposes `SCRYPT` with `hexpass`, `hexsalt`,
+`n`, `r`, `p`, `maxmem_bytes`, and selectable key length; `PBKDF2` is an
+alternative. The target is a complete **32-byte repository salt** and
+**64-byte derived key** with fixed profile-specific parameters. The CLI
+places password bytes in argv (accepted local trust assumption). Unlike
+`enc -pbkdf2 -S`, this path does **not** truncate salts to eight bytes.
+The exact 3.0.13 output, parameter availability, memory limits and
+independent vectors remain a D1 prototype/test requirement. Argon2id is
+not available from the OpenSSL 3.0 CLI KDF and remains Rust-only on 3.0.
 
 ### F-3. PBKDF2-HMAC-SHA256 without secret in argv: feasible on OpenSSL 3.0+
 
@@ -104,19 +126,30 @@ process can receive the password on a dedicated pipe without argv, env,
 or a temporary file. This satisfies the D-06 capability requirement for
 the KDF step on 3.0+ backends.
 
-## Consequences for the decision register (no decisions made)
+## Consequences for the current decision (2026-11-11)
 
-| ID | State after this evidence |
-|---|---|
-| D-01 | AES-SIV remains the preferred *reviewed* construction for the protocol, but **cannot be implemented in the plain 3.0.13 CLI** (F-1, F-2). Options: accept an argv-exposed derived MAC key in Bash (with a written threat-model assessment), negotiate the D-00 platform policy, or pick an alternative construction whose MAC step is expressible via the F-3/F-4 channels — each is an external decision. |
-| D-02 | KDF and encryption steps are feasible with zero secret in argv on OpenSSL 3.0+ via `enc -pass` (F-3, F-4, F-6). The `kdf` app adds **no** secret channel on 3.0.13 or 3.5.9 (literal parameter values). The authentication step is **not** CLI-feasable without argv key exposure (F-2, F-5). |
-| D-03 | PBKDF2-HMAC-SHA256 is computable; the 8-byte `-S` limit means the full public salt must be carried inside the KDF input (exact transcript to be specified). |
-| D-09 | The v3 Bash format as sketched requires OpenSSL ≥ 3.0 (F-3). v2's 1.1.x/LibreSSL support is preserved only for legacy format handling. Needs a maintainer decision. |
-| D-06 | `-pass fd:` gives the needed non-interactive secret channel on 3.0+ (F-6). |
+- **D-01/D-02:** retain RFC 5297 AES-256-CMAC-SIV and path/config binding;
+  the `enc` command does not itself support SIV, but CLI CMAC+CTR
+  composition is the active approach. Accept local argument-list exposure
+  of password and derived key for Bash.
+- **D-03:** preserve Rust P1 Argon2id unchanged. Specify separately
+  versioned scrypt/AES-SIV (portable preferred) and PBKDF2/AES-SIV
+  (portable alternative), with 32-byte public salts and 64-byte derived
+  outputs, after parameter calibration and independent test vectors.
+- **D-06:** a special FD-only secret channel is no longer a requirement for
+  the Bash implementation; ensure secrets do not enter published Git.
+- **D-09:** OpenSSL **3.0.13** is the first-class target. Actual provider
+  capabilities are probed; older OpenSSL and LibreSSL do not acquire v3
+  support merely because they supported legacy Bash v2.
+- **Versioning:** P1 discriminators remain frozen. New profiles get new
+  discriminators/config contracts and fail closed on unsupported clients.
+
+See [the active plan](../V3-DUAL-IMPLEMENTATION-ROADMAP.md) and
+[product charter](../V3-PRODUCT-CHARTER.md).
 
 ## What this does NOT establish
 
-- No cryptographic security property of any candidate construction is
+- No cryptographic security property of a proposed new profile is
   claimed. F-3/F-4 verify byte-level computation, not confidentiality or
   authenticity.
 - OpenSSL 1.1.x / LibreSSL behavior is not covered by these runs; the CI

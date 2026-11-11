@@ -1,5 +1,15 @@
 # Transcrypt v3: the end-to-end security argument
 
+> **2026-11-11 scope update:** this argument is evidence for the current
+> Rust profile-1 product. New portable Bash/OpenSSL 3.0.13 profiles have
+> their own forthcoming config/cryptographic contracts and must satisfy
+> the same publication/authentication/recovery goals. See
+> [dual-implementation roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md).
+> Source-derived Rust theorems do not prove Bash; common-profile Bash
+> correspondence will be measured empirically. Local process-argument
+> exposure on a trusted developer machine is accepted; plaintext in Git
+> remains a security failure.
+
 **Written 2026-10-26; settled entries and A24 added the same day (review
 round 9); the product theorems and the A24 induction added 2026-11-01
 (`ProductSecurity.lean`); the keyed audit of one commit and the start of a

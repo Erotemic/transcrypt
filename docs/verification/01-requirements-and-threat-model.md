@@ -1,5 +1,17 @@
 # 01. Requirements, security goals, and threat model
 
+> **Active threat-model update (2026-11-11):** selected files must be
+> authenticated ciphertext when published in Git; the developer's local
+> machine is normally trusted. The former R-08 ban on secrets in process
+> arguments/environment is optional local hardening, not a Bash release
+> gate. Rust may enforce it through stronger execution modes. Standalone
+> Bash + OpenSSL **3.0.13** and Rust share portable, versioned AES-SIV
+> profiles, while the existing Argon2id P1 remains available in Rust.
+> For current acceptance criteria see the
+> [product charter](V3-PRODUCT-CHARTER.md) and
+> [dual-client roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md). The original
+> requirements matrix below is historical planning input.
+
 **Document status:** historical requirement set from the earlier dual-Bash/
 Rust design campaign. Some requirements (mandatory two-way Bash parity,
 local-credential threat assumptions, path-binding choices, and release gates)
@@ -60,7 +72,7 @@ manager are never prerequisites for installing/running Bash Transcrypt.
 | R-05 | Equal plaintext under the same key/context and supported associated data yields equal stored ciphertext, by design, unless format parameters explicitly change | Canonical vectors and round-trip/determinism theorem |
 | R-06 | Password-derived key material is context/domain separated; public salts are generated independently of passwords and never reused accidentally across fresh repositories | KDF transcript spec, tests, RNG contract |
 | R-07 | New-format cipher suites must be authenticated and meet a separately reviewed security definition for deterministic encryption; functional proofs alone cannot assert this | Algorithm standards, review, rationale and design approval |
-| R-08 | Neither distribution knowingly places passwords/derived keys in process argv, logs, trace output, public Git metadata, or crash diagnostics for new-format operations | OS process audits; secrets-handling design |
+| R-08 | **Superseded local-hardening requirement:** passwords/keys must never enter public Git objects; argument/environment/memory secrecy is optional for trusted workstation use and a valid Rust-only hardened feature | Inspect staged/published objects and traces for actual publication; opt-in local mode tests where claimed |
 | R-09 | Secret material is not available to uninitialized clones unless an explicit unlock succeeds; local saved credentials follow an intentional consent/persistence policy | Threat review and key-handle tests |
 
 ### Versioning, metadata, and Git state

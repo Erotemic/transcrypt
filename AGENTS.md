@@ -1,6 +1,7 @@
 # Working on Transcrypt v3
 
 Read [the v3 product charter](docs/verification/V3-PRODUCT-CHARTER.md)
+and the [dual-implementation roadmap](docs/verification/V3-DUAL-IMPLEMENTATION-ROADMAP.md)
 **before** proposing security hardening, formalization, changes to Git UX or
 release gates. It is the current maintainer-directed statement of product
 intent; older agent prompts and historical numbered roadmaps are not authority
@@ -8,7 +9,11 @@ for incompatible default behaviors.
 
 - **Main promise:** user-selected files are authenticated ciphertext in public
   Git history. An unlocked local checkout behaves normally. Local-at-rest
-  secrecy is not a default security guarantee.
+  secrecy is not a default security guarantee. The primary adversary is an
+  offline reader of public Git, not a process on the trusted developer host.
+  Derived keys in local Bash/OpenSSL process arguments are an accepted
+  portability tradeoff, not a release-blocking vulnerability by themselves.
+  Secrets accidentally published to Git remain critical defects.
 - **Default UX (implemented):** arbitrary patterns via Git `.gitattributes`
   (`protect PATTERN` or `PATTERN transcrypt`), the derived key stored in
   `.git/transcrypt-v3/key` by `unlock`, and an optional `--private` mode
@@ -18,16 +23,22 @@ for incompatible default behaviors.
 - **Keep real bugs in scope:** a plaintext staging bypass, wrong authentication
   context, attacker-controlled write, data loss or broken ordinary rename is
   not waived because a local privacy feature is optional.
-- **Proofs:** preserve byte-exact v3 protocol and verified Rust-to-Lean
-  correspondence. Named theorems about production-derived functions are
+- **Proofs:** prioritize human-consequential publication, authentication,
+  cross-profile rejection and data-recovery claims; Bash corresponds through
+  empirical tests, not inherited Lean theorems. Preserve byte-exact v3
+  protocol and verified Rust-to-Lean correspondence. Named theorems about production-derived functions are
   distinct from adapter model proofs, Git/OS assumptions and crypto-library
   security. Do not introduce `sorry`, `admit` or weaken a spec to fit a bug.
   Normal development uses compilation; reserve transitive axiom inventory for
   the existing named audit milestones.
 - **Version compatibility:** no legacy CBC/MD5 in the formally verified v3
-  runtime. Provide explicit one-time v2-to-v3 migration; keep Bash semantic
-  correspondence documented. Changes to authenticated wire semantics require
-  a new profile/version rather than silent reinterpretation.
+  runtime. Preserve existing Rust Argon2id/AES-SIV profile 1 and all of its
+  guarantees. Add portable, separately versioned AES-SIV profiles for Bash +
+  OpenSSL 3.0.13 and Rust; inspect committed config and fail clearly when a
+  backend does not support its profile. No automatic crypto downgrade.
+  Provide explicit one-time v2-to-v3 migration and profile conversion.
+  The target is empirical Bash/Rust Git feature parity on shared profiles,
+  with stricter local hardening remaining available in Rust.
 - **Work order:** actual consequential defects, arbitrary protected-file
   selection, transparent persistent unlock, routine Git workflows, conditional
   formal coverage, migration, simplicity/portability/performance. Rerank

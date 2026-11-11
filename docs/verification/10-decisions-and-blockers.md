@@ -1,6 +1,25 @@
 # 10. Decision register: what is agreed and what must be decided
 
-> **Current maintainer direction (2026-10-25):** consult the
+> **Active maintainer direction, 2026-11-11:** the former "no secrets in
+> argv" condition is relaxed for trusted local Bash/OpenSSL execution.
+> The developer workstation is normally trusted; **published Git objects**
+> must remain authenticated ciphertext. On the confirmed OpenSSL 3.0.13
+> target, CMAC works with `-cipher AES-256-CBC` (the old failing probe
+> used `-cipher AES-256`). Preserve existing Rust-only P1 Argon2id/AES-SIV;
+> implement independent, versioned portable scrypt/AES-SIV and
+> PBKDF2/AES-SIV profiles in **both** Rust and Bash. Committed config
+> controls compatibility; no implicit downgrade. Empirical Bash/Rust feature
+> parity and source-derived Rust security proofs are active goals.
+> [Roadmap and exit criteria](V3-DUAL-IMPLEMENTATION-ROADMAP.md).
+>
+> **Decision authority:** the table below is a historical upstream decision
+> record, not the current set of blocking design questions. D-01/D-02,
+> D-03, D-06, D-08 and D-09 have the above new direction; exact portable
+> profile IDs/KDF parameters and completed interoperability evidence are
+> still open. Keep this record for provenance without re-imposing its old
+> workstation secrecy gate.
+
+> **Earlier maintainer direction (2026-10-25):** consult the
 > [v3 product charter](V3-PRODUCT-CHARTER.md). Generic Git attribute selection,
 > persistent local-derived credentials as the default, an optional in-memory
 > agent/private-workstation mode and recoverable one-time legacy transition
@@ -47,7 +66,8 @@ format is written or released.
 | D-11 | Rust source location / upstream ownership? | Prefer optional companion distribution; put shared spec where maintainer accepts it, avoid forcing Rust CI on Bash maintainer | Governance/release maintainer acknowledgment |
 | D-12 | How to treat the previous prototype's on-disk records? | Treat unreleased `TCRYPT3:` as development fixtures; if anyone deployed them, provide explicit one-time conversion tool rather than silent reinterpretation | Provenance and real-world usage assessment |
 
-These 12 entries are **not yet approved**. D-01 through D-07 are hard
+These 12 entries were **historical proposals**, not the active 2026-11-11
+product decision. In the original plan D-01 through D-07 were hard
 blockers for encryption format implementation; D-08/D-09 need approval before
 claiming cross-host interoperability; D-10 before migration; D-11 before
 upstream packaging; D-12 before format publication.
@@ -90,8 +110,10 @@ These are strong proposals to make implementation planning actionable:
 - adding a broad `--audit` UX despite prior maintainer preference for
   actionable initialization/migration warnings.
 
-Each can be a future spec extension, not an excuse to loosen initial
-interoperability or security gates.
+These historical exclusions are not current scope restrictions: approved
+profile agility, scrypt/PBKDF2 and independent Bash v3 are now in scope.
+The [active dual-client plan](V3-DUAL-IMPLEMENTATION-ROADMAP.md) gives
+the governing profile and proof decisions.
 
 ## E. How to close a design decision
 

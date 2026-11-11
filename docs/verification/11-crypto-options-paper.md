@@ -1,5 +1,17 @@
 # 11. Cryptographic construction options paper (M1 input)
 
+> **Superseded feasibility correction, 2026-11-11:** the negative Bash
+> CMAC result in historical Option A was due to `-cipher AES-256` instead
+> of the supported `-cipher AES-256-CBC`. OpenSSL **3.0.13** successfully
+> computes CMAC on the maintainer's machine. Derived keys in OpenSSL argv
+> are an accepted workstation assumption. The active plan is CLI-composed
+> AES-256-CMAC-SIV, with new portable scrypt and PBKDF2 profiles and the
+> existing Rust-only Argon2id P1 preserved. See
+> [corrected feasibility](reference/d01-d02-feasibility.md) and
+> [dual-client roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md). The older option
+> ratings below are retained as historical arguments, **not current
+> decisions or implementation blockers**.
+
 > **Historical planning context:** some requirements below were written
 > before the 2026-10-25 maintainer direction. The current
 > [v3 product charter](V3-PRODUCT-CHARTER.md) controls product goals,
@@ -20,8 +32,10 @@ gate (R-07, D-01/D-02). No option here is a frozen protocol.
 - **R-07** — the released v3 suite is authenticated deterministic
   encryption with a separately reviewed security definition; functional
   correctness alone does not establish it.
-- **R-08** — new-format operations never place passwords or derived keys
-  in process argv, environment, logs, or public Git metadata.
+- **R-08 (historical, superseded)** — earlier work required new-format
+  operations never to place passwords or derived keys in process argv,
+  environment, logs, or public Git metadata. The current threat model
+  permits local argument exposure but still forbids Git publication.
 - **R-05** — same key/context/AD/plaintext ⇒ identical stored bytes.
 - **R-06** — CSPRNG public salt of ≥ 128 bits, password-independent, with
   explicit context/domain separation in the KDF transcript.
@@ -35,24 +49,23 @@ gate (R-07, D-01/D-02). No option here is a frozen protocol.
 
 ## 2. Option A — RFC 5297 AES-SIV (S2V/CMAC + CTR)
 
-The IETF-standardized deterministic authenticated mode. 32-byte key split
-into K1 (S2V/CMAC) and K2 (CTR); the SIV doubles as the CTR nonce, so
+The IETF-standardized deterministic authenticated mode. 64-byte key split
+into two 32-byte keys K1 (S2V/CMAC) and K2 (CTR); the SIV doubles as the CTR nonce, so
 `SIV || CTR_K2(SIV, P)` is fully deterministic after the key and AAD are
 fixed, and it has an explicit authenticated empty record (R-19).
 
 | Implementation | Feasibility (evidence: [d01-d02](reference/d01-d02-feasibility.md)) |
 |---|---|
 | Rust | **Yes** — in-process audited library; satisfies R-08. |
-| Bash / OpenSSL 3.0.13 CLI | **No** — SIV absent from `enc` (F-1); CMAC broken in `mac` (F-2); CMAC keys are argv-only anyway (F-5). |
+| Bash / OpenSSL 3.0.13 CLI | **Feasible candidate after the 2026-11-11 correction** — SIV absent from `enc`, but CMAC works with `-cipher AES-256-CBC` and CTR is available. Requires a complete binary-safe S2V composition and independent conformance tests; derived keys appear in argv (accepted for portable Bash). |
 
 Bash sub-options if SIV is the chosen protocol:
 
 - **A1 — argv-exposed derived CMAC key.** Bash computes the SIV steps with
   CLI primitives, accepting the derived K1 in `-macopt hexkey` argv.
-  Violates R-08 in its strict form; requires a *written, risk-accepted*
-  security decision (threat model: local multi-user hosts; mitigations such
-  as short-lived children and `/proc` restrictions do not remove the
-  exposure). Not an acceptable default without that explicit decision.
+  This was blocked by the **former** strict R-08 rule. Under the current
+  trusted-local-workstation threat model it is an accepted portability
+  choice; it still requires correct output and failure tests.
 - **A2 — wait for a CLI that exposes it.** If a future OpenSSL (or
   LibreSSL) CLI gains file-keyed CMAC/SIV or a file-based MAC key, the
   same wire bytes become R-08-clean in Bash. **3.5.9 (LTS, 2026-09) does

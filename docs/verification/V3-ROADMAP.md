@@ -1,6 +1,6 @@
 # Transcrypt v3: active product and verification roadmap
 
-**Intent updated 2026-10-25; implementation checkpoint: the product-charter campaign (P0–P4 done).** This is
+**Intent updated 2026-11-11; implementation checkpoint: the product-charter campaign (P0–P4 done).** This is
 the active plan for the Rust v3 product on
 `work/m2-nul-safe-path-enumeration`. The [maintainer product charter]
 (V3-PRODUCT-CHARTER.md) governs goals, non-goals, trusted boundaries and
@@ -18,8 +18,11 @@ paths through Git attributes, unlock persistently by default without a
 required daemon, and can opt into strict local privacy if desired. Source-
 derived Lean theorems constrain the actual Rust core under explicit crypto,
 Git, OS and translation assumptions. Legacy Bash-to-v3 *transition* must be
-safe; legacy wire interoperability is not required. A future Bash v3 may
-implement the same byte contract independently.
+safe; legacy wire interoperability is not required. **A standalone Bash v3
+with empirical functional parity on portable profiles is now a first-class
+target**, without sacrificing the existing Rust-only Argon2id profile.
+The [dual-implementation plan](V3-DUAL-IMPLEMENTATION-ROADMAP.md) defines
+that campaign and the OpenSSL 3.0.13 portability baseline.
 
 This is an **experimental security design**, not a production security
 certification. The exact bytes and threat assumptions live in the
@@ -39,7 +42,7 @@ what is and is not established.
 | V4 — authenticated-operation contracts | Production Rust calls a pure core for every decision; the core is translated and proved; crypto is an explicit contract | **Achieved**: the core owns seal/open/authenticate/authorize/attribute/hydrate/lock decisions (`Protocol.lean`, `Bytes.lean`, `Path.lean`) relative to `Realizes` | Done |
 | V5 — lifecycle/failure assurance | Malicious paths, staged conflicts, interruptions, recovery, transplants; transactions hardened or declared | **Achieved for the stated threat model**: Lean lifecycle models (`Lifecycle.lean`), adversarial suite, private staging, dirfd resolution, resumable lock/hydrate; multi-file atomicity is explicitly not claimed | Done |
 | V6 — freeze, review, distribution | Threat review, reproducible tests, profile decision, honest claims | **Internal review done** ([V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md), [V3-ASSUMPTIONS](V3-ASSUMPTIONS.md), [user guide](V3-USER-GUIDE.md)); Linux+macOS CI; **external review (R-01) outstanding** | Release blocker |
-| V7 — Bash v3 conformance | Bash implements exactly the approved v3 wire/profile | **Deferred** by policy: no reviewed Bash-feasible AES-SIV under the current dependency contract | No |
+| V7 — Bash v3 and profile parity | Independent Bash v3 on OpenSSL 3.0.13; portable scrypt/PBKDF2 AES-SIV in both CLIs; two-way Git parity tests; P1 unchanged and Rust-only on 3.0 | **Activated, not implemented**. CMAC works with `-cipher AES-256-CBC`; new profile specifications and multi-profile Rust/Lean work are pending. See [D0–D7 plan](V3-DUAL-IMPLEMENTATION-ROADMAP.md) | Yes, for the new dual-implementation goal |
 
 **Interpretation:** V0–V6 summarize the **existing experimental baseline**;
 they do not imply the product now meets the new charter. Further deliverables
@@ -143,6 +146,15 @@ verified" or "cryptographic security has been proved from first principles."
 
 ### Next milestones, ranked by expected value
 
+**New portability campaign (2026-11-11):** execute D0–D7 in
+[V3-DUAL-IMPLEMENTATION-ROADMAP](V3-DUAL-IMPLEMENTATION-ROADMAP.md).
+First establish scrypt/PBKDF2, CMAC/S2V and AES-CTR with independent vectors
+on OpenSSL **3.0.13**; freeze new profile IDs and authenticated transcripts;
+add Rust multi-profile support and source-derived Lean proofs; implement the
+Bash client; close the two-way feature and adversarial matrix. These tasks
+are open and do not invalidate previously achieved P1 proofs. The list below
+records the remaining work in the prior Rust-first campaign.
+
 1. Continued adversarial agent review of each change; the external human
    review (R-01) comes last, once everything else is done.
 2. Done: the rebind decision is the verified `repair_plan` on a typed `Provenance` (computed by the verified `entry_provenance` from Git's listings) and `RecordClass`; `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`.
@@ -152,9 +164,9 @@ verified" or "cryptographic security has been proved from first principles."
 
 **Parallel optional tracks:** server/CI audits for organizations requiring
 remote policy enforcement; session-only credential/strict-local-privacy mode;
-Git-platform portability and performance; possible independently written Bash
-v3 once its crypto/dependency feasibility is resolved. None is allowed to
-compromise the main Rust product promise or silently weaken v3 authentication.
+Git-platform portability and performance. **Independent Bash v3** is now an
+active V7 deliverable, not an optional track. None is allowed to compromise
+the existing Rust P1 protocol or silently weaken v3 authentication.
 
 **Legacy finding F-01 was real and is fixed in the Bash script** (decrypt
 and salt check instead of the prefix); users of existing installs should run
@@ -165,13 +177,14 @@ teach verified v3 to decrypt legacy CBC.
 
 - **Do not implement legacy-v2 features in formally verified v3.** Existing
   v2 security/regression work is maintenance, not a v3 completion gate.
-- **Do not require full Bash v3 to preserve the achieved Rust V3/V4 proofs.**
-  Bash portability is an independent follow-on track under the old 08 plan.
-  The CLI-only OpenSSL feasibility study found no straightforward safe
-  AES-SIV implementation under the existing Bash dependency policy: do not
-  weaken the Rust protocol to accommodate it. Either renegotiate the Bash
-  runtime contract, obtain a reviewed Bash-feasible implementation, or ship
-  a Rust-only secure suite until Bash conformance is viable.
+- **Keep existing Rust profile 1 and its V3/V4 proofs unchanged.**
+  Bash v3 parity is now an active parallel deliverable, not an optional
+  indefinitely deferred track. The earlier CLI feasibility assessment
+  incorrectly invoked CMAC with `-cipher AES-256`; the target host confirmed
+  `openssl mac -cipher AES-256-CBC ... CMAC` works on OpenSSL 3.0.13.
+  Accept local argv key exposure for portable Bash. Add **new** versioned
+  scrypt/PBKDF2 AES-SIV profiles instead of changing the P1 Argon2id wire
+  format. See the revised [feasibility record](reference/d01-d02-feasibility.md).
 - **No extra SMT milestones:** source-independent solver exercises are not a
   substitute for the Rust-generated Lean correspondence. Keep useful existing
   evidence without expanding it unless it supports the actual Rust proof.

@@ -1,5 +1,15 @@
 # Transcrypt v3: what the proofs guarantee
 
+> **Scope (2026-11-11):** all named compiled product theorems below
+> currently concern **Rust profile 1**. Proposed portable scrypt/PBKDF2
+> profiles and independent Bash v3 are unimplemented. The next formal
+> obligations concern publication integrity, profile/config dispatch,
+> authenticity before plaintext release, Git path binding and recovery;
+> see [dual-client plan](V3-DUAL-IMPLEMENTATION-ROADMAP.md). The Rust
+> proofs do **not** transfer automatically to Bash: empirical two-way
+> conformance supplies the correspondence evidence. Local argv secrecy
+> is optional under the ordinary trusted-workstation threat model.
+
 ## The product guarantee
 
 Suppose you unlocked a checkout, so that the verified stored-key check

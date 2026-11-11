@@ -1,6 +1,6 @@
 # Transcrypt: product vision, protocol and verification
 
-**Status (2026-10-25):** the experimental Rust
+**Status (2026-11-11):** the experimental Rust
 v3 lifecycle exists; the Aeneas-extracted wire and decision core have
 compiled refinement theorems, while the effectful Git/OS adapter and crypto
 implementations remain explicitly assumed/tested rather than fully proved.
@@ -19,7 +19,7 @@ are in the [disposition](V3-REVIEW-TRIAGE.md).
 
 ## Secure-first v3 implementation (experimental)
 
-The current implementation is an experimental [byte-exact v3 AES-SIV /
+The current **Rust profile 1** implementation is an experimental [byte-exact v3 AES-SIV /
 Argon2id candidate](specs/V3-AUTHENTICATED-P0.md) with Rust crates
 `transcrypt-v3-core` and `transcrypt-rs`. Independent reference vectors and
 real-Git tests accompany source-derived Lean refinements of the codec and
@@ -30,10 +30,14 @@ of concept or pursuing parity with legacy-v2 cryptography.
 
 ## The intended result
 
-The *active* target is a highly usable Rust-first, byte-exact authenticated
-protocol and a scoped machine-checked proof development. A future independent
-Bash v3 implementation is desirable **if feasible without diluting security
-or portability**, but is not a Rust-v3 release prerequisite. One-time
+The *active* target is a highly usable, independently implemented **Bash
+v3 and Rust v3 pair** sharing authenticated bytes and empirical Git feature
+parity on portable profiles. Bash runs with Bash, Git, common Unix tools and
+**OpenSSL CLI 3.0.13**; Rust retains its stronger Argon2id profile and
+optional private local hardening. This is a planned deliverable, not an
+assertion that Bash v3 or the new profiles exist.
+[The dual-implementation roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md)
+sets execution and acceptance criteria. One-time
 legacy-to-v3 migration is more important than legacy wire compatibility. The current
 formalization is not blocked on writing the Bash v3 implementation. It uses a
 public, implementation-independent specification and one machine-checked proof
@@ -62,7 +66,7 @@ Rust design is not promoted into the protocol simply to make proofs easy.
 
 ## Read in this order
 
-For the current Rust-first work, read the product charter first. Consult the
+For current work, read the charter and dual-implementation roadmap first. Consult the
 original numbered plans for longer-term Bash interoperability, historical
 audit findings, and source decisions.
 
@@ -70,7 +74,8 @@ audit findings, and source decisions.
 |---|---|---|
 | [V3 product charter](V3-PRODUCT-CHARTER.md) | Normative intended UX, public-Git threat model, goals and non-goals | **Maintainer direction** |
 | [Independent security review disposition](V3-REVIEW-TRIAGE.md) | Separate implementation bugs from legacy, optional local and deployment concerns | Active review triage |
-| [Active v3 roadmap](V3-ROADMAP.md) | Current product milestones, statuses, proof evidence and next action | **Current plan** |
+| [Active v3 roadmap](V3-ROADMAP.md) | Rust milestones and active v3 work queue | **Current plan** |
+| [Dual-implementation roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md) | OpenSSL 3.0.13 target, immutable profiles, empirical Bash/Rust parity, human-consequential proof goals | **Current dual-client plan** |
 | [V3 proof coverage](V3-PROOF-COVERAGE.md) | Source-derived Lean theorems vs tests vs trusted assumptions | **Current status** |
 | [V3 security argument](V3-SECURITY-ARGUMENT.md) | The end-to-end statement (selected paths enter Git as authenticated ciphertext) and every assumption it rests on | **Current status** |
 | [V3 handoff](V3-HANDOFF.md) | Working branch, file map, commands, continuity rules | **Current handoff** |

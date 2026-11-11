@@ -1,5 +1,14 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
+> **Planning update (2026-11-11):** the existing implementation details
+> below document Rust profile 1. The new
+> [Bash/OpenSSL 3.0.13 and Rust parity roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md)
+> is an **active, not yet implemented** workstream: portable scrypt/PBKDF2
+> AES-SIV profiles; committed-config capability checking; independent Bash
+> Git feature parity; source-derived Rust security proofs. Preserve P1 and
+> optional Rust-only local hardening. This note does not change the
+> historical completion assertions below.
+
 **Last reconciled:** 2026-10-26, after review round 9 (sorted listings,
 binary-search lookups and object orders in the verified core; A24), on top
 of the end-to-end campaign (the

@@ -14,17 +14,22 @@ them with your entire team or complicate your workflow.
 
 ![Tests](https://github.com/elasticdog/transcrypt/workflows/Tests/badge.svg)
 
-> **Product direction for Rust v3 (2026-10-25):**
+> **Product direction for v3 (updated 2026-11-11):**
 > [Read the maintainer's product charter](docs/verification/V3-PRODUCT-CHARTER.md)
 > before proposing feature or security requirements. The main goal is
 > authenticated ciphertext **in public Git** with ordinary, transparent
-> **plaintext work on unlocked local files**. Arbitrary Git-selected paths and
-> persistent local unlock are prioritized future defaults; they are **not yet
-> implemented** in this snapshot. See the
+> **plaintext work on unlocked local files**. Rust v3 already implements
+> arbitrary Git-selected paths and persistent local unlock. The next goal is
+> an independent **Bash/OpenSSL 3.0.13 v3** client with empirical Git feature
+> parity on new shared authenticated profiles, while the Argon2id profile and
+> optional stronger local hardening stay available in Rust.
+> See the [dual-implementation roadmap](docs/verification/V3-DUAL-IMPLEMENTATION-ROADMAP.md)
+> and
 > [independent-review disposition](docs/verification/V3-REVIEW-TRIAGE.md).
 > An independent source review also reproduced a **Bash v2 plaintext-staging
 > bypass**; consult that disposition for legacy remediation and migration
-> guidance. This docs-only overlay does **not** fix the Bash or Rust code.
+> guidance. The portable Bash v3 and shared profiles are **planned**, not
+> implemented; the released Bash command below still describes v2.
 >
 > **Experimental secure-first Rust v3:** a separate authenticated Rust
 > implementation and Lean/Aeneas verification project are under active

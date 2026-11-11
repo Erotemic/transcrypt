@@ -11,6 +11,15 @@
 > Path binding and exact AAD remain mandatory until a separately versioned,
 > reviewed protocol says otherwise.
 
+**Profile evolution (2026-11-11):** this document is *only* the frozen
+Rust v3 **profile 1**, with Argon2id + AES-256-CMAC-SIV and its original
+`TCFG3 00 01` and `TV3F 00 01` discriminators. The new
+[Bash/Rust parity roadmap](../V3-DUAL-IMPLEMENTATION-ROADMAP.md) proposes
+**separate, new** scrypt and PBKDF2 AES-SIV profiles for OpenSSL 3.0.13.
+Their IDs and exact KDF transcripts are **not yet specified**; no reader
+may infer them from these P1 bytes. This document must not be altered to
+retrofit Bash compatibility.
+
 **Status:** Proposed experimental v3 protocol. No compatibility with released
 legacy formats or the earlier `TCRYPT3:` experiment. The Rust implementation
 must be built/tested and independently reviewed before security-sensitive use.

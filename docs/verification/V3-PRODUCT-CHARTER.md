@@ -1,6 +1,7 @@
 # Transcrypt v3: product charter, security promise and non-goals
 
-**Status:** Maintainer-directed product intent, recorded 2026-10-25. **Authority:**
+**Status:** Maintainer-directed product intent, recorded 2026-10-25;
+portable Bash/Rust target clarified 2026-11-11. **Authority:**
 this is the source of truth for the *intended product and threat model*, not
 an assertion that the current Rust implementation already satisfies it.
 The [byte-exact v3 protocol specification](specs/V3-AUTHENTICATED-P0.md)
@@ -43,7 +44,13 @@ able to elicit accepted, unauthenticated plaintext through an implementation
 mistake.
 
 This is **encryption for publication**, not encryption of the developer's
-unlocked workstation. A user who can already read local plaintext, the local
+unlocked workstation. A Rust-only hardened mode is welcome, but the
+portable Bash/OpenSSL 3.0.13 route is permitted to keep derived keys in
+process arguments, Bash variables and local working files. Those are
+explicit local trust assumptions, not defects in the public Git encryption
+contract. Never allow such secrets or plaintext staging artifacts to cross
+into committed history. Do not create release gates for hypothetical local
+attackers outside the selected threat model. A user who can already read local plaintext, the local
 credential or the user's processes is *not* the adversary this product
 primarily defends against. Likewise, an informed user with unrestricted Git
 access can deliberately turn off a filter, commit a plaintext file, or share
@@ -63,8 +70,9 @@ all of Git, RustCrypto, the OS, Charon/Aeneas, the compiler or the entire CLI.
 No document or agent may claim "no bugs" or "completely formally verified"
 without a theorem and trusted-boundary statement sufficient for that claim.
 
-Offline passphrase attacks remain possible; Argon2id increases their cost but
-cannot rescue a weak password. Passphrase quality is ultimately the user's
+Offline passphrase attacks remain possible; the selected KDF (Argon2id in existing Rust P1; scrypt or PBKDF2 in
+planned portable profiles) increases their cost but cannot rescue a weak
+password. Passphrase quality is ultimately the user's
 choice: make strong generation and clear guidance easy, and support stricter
 organizational policy as an option. Do not claim a weak chosen passphrase is
 strong merely because the encryption code is formally verified. The public still learns filenames, commit
@@ -83,7 +91,7 @@ replay of an old valid Git revision without external freshness state.
 | G5 | Optional stricter local mode | Keep the memory-only credential agent, session expiration, no-persist mode, private file permissions and related hardening **optional** for users who want them. Both credential modes use the identical v3 ciphertext format and policy |
 | G6 | Source-derived formal assurance | Actual invoked Rust v3 code, translated with pinned Charon/Aeneas, refines an **independent** Lean spec for serialization, authentication gates, path binding, and consequential security decisions; keep the residual trusted boundary enumerated |
 | G7 | Recoverable, explicit legacy transition | Provide a tested **one-time** Bash/v2-to-v3 migration that preserves intended protected files, warns about older history, and fails without losing plaintext or mixing states. No need to support v2 ciphertext in the formally verified v3 runtime |
-| G8 | Clear Bash correspondence | Maintain a command/semantics mapping to Bash Transcrypt, and independent conformance vectors. A future *Bash v3* may implement the same approved protocol if feasible, but Bash v3 parity is **not** a prerequisite for a good Rust v3 product |
+| G8 | Independent Bash v3 with empirical Rust parity | Deliver a standalone Bash + Git + system utilities + **OpenSSL CLI 3.0.13** implementation of the portable profiles. Each supported profile must produce the same config, authenticated ciphertext and user-observable Git outcome in Bash and Rust, measured by two-way, real-Git conformance tests. Rust retains Argon2id profile 1 and optional stricter local isolation |
 | G9 | Simplicity, portability, performance and truthful security reporting | Reduce required components, implicit states, ritual and incidental failures; benchmark real Git flows; rank remaining assumptions and actual attacks, not arbitrary theorem or commit counts |
 
 The order reflects product value, not permission to release before serious
@@ -154,7 +162,7 @@ memory-only agent and private worktree permissions are the optional
 | Concealing filenames, sizes, Git commit graph or deterministic equality | Intrinsic limitations of the chosen Git-oriented design; document them |
 | Adding legacy CBC/MD5 encryption to the proved v3 core; full legacy CLI parity | Use the old tool only for explicit migration; keep the new protocol narrow and authenticated |
 | Formal verification of all RustCrypto, Git, the compiler, OS or Lean itself | State narrowly bounded external contracts, run adversarial tests and obtain independent reviews; formalize only when it removes a consequential implementation assumption |
-| Broad cipher agility, multiple credential contexts, GPG integration or elaborate privilege management *by default* | Consider based on demonstrated user value; not a condition for a simple secure v3 release |
+| Arbitrary user-designed crypto combinations or multiple credential contexts *by default* | Offer a small registry of reviewed, immutable profiles. Preserve Rust Argon2id/AES-SIV profile 1, add portable scrypt/AES-SIV and PBKDF2/AES-SIV profiles, and report compatibility from the committed config. GPG integration remains optional |
 
 **Non-goal does not mean "ignore concrete defects."** A symlink-based
 out-of-repository overwrite, incorrect rekey transaction, silent plaintext
@@ -227,9 +235,14 @@ for a different product. See the [October 25 independent assessment triage]
    deliberate full conversion and staged-tree check; verify a fresh v3 clone
    can decrypt; only then retire old credentials. Do not silently rewrite old
    Git history or pretend old ciphertext inherits v3 security.
-2. **Bash correspondence:** document what a Bash user can do in Rust v3 and
-   what materially differs. Same-profile Bash v3 is an optional independent
-   implementation, not the definition of the Rust product.
+2. **Bash correspondence:** implement an independent Bash v3 client as
+   a first-class product goal. Match Rust user-visible Git behavior and
+   byte-for-byte authenticated objects on each common portable profile;
+   validate by actual two-way Git workflows. The existing stronger Rust
+   profile and private local modes remain available and are labeled
+   `Rust-only` or `requires newer OpenSSL` as appropriate. Rust formal
+   theorems strengthen confidence in the shared design but do not verify Bash.
+   See [the detailed execution plan](V3-DUAL-IMPLEMENTATION-ROADMAP.md).
 3. **Versioning:** a backward-incompatible change to the authenticated
    ciphertext/config transcript must get a new discriminator/profile and
    explicit conversion. A credential-storage option or pattern selector need
@@ -241,7 +254,13 @@ for a different product. See the [October 25 independent assessment triage]
 
 ## 7. Work priorities and continuity rule
 
-**Near-term priority:** (a) independently reproduce/fix genuine v3 adapter
+**Near-term priority:** the original Rust product-charter items below are
+completed or ongoing as recorded in [V3-ROADMAP](V3-ROADMAP.md). The
+2026-11-11 next campaign is independent Bash/OpenSSL 3.0.13 conformance and
+Rust multi-profile formal refinement, as specified by
+[V3-DUAL-IMPLEMENTATION-ROADMAP](V3-DUAL-IMPLEMENTATION-ROADMAP.md).
+Do not reopen completed work solely to enforce optional workstation
+privacy. The prior campaign prioritized (a) independently reproduce/fix genuine v3 adapter
 and transaction bugs, notably reviewed rekey-symlink and path-bound rename
 failures; (b) implement arbitrary Git-selected paths; (c) default to
 persistent local unlock with optional private mode; (d) make ordinary Git
