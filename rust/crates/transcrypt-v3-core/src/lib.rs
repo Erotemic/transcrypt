@@ -2631,5 +2631,36 @@ pub fn push_admission(authenticated: bool, required: bool) -> PushAdmission {
     PushAdmission::Warn
 }
 
+/// `transcrypt.requireAuthenticatedPush` as the pre-push hook reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushSetting {
+    /// Not set in any config scope: the default.
+    Unset,
+    /// Set to a value Git reads as boolean false: the explicit opt-out.
+    Disabled,
+    /// Set to anything else, a misspelt value included.
+    Enabled,
+}
+
+/// Whether the pre-push hook requires every protected record it admits to
+/// be authenticated: always, unless the setting explicitly disables it.
+/// Envelope-only admission is never the default.
+pub fn authenticated_push_required(setting: PushSetting) -> bool {
+    match setting {
+        PushSetting::Disabled => false,
+        PushSetting::Unset | PushSetting::Enabled => true,
+    }
+}
+
+/// Whether publication checks treat a path as protected: `committed` is
+/// what the committed (or staged) `.gitattributes` files alone select, as
+/// Git evaluates them with no local attribute source; `effective` what Git
+/// selects with every local source (`.git/info/attributes`,
+/// `core.attributesFile`, `GIT_ATTR_SOURCE`, ...) applied. Local sources
+/// may add protection, never remove it.
+pub fn admission_selected(committed: bool, effective: bool) -> bool {
+    committed || effective
+}
+
 #[cfg(test)]
 mod tests;

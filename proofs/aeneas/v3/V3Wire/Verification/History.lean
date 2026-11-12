@@ -356,6 +356,57 @@ theorem keyless_dag_audit_authenticated {C A : Type} (aans : StagedEvidence A) (
       exact keyless_audit_run_authenticated ha hn hσ _ (fun hb => hboundary c hc p hfp hp hb hk σ hσ)
         (fun _ _ _ _ => rfl)
 
+/-- **A13 for one suite per configuration**: a commit of the range whose
+    configuration has no key here, whose first parent lies outside the
+    range and that the audit trusted from that parent, has a parent whose
+    records and selection authenticate under `real` of its configuration
+    (the suite of that configuration's genuine key). -/
+def KeylessBoundaryAuthenticUnder {C A : Type} (keys : EpochKeys P) (real : List Nat → Suite) (g : GitState)
+    (d : AuditedRange C A) : Prop :=
+  ∀ c ∈ d.commits, ∀ p, d.firstParent c = some p → p ∉ d.commits → (d.run c).base = .Parent →
+    keys (d.config c) = none →
+      RecordsAuthentic (real (d.config c)) (d.config c) g (d.run c).commit.parent ∧
+      SelectionAuthentic (real (d.config c)) (d.config c) g (d.run c).commit.filter (d.run c).commit.parent
+
+/-- **`keyless_dag_audit_authenticated`, under one suite per
+    configuration.** With `real` giving each configuration a suite with
+    that configuration's id (its genuine key's), and the boundary only
+    under `real` (`KeylessBoundaryAuthenticUnder`, A13): every keyless
+    commit of the range whose `commit_needs_no_key` answered `true` keeps
+    both invariants under `real` of its configuration. -/
+theorem keyless_dag_audit_authenticated_under {C A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A)
+    (keys : EpochKeys P) (σ₀ : Suite) (real : List Nat → Suite)
+    (hreal : ∀ config, (real config).digest16 config = σ₀.digest16 config)
+    (g : GitState) (d : AuditedRange C A) (hedges : FirstParentEdges d)
+    (haudits : ∀ c ∈ d.commits, keys (d.config c) = none → KeylessAudit aans acache inst σ₀ g (d.run c))
+    (hnokey : ∀ c ∈ d.commits, keys (d.config c) = none →
+      KeylessNeedsNoKey aans acache (d.run c).id (d.run c).base (d.run c).run)
+    (hboundary : KeylessBoundaryAuthenticUnder keys real g d) :
+    ∀ c ∈ d.commits, keys (d.config c) = none →
+      AuditedCommitAuthentic (real (d.config c)) (d.config c) g (d.run c).commit := by
+  refine first_parent_induction d hedges.acyclic _ fun c hc ih hk => ?_
+  have ha := haudits c hc hk
+  have hn := hnokey c hc hk
+  have hσ := hreal (d.config c)
+  cases hfp : d.firstParent c with
+  | none =>
+    have hroot := hedges.root c hc hfp
+    exact keyless_audit_run_authenticated ha hn hσ _
+      (fun _ => ⟨(fun x hx => by rw [hroot] at hx; cases hx), (fun x hx => by rw [hroot] at hx; cases hx)⟩)
+      (fun _ _ _ _ => rfl)
+  | some p =>
+    by_cases hp : p ∈ d.commits
+    · have hs := hedges.step c hc p hp hfp
+      exact keyless_audit_run_authenticated ha hn hσ (d.run p).commit.filter (fun hb => by
+          have hcfg : (d.run c).config = (d.run p).config := hs.config hb
+          have h := ih p hp hfp (by simpa [AuditedRange.config, hcfg] using hk)
+          rw [hs.parent]
+          simp only [AuditedRange.config, hcfg] at h ⊢
+          exact h)
+        hs.selection
+    · exact keyless_audit_run_authenticated ha hn hσ _ (fun hb => hboundary c hc p hfp hp hb hk)
+        (fun _ _ _ _ => rfl)
+
 /-! ## The pre-commit history across a rekey -/
 
 /-- The commit was accepted by a keyed check with its own configuration's

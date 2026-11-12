@@ -1065,4 +1065,43 @@ theorem pushAdmissionSpec_required {authenticated : Bool} (h : pushAdmissionSpec
     authenticated = true := by
   cases authenticated <;> simp_all [pushAdmissionSpec]
 
+/-- `transcrypt.requireAuthenticatedPush` as the hook reads it: not set in
+    any scope, set to a value Git reads as false, or set to anything else
+    (a misspelt value included). -/
+inductive PushSetting | unset | disabled | enabled
+  deriving DecidableEq
+
+/-- **Authenticated pushes are the default.** Only an explicit false
+    setting lets the hook accept records it could not authenticate. -/
+def authenticatedPushRequiredSpec : PushSetting → Bool
+  | .disabled => false
+  | .unset | .enabled => true
+
+theorem authenticatedPushRequiredSpec_false {s : PushSetting} :
+    authenticatedPushRequiredSpec s = false ↔ s = .disabled := by
+  cases s <;> simp [authenticatedPushRequiredSpec]
+
+/-- **Unless explicitly disabled, an admitted push authenticated every new
+    or changed record**: with any setting but `disabled`, the verdict is
+    not `refuse` only when the audit authenticated. -/
+theorem pushAdmissionSpec_default {authenticated : Bool} {s : PushSetting} (hs : s ≠ .disabled)
+    (h : pushAdmissionSpec authenticated (authenticatedPushRequiredSpec s) ≠ .refuse) : authenticated = true := by
+  cases s <;> first | exact absurd rfl hs | exact pushAdmissionSpec_required h
+
+/-- **The committed policy's protection, for publication checks**:
+    `committed` is what the committed (or staged) `.gitattributes` files
+    alone select, `effective` what Git selects with every local attribute
+    source applied. -/
+def admissionSelectedSpec (committed effective : Bool) : Bool :=
+  committed || effective
+
+/-- **No local attribute source unprotects a committed path**: whatever
+    the local sources make of it. -/
+theorem admissionSelectedSpec_committed {effective : Bool} : admissionSelectedSpec true effective = true := by
+  simp [admissionSelectedSpec]
+
+/-- Local sources may add protection. -/
+theorem admissionSelectedSpec_effective {committed : Bool} : admissionSelectedSpec committed true = true := by
+  simp [admissionSelectedSpec]
+
 end Transcrypt.V3Policy

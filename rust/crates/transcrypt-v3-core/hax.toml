@@ -82,6 +82,8 @@ include = [
   "transcrypt_v3_core::config_recovery",
   "transcrypt_v3_core::file_recovery",
   "transcrypt_v3_core::push_admission",
+  "transcrypt_v3_core::authenticated_push_required",
+  "transcrypt_v3_core::admission_selected",
 ]
 # hax 0.4.2 requires scenario outputs to remain *inside* the Rust workspace.
 # Two levels above this crate is rust/, the workspace root.

@@ -4072,4 +4072,21 @@ def push_admission
        then ok PushAdmission.Refuse
        else ok PushAdmission.Warn
 
+/-- [transcrypt_v3_core::authenticated_push_required]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2648:0-2653:1
+    Visibility: public -/
+def authenticated_push_required (setting : PushSetting) : RustM Bool := do
+  match setting with
+  | PushSetting.Unset => ok true
+  | PushSetting.Disabled => ok false
+  | PushSetting.Enabled => ok true
+
+/-- [transcrypt_v3_core::admission_selected]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2661:0-2663:1
+    Visibility: public -/
+def admission_selected (committed : Bool) (effective : Bool) : RustM Bool := do
+  if committed
+  then ok true
+  else ok effective
+
 end transcrypt_v3_core

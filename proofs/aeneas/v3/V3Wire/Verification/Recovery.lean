@@ -1,7 +1,8 @@
 import V3Wire.Verification.Bytes
 
 /-!
-# Interrupted commands and the pre-push verdict: the production decisions
+# Interrupted commands, the pre-push verdict and the publication selection:
+# the production decisions
 
 Functional refinement of the core functions behind the setup record, the
 rekey journal's recovery and the pre-push verdict: each production function
@@ -158,5 +159,43 @@ theorem push_admission_spec (authenticated required : Bool) :
 theorem push_admission_required (authenticated : Bool) :
     push_admission authenticated true ⦃ r => r ≠ .Refuse → authenticated = true ⦄ := by
   rcases authenticated with _ | _ <;> simp [push_admission]
+
+def pushSettingSpecOf : PushSetting → Transcrypt.V3Policy.PushSetting
+  | .Unset => .unset
+  | .Disabled => .disabled
+  | .Enabled => .enabled
+
+/-- `authenticated_push_required` is `authenticatedPushRequiredSpec`. -/
+@[step]
+theorem authenticated_push_required_spec (setting : PushSetting) :
+    authenticated_push_required setting ⦃ r =>
+      r = Transcrypt.V3Policy.authenticatedPushRequiredSpec (pushSettingSpecOf setting) ⦄ := by
+  rcases setting with _ | _ | _ <;>
+    simp [authenticated_push_required, pushSettingSpecOf, Transcrypt.V3Policy.authenticatedPushRequiredSpec]
+
+/-- **The hook's dispatch, in production terms**: with any setting but an
+    explicit false, `push_admission` of the audit's flag and the verified
+    `authenticated_push_required` admits (or warns) only an authenticated
+    audit; explicitly false, an unauthenticated one is admitted with a
+    warning (`Warn`), never silently. -/
+theorem push_dispatch (authenticated : Bool) (setting : PushSetting) :
+    (do let required ← authenticated_push_required setting; push_admission authenticated required) ⦃ r =>
+      (setting ≠ .Disabled → r ≠ .Refuse → authenticated = true) ∧
+      (setting = .Disabled → authenticated = false → r = .Warn) ⦄ := by
+  rcases setting with _ | _ | _ <;> rcases authenticated with _ | _ <;>
+    simp [authenticated_push_required, push_admission]
+
+/-- `admission_selected` is `admissionSelectedSpec`. -/
+@[step]
+theorem admission_selected_spec (committed effective : Bool) :
+    admission_selected committed effective ⦃ r => r = Transcrypt.V3Policy.admissionSelectedSpec committed effective ⦄ := by
+  rcases committed with _ | _ <;> simp [admission_selected, Transcrypt.V3Policy.admissionSelectedSpec]
+
+/-- **No local attribute source unprotects a committed path, in production
+    terms**: when the committed policy selects a path, `admission_selected`
+    answers `true` whatever Git's effective answer. -/
+theorem admission_selected_committed (effective : Bool) :
+    admission_selected true effective ⦃ r => r = true ⦄ := by
+  simp [admission_selected]
 
 end Transcrypt.V3Verification

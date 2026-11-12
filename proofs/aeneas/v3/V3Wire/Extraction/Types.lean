@@ -357,4 +357,13 @@ inductive PushAdmission where
 | Warn : PushAdmission
 | Refuse : PushAdmission
 
+/-- [transcrypt_v3_core::PushSetting]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2636:0-2643:1
+    Visibility: public -/
+@[discriminant isize]
+inductive PushSetting where
+| Unset : PushSetting
+| Disabled : PushSetting
+| Enabled : PushSetting
+
 end transcrypt_v3_core

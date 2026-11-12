@@ -1455,3 +1455,25 @@ fn push_admission_matches_its_definition() {
     assert_eq!(push_admission(false, false), PushAdmission::Warn);
     assert_eq!(push_admission(false, true), PushAdmission::Refuse);
 }
+
+/// Authenticated pushes are required unless explicitly disabled; with the
+/// default setting an unauthenticated audit is refused.
+#[test]
+fn authenticated_pushes_are_required_by_default() {
+    assert!(authenticated_push_required(PushSetting::Unset));
+    assert!(authenticated_push_required(PushSetting::Enabled));
+    assert!(!authenticated_push_required(PushSetting::Disabled));
+    let default = authenticated_push_required(PushSetting::Unset);
+    assert_eq!(push_admission(false, default), PushAdmission::Refuse);
+    assert_eq!(push_admission(true, default), PushAdmission::Admit);
+}
+
+/// Local attribute sources can add protection but never remove what the
+/// committed policy selects.
+#[test]
+fn local_attributes_never_unprotect_a_committed_path() {
+    assert!(admission_selected(true, false));
+    assert!(admission_selected(true, true));
+    assert!(admission_selected(false, true));
+    assert!(!admission_selected(false, false));
+}

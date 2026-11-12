@@ -217,6 +217,7 @@ open Transcrypt.V3Verification
 #print axioms keyed_dag_audit_authenticated
 #print axioms keyless_dag_audit_enveloped
 #print axioms keyless_dag_audit_authenticated
+#print axioms keyless_dag_audit_authenticated_under
 #print axioms rekey_guard_false
 #print axioms rekey_commit_starts_epoch
 #print axioms epoch_history_authenticated
@@ -289,6 +290,9 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.interrupted_rekey_abort_restores
 #print axioms Transcrypt.V3Policy.interrupted_rekey_abort_restores_exactly
 #print axioms Transcrypt.V3Policy.interrupted_rekey_continue_finishes
+#print axioms Transcrypt.V3Policy.pushAdmissionSpec_default
+#print axioms Transcrypt.V3Policy.authenticatedPushRequiredSpec_false
+#print axioms Transcrypt.V3Policy.admissionSelectedSpec_committed
 -- Publication: the pre-push verdict and what a push sends
 #print axioms push_admission_spec
 #print axioms push_admission_required
@@ -297,5 +301,17 @@ open Transcrypt.V3Verification
 #print axioms boundary_outside
 #print axioms keyed_boundary_of_published
 #print axioms keyless_boundary_of_published
-#print axioms push_publishes_no_protected_plaintext
+#print axioms authenticated_push_required_spec
+#print axioms push_dispatch
+#print axioms admission_selected_spec
+#print axioms admission_selected_committed
+#print axioms remoteTips_advertised
+#print axioms selected_admissionFilter
+#print axioms admissionFilter_flag
+#print axioms keyless_boundary_authentic_of_published
+#print axioms push_sent_keyed
+#print axioms push_publishes_authenticated
 #print axioms push_sends_no_protected_plaintext
+#print axioms committed_protection_published
+#print axioms push_publishes_enveloped
+#print axioms push_sends_only_records
