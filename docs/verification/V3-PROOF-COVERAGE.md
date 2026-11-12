@@ -1,6 +1,6 @@
 # Transcrypt v3: proof and test coverage ledger
 
-**Updated 2026-11-02.** This ledger keeps a compiled proof, a functional
+**Updated 2026-11-11** (configuration profiles, the portable Bash client). This ledger keeps a compiled proof, a functional
 regression, an extraction check and a cryptographic assumption from being
 reported as the same kind of evidence. See the active
 [v3 roadmap](V3-ROADMAP.md), the theorem-level
@@ -28,9 +28,9 @@ Evidence levels:
 | ID | Requirement | Evidence | Remaining |
 | --- | --- | --- | --- |
 | W-00 | Generated Lean matches the Rust core source | **GENERATED**: `SNAPSHOT.json`, source-hash gate, CI regeneration with pinned cargo-hax 0.4.2 (reproduced locally byte-for-byte) | Maintain on every core change |
-| W-01 | Magic/version markers match the spec | **PROVED** `extracted_*_magic_matches_spec`, `extracted_magic_disjoint` | — |
+| W-01 | Magic/version markers match the spec | **PROVED** `extracted_config_family_matches_spec`, `extracted_file_magic_matches_spec`, `configMagicU8_bytes` (each profile's config magic), `extracted_magic_disjoint` | — |
 | W-02 | Config encoder writes all 55 bytes | **PROVED** `encode_config_bytes`, `encode_config_refines` | — |
-| W-03 | Exact config decoder accepts iff magic correct, fields exact | **PROVED** `decode_config_exact_spec`, roundtrip `decode_config_exact_encode_config` | — |
+| W-03 | Exact config decoder accepts iff the family marker is correct and the profile byte names a profile; fields exact | **PROVED** `decode_config_exact_spec` (`Err Profile` for an unknown byte), `profile_of_byte_spec`, roundtrip `decode_config_exact_encode_config` (profile included) | — |
 | W-04 | File-header encoder writes all 22 bytes | **PROVED** `encode_file_header_bytes`, `encode_file_header_refines` | — |
 | W-05 | File-header decoder rejects wrong magic, extracts id | **PROVED** `decode_file_header_exact_spec` + roundtrip | — |
 | W-06 | Public slice parsers enforce length and magic | **PROVED** `parse_config_spec`, `parse_file_header_spec` (exactly the spec's shape decoders) | — |
@@ -64,22 +64,24 @@ Evidence levels:
 | E2E-DAG | The history composition over merges, branches and rekeys | **PROVED (model)** `History.lean`: `first_parent_induction` (any walk order; only the first-parent relation's acyclicity), `keyed_dag_audit_authenticated` (every audited commit whose configuration has a key keeps `RecordsAuthentic` and `SelectionAuthentic` under that key), `keyless_dag_audit_enveloped` (every one without a key has its configuration's envelope at every selected path), `keyless_dag_audit_authenticated` (when every such commit needed no key, `KeylessNeedsNoKey`: what the adapter requires to report the run authenticated, every one keeps both invariants under every suite with its configuration's id, so under its real key's; boundary `KeylessBoundaryAuthentic`, A13), `keyed_audit_run_authenticated`, `keyless_audit_run_enveloped`, `keyless_audit_run_authenticated` (the only proofs that open an audit bundle), `rekey_guard_false` (a configuration change turns the hook's guard off), `rekey_commit_starts_epoch` (the new epoch's invariant with nothing about the old one), `epoch_history_authenticated` (the hook history with a key per configuration), `transcrypt_product_assurance_dag` (top level: `EpochKeyGuarantees` per stored key, `AuditedCommitAuthentic` or `SelectionEnveloped` per audited commit, `AuthenticatedRepositoryState` per checked commit); only standard axioms; **TESTED** `the_audit_does_not_depend_on_the_walk_order` (a commit printed before its first parent is still audited against that parent's attributes; it fails when an unaudited parent's attributes are taken as empty), `incremental_audit_covers_merges_and_config_changes`, `the_audit_trusts_no_parent_across_a_config_change`, `pushes_checked_by_envelope_only_warn_or_refuse_when_required`, `locked_pushes_of_unprotected_changes_need_no_key`, `locked_pushes_of_records_at_unprotected_paths_still_need_the_key`, `locked_pushes_of_protected_changes_still_need_the_key`, `old_epoch_commits_of_unprotected_changes_need_no_key` (reverting the adapter to "keyless is unauthenticated" fails the first and last; counting every keyless commit as authenticated fails the middle two; the core treating a record or a selected entry as needing no key fails the second or third, 2026-11-03) | `FirstParentEdges` (A11: acyclic; A20: a root is compared with the empty tree, an in-range first parent is an `AuditStep`); the trusted boundary, keyed and keyless (A13); merges are compared with their first parent only, and a second parent outside the range is audited by nothing; authenticity only for epochs whose key the checkout holds (one stored key per run, A14 otherwise); the start's `CommitConfig` (the adapter's `config_blob`, A20, A11); the private agent's key is outside the statement (A6) |
 | G-MIG | Explicit recoverable one-time Bash v2 → v3 transition | **TESTED** `bash_v2_repositories_migrate_to_v3` against the real Bash script (refusal of uncommitted work, pattern preservation, fresh-clone unlock); `rewrite_attributes` unit test | Git/OS adapter transaction assumptions; historical v2 risk |
 | F-02 | Repository files v3 writes never follow committed symlinks | **TESTED** `rekey_never_writes_through_committed_symlinks`, `protected_parent_symlinks_cannot_redirect_lock_or_hydrate`; design: one writer (`write_repository_file`) | Same-UID races (A8) |
-| B-01 | Standalone Bash conforms to portable v3 profiles | **OPEN / ACTIVE TARGET** (V7): no Bash v3 implementation or two-way conformance suite yet; Rust P1 proof status unchanged | OpenSSL 3.0.13 SIV/KDF spike; shared P2/P3 specs; Git parity matrix |
+| PR-01 | A configuration's profile selects exactly its key derivation and parameters; unknown profiles are refused before any derivation; no fallback | **PROVED** `profile_kdf_spec` (= spec table `profileKdf`), `derive_profile_key_spec`, `derive_config_key_spec` (= spec `configKey`), `derive_config_key_uses_config_profile` (relative to `KdfRealizes`); **SPEC PROVED** `configKey_uses_its_profile`, `configKey_unknown_profile`, `profileKdf_injective`; **TESTED** `derivation_follows_the_configuration_profile` (core), `unknown_profiles_are_named_and_refused` | The KDF implementations (A26); their strength (A10) |
+| PR-02 | The profile byte is authenticated: relabelling a config does not change which derivation a passphrase gets for an *accepted* config | **SPEC PROVED** `config_profile_bound` (a relabelled config authenticating under one key is an AES-SIV collision); **PROVED** `authenticate_config_spec` with the profile in the authenticated prefix; **TESTED** `profiles_never_share_keys_or_records`, relabelled-config refusals in both clients | A10 |
+| PR-03 | Records are bound to their path and configuration (hence profile); determinism leaks exactly plaintext equality at one path and config | **PROVED** `open_record_of_other_context_needs_collision`, `seal_record_deterministic`; **SPEC PROVED** `transplant_needs_siv_collision`, `sealedRecord_eq_iff_same_context`, `other_config_needs_same_id_or_collision`; **TESTED** wrong-path, tampering and cross-profile vectors (Rust and Bash) | A10 (that collisions are infeasible; that SIV reveals nothing beyond equality) |
+| PR-04 | Profile conversion is an explicit rekey; earlier commits keep their records | **PROVED (model)** the existing epoch theorems quantify over any configuration change, profile included (`rekey_guard_false`, `rekey_commit_starts_epoch`, `epoch_history_authenticated`); **TESTED** `rekey --profile` in both clients, Rust converting profile 1 to 2 for Bash (`conformance/run.sh`) | — |
+| C-04 | Profiles 2 and 3 match independent vectors byte for byte | **TESTED** `tests/v3/reference/portable_vectors.py` (Python hashlib scrypt/PBKDF2 + `cryptography` AESSIV) → `portable-vectors.tsv`: key, config, key-check value, 12 records per profile; Rust `portable_vectors.rs`; Bash `test_reference.sh` | External review (R-01) |
+| B-01 | The portable Bash client implements the shared profiles and Git workflows | **TESTED** (no theorem: A27) `tests/v3/bash/test_reference.sh` (19 checks: every vector, tampering/truncation/wrong path, relabelled and unknown profiles, init with quoted patterns, filters and diff, pre-commit sealing and rename re-encryption, refusal of copied records, lock/hydrate/unlock, merges with conflicts, rekey with profile conversion, pre-push refusal of a hidden plaintext commit, unprotect, fresh clone, linked worktrees, uninstall, v2 migration) on OpenSSL 3.0.13 | Source-level verification of Bash is not claimed |
+| B-02 | Bash and Rust interoperate on the same repositories | **TESTED** `tests/v3/conformance/run.sh` (28 checks): for profiles 2 and 3 in both directions, setup by one client and unlock/decrypt/byte-identical re-encryption by the other, edits and renames read across clients, merges of branches from both, switching clients in one checkout, rekey by one and recovery by the other; profile 1 named and refused by Bash without changes, converted by Rust; shared refusals (wrong passphrase, foreign-path and tampered records, tampered commits, unknown profile, hidden plaintext commits at push); v2 migration by either client read by the other | — |
 | R-01 | Independent algorithm, threat and adapter security review | **REVIEW (internal)** [V3-SECURITY-REVIEW.md](V3-SECURITY-REVIEW.md) | External review before security-sensitive release |
 
-## Planned profile-aware proof obligations (not achieved)
+## Profile-aware proof obligations (2026-11-11)
 
-The [dual-client program](V3-DUAL-IMPLEMENTATION-ROADMAP.md) will extend
-source-derived Rust proofs to reject unsupported/mixed profile dispatch,
-authenticate the exact profile/config/path, gate all plaintext emission,
-model selected Git objects before publication, and preserve recoverability
-through rekey/profile switching. The crypto primitives remain explicit
-reviewed assumptions; prove composition and decision logic rather than
-claiming a proof of OpenSSL or RustCrypto. Each new proof must name a
-production Rust call site, its extracted definition, the independent spec,
-and a corresponding Bash empirical conformance case. **No Bash theorem is
-claimed.** Do not mark any new profile `PROVED` before code and Lean builds
-exist.
+Achieved: profile dispatch (PR-01), profile binding (PR-02), record
+binding and determinism (PR-03), conversion as a rekey (PR-04), each naming
+the production function it is about. The KDF and AES-SIV primitives remain
+explicit assumptions (A10, A26); the Bash client has empirical evidence only
+(A27). Remaining: the Rust adapter's call of `derive_config_key` during
+`unlock` and of `derive_profile_key` during `init`/`rekey`/`migrate` is
+reviewed and tested, not modelled (A4).
 
 ## Historical first-core completion gate (achieved; not the product finish line)
 

@@ -11,15 +11,14 @@
 > Path binding and exact AAD remain mandatory until a separately versioned,
 > reviewed protocol says otherwise.
 
-**Profile evolution (2026-11-11):** this document is *only* the frozen
-Rust v3 **profile 1**, with Argon2id + AES-256-CMAC-SIV and its original
-`TCFG3 00 01` and `TV3F 00 01` discriminators. The new
-[Bash/Rust parity roadmap](../V3-DUAL-IMPLEMENTATION-ROADMAP.md) proposes
-**separate, new** scrypt and PBKDF2 AES-SIV profiles for OpenSSL 3.0.13.
-The new [portable profile-2 specification](V3-PORTABLE-P2.md) now assigns
-`TCFG3 00 02` and `TV3F 00 02` with its own exact scrypt transcript; no reader
-may infer them from these P1 bytes. This document must not be altered to
-retrofit Bash compatibility.
+**Profile evolution (2026-11-11):** this document is the frozen **profile
+1** (Argon2id + AES-256-CMAC-SIV, config `TCFG3 00 01`). The
+[portable profiles specification](V3-PORTABLE-PROFILES.md) adds profiles 2
+(scrypt, `TCFG3 00 02`) and 3 (PBKDF2-HMAC-SHA256, `TCFG3 00 03`), which
+differ from profile 1 only in the key derivation; their records use the same
+`TV3F 00 01` record format defined here, bound to their config by id and
+associated data. No byte of a profile-1 config or record changes, and this
+document must not be altered to retrofit other profiles.
 
 **Status:** Proposed experimental v3 protocol. No compatibility with released
 legacy formats or the earlier `TCRYPT3:` experiment. The Rust implementation

@@ -1,16 +1,19 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
-> **Planning update (2026-11-11):** the existing implementation details
-> below document Rust profile 1. The new
-> [Bash/OpenSSL 3.0.13 and Rust parity roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md)
-> now includes an implemented experimental Bash scrypt/AES-SIV
-> profile-2 reference (`contrib/v3/transcrypt-bash`) with independent byte
-> vectors and Git lifecycle tests. Rust support for that portable profile,
-> OpenSSL 3.0.13 qualification, and full parity remain pending. The broader
-> workstream includes optional PBKDF2 profiles; committed-config capability checking; independent Bash
-> Git feature parity; source-derived Rust security proofs. Preserve P1 and
-> optional Rust-only local hardening. This note does not change the
-> historical completion assertions below.
+> **Update (2026-11-11, evening):** configuration **profiles** are
+> implemented end to end. The config's byte 6 names the key derivation
+> (1 Argon2id, 2 scrypt, 3 PBKDF2-HMAC-SHA256); records stay `TV3F 00 01`.
+> Core: `Profile`, `profile_kdf`, `passphrase_ok`, `V3Kdf`,
+> `derive_profile_key`, `derive_config_key` (proved, `Profiles.lean`); Rust:
+> `--profile=NAME` for `init`/`migrate`/`rekey`, `profiles`. The portable
+> client `contrib/v3/transcrypt-bash` (Bash + Git + OpenSSL 3.0) implements
+> profiles 2/3 and the shared workflows with the same bytes and key file.
+> Evidence: `tests/v3/reference/portable_vectors.py`,
+> `rust/crates/transcrypt-rs/tests/portable_vectors.rs`,
+> `tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`. Status
+> and parity matrix: [dual-implementation roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md).
+> Build note: Lean `.lake` and `rust/target` may be bind-mounted from local
+> disk when the checkout is on a slow network filesystem.
 
 **Last reconciled:** 2026-10-26, after review round 9 (sorted listings,
 binary-search lookups and object orders in the verified core; A24), on top

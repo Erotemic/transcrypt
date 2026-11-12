@@ -127,9 +127,11 @@ fn ours(name: &str, command: &str, text: &str) -> bool {
     let Some(line) = text.strip_prefix("#!/bin/sh\nexec ").and_then(|t| t.strip_suffix('\n')) else { return false };
     let Some((path, rest)) = shell_unquote(line) else { return false };
     // The exact form v3 writes, for a binary named transcrypt-rs or (before
-    // the rename) transcrypt-v3; on Windows also with `.exe`, in any case.
+    // the rename) transcrypt-v3, or the portable client transcrypt-bash
+    // (same formats and key file, so either client can take over a
+    // checkout); on Windows also with `.exe`, in any case.
     Path::new(&path).file_name().and_then(|n| n.to_str()).is_some_and(|name| {
-        ["transcrypt-rs", "transcrypt-v3"].iter().any(|ours| if cfg!(windows) {
+        ["transcrypt-rs", "transcrypt-v3", "transcrypt-bash"].iter().any(|ours| if cfg!(windows) {
             name.eq_ignore_ascii_case(ours) || name.eq_ignore_ascii_case(&format!("{ours}.exe"))
         } else {
             name == *ours
@@ -590,7 +592,21 @@ pub(crate) fn doctor(repo: &Repository) -> Result<(), String> {
         match entries.and_then(|entries| staged_protected(repo, entries)) {
             Ok(protected) if protected.is_empty() => println!("note no tracked file is protected yet: \
                 `transcrypt-rs protect PATTERN` (for example .env)"),
-            Ok(protected) => println!("note {} tracked file(s) protected by .gitattributes", protected.len()),
+            Ok(protected) => {
+                println!("note {} tracked file(s) protected by .gitattributes", protected.len());
+                // Git marks the index entry of an empty file whose clean form
+                // is not empty as possibly modified forever, and `git merge`
+                // then stops with "stash failed" (a Git bug, any such filter).
+                for staged in &protected {
+                    let empty = indexed_path(&staged.path).ok()
+                        .and_then(|p| fs::symlink_metadata(repo.root().join(p)).ok())
+                        .is_some_and(|m| m.is_file() && m.len() == 0);
+                    if empty {
+                        println!("note {} is empty: Git's merge fails (\"stash failed\") while a protected file \
+                            is empty; put a byte in it or stop protecting it", staged.name());
+                    }
+                }
+            },
             Err(e) => report(false, &format!("protected-file selection: {e}")),
         }
         let checked = check_index(repo, key);

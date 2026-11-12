@@ -5,6 +5,7 @@ import Transcrypt.V3Policy.Lifecycle
 import Transcrypt.V3Policy.Git
 import Transcrypt.V3Policy.Credentials
 import Transcrypt.V3Policy.Profiles
+import Transcrypt.V3Policy.Binding
 
 /-!
 Independent specification of the v3 protocol *decisions*. This module only
@@ -20,6 +21,8 @@ gathers its parts, each importing only what it builds on:
   `cat-file --batch` replies;
 * `Credentials`: the agent's requests and framing, and the stored key.
 * `Profiles`: the key-derivation function a configuration's profile selects.
+* `Binding`: what deterministic records leak (equality), and that moving a
+  record to another path or configuration needs an AES-SIV collision.
 
 Written from `docs/verification/specs/V3-AUTHENTICATED-P0.md`, not from the
 Rust source. Aeneas refinement theorems in `proofs/aeneas/v3` relate the

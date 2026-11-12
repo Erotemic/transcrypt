@@ -36,7 +36,7 @@ parity on portable profiles. Bash runs with Bash, Git, common Unix tools and
 **OpenSSL CLI 3.0.13**; Rust retains its stronger Argon2id profile and
 optional private local hardening. A first Bash v3 profile-2 reference now exists at
 [`contrib/v3/transcrypt-bash`](../../contrib/v3/transcrypt-bash), with an
-[exact wire contract](specs/V3-PORTABLE-P2.md) and independent vectors.
+[exact wire contract](specs/V3-PORTABLE-PROFILES.md) and independent vectors.
 Rust profile-2 support and empirical parity remain planned.
 [The dual-implementation roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md)
 sets execution and acceptance criteria. One-time

@@ -1,125 +1,231 @@
 #!/usr/bin/env bash
-# No cryptographic Python/Rust dependency required: independent vectors are
-# checked as fixed bytes against OpenSSL CLI, then exercised in real Git.
+# The portable Bash client alone (Bash, Git, OpenSSL; no Rust or Python):
+# the independent byte vectors of tests/v3/reference/portable-vectors.tsv,
+# refusals, and real-Git workflows. Cross-client checks against transcrypt-rs
+# are in tests/v3/conformance/run.sh.
 set -euo pipefail
 export LC_ALL=C
 SOURCE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd -P)
 CLI=$SOURCE_ROOT/contrib/v3/transcrypt-bash
-VECTORS=$SOURCE_ROOT/tests/v3/bash/portable-p2-vectors.tsv
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/transcrypt-p2-test.XXXXXXXX")
+VECTORS=$SOURCE_ROOT/tests/v3/reference/portable-vectors.tsv
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/transcrypt-bash-test.XXXXXXXX")
 trap 'rm -rf -- "$SCRATCH"' EXIT
-FAIL=0
-assert() { "$@" || { printf 'FAIL: %s\n' "$*" >&2; exit 1; }; }
-hex_bytes() { local s=$1 i; for ((i=0;i<${#s};i+=2)); do printf '%b' "\\x${s:i:2}"; done; }
-hex_file() { od -An -tx1 -v <"$1" | tr -d ' \n'; }
-export TRANSCRYPT_PASSWORD='correct horse battery staple'
-mkdir "$SCRATCH/vectors"
-cd "$SCRATCH/vectors"
-git init -q
-git config user.email test@example.invalid
-git config user.name Test
-mkdir .transcrypt
-while IFS=$'\t' read -r name pathhex plainhex cfghex recordhex; do
-    [[ $name == \#* || -z $name ]] && continue
-    hex_bytes "$cfghex" > .transcrypt/config
-    break
-done <"$VECTORS"
-"$CLI" unlock
-count=0
-while IFS=$'\t' read -r name pathhex plainhex cfghex recordhex; do
-    [[ $name == \#* || -z $name ]] && continue
-    path=$(hex_bytes "$pathhex")
-    [[ $plainhex == '-' ]] && plainhex=''
-    hex_bytes "$plainhex" >"$SCRATCH/plain"
-    "$CLI" encrypt "$path" <"$SCRATCH/plain" >"$SCRATCH/record"
-    [[ $(hex_file "$SCRATCH/record") == "$recordhex" ]] || { echo "vector mismatch: $name" >&2; exit 1; }
-    "$CLI" decrypt "$path" <"$SCRATCH/record" >"$SCRATCH/opened"
-    cmp -s "$SCRATCH/plain" "$SCRATCH/opened" || { echo "roundtrip mismatch: $name" >&2; exit 1; }
-    if "$CLI" decrypt "another/$path" <"$SCRATCH/record" >"$SCRATCH/rejected" 2>/dev/null; then
-        echo "wrong-path accepted: $name" >&2; exit 1
-    fi
-    ((count+=1))
-done <"$VECTORS"
-# Tamper the tag (position 23) and ensure no plaintext reaches stdout.
-{ head -c 22 "$SCRATCH/record"; printf '\xff'; tail -c +24 "$SCRATCH/record"; } >"$SCRATCH/tampered"
-if "$CLI" decrypt "$path" <"$SCRATCH/tampered" >"$SCRATCH/incorrect" 2>/dev/null; then
-    echo 'modified ciphertext authenticated' >&2; exit 1
-fi
-[[ ! -s "$SCRATCH/incorrect" ]] || { echo 'unauthenticated plaintext released' >&2; exit 1; }
-"$CLI" lock
-if printf 'plaintext' | "$CLI" encrypt demo.secret >/dev/null 2>&1; then
-    echo 'locked backend encrypted new plaintext' >&2; exit 1
-fi
-if TRANSCRYPT_PASSWORD=wrong-password "$CLI" unlock >/dev/null 2>&1; then
-    echo 'wrong password unlocked config' >&2; exit 1
-fi
-printf 'PASS: %s independent byte vectors and negative-path checks\n' "$count"
+PASS=0
+ok() { PASS=$((PASS + 1)); printf 'ok %d - %s\n' "$PASS" "$*"; }
+die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+hexb() { local s=$1 i o=''; [[ $s == - ]] && return 0; for ((i = 0; i < ${#s}; i += 2)); do o+="\\x${s:i:2}"; done; printf "$o"; }
+hexf() { od -An -tx1 -v <"$1" | tr -d ' \n'; }
+newrepo() {
+    rm -rf -- "$SCRATCH/$1"; mkdir -p "$SCRATCH/$1"; cd "$SCRATCH/$1"
+    git init -q; git config user.email t@example.invalid; git config user.name Test
+    git config commit.gpgsign false
+}
+PASSPHRASE='correct horse battery staple'
 
-# Exercise a real .gitattributes, index, commit, rename, rekey and disclosure.
-cd "$SCRATCH"
-mkdir lifecycle
-cd lifecycle
-git init -q
-git config user.email test@example.invalid
-git config user.name Test
-printf 'hello\n' >one.secret
+# ---------------------------------------------------------------------------
+# Independent vectors: config, key-check value and records, both profiles.
+# ---------------------------------------------------------------------------
+"$CLI" doctor >/dev/null 2>&1 || true
+for profile in 2 3; do
+    newrepo "vectors-$profile"
+    mkdir .transcrypt
+    first=1
+    while IFS=$'\t' read -r p name pw salt key cfg check pathhex pt rec; do
+        [[ $p == "$profile" ]] || continue
+        if ((first)); then
+            hexb "$cfg" >.transcrypt/config
+            hexb "$pw" | "$CLI" unlock --password-stdin --no-hydrate 2>/dev/null
+            [[ $(hexf .git/transcrypt-v3/key) == "$cfg$key$check" ]] || die "profile $profile: stored key file differs from the vector"
+            first=0
+        fi
+        path=$(hexb "$pathhex"; printf x); path=${path%x}
+        hexb "$pt" >"$SCRATCH/plain"
+        "$CLI" encrypt "$path" <"$SCRATCH/plain" >"$SCRATCH/record"
+        [[ $(hexf "$SCRATCH/record") == "$rec" ]] || die "profile $profile/$name: record differs from the vector"
+        "$CLI" decrypt "$path" <"$SCRATCH/record" >"$SCRATCH/opened"
+        cmp -s "$SCRATCH/plain" "$SCRATCH/opened" || die "profile $profile/$name: decrypt"
+        if "$CLI" decrypt "other/$path" <"$SCRATCH/record" >"$SCRATCH/out" 2>/dev/null; then die "$name: wrong path accepted"; fi
+        [[ ! -s $SCRATCH/out ]] || die "$name: plaintext released for a wrong path"
+        size=$(wc -c <"$SCRATCH/record")
+        for at in 6 22 $((size - 1)); do
+            { head -c "$at" "$SCRATCH/record"; head -c 1 "$SCRATCH/record" | tail -c 1 >/dev/null
+              printf '\xa5'; tail -c "+$((at + 2))" "$SCRATCH/record"; } >"$SCRATCH/tampered"
+            if "$CLI" decrypt "$path" <"$SCRATCH/tampered" >"$SCRATCH/out" 2>/dev/null; then die "$name: tampering at $at accepted"; fi
+            [[ ! -s $SCRATCH/out ]] || die "$name: unauthenticated plaintext released"
+        done
+        if "$CLI" decrypt "$path" < <(head -c "$((size - 1))" "$SCRATCH/record") >/dev/null 2>&1 && [[ -n $pt && $pt != - ]]; then
+            die "$name: truncated record accepted"
+        fi
+    done <"$VECTORS"
+    ok "profile $profile: stored key, config check value and every record match the independent vectors; tampering, truncation and wrong paths refused"
+    # Relabelling the config's profile byte: the passphrase no longer unlocks it.
+    for byte in 01 02 03 04; do
+        [[ $byte == "0$profile" ]] && continue
+        { head -c 6 .transcrypt/config; hexb "$byte"; tail -c +8 .transcrypt/config; } >"$SCRATCH/relabelled"
+        cp "$SCRATCH/relabelled" .transcrypt/config
+        if printf '%s' "$PASSPHRASE" | "$CLI" unlock --password-stdin --no-hydrate >"$SCRATCH/log" 2>&1; then die "relabelled profile $byte unlocked"; fi
+        case $byte in
+            01) grep -q 'only the Rust client' "$SCRATCH/log" || die 'profile 1 refusal does not name the Rust client' ;;
+            04) grep -q 'profile 4' "$SCRATCH/log" || die 'unknown profile not named' ;;
+            *) grep -q 'incorrect credentials' "$SCRATCH/log" || die "relabelled config (byte $byte) not refused as unauthentic" ;;
+        esac
+    done
+    ok "profile $profile: a relabelled profile byte never unlocks; profile 1 and unknown profiles are named"
+done
+
+# ---------------------------------------------------------------------------
+# A Bash-only repository, init to push.
+# ---------------------------------------------------------------------------
+newrepo life
+printf 'hello\n' >one.env
 printf 'ordinary\n' >public.txt
-git add one.secret public.txt
-"$CLI" init --profile v3-scrypt-aes256-siv '*.secret'
-"$CLI" verify-index
-git commit -qm initial
-# The index config is part of the publication contract.
-original_cfg_oid=$(git rev-parse :.transcrypt/config)
-wrong_cfg_oid=$(printf 'not-a-v3-config' | git hash-object -w --stdin)
-git update-index --cacheinfo 100644 "$wrong_cfg_oid" .transcrypt/config
-if "$CLI" verify-index >/dev/null 2>&1; then
-    echo 'mismatched staged config passed verification' >&2; exit 1
-fi
-git update-index --cacheinfo 100644 "$original_cfg_oid" .transcrypt/config
-# The explicit external diff must render authenticated Git blobs as plaintext.
-printf 'HELLO\n' >one.secret
-git add one.secret
-if ! git diff --cached -- one.secret | grep -q 'HELLO'; then
-    echo 'Git diff failed to display authenticated plaintext' >&2; exit 1
-fi
-printf 'hello\n' >one.secret
-git add one.secret
-[[ $(git show HEAD:one.secret | head -c 6 | od -An -tx1 -v | tr -d ' \n') == '545633460002' ]] || exit 1
-assert git diff --quiet
-git mv one.secret two.secret
-"$CLI" rebind
-"$CLI" verify-index
-git commit -qm renamed
-[[ $(git show HEAD:two.secret | "$CLI" decrypt two.secret) == hello ]] || exit 1
-"$CLI" audit HEAD
-"$CLI" lock
-[[ $(git show HEAD:two.secret | "$CLI" smudge two.secret | head -c 6 | od -An -tx1 -v | tr -d ' \n') == '545633460002' ]] || exit 1
-"$CLI" unlock
-"$CLI" hydrate
-TRANSCRYPT_PASSWORD='new sufficiently strong password' "$CLI" rekey
-"$CLI" verify-index
-git commit -qm rekeyed
-[[ $(git show HEAD:two.secret | "$CLI" decrypt two.secret) == hello ]] || exit 1
-"$CLI" unprotect '*.secret'
-[[ $(git show :two.secret) == $'hello' ]] || exit 1
-git commit -qm unprotected
-[[ $(git show HEAD:two.secret) == $'hello' ]] || exit 1
-# A new remote must see only authenticated objects for selected paths in
-# every outgoing revision, including revisions before a local rekey.
-git init --bare -q "$SCRATCH/remote.git"
+mkdir -p 'dir with space'
+printf '\x00\xff binary\n' >'dir with space/blob.bin'
+git add one.env public.txt 'dir with space/blob.bin'
+git commit -qm 'plain start'
+if printf 'short' | "$CLI" init --password-stdin '*.env' 2>/dev/null; then die 'short passphrase accepted'; fi
+[[ ! -e .transcrypt ]] || die 'refused init left .transcrypt behind'
+printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.env' 'dir with space/**' 2>/dev/null
+[[ $(head -c 7 .transcrypt/config | od -An -tx1 | tr -d ' \n') == 54434647330002 ]] || die 'init did not write profile 2'
+grep -qx '\[attr\]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text' .gitattributes || die 'macro missing'
+grep -qx '"dir with space/\*\*" transcrypt' .gitattributes || die 'pattern with a blank not quoted'
+[[ $(git cat-file blob :one.env | head -c 6 | od -An -tx1 | tr -d ' \n') == 545633460001 ]] || die 'protect did not encrypt the staged file'
+git commit -qm 'enable v3'
+"$CLI" audit HEAD 2>/dev/null
+ok 'init with patterns: profile-2 config, quoted rules, staged records, audit'
+[[ $(cat one.env) == hello ]] || die 'worktree should stay plaintext'
+git diff --quiet || die 'status not clean after init'
+printf 'changed\n' >one.env
+git diff | grep -q '^+changed' || die 'diff driver does not show plaintext'
+git commit -qam edit
+[[ $(git show HEAD:one.env | "$CLI" decrypt one.env) == changed ]] || die 'commit not encrypted'
+ok 'edit, diff and commit through the filters'
+
+# Plaintext staged around the filter is sealed by pre-commit.
+printf 'bypass\n' >one.env
+git -c filter.transcrypt-v3.clean=cat -c filter.transcrypt-v3.required=false add one.env
+[[ $(git cat-file blob :one.env) == bypass ]] || die 'setup: bypass did not stage plaintext'
+git commit -qm 'bypass attempt'
+[[ $(git show HEAD:one.env | "$CLI" decrypt one.env) == bypass ]] || die 'pre-commit did not seal plaintext staged around the filter'
+ok 'pre-commit seals plaintext staged around the filter'
+
+# git mv: the record is re-encrypted for the new path at commit.
+git mv one.env two.env
+git commit -qm rename
+[[ $(git show HEAD:two.env | "$CLI" decrypt two.env) == bypass ]] || die 'rename not re-encrypted'
+"$CLI" verify-index 2>/dev/null
+ok 'git mv: pre-commit re-encrypts for the new path'
+
+# A record copied to another path (no rename) is refused, not laundered.
+git show HEAD:two.env >"$SCRATCH/rec"
+oid=$(git hash-object -w --no-filters "$SCRATCH/rec")
+git update-index --add --cacheinfo "100644,$oid,copy.env"
+if git commit -qm copy 2>/dev/null; then die 'a record copied to another path was committed'; fi
+git rm -q --cached copy.env
+ok 'a record staged at a path it was not sealed for is refused'
+
+# Lock, hydrate, unlock.
+"$CLI" lock 2>/dev/null
+[[ ! -e .git/transcrypt-v3/key ]] || die 'lock kept the key'
+[[ $(head -c 4 two.env) == TV3F ]] || die 'lock left plaintext'
+git diff --quiet || die 'locked checkout not clean'
+printf 'locked edit\n' >two.env
+if git add two.env 2>/dev/null; then die 'locked clean stored plaintext'; fi
+git checkout -q -- two.env 2>/dev/null || git show HEAD:two.env >two.env
+printf '%s\n' "$PASSPHRASE" | "$CLI" unlock --password-stdin 2>/dev/null
+[[ $(cat two.env) == bypass ]] || die 'unlock did not hydrate'
+git diff --quiet || die 'status not clean after unlock'
+ok 'lock restores ciphertext and refuses plaintext; unlock hydrates'
+printf 'uncommitted\n' >two.env
+if "$CLI" lock 2>/dev/null; then die 'lock with uncommitted changes'; fi
+[[ $(cat two.env) == uncommitted ]] || die 'refused lock lost an edit'
+git checkout -q -- two.env
+ok 'lock refuses (and keeps) uncommitted edits'
+
+# Merge of protected files: clean, and conflicted with markers.
+git checkout -q -b side
+printf 'a\nb\nc\nside\n' >m.env; git add m.env; git commit -qm 'm base'
+git checkout -q master; git merge -q side
+git checkout -q side; printf 'a\nB\nc\nside\n' >m.env; git commit -qam side-edit
+git checkout -q master; printf 'a\nb\nc\nside\nmaster\n' >m.env; git commit -qam master-edit
+git merge -q side -m merge 2>/dev/null
+[[ $(cat m.env) == $'a\nB\nc\nside\nmaster' ]] || die 'clean merge of a protected file'
+git checkout -q side; printf 'x\n' >m.env; git commit -qam side-x
+git checkout -q master; printf 'y\n' >m.env; git commit -qam master-y
+if git merge -q side 2>/dev/null; then die 'conflict expected'; fi
+grep -q '<<<<<<< ours' m.env || die 'conflict markers missing in the worktree'
+[[ $(git cat-file blob :2:m.env | head -c 4) == TV3F ]] || die 'conflict stage not encrypted'
+printf 'resolved\n' >m.env; git add m.env; git commit -qm resolved
+[[ $(git show HEAD:m.env | "$CLI" decrypt m.env) == resolved ]] || die 'resolution not encrypted'
+ok 'merges: clean merge decrypted, conflict markers in plaintext, records in Git'
+
+# Rekey and profile conversion to PBKDF2.
+printf 'rekey passphrase number two\n' | "$CLI" rekey --password-stdin --profile=pbkdf2 2>/dev/null
+git commit -qm rekey
+[[ $(head -c 7 .transcrypt/config | od -An -tx1 | tr -d ' \n') == 54434647330003 ]] || die 'rekey did not convert to profile 3'
+[[ $(git show HEAD:two.env | "$CLI" decrypt two.env) == bypass ]] || die 'rekeyed record'
+git diff --quiet || die 'status not clean after rekey'
+"$CLI" audit HEAD~1 2>&1 | grep -q 'envelope only' || die 'old epoch should audit by envelope'
+ok 'rekey --profile=pbkdf2 converts and re-encrypts; old commits audit keylessly'
+
+# Push: an intermediate plaintext commit is refused even after a fix.
+git init -q --bare "$SCRATCH/remote.git"
 git remote add origin "$SCRATCH/remote.git"
-git push -q origin HEAD:refs/heads/main
-# Simulate a malicious or defective clean filter followed by an apparently
-# repaired HEAD. Pre-push must reject the intermediate plaintext Git object.
-"$CLI" protect '*.secret'
-git commit -qm protect-again
-printf 'published plaintext would leak\n' >two.secret
-git -c filter.transcrypt-v3.clean=cat add two.secret
-git -c core.hooksPath=/dev/null commit -qm deliberately-unsafe
-printf 'safe now\n' >two.secret
-git add two.secret
-git commit -qm repaired
-if git push -q origin HEAD:refs/heads/main >"$SCRATCH/push.log" 2>&1; then
-    echo 'pre-push failed to catch historical plaintext in outgoing range' >&2; exit 1
+git push -q origin master 2>/dev/null
+printf 'leak\n' >two.env
+git -c filter.transcrypt-v3.clean=cat -c filter.transcrypt-v3.required=false add two.env
+git -c core.hooksPath=/dev/null commit -qm 'unsafe, hooks bypassed'
+printf 'fixed\n' >two.env; git add two.env; git commit -qm fixed
+if git push -q origin master 2>"$SCRATCH/push.log"; then die 'pre-push accepted an intermediate plaintext commit'; fi
+grep -q 'refusing to push' "$SCRATCH/push.log" || die 'pre-push refusal message'
+git reset -q --hard HEAD~2
+ok 'pre-push refuses a plaintext commit hidden behind a later fix'
+
+# Unprotect publishes plaintext deliberately.
+"$CLI" unprotect 'dir with space/**' 2>/dev/null
+[[ $(git cat-file blob ':dir with space/blob.bin' | od -An -tx1 | tr -d ' \n') == 00ff2062696e6172790a ]] || die 'unprotect'
+git commit -qm unprotect
+ok 'unprotect stages plaintext'
+
+# Fresh clone: install, unlock, files decrypt; a missing key keeps records.
+git push -q origin master 2>/dev/null
+git clone -q "$SCRATCH/remote.git" "$SCRATCH/clone" 2>/dev/null
+cd "$SCRATCH/clone"
+git config user.email t@example.invalid; git config user.name Test
+[[ $(head -c 4 two.env) == TV3F ]] || die 'clone without filters should hold ciphertext'
+printf 'rekey passphrase number two\n' | "$CLI" unlock --password-stdin 2>/dev/null
+[[ $(cat two.env) == bypass ]] || die 'clone unlock + hydrate'
+git status --porcelain | grep -q . && die 'clone not clean after unlock'
+ok 'fresh clone: unlock installs filters and decrypts'
+
+# Linked worktree shares the key; lock flushes both.
+git worktree add -q "$SCRATCH/wt" 2>/dev/null
+[[ $(cat "$SCRATCH/wt/two.env") == bypass ]] || die 'linked worktree checkout not decrypted'
+"$CLI" lock 2>/dev/null
+[[ $(head -c 4 "$SCRATCH/wt/two.env") == TV3F ]] || die 'lock did not flush the linked worktree'
+ok 'linked worktrees share the key; lock flushes every worktree'
+
+"$CLI" uninstall 2>/dev/null
+[[ -z $(git config --get filter.transcrypt-v3.clean || true) && ! -e .git/hooks/pre-commit ]] || die 'uninstall'
+ok 'uninstall removes filters and hooks'
+
+# ---------------------------------------------------------------------------
+# v2 migration (needs the repository's Bash v2 script).
+# ---------------------------------------------------------------------------
+V2=$SOURCE_ROOT/transcrypt
+if [[ -x $V2 ]]; then
+    newrepo migrate
+    printf 'v2 secret\n' >s.key; printf 'x\n' >plain.txt
+    git add s.key plain.txt; git commit -qm init
+    "$V2" -c aes-256-cbc -p 'v2-password' -y >/dev/null 2>&1
+    printf 's.key filter=crypt diff=crypt merge=crypt\n' >.gitattributes
+    git add .gitattributes; git add --renormalize s.key; git commit -qm 'v2 protect'
+    [[ $(git cat-file blob HEAD:s.key | head -c 8) == U2FsdGVk ]] || die 'v2 setup'
+    printf '%s\n' "$PASSPHRASE" | "$CLI" migrate --password-stdin 2>/dev/null
+    git commit -qm 'convert to v3'
+    [[ $(git show HEAD:s.key | "$CLI" decrypt s.key) == 'v2 secret' ]] || die 'migrate'
+    grep -qx 's.key transcrypt' .gitattributes || die 'v2 rule not converted'
+    ok 'migrate converts a v2 checkout: rules, records and config'
 fi
-printf 'PASS: full profile-2 Git lifecycle, rename, rekey, unprotect, diff and push-history refusal\n'
+
+printf 'PASS: %d Bash client checks\n' "$PASS"

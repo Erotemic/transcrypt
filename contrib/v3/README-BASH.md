@@ -1,77 +1,121 @@
-# Bash v3 reference implementation
+# transcrypt-bash: the portable Transcrypt v3 client
 
-`transcrypt-bash` is a standalone, independent **profile-2** implementation
-using Bash, Git, OpenSSL's command-line tools, and standard Unix utilities.
-It does not call Rust, Python, Perl, `xxd`, or a compiled helper. Its crypto
-format is defined in
-[`../../docs/verification/specs/V3-PORTABLE-P2.md`](../../docs/verification/specs/V3-PORTABLE-P2.md).
-The intended minimum OpenSSL version is **3.0.13**; initial executed tests
-were on OpenSSL **3.5.5**. Use `bash --version`, `git --version`, and
-`openssl version` to inspect the local environment. Bash 4+ is required.
+`transcrypt-bash` is a complete Transcrypt v3 client written in Bash. It
+needs only Bash 4+, Git, the **OpenSSL 3 command line** (3.0.13 or newer)
+and POSIX utilities (`od`, `head`, `tail`, `wc`, `cmp`, `diff`, `mktemp`):
+no Rust binary, Python or compiled helper. Use it where the Rust client
+(`transcrypt-rs`) is not available; both work on the same repositories.
 
-```bash
-# Run from a Git repository, with an installed copy of this script:
-TRANSCRYPT_PASSWORD='a strong passphrase of your choice' \
-  /path/to/transcrypt-bash init --profile v3-scrypt-aes256-siv '*.secret'
-git commit -m 'Set up portable v3 encryption'
+**Same repositories, same bytes.** For the portable profiles both clients
+write the identical `.transcrypt/config`, the identical encrypted Git
+objects and the identical local key file. A repository set up by one can be
+cloned, unlocked, edited, merged, rekeyed and audited with the other; in one
+checkout you can switch clients without unlocking again.
 
-# On a new clone (install Git filters locally, then unlock and hydrate):
-/path/to/transcrypt-bash install
-TRANSCRYPT_PASSWORD='a strong passphrase of your choice' /path/to/transcrypt-bash unlock
-/path/to/transcrypt-bash hydrate
+## Profiles
 
-# Ordinary Git work is then transparent:
-printf 'sensitive bytes\n' > example.secret
-git add example.secret
-/path/to/transcrypt-bash verify-index
-git commit -m 'Update protected data'
-/path/to/transcrypt-bash audit HEAD
+| Profile | Key derivation | transcrypt-bash | transcrypt-rs |
+| --- | --- | --- | --- |
+| `scrypt` (2) | scrypt N=2^15, r=8, p=1 | yes (the default) | yes |
+| `pbkdf2` (3) | PBKDF2-HMAC-SHA256, 600 000 iterations | yes | yes |
+| `argon2id` (1) | Argon2id 64 MiB, t=3 | no: OpenSSL 3.0 has no Argon2id | yes (its default) |
 
-# If Git moved the file and staged its old-path ciphertext:
-git mv example.secret moved.secret
-/path/to/transcrypt-bash rebind
+Every profile encrypts files with AES-256-SIV bound to the repository
+configuration and the file's exact Git path. Profiles differ only in how the
+passphrase becomes a key: scrypt and Argon2id are memory-hard and slow down
+offline guessing more than PBKDF2; a long random passphrase matters more than
+the profile. In a profile-1 repository `transcrypt-bash` says so and changes
+nothing; `transcrypt-rs rekey --profile=scrypt` makes it portable.
 
-# To change the password and repository salt (commit changes first):
-TRANSCRYPT_PASSWORD='a new strong passphrase' /path/to/transcrypt-bash rekey
-git commit -m 'Rotate v3 portable encryption key'
-```
-
-The script provides `init`, `install`, `unlock`, `lock`, `protect`,
-`unprotect`, `hydrate`, `rebind`, `rekey`, `clean`, `smudge`, `encrypt`,
-`decrypt`, `verify-index`, `audit`, and `diff`/`merge` drivers. Run
-`transcrypt-bash help` for their arguments. The explicit `unprotect`
-operation stages **plaintext** intentionally and warns about it.
-
-`install` sets *local* Git filter/merge/diff commands and installs
-pre-commit, pre-push and pre-merge-commit hooks. The pre-push
-hook audits **every outgoing commit**, rather than just `HEAD`, and refuses
-a plaintext intermediate commit even when a later tree appears safe. It refuses to replace
-unrelated existing hooks. The Git filter is `required=true`; failed filters
-must not be ignored. A fresh clone without installed filters may nevertheless
-stage plaintext if someone edits protected files before setup. Local hooks
-are not a server-enforced policy; control remote writes with server-side
-checks if a hostile or uninformed pusher is in scope. `audit REV` verifies
-one tree using its own committed attributes and config. For a prior rekey,
-it uses the locally retained `bash-key-p2.previous-<config-id>` credential.
-A fresh clone without prior credentials may be unable to authenticate
-previous history; it should not claim an unaudited push is safe.
-
-Unlike the Rust client, Bash may expose derived keys in local OpenSSL
-process arguments and write temporary plaintext to mode-0700 directories.
-These are accepted trusted-host differences. Publication of plaintext to Git
-is not accepted. The format authenticates ciphertext before emitting its
-plaintext, and uses path/config binding.
-
-Not implemented yet: profile 1 (Argon2id, available in Rust), profile 3,
-Rust-side profile-2 interoperability, v2 migration, historical rekey browsing,
-private-mode credential agent, complete Git-conflict recovery and the full
-adversarial parity matrix. `rekey` requires a clean tracked working tree;
-keep a backup of the original repository and test a disposable clone while
-this backend is under development. The Bash script currently has no official
-release/security qualification.
-
-Tests (no Python required to run the precomputed independent vectors):
+## Use
 
 ```bash
-bash tests/v3/bash/test_reference.sh
+# Set up (from the repository root); then commit
+transcrypt-bash init '.env' 'secrets/**'          # asks for a passphrase twice
+git commit -m 'Enable transcrypt-v3'
+
+# A fresh clone: unlock once; files decrypt and Git works normally
+git clone URL && cd REPO
+transcrypt-bash unlock
+
+# Everyday work is plain Git: edit, add, commit, diff, merge, git mv
+transcrypt-bash status
+transcrypt-bash protect 'config/*.key'             # encrypt more files
+transcrypt-bash unprotect 'config/*.key'           # publish them as plaintext from now on
+transcrypt-bash rekey [--profile=pbkdf2]           # new passphrase (and profile); commit after
+transcrypt-bash lock                               # ciphertext back in the worktree, key forgotten
+transcrypt-bash audit origin/main..HEAD            # check what you are about to publish
+transcrypt-bash migrate                            # convert a Bash transcrypt (v2) checkout
+transcrypt-bash doctor                             # filters, hooks, OpenSSL capabilities, index
 ```
+
+`--password-stdin` reads the passphrase from standard input (scripts, CI);
+`TRANSCRYPT_PASSWORD` also works. Passphrases are 16 to 4096 bytes.
+
+`unlock` (and `init`) store the derived key, never the passphrase, in
+`.git/transcrypt-v3/key` (mode 0600), install the Git filters and the
+`pre-commit`, `pre-push` and `pre-merge-commit` hooks, and decrypt the
+worktree. Switching to `transcrypt-rs` in the same checkout is
+`transcrypt-rs unlock` (the stored key is reused only after it authenticates);
+back again is `transcrypt-bash install`.
+
+## What protects you
+
+- **Committed files are authenticated ciphertext.** The clean filter
+  encrypts; the `pre-commit` hook encrypts anything staged around the filter
+  and re-encrypts files you renamed with `git mv`, and refuses records that
+  were not sealed for their path. It never re-encrypts content that came
+  from another commit (no laundering).
+- **Decryption is exact or fails.** A record opens only at its own path
+  under its own configuration; anything altered, moved, truncated or of
+  another configuration is refused, and unauthenticated bytes are never
+  written out.
+- **Pushes are audited.** The `pre-push` hook checks every outgoing commit,
+  not only the last one, using each commit's own `.gitattributes` and
+  config: a plaintext commit hidden behind a later fix is refused. Commits
+  under a configuration this checkout has no key for (before a rekey) are
+  checked by envelope; set `git config transcrypt.requireAuthenticatedPush
+  true` to refuse those instead.
+- **No downgrade.** The profile comes from the committed config, which the
+  passphrase authenticates; an unknown or unsupported profile is refused by
+  name before anything changes, and a failed key derivation or OpenSSL call
+  is an error, never a fallback to plaintext or a weaker setting.
+
+Local hooks protect against mistakes, not against someone who disables them;
+enforce publication with `audit` in CI or a server hook
+(`contrib/v3/pre-receive`). Filenames, sizes, history structure and the
+equality of a file's content between commits stay visible. Data committed
+before it was protected stays in earlier commits.
+
+## Differences from transcrypt-rs
+
+The portable client is slower (a few OpenSSL processes per file) and keeps
+derived keys in local OpenSSL arguments and plaintext in a private (0700)
+temporary directory while it works. Under the Transcrypt threat model the
+developer's machine is trusted; none of this reaches Git. `transcrypt-rs`
+additionally offers profile 1, the `--private` mode (key only in a
+memory-only agent, private file permissions), `reencrypt` for records
+brought across a rekey by cherry-picks, a long-running filter process, and
+in-memory key handling with zeroization. Everything else is the same
+behavior; `tests/v3/conformance/run.sh` checks it in real repositories in
+both directions.
+
+## Known limitation: empty protected files and `git merge`
+
+An **empty** protected file makes `git merge` stop with `fatal: stash
+failed`, and `git diff` list the file as changed. This is a Git bug that
+affects any clean filter turning an empty file into non-empty content (Git
+marks such index entries as possibly modified forever and its merge then
+misreads `git stash create`), in both clients. Put a byte in the file (for
+example a newline) or do not protect empty files.
+
+## Tests
+
+```bash
+bash tests/v3/bash/test_reference.sh            # this client alone (no Rust, no Python)
+bash tests/v3/conformance/run.sh [transcrypt-rs] # both clients, both directions
+python3 tests/v3/reference/portable_vectors.py  # regenerate/check the independent vectors
+```
+
+The byte format is in
+[V3-PORTABLE-PROFILES.md](../../docs/verification/specs/V3-PORTABLE-PROFILES.md).

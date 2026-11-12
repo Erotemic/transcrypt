@@ -207,4 +207,45 @@ theorem derive_config_key_uses_config_profile (h : KdfRealizes inst kdf D)
   obtain ⟨salt, tag, he, _, hk, hok⟩ := Transcrypt.V3Policy.configKey_uses_its_profile hr
   exact ⟨salt, tag, he, hk, hok⟩
 
+/-! ## Binding and determinism of the production records -/
+
+section Binding
+
+variable {P : Type} {inst : V3Primitives P} {prims : P} {σ : Transcrypt.V3Policy.Suite}
+
+/-- **Path and configuration binding.** If the production `open_record`
+    accepts, at `path'` under `config'`, a record that the production
+    `seal_record` produced for `path` under `config`, with either one
+    different, the key's AES-SIV collides on two different associated-data
+    lists (`SivCollision`), which A10 rules out except with negligible
+    probability. This covers records moved between paths, repositories and
+    profiles (configurations of different profiles differ). -/
+theorem open_record_of_other_context_needs_collision (h : Realizes inst prims σ)
+    {sealedOut : Slice U8} {config config' : Std.Array U8 55#usize} {path path' plaintext : Slice U8}
+    (hseal : Transcrypt.V3Policy.MaySeal σ (wireBytes config) (sliceBytes path) (sliceBytes plaintext) ∧
+      sliceBytes sealedOut = Transcrypt.V3Policy.sealedRecord σ (wireBytes config) (sliceBytes path) (sliceBytes plaintext))
+    (hdiff : wireBytes config ≠ wireBytes config' ∨ sliceBytes path ≠ sliceBytes path')
+    (out : Slice U8) :
+    open_record inst prims config' path' sealedOut out ⦃ r =>
+      (∃ x, r.1 = core.result.Result.Ok x) → Transcrypt.V3Policy.SivCollision σ ⦄ := by
+  apply WP.spec_mono (open_record_spec h config' path' sealedOut out)
+  intro r hr hok
+  obtain ⟨x, hx⟩ := hok
+  rw [hx] at hr
+  rw [hseal.2] at hr
+  exact Transcrypt.V3Policy.transplant_needs_siv_collision σ hr hdiff
+
+/-- **Determinism.** Two successful production seals at one path under one
+    configuration produce the same record exactly when the plaintexts are
+    equal: re-encrypting unchanged content changes nothing in Git, and
+    equality of plaintexts at the same path is what records reveal. -/
+theorem seal_record_deterministic {config : Std.Array U8 55#usize} {path p1 p2 o1 o2 : Slice U8}
+    (h1 : sliceBytes o1 = Transcrypt.V3Policy.sealedRecord σ (wireBytes config) (sliceBytes path) (sliceBytes p1))
+    (h2 : sliceBytes o2 = Transcrypt.V3Policy.sealedRecord σ (wireBytes config) (sliceBytes path) (sliceBytes p2)) :
+    sliceBytes o1 = sliceBytes o2 ↔ sliceBytes p1 = sliceBytes p2 := by
+  rw [h1, h2]
+  exact Transcrypt.V3Policy.sealedRecord_eq_iff_same_context σ _ _ _ _
+
+end Binding
+
 end Transcrypt.V3Verification

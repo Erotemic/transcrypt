@@ -255,3 +255,9 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.configKey_uses_its_profile
 #print axioms Transcrypt.V3Policy.configKey_unknown_profile
 #print axioms Transcrypt.V3Policy.config_profile_bound
+-- Binding and determinism (every profile)
+#print axioms Transcrypt.V3Policy.sealedRecord_eq_iff_same_context
+#print axioms Transcrypt.V3Policy.transplant_needs_siv_collision
+#print axioms Transcrypt.V3Policy.other_config_needs_same_id_or_collision
+#print axioms open_record_of_other_context_needs_collision
+#print axioms seal_record_deterministic

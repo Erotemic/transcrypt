@@ -4,21 +4,13 @@ This maps the shipped Bash `transcrypt` (the v2 protocol) onto the Rust
 `transcrypt-rs` command and protocol, so that a Bash user knows what each
 command becomes, and a reviewer can see exactly which mechanism replaces
 which. v3 is a *new protocol*, not a re-implementation of v2: the two cannot
-read each other's ciphertext. **Bash v3 is now an active first-class
-implementation target**, not an optional port. It will use the same portable
-profile bytes and Git semantics as Rust, while keeping Rust's existing
-Argon2id profile and optional local hardening. The bridge from Bash **v2**
-to v3 remains an explicit one-time migration (`transcrypt-rs migrate` today),
-not legacy binary compatibility. The tables below describe the **current
-v2-to-Rust-v3** mapping, not achieved Bash-v3 parity.
-
-**Current Bash v3 checkpoint:** `contrib/v3/transcrypt-bash` implements
-portable P2 scrypt/AES-SIV and basic Git lifecycle, using independent
-[profile-2 vectors](../../tests/v3/bash/portable-p2-vectors.tsv).
-[Implementation guide](../../contrib/v3/README-BASH.md) and
-[exact profile spec](specs/V3-PORTABLE-P2.md). Rust P2 and bidirectional
-feature parity are not yet implemented; the tables below remain the
-legacy-v2 to Rust-P1 crosswalk.
+read each other's ciphertext. The bridge from Bash **v2** to v3 is an
+explicit one-time `migrate` (in either v3 client), not legacy binary
+compatibility. The tables below map v2 commands onto the v3 commands; the
+portable v3 client `contrib/v3/transcrypt-bash` has the same command names
+and behavior as `transcrypt-rs` for profiles 2 and 3
+([guide](../../contrib/v3/README-BASH.md),
+[spec](specs/V3-PORTABLE-PROFILES.md)).
 
 
 ## Commands
@@ -82,27 +74,18 @@ credentials. The old history keeps the v2 ciphertext, protected only by the
 Bash password (now also fixed for review F-01): rotate those secrets if the
 history or password was exposed. The v3 binary contains no v2 cryptography.
 
-## Planned Bash v3 ↔ Rust v3 compatibility
+## Bash v3 ↔ Rust v3 compatibility
 
-See [the active dual-client work plan](V3-DUAL-IMPLEMENTATION-ROADMAP.md)
-for per-workflow acceptance and adversarial tests. The target is two-way
-byte-identical, authentic Git objects under a common portable profile:
-`scrypt + AES-256-SIV` first and `PBKDF2-HMAC-SHA256 + AES-256-SIV`
-second. Both distributions must inspect the committed profile before
-mutating a checkout, refuse unsupported profiles without plaintext
-fall-through, and allow alternating Bash/Rust use of one repository.
-
-Existing Rust **P1 Argon2id + AES-SIV** stays available; OpenSSL 3.0.13
-Bash must report it as unsupported rather than downgrading. Rust local
-`--private`/in-process key handling is an optional hardening distinction.
-The Bash client may expose derived keys in local OpenSSL process arguments,
-which does not change the protected public Git ciphertext promise.
-
-**Status:** no independent Bash v3 implementation or two-direction parity
-suite exists yet. `tests/v3/*.bats` presently contains legacy Bash v2
-coverage; it cannot be counted as Bash v3 evidence. Proofs about Rust do
-not automatically prove Bash. A new release needs independent vectors,
-real-Git cross-client tests and a documented feature matrix.
+Achieved for profiles 2 (scrypt) and 3 (PBKDF2): both clients write
+byte-identical configs, records and stored key files, inspect the committed
+profile before changing anything, refuse unsupported profiles by name, and
+can alternate on one repository (and in one checkout). Profile 1 (Argon2id)
+is Rust-only; the Bash client reports it and changes nothing. Rust-only by
+design: `--private`, `reencrypt`, the long-running filter and in-process key
+handling. Evidence: `tests/v3/bash/test_reference.sh` and the two-way
+`tests/v3/conformance/run.sh`; the per-workflow matrix is in the
+[dual-implementation roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md). Proofs
+about Rust do not prove the Bash source (A27).
 
 ## Formal correspondence
 

@@ -34,6 +34,15 @@ system, you must also run the `--upgrade` command in each repository:
 
 ## [Unreleased]
 
+### Added
+
+- Experimental v3: configuration profiles. A v3 config names its key
+  derivation: 1 Argon2id (unchanged), 2 scrypt, 3 PBKDF2-HMAC-SHA256;
+  `transcrypt-rs init|migrate|rekey --profile=NAME`, `transcrypt-rs profiles`.
+- Experimental v3: `contrib/v3/transcrypt-bash`, a portable v3 client (Bash,
+  Git, OpenSSL 3.0) for profiles 2 and 3, byte-compatible with
+  `transcrypt-rs`; independent vectors and a two-way conformance suite.
+
 ### Changed
 
 - Improve test suite to better use `bats` conventions to run tests in

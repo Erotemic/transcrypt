@@ -19,16 +19,15 @@ them with your entire team or complicate your workflow.
 > before proposing feature or security requirements. The main goal is
 > authenticated ciphertext **in public Git** with ordinary, transparent
 > **plaintext work on unlocked local files**. Rust v3 already implements
-> arbitrary Git-selected paths and persistent local unlock. The next goal is
-> an independent **Bash/OpenSSL 3.0.13 v3** client with empirical Git feature
-> parity on new shared authenticated profiles, while the Argon2id profile and
-> optional stronger local hardening stay available in Rust.
+> arbitrary Git-selected paths and persistent local unlock. Two v3 clients
+> now share one repository format: the Rust client and an independent
+> **Bash/OpenSSL 3.0 client**, interoperable on the portable profiles
+> (scrypt, PBKDF2) with the Argon2id profile and optional stronger local
+> hardening available in Rust.
 > See the [dual-implementation roadmap](docs/verification/V3-DUAL-IMPLEMENTATION-ROADMAP.md)
 > and
 > [independent-review disposition](docs/verification/V3-REVIEW-TRIAGE.md).
-> The independent Bash **profile-2 reference is now implemented**, but
-> Rust profile-2 support, full interoperability and OpenSSL 3.0.13 tests
-> are outstanding. An independent source review also reproduced a **Bash v2 plaintext-staging
+> An independent source review also reproduced a **Bash v2 plaintext-staging
 > bypass**; consult that disposition for legacy remediation and migration
 > guidance. The released top-level `transcrypt` command below still
 > describes legacy Bash v2.
@@ -44,18 +43,17 @@ them with your entire team or complicate your workflow.
 > [continuation handoff](docs/verification/V3-HANDOFF.md).
 
 
-### Portable v3 Bash reference (experimental)
+### Portable v3 Bash client (experimental)
 
-A standalone Bash/OpenSSL reference implementation is available at
-[`contrib/v3/transcrypt-bash`](contrib/v3/transcrypt-bash), with an
-[installation/workflow guide](contrib/v3/README-BASH.md) and a
-[fixed profile-2 wire specification](docs/verification/specs/V3-PORTABLE-P2.md).
-It targets OpenSSL 3.0.13 (testing so far on 3.5.5), independently composes
-scrypt + AES-256-SIV, and runs real Git encryption/filter workflows.
-The existing Rust **profile 1** (Argon2id/AES-SIV) remains available and
-unchanged. Rust support for portable profile 2 and complete Bash/Rust
-feature parity remain future work; see the
-[dual-implementation roadmap](docs/verification/V3-DUAL-IMPLEMENTATION-ROADMAP.md).
+[`contrib/v3/transcrypt-bash`](contrib/v3/transcrypt-bash) is a complete v3
+client that needs only Bash 4+, Git and the OpenSSL 3.0 command line (tested
+on OpenSSL 3.0.13). For the portable profiles it writes the same config,
+the same encrypted Git objects and the same local key file as the Rust
+client, so the two can be mixed freely on one repository; a two-way
+conformance suite checks it in real repositories. Profile 1 (Argon2id, the
+Rust default) is Rust-only; the Bash client recognizes it and changes
+nothing. See the [Bash client guide](contrib/v3/README-BASH.md) and the
+[portable profile specification](docs/verification/specs/V3-PORTABLE-PROFILES.md).
 
 ## Overview
 

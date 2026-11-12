@@ -55,13 +55,19 @@ for incompatible default behaviors.
 The maintainer's current product direction controls what *should* be built;
 actual code and executed evidence control claims about what *is* built.
 
-## Portable Bash reference implementation (2026-11-11)
+## Profiles and the portable Bash client (2026-11-11)
 
-`contrib/v3/transcrypt-bash` now implements **profile 2** with a separately
-versioned scrypt/AES-SIV protocol; keep profile 1 byte-exact and Rust-only
-on OpenSSL 3.0. `tests/v3/bash/test_reference.sh` checks independent fixed
-byte vectors and a real-Git lifecycle. Run it when changing the Bash
-backend. This is a partial implementation of the dual-implementation
-roadmap, **not** evidence of Rust/Bash parity or a completed Lean proof.
-Do not add local-process isolation obligations merely to make the Bash path
-look like Rust; prioritize authenticated Git publication and recovery.
+The committed config's byte 6 is the **profile** (1 Argon2id, 2 scrypt,
+3 PBKDF2); records are `TV3F 00 01` for every profile. The verified core
+decides the key derivation (`profile_kdf`, `derive_config_key`;
+`Profiles.lean`). `contrib/v3/transcrypt-bash` implements profiles 2 and 3
+byte-for-byte like Rust (config, records, `.git/transcrypt-v3/key`) and the
+shared Git workflows. When changing either client run
+`bash tests/v3/bash/test_reference.sh` and
+`bash tests/v3/conformance/run.sh` (needs `cargo build --release`); keep the
+Bash script `scripts/lint-shell.sh` clean (shfmt reformats associative
+array keys containing `/` as arithmetic: quote them). Bash has empirical
+evidence only (A27), never Lean theorems. Spec:
+`docs/verification/specs/V3-PORTABLE-PROFILES.md`; parity matrix in the
+dual-implementation roadmap. Do not add local-process isolation obligations
+to the Bash path; prioritize authenticated Git publication and recovery.

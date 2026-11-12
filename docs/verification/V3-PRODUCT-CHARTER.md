@@ -70,8 +70,8 @@ all of Git, RustCrypto, the OS, Charon/Aeneas, the compiler or the entire CLI.
 No document or agent may claim "no bugs" or "completely formally verified"
 without a theorem and trusted-boundary statement sufficient for that claim.
 
-Offline passphrase attacks remain possible; the selected KDF (Argon2id in existing Rust P1; scrypt or PBKDF2 in
-planned portable profiles) increases their cost but cannot rescue a weak
+Offline passphrase attacks remain possible; the selected KDF (Argon2id in
+Rust profile 1; scrypt or PBKDF2 in the portable profiles 2 and 3) increases their cost but cannot rescue a weak
 password. Passphrase quality is ultimately the user's
 choice: make strong generation and clear guidance easy, and support stricter
 organizational policy as an option. Do not claim a weak chosen passphrase is

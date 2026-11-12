@@ -1,13 +1,14 @@
 # Transcrypt v3: Bash/OpenSSL and Rust parity program
 
-**Status:** Updated 2026-11-11. The first independent Bash v3 **profile-2**
-reference implementation exists at `contrib/v3/transcrypt-bash`, with exact
-independent byte vectors and basic Git lifecycle tests. Rust P2/P3 support,
-full cross-backend parity, formal extension, and OpenSSL 3.0.13 qualification
-remain outstanding. This plan supersedes the *deferral* of Bash v3 in earlier roadmaps;
-it does not supersede the byte-exact, frozen
-[profile-1 specification](specs/V3-AUTHENTICATED-P0.md) or the existing
-[Rust proof ledger](V3-PROOF-COVERAGE.md).
+**Status (2026-11-11, evening):** D1–D6 are implemented and checked: the
+core, Rust and Lean support profiles 1–3 with a verified key-derivation
+dispatch; the portable Bash client (`contrib/v3/transcrypt-bash`) implements
+profiles 2 and 3 and the shared Git workflows; both clients match
+independent vectors byte for byte and pass a two-way conformance suite in
+real repositories on OpenSSL 3.0.13. See the
+[checkpoint and parity matrix](#implementation-checkpoint-2026-11-11-evening)
+below. This plan supersedes the *deferral* of Bash v3 in earlier roadmaps;
+it does not change the frozen [profile-1 specification](specs/V3-AUTHENTICATED-P0.md).
 
 **Target:** two independent v3 implementations of the same published protocol
 and ordinary Git user workflows. The Bash distribution runs with Bash, Git,
@@ -84,8 +85,8 @@ not substitute another algorithm or allow a plaintext write.
 | Planned profile | KDF | Authenticated encryption | Bash + OpenSSL 3.0.13 | Rust | Status |
 | --- | --- | --- | --- | --- | --- |
 | **P1 — preserved Rust** | Argon2id v19, m=65536 KiB, t=3, p=1, 64-byte output | AES-256-CMAC-SIV (RFC 5297), path/config AAD | Not supported by 3.0 CLI KDF | Existing | Frozen `TCFG3 00 01` / `TV3F 00 01` |
-| **P2 — portable preferred** | scrypt (fixed `N,r,p,maxmem`, 32-byte salt, 64-byte output) | Same AES-256-CMAC-SIV construction and AAD contract | Target | Implement | **Implemented in Bash**; profile-2 bytes and parameters documented in [P2 spec](specs/V3-PORTABLE-P2.md); Rust pending |
-| **P3 — portable fallback** | PBKDF2-HMAC-SHA256 (fixed work factor, 32-byte salt, 64-byte output) | Same AES-256-CMAC-SIV construction and AAD contract | Target | Implement | **Implemented in Bash**; profile-2 bytes and parameters documented in [P2 spec](specs/V3-PORTABLE-P2.md); Rust pending |
+| **P2 — portable preferred** | scrypt N=2^15, r=8, p=1, 32-byte salt, 64-byte output | Same AES-256-CMAC-SIV construction and AAD contract | Implemented | Implemented | `TCFG3 00 02`; [portable spec](specs/V3-PORTABLE-PROFILES.md) |
+| **P3 — portable fallback** | PBKDF2-HMAC-SHA256, 600 000 iterations, 32-byte salt, 64-byte output | Same AES-256-CMAC-SIV construction and AAD contract | Implemented | Implemented | `TCFG3 00 03`; [portable spec](specs/V3-PORTABLE-PROFILES.md) |
 
 P2 is the intended **Bash default** once memory and time are benchmarked on
 OpenSSL 3.0.13. P1 remains available and may remain the Rust default; do not
@@ -96,16 +97,14 @@ proof-of-capability on that actual CLI and a review of its KDF and SIV
 composition; a version string alone is insufficient. Compatibility describes
 *capabilities*, not a moral ranking of implementations.
 
-P2 now uses frozen experimental bytes `TCFG3 00 02` and `TV3F 00 02`,
-with KDF `scrypt(N=32768,r=8,p=1,dkLen=64)` and 32-byte salt; see the
-[P2 wire contract](specs/V3-PORTABLE-P2.md). P3 remains a planning label. Future profiles require new discriminators and their own reviewed wire contracts. The existing 55-byte P1 config,
-22-byte file header, salt, domain separation, path byte rules and key-check
-semantics stay unchanged. Other profiles may reuse the general layout **only
-if** the independently frozen spec assigns unambiguous bytes and KDF
-transcripts; never reinterpret P1. Include profile identity and all public
-KDF parameters in authenticated config, and bind the entire config to the
-file record. Profile switching is an explicit full re-encryption/rekey
-transaction, with a rollback and compatibility plan for existing clones.
+P2 and P3 use `TCFG3 00 02` and `TCFG3 00 03`. **Records are shared:**
+every profile writes `TV3F 00 01` records (the record format), because a
+record names its config by id and its associated data contains the whole
+config, profile byte included; the never-released P2 draft's `TV3F 00 02`
+was reconciled to this before Rust support existed. The existing 55-byte P1
+config, 22-byte file header, salt, domain separation, path byte rules and
+key-check semantics stay unchanged. Profile switching is an explicit full
+re-encryption (`rekey --profile=NAME`).
 
 ### CLI capability matrix (target, not a completed certification)
 
@@ -306,23 +305,51 @@ external assumption, and a corresponding Bash empirical conformance case.
 Any residual feature differences are explicit capability distinctions or
 failing items, not hidden exceptions to the parity claim.
 
-## Implementation checkpoint (2026-11-11)
+## Implementation checkpoint (2026-11-11, evening)
 
-- **D1/P2:** The `openssl kdf` SCRYPT control is lowercase `n:`; `N:` was
-  rejected by testing. AES-SIV is assembled using `openssl mac` AES-CMAC
-  and `openssl enc -aes-256-ctr`. Eight independently generated Python
-  scrypt/AESSIV byte vectors pass with OpenSSL 3.5.5, including non-UTF-8
-  paths, 0/1/15/16/17-byte messages, and binary data. Run the same suite
-  on the maintainer's OpenSSL **3.0.13** to qualify that target.
-- **D2/P2:** The profile-2 wire contract and experimental discriminators
-  are recorded in [V3-PORTABLE-P2.md](specs/V3-PORTABLE-P2.md). P1 is
-  unchanged. P3 remains a proposal.
-- **D5 (partial):** Bash can initialize, install filters/hooks, unlock,
-  protect/unprotect, encrypt/decrypt, lock, hydrate, rebind after rename,
-  rekey, verify staged blobs, audit committed trees with current or
-  historical keys, reject plaintext intermediate commits through pre-push,
-  and run diff/merge drivers. The [Bash guide](../../contrib/v3/README-BASH.md) lists limitations.
-- **Still required:** D3 Rust P2 implementation; D4 proof extension; D5
-  Bash v2 migration and conflict/clone robustness; D6 bidirectional Rust
-  conformance and publication fault matrix; D7 target-version and platform
-  qualification. Do **not** claim empirical feature parity yet.
+**Evidence executed** (Linux, OpenSSL 3.0.13 30 Jan 2024, Git 2.43.0,
+Bash 5.2):
+
+- `cargo test --workspace` (Rust, all suites incl. `portable_vectors.rs`),
+  `cargo clippy --workspace --all-targets -D warnings`;
+- `python3 tests/v3/reference/portable_vectors.py` (independent vectors);
+- `bash tests/v3/bash/test_reference.sh` (19 checks, Bash alone);
+- `bash tests/v3/conformance/run.sh` (28 checks, Bash vs Rust);
+- `bash proofs/aeneas/build-v3-tracked.sh`, `check-v3-axioms.sh` (207
+  theorems, standard axioms only), `v3_snapshot.py verify`.
+
+| Stage | State |
+| --- | --- |
+| D0 decisions | Done: profile = KDF suite in the config byte; records shared |
+| D1 primitives | Done on 3.0.13: CMAC (`-cipher AES-256-CBC`), CTR, SCRYPT (`n:`), PBKDF2; runtime known-answer probes in the Bash client |
+| D2 spec | Done: [V3-PORTABLE-PROFILES](specs/V3-PORTABLE-PROFILES.md), independent vectors |
+| D3 Rust | Done: `--profile` for `init`/`migrate`/`rekey`, `profiles`, profile in `status`/`doctor`, named refusals |
+| D4 formal | Done for dispatch, profile binding, record binding and determinism (see [proof coverage](V3-PROOF-COVERAGE.md) PR-01…PR-04); KDF and AES-SIV security remain assumptions (A10, A26) |
+| D5 Bash | Done: full command set below |
+| D6 parity | Done for the matrix below |
+| D7 qualification | Run locally on OpenSSL 3.0.13; CI is configured to run both suites on Ubuntu 24.04 (3.0.13), 22.04 (3.0.2) and macOS (Homebrew OpenSSL 3, BSD utilities), not yet seen passing there; external review open (R-01) |
+
+### Parity matrix (profiles 2 and 3)
+
+| Area | Bash | Rust | Evidence |
+| --- | --- | --- | --- |
+| Config, records, key-check value, stored key file | identical bytes | identical bytes | vectors; conformance 1, 16 |
+| `init` (patterns, quoting, macro), `protect`, `unprotect` | yes | yes | bash 5, 15; conformance |
+| `unlock` (+hydrate), `lock` (all worktrees), `hydrate`, `status`, `doctor`, `install`/`uninstall` | yes | yes (`unlock` installs) | bash 10, 11, 17, 18 |
+| clean/smudge semantics (locked, stale key, other configs) | yes | yes (+ long-running filter) | bash 10; conformance "stale key" |
+| `git diff`, merges (clean and conflicted, markers in plaintext) | yes | yes | bash 6, 12; conformance merges |
+| `pre-commit`: seal plaintext staged around the filter, re-encrypt `git mv`, refuse copied/foreign records, no laundering | yes | yes | bash 7–9; conformance renames |
+| `pre-merge-commit` (`verify-index`), `pre-push`, `audit` (per-commit attributes, keyless epochs, `requireAuthenticatedPush`) | yes | yes | bash 14; conformance pre-push |
+| `rekey`, `rekey --profile` | yes (2, 3) | yes (1, 2, 3) | bash 13; conformance rekey, P1 conversion |
+| v2 `migrate` | yes | yes | bash 19; conformance migration |
+| Linked worktrees, fresh clones, non-UTF-8/Unicode/blank paths, binary and empty files | yes | yes | bash 16–17; conformance 1 |
+| Profile 1 | recognized, refused unchanged | yes | conformance 21 |
+| `--private` agent, `reencrypt`, zeroization, long-running filter | **Rust-only** (local hardening / convenience) | yes | by design |
+
+Known shared limitation: an empty protected file makes `git merge` stop with
+`fatal: stash failed` (a Git bug with any clean filter mapping empty to
+non-empty content); both clients' `doctor` name such files.
+
+Remaining: an external cryptographic and adapter review (R-01); a Bash
+`reencrypt` (records cherry-picked across a rekey must be re-added by hand);
+benchmarks of the Bash client on large repositories.

@@ -49,7 +49,7 @@ one.
 | A7 | Git semantics | TESTED on Git 2.43; ASSUMED otherwise |
 | A8 | OS / filesystem behavior | Narrowed + TESTED (SIGKILL fault injection); same-UID races ACCEPTED RISK |
 | A9 | RustCrypto implementations are correct | TESTED (differential); no external audit |
-| A10 | AES-SIV, Argon2id, SHA-256 security | ASSUMED (standard) |
+| A10 | AES-SIV, Argon2id, scrypt, PBKDF2-HMAC-SHA256, SHA-256 security | ASSUMED (standard) |
 | A11 | A Git object id names exactly one content | ASSUMED (Git's hash) |
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
 | A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`; a keyless commit that needed no key, `commit_needs_no_key`, authenticates: `keyless_dag_audit_authenticated`): only the boundary remains |
@@ -65,6 +65,8 @@ one.
 | A23 | The sequencing state names the commits being brought in (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `REBASE_HEAD`, rebase directories) | TESTED (merge, octopus, cherry-pick, rebase suites) |
 | A24 | The history the incremental pre-commit hook trusts was checked: `HEAD`'s records authenticate at their paths (`RecordsAuthentic`, selection-independent) | Narrowed: use PROVED (model) (`hook_records_authentic`, `keyed_check_records_authentic`); the induction over keyed commits PROVED (model) with no policy or selection hypothesis (`keyed_history_authenticated_by_guard`, `config_unchanged_of_guard`, `records_authentic_of_checked_commit`); remaining: the commit step (A22, A11) and the start of history, now discharged by a keyed audit of the commit `HEAD` names (`audited_head_starts_keyed_history`, PROVED (model)) or a full keyed check; what remains of the start is the audit's own: its first commit's parent records when that parent lies outside the audited range (A13); one key per configuration across rekeys PROVED (model) (`epoch_history_authenticated`, `rekey_commit_starts_epoch`) |
 | A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS not yet run (its CI jobs have not been seen passing); REVIEWED |
+| A26 | The key-derivation implementation computes the function and parameters the core asks for (`V3Kdf`: RustCrypto Argon2id, scrypt, PBKDF2) | Which function and parameters: PROVED (`derive_config_key_uses_config_profile`, `profile_kdf_spec`); the computation: TESTED (independent vectors for every profile, `portable_vectors.rs`, `v3_differential.rs`) |
+| A27 | The portable Bash client behaves as the specification and the Rust client | Not proved (Bash source is not verified). TESTED: independent byte vectors, real-Git workflows (`tests/v3/bash/test_reference.sh`), two-way conformance with the Rust client (`tests/v3/conformance/run.sh`), OpenSSL known-answer probes at run time; on OpenSSL 3.0.13 (Ubuntu 24.04) |
 
 ## Detailed register
 
@@ -1199,6 +1201,32 @@ one.
 - **Next reduction:** a macOS run outside CI.
 - **Status:** TESTED (Linux, FreeBSD, NetBSD, OpenBSD, Windows) + REVIEWED;
   macOS TESTED in CI only.
+
+### A26 — Key derivation (new, 2026-11-11)
+
+A configuration's profile byte selects the key-derivation function; the
+verified core decides which function and which parameters
+(`profile_kdf`, `derive_profile_key`, `derive_config_key`), and the adapter's
+`V3Kdf` implementation (`RustKdf` in `transcrypt-rs/src/lib.rs`) computes it
+with RustCrypto `argon2`, `scrypt` and `pbkdf2`. That the implementation
+computes exactly the named function is the contract `KdfRealizes`; it is
+tested against independent vectors for every profile
+(`tests/v3/reference/kdf.tsv`, `portable-vectors.tsv`). That a derived key
+resists offline guessing is A10 and the passphrase's strength. scrypt and
+PBKDF2 working memory is not wiped by the RustCrypto crates (local hardening
+only; Argon2's is).
+
+### A27 — The portable Bash client (new, 2026-11-11)
+
+`contrib/v3/transcrypt-bash` is an independent implementation of the same
+specification; no Lean theorem is about it. Its evidence is empirical: every
+independent vector (key, config, key-check value, records), refusal cases,
+real-Git workflows, and two-way conformance with the Rust client on the same
+repositories (identical Git objects, the same refusals). It composes AES-SIV
+from `openssl mac` (CMAC) and `openssl enc` (CTR) and runs known-answer
+probes before deriving keys. Derived keys in local OpenSSL arguments and
+plaintext in a private temporary directory are accepted local exposures
+(charter); neither enters Git.
 
 ## Ranked unresolved risks and *product* opportunities
 

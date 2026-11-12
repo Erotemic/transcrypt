@@ -40,6 +40,31 @@ cargo build --release -p transcrypt-rs
 
 Requirements: Unix (Linux or macOS) and Git 2.34 or newer.
 
+Without Rust, the portable client
+[`contrib/v3/transcrypt-bash`](../../contrib/v3/README-BASH.md) (Bash, Git,
+OpenSSL 3.0) has the same commands and works on the same repositories for
+the portable profiles below.
+
+## Profiles: how the passphrase becomes a key
+
+`init --profile=NAME` chooses it once per repository; the committed
+`.transcrypt/config` records it, and every client checks it before doing
+anything.
+
+| Profile | Key derivation | Clients |
+| --- | --- | --- |
+| `argon2id` (1, default for `transcrypt-rs`) | Argon2id, 64 MiB, 3 passes | Rust only |
+| `scrypt` (2, default for `transcrypt-bash`) | scrypt N=2^15, r=8, p=1 | Rust and Bash |
+| `pbkdf2` (3) | PBKDF2-HMAC-SHA256, 600 000 iterations | Rust and Bash |
+
+Files are encrypted the same way under every profile (AES-256-SIV bound to
+the config and the path). Choose `scrypt` if anyone may need the Bash
+client; a long random passphrase matters more than the profile. To change
+profile (or let Bash users in): `transcrypt-rs rekey --profile=scrypt`, then
+commit; everyone runs `unlock` with the new passphrase. `transcrypt-rs
+profiles` lists them. A client that does not support a repository's profile
+says so and changes nothing; it never falls back to another one.
+
 ## Start protecting a repository
 
 ```bash
@@ -351,6 +376,12 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
 - Files larger than 16 MiB are refused.
 
 ## Troubleshooting
+
+- **`git merge` says `fatal: stash failed`, and `git diff` lists an empty
+  protected file**: a Git bug with any clean filter that turns an empty file
+  into non-empty content (Git keeps such an index entry marked as possibly
+  modified). Put a byte in the file, or stop protecting it; `doctor` names
+  empty protected files.
 
 | Message | Meaning and fix |
 | --- | --- |
