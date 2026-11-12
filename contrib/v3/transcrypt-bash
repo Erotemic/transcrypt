@@ -794,12 +794,36 @@ tc_policy() {
 	} | LC_ALL=C sort -z >"$out" || tc_fail 'cannot sort the policy entries'
 }
 
+# Git, in an isolated directory whose index ($TC_TMP/policy-index) holds
+# only a policy's .gitattributes files: no info/attributes, no config, no
+# global or system attributes (HOME and XDG_CONFIG_HOME point into it), and
+# no GIT_ATTR_SOURCE or GIT_CONFIG_* overrides; objects are the
+# repository's. check-attr there evaluates exactly the committed (or
+# staged) files (the Rust client's `Policy`).
+tc_policy_git() {
+	local dir=$TC_TMP/policy-git
+	if [[ ! -d $dir ]]; then
+		TC_POLICY_OBJECTS=$(git rev-parse --path-format=absolute --git-path objects) || tc_fail 'cannot find the object directory'
+		mkdir -p "$dir/refs" "$dir/objects" || tc_fail 'cannot create the policy directory'
+		printf 'ref: refs/heads/policy\n' >"$dir/HEAD" || tc_fail 'cannot create the policy directory'
+	fi
+	(cd "$dir" && env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM \
+		-u GIT_ATTR_SOURCE -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_NAMESPACE GIT_DIR="$dir" \
+		GIT_OBJECT_DIRECTORY="$TC_POLICY_OBJECTS" GIT_INDEX_FILE="$TC_TMP/policy-index" HOME="$dir" \
+		XDG_CONFIG_HOME="$dir" GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 git -c core.ignorecase=false "$@")
+}
+
 declare -A TC_SELECTED=()
-# Which of the NUL-separated paths in file $1 Git's attributes protect:
+# Which of the NUL-separated paths in file $1 are protected:
 # TC_SELECTED[path]=1. $2: --cached (staged attributes) or empty (worktree).
-# Also TC_FILTER[path] (the `filter` value) and TC_MARKED[path] (set when
-# the `transcrypt` macro is set for it). Patterns match case-sensitively
-# on every system, as for the Rust client.
+# With --cached a path is protected when the staged .gitattributes files
+# alone select it (evaluated by tc_policy_git) or Git's effective
+# attributes do: a local source (.git/info/attributes, core.attributesFile,
+# GIT_ATTR_SOURCE, ...) can add protection, never remove it (the verified
+# `admission_selected`). Without, Git's effective answer: what `git add`
+# applies. Also TC_FILTER[path] (the effective `filter` value) and
+# TC_MARKED[path] (set when the `transcrypt` macro is set for it). Patterns
+# match case-sensitively on every system, as for the Rust client.
 declare -A TC_FILTER=() TC_MARKED=()
 tc_selected() {
 	local list=$1 path name value
@@ -819,6 +843,17 @@ tc_selected() {
 			TC_MARKED[$path]=1
 		fi
 	done <"$TC_TMP/attrs"
+	[[ -n ${2-} ]] || return 0
+	rm -f -- "$TC_TMP/policy-index"
+	GIT_LITERAL_PATHSPECS=0 git ls-files -s -z -- ':(top,glob)**/.gitattributes' >"$TC_TMP/policy-files" ||
+		tc_fail 'cannot list the staged .gitattributes files'
+	if [[ -s $TC_TMP/policy-files ]]; then
+		tc_policy_git update-index -z --index-info <"$TC_TMP/policy-files" || tc_fail 'cannot read the .gitattributes files'
+	fi
+	tc_policy_git check-attr --cached -z --stdin filter <"$list" >"$TC_TMP/policy-attrs" || tc_fail 'git check-attr failed'
+	while IFS= read -r -d '' path && IFS= read -r -d '' name && IFS= read -r -d '' value; do
+		[[ $value == transcrypt-v3 ]] && TC_SELECTED[$path]=1
+	done <"$TC_TMP/policy-attrs"
 	return 0
 }
 
@@ -827,17 +862,25 @@ readonly TC_MACRO_MISSING='the `transcrypt` macro does not set filter=transcrypt
 # Whether Git resolves the `transcrypt` macro to filter=transcrypt-v3 for a
 # commit whose top-level .gitattributes is blob $1 (none if empty): probed
 # in a temporary index holding that file and a directory whose own rules
-# say `probe transcrypt` (the Rust client's `macro_resolves`).
+# say `probe transcrypt`, both from that file alone (what every clone sees)
+# and with every local attribute source (what this checkout's filters do)
+# (the Rust client's `macro_resolves`).
 tc_macro_resolves() {
 	local top=$1 rules value
 	rules=$(printf 'probe transcrypt\n' | git hash-object -w --no-filters --stdin) || tc_fail 'cannot write a Git object'
-	rm -f -- "$TC_TMP/probe-index"
+	rm -f -- "$TC_TMP/probe-index" "$TC_TMP/policy-index"
 	{
 		printf '100644 %s 0\ttranscrypt-v3-probe/.gitattributes\0' "$rules"
 		if [[ -n $top ]]; then printf '100644 %s 0\t.gitattributes\0' "$top"; fi
-	} | GIT_INDEX_FILE=$TC_TMP/probe-index git update-index -z --index-info || tc_fail 'cannot build the probe index'
+	} >"$TC_TMP/probe-info"
+	GIT_INDEX_FILE=$TC_TMP/probe-index git update-index -z --index-info <"$TC_TMP/probe-info" ||
+		tc_fail 'cannot build the probe index'
+	tc_policy_git update-index -z --index-info <"$TC_TMP/probe-info" || tc_fail 'cannot build the probe index'
 	value=$(printf 'transcrypt-v3-probe/probe\0' |
 		GIT_INDEX_FILE=$TC_TMP/probe-index git -c core.ignorecase=false check-attr --cached -z --stdin filter |
+		tr '\0' '\n' | tail -n 1) || tc_fail 'git check-attr failed'
+	[[ $value == transcrypt-v3 ]] || return 1
+	value=$(printf 'transcrypt-v3-probe/probe\0' | tc_policy_git check-attr --cached -z --stdin filter |
 		tr '\0' '\n' | tail -n 1) || tc_fail 'git check-attr failed'
 	[[ $value == transcrypt-v3 ]]
 }
@@ -2592,8 +2635,19 @@ tc_cmd_audit() {
 	fi
 }
 
+# Whether pushes must authenticate every new or changed record
+# (transcrypt.requireAuthenticatedPush): unless it is set to a value Git
+# reads as false; unset or unreadable (misspelt) counts as required (the
+# verified `authenticated_push_required`).
+tc_push_required() {
+	local value
+	git config --get transcrypt.requireAuthenticatedPush >/dev/null 2>&1 || return 0
+	value=$(git config --bool --get transcrypt.requireAuthenticatedPush 2>/dev/null) || return 0
+	[[ $value != false ]]
+}
+
 tc_cmd_pre_push() {
-	local localoid remoteoid
+	local url=${2-} localoid remoteoid
 	local -a revs=()
 	while read -r _ localoid _ remoteoid; do
 		[[ -n ${localoid-} ]] || continue
@@ -2609,12 +2663,22 @@ tc_cmd_pre_push() {
 		fi
 	done
 	((${#revs[@]})) || return 0
-	# Only the remote's own commits of the updated refs bound the range: a
-	# remote-tracking ref is a local ref anyone can point at an unaudited
-	# commit, and no evidence that the remote has it (H-98).
+	# Only the remote's own answers bound the range: its commits of the
+	# updated refs, and every commit it advertises (ls-remote on the push
+	# URL Git passes as $2) that this repository has; Git does not send
+	# those. A remote-tracking ref is a local ref anyone can point at an
+	# unaudited commit, and no evidence that the remote has it (H-98). If
+	# the remote cannot be asked without a prompt, nothing is excluded.
 	tc_repo
-	git rev-list "${revs[@]}" >"$TC_TMP/push-commits" || tc_fail 'cannot list the pushed commits'
-	local rev n=0 required
+	: >"$TC_TMP/push-excluded"
+	if [[ -n $url ]] && GIT_TERMINAL_PROMPT=0 git ls-remote -- "$url" </dev/null >"$TC_TMP/push-advertised" 2>/dev/null; then
+		cut -f1 "$TC_TMP/push-advertised" | grep -E '^[0-9a-f]{40}([0-9a-f]{24})?$' | sed 's/$/^{commit}/' |
+			git cat-file --batch-check='%(objectname) %(objecttype)' |
+			sed -n 's/^\([0-9a-f]*\) commit$/^\1/p' | sort -u >"$TC_TMP/push-excluded" || : >"$TC_TMP/push-excluded"
+	fi
+	git rev-list --stdin "${revs[@]}" <"$TC_TMP/push-excluded" >"$TC_TMP/push-commits" ||
+		tc_fail 'cannot list the pushed commits'
+	local rev n=0
 	# A failure anywhere in the audit exits with this prefix.
 	TC_FAIL_PREFIX='refusing to push: '
 	while IFS= read -r rev; do
@@ -2622,14 +2686,15 @@ tc_cmd_pre_push() {
 		n=$((n + 1))
 	done <"$TC_TMP/push-commits"
 	TC_FAIL_PREFIX=''
-	if ((TC_AUDIT_KEYLESS)); then
-		tc_log "pre-push: $TC_AUDIT_KEYLESS protected file(s) in $n commit(s) checked by envelope only (no key here for their config)"
-		# Any value but an explicit false counts as set (fail safe).
-		required=$(git config --get transcrypt.requireAuthenticatedPush 2>/dev/null || true)
-		required=${required,,}
-		if ((TC_AUDIT_NEEDS_KEY)) && [[ -n $required && $required != false && $required != no && $required != off && $required != 0 ]]; then
-			tc_fail 'refusing to push: transcrypt.requireAuthenticatedPush is set and some records could not be authenticated; unlock (for older configs, audit where their key is available)'
+	# An envelope is no authentication (plaintext appended to a record keeps
+	# it): new or changed records that could not be authenticated are
+	# refused unless the repository explicitly opts out.
+	if ((TC_AUDIT_NEEDS_KEY)); then
+		local missing='some new or changed protected records in the pushed history could not be authenticated: no key here for their configuration (this checkout is locked, or they predate a rekey)'
+		if tc_push_required; then
+			tc_fail "refusing to push: $missing; unlock and push again (to publish them checked by their envelope only, which accepts a record with plaintext appended: \`git -c transcrypt.requireAuthenticatedPush=false push ...\`)"
 		fi
+		tc_log "warning: $missing; they were checked by their envelope only, because transcrypt.requireAuthenticatedPush is false"
 	fi
 	return 0
 }

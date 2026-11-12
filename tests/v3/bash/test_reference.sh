@@ -181,7 +181,12 @@ ok 'rekey --profile=pbkdf2 converts and re-encrypts; old commits audit keylessly
 # Push: an intermediate plaintext commit is refused even after a fix.
 git init -q --bare "$SCRATCH/remote.git"
 git remote add origin "$SCRATCH/remote.git"
-git push -q origin "$BRANCH" 2>/dev/null
+# The history before the rekey has no key here any more: refused by
+# default, published by envelope only with the explicit opt-out.
+if git push -q origin "$BRANCH" 2>"$SCRATCH/push.log"; then die 'pre-push admitted records it could not authenticate'; fi
+grep -q 'could not be authenticated' "$SCRATCH/push.log" || die 'pre-push refusal message for a missing key'
+git -c transcrypt.requireAuthenticatedPush=false push -q origin "$BRANCH" 2>"$SCRATCH/push.log" || die 'the explicit opt-out'
+grep -q 'envelope only' "$SCRATCH/push.log" || die 'the opt-out warns'
 printf 'leak\n' >two.env
 git -c filter.transcrypt-v3.clean=cat -c filter.transcrypt-v3.required=false add two.env
 git -c core.hooksPath=/dev/null commit -qm 'unsafe, hooks bypassed'
@@ -313,7 +318,7 @@ git commit -qm 'brought forward'
 ok 'reencrypt re-encrypts a record of an earlier config under the current one'
 # Bare repositories audit (server-side hooks); --max-commits refuses.
 git init -q --bare "$SCRATCH/policy.git"
-git push -q "$SCRATCH/policy.git" "$BRANCH" 2>/dev/null
+git -c transcrypt.requireAuthenticatedPush=false push -q "$SCRATCH/policy.git" "$BRANCH" 2>/dev/null
 (cd "$SCRATCH/policy.git" && "$CLI" audit "$BRANCH" >/dev/null 2>"$SCRATCH/err") || die "audit in a bare repository: $(cat "$SCRATCH/err")"
 if (cd "$SCRATCH/policy.git" && "$CLI" audit --max-commits=1 "$BRANCH" >/dev/null 2>&1); then die '--max-commits did not refuse'; fi
 ok 'audit runs in a bare repository; --max-commits refuses larger ranges'
@@ -469,6 +474,93 @@ for remote in tracking moved; do
     ! git -C "$SCRATCH/$remote.git" cat-file --batch-all-objects --batch | grep -q MARK-poison || die "plaintext reached $remote"
 done
 ok 'pre-push trusts no remote-tracking ref, planted or stale'
+
+# A protected repository whose history the bare remote $SCRATCH/$1.git has.
+pushed_repo() {
+    newrepo "$1"
+    printf 'pub\n' >pub.txt; git add pub.txt; git commit -qm base
+    printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.env' 2>/dev/null
+    mkdir dir; printf 'alpha\n' >a.env; printf 'beta\n' >dir/b.env
+    git add .gitattributes .transcrypt a.env dir/b.env; git commit -qm protect
+    git init -q --bare "$SCRATCH/$1.git"; git remote add origin "$SCRATCH/$1.git"
+    git push -q origin HEAD:refs/heads/main 2>/dev/null || die 'first push'
+}
+# (grep reads everything: an early exit would fail the pipeline.)
+has_marker() { git -C "$SCRATCH/$1" cat-file --batch-all-objects --batch | grep -c "$2" >/dev/null; }
+
+# SEC-01 (H-99): no local attribute source unprotects what the committed
+# .gitattributes protect. Each makes Git's filter skip a protected file, so
+# `git add` stages plaintext: the pre-commit hook encrypts it (or refuses a
+# broken macro), and a plaintext commit with the hooks bypassed is refused
+# at push, authenticated pushes required or not, from a linked worktree too.
+pushed_repo localattrs
+base=$(git rev-parse HEAD); empty=$(git hash-object -t tree /dev/null)
+git worktree add -q --detach "$SCRATCH/localattrs-wt" "$base"
+for case in info macro nested source worktree; do
+    dir=$SCRATCH/localattrs file=a.env rules='*.env -transcrypt -filter' env=()
+    case $case in
+        macro) rules='[attr]transcrypt -filter' ;;
+        nested) rules='dir/*.env -filter'; file=dir/b.env ;;
+        source) rules=''; env=(GIT_ATTR_SOURCE="$empty") ;;
+        worktree) dir=$SCRATCH/localattrs-wt ;;
+    esac
+    printf '%s\n' "$rules" >"$SCRATCH/localattrs/.git/info/attributes"
+    printf 'MARK-local-%s\n' "$case" >"$dir/$file"
+    (cd "$dir" && env "${env[@]}" git add "$file")
+    [[ $(git -C "$dir" cat-file blob ":$file") == "MARK-local-$case" ]] || die "$case: Git's filter was not skipped"
+    if (cd "$dir" && env "${env[@]}" git commit -qm "$case" 2>"$SCRATCH/commit.log"); then
+        [[ $(git -C "$dir" cat-file blob "HEAD:$file" | head -c 4) == TV3F ]] || die "$case: committed plaintext"
+        git -C "$dir" reset -q --soft HEAD~1
+    else
+        grep -q 'transcrypt` macro' "$SCRATCH/commit.log" || die "$case: pre-commit: $(cat "$SCRATCH/commit.log")"
+    fi
+    printf 'MARK-local-%s\n' "$case" >"$dir/$file"
+    (cd "$dir" && env "${env[@]}" git add "$file" && env "${env[@]}" git commit -q --no-verify -m "$case")
+    [[ $(git -C "$dir" cat-file blob "HEAD:$file") == "MARK-local-$case" ]] || die "$case: setup"
+    for strict in false true; do
+        if (cd "$dir" && env "${env[@]}" git -c "transcrypt.requireAuthenticatedPush=$strict" push -q origin \
+            HEAD:refs/heads/main 2>"$SCRATCH/push.log"); then die "$case: pushed protected plaintext ($strict)"; fi
+        grep -q 'refusing to push' "$SCRATCH/push.log" || die "$case: push refusal: $(cat "$SCRATCH/push.log")"
+    done
+    git -C "$dir" reset -q --hard "$base"
+done
+rm -f .git/info/attributes
+! has_marker localattrs.git MARK-local || die 'plaintext reached the remote'
+printf 'edited\n' >a.env; git add a.env; git commit -qm edit
+git push -q origin HEAD:refs/heads/main 2>/dev/null || die 'an ordinary push after the overrides'
+ok 'no local attribute source unprotects a committed rule (info/attributes, macro, nested, GIT_ATTR_SOURCE, linked worktree)'
+
+# SEC-02 (H-100): plaintext appended to a locked record keeps its envelope
+# and passes the keyless pre-commit check; the push is refused by default
+# and the remote never sees it. The explicit opt-out publishes it. With the
+# key the same commit is refused as not authenticating; a valid update
+# pushes.
+pushed_repo append
+base=$(git rev-parse HEAD)
+"$CLI" lock 2>/dev/null
+printf 'MARK-appended\n' >>a.env; git add a.env; git commit -qm appended 2>/dev/null
+git cat-file blob HEAD:a.env | grep -q MARK-appended || die 'setup: appended plaintext not committed'
+for strict in '' true; do
+    if git ${strict:+-c transcrypt.requireAuthenticatedPush=$strict} push -q origin HEAD:refs/heads/main 2>"$SCRATCH/push.log"; then
+        die "pushed a record it could not authenticate (${strict:-default})"
+    fi
+    grep -q 'could not be authenticated' "$SCRATCH/push.log" && grep -q 'no key here' "$SCRATCH/push.log" ||
+        die "missing-key refusal: $(cat "$SCRATCH/push.log")"
+done
+! has_marker append.git MARK-appended || die 'appended plaintext reached the remote'
+git init -q --bare "$SCRATCH/weak.git"
+git -c transcrypt.requireAuthenticatedPush=false push -q "$SCRATCH/weak.git" HEAD:refs/heads/main 2>"$SCRATCH/push.log" ||
+    die 'the explicit opt-out'
+grep -q 'envelope only' "$SCRATCH/push.log" && has_marker weak.git MARK-appended || die 'the opt-out publishes envelope-checked records'
+git checkout -q "$base" -- a.env
+printf '%s\n' "$PASSPHRASE" | "$CLI" unlock --password-stdin 2>/dev/null
+if git push -q origin HEAD:refs/heads/main 2>"$SCRATCH/push.log"; then die 'pushed a record that does not authenticate'; fi
+grep -q 'a.env' "$SCRATCH/push.log" && ! grep -q 'no key here' "$SCRATCH/push.log" || die "invalid-record refusal: $(cat "$SCRATCH/push.log")"
+git reset -q --hard "$base"
+printf 'alpha, edited with the key\n' >a.env; git add a.env; git commit -qm 'valid update'
+git push -q origin HEAD:refs/heads/main 2>"$SCRATCH/push.log" || die "a valid update: $(cat "$SCRATCH/push.log")"
+! has_marker append.git MARK-appended || die 'appended plaintext reached the remote'
+ok 'locked: plaintext appended to a record is refused at push by default; the opt-out publishes it; with the key it does not authenticate'
 
 # ---------------------------------------------------------------------------
 # v2 migration (needs the repository's Bash v2 script).

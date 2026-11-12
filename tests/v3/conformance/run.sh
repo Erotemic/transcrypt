@@ -127,6 +127,10 @@ for profile in scrypt pbkdf2; do
 
         # Rekey by the second client; the first must unlock again.
         cd "$SCRATCH/$name-a"; git pull -q --no-rebase "$SCRATCH/$name-seed" "$BRANCH" 2>/dev/null
+        # Pushed while its key is here: after the rekey, history the remote
+        # lacks under the old config could not be authenticated (refused by
+        # default).
+        git push -q "$SCRATCH/$name.git" HEAD:before-rekey 2>/dev/null
         printf '%s\n' "$P2" | "${second}_" rekey --password-stdin
         git commit -qm "rekey by $second"
         git push -q "$SCRATCH/$name.git" HEAD:rekeyed 2>/dev/null
@@ -142,6 +146,36 @@ for profile in scrypt pbkdf2; do
         audits HEAD
         ok "$profile: $second rekeys; $first refuses to encrypt with the stale key, then unlocks with the new passphrase"
     done
+done
+
+# --------------------------------------------------------------------------
+# Publication (H-99, H-100): each client's hooks, in a repository the other
+# set up, refuse to push plaintext that a local attribute source kept from
+# Git's filter, and a record they cannot authenticate (plaintext appended
+# while locked).
+# --------------------------------------------------------------------------
+for hooks in sh rs; do
+    other=$([[ $hooks == sh ]] && echo rs || echo sh)
+    seed "$other" scrypt "pub-$hooks"
+    clone "pub-$hooks" "pub-$hooks-a"
+    printf '%s\n' "$P1" | "${hooks}_" unlock --password-stdin
+    base=$(git rev-parse HEAD)
+    printf '*.env -transcrypt -filter\n' >.git/info/attributes
+    printf 'MARK-pub-local\n' >.env; git add .env
+    [[ $(git cat-file blob :.env) == MARK-pub-local ]] || die "$hooks: the override did not stop Git's filter"
+    if git commit -qm local 2>>"$SCRATCH/log"; then
+        [[ $(git cat-file blob HEAD:.env | head -c 4) == TV3F ]] || die "$hooks: committed plaintext under a local override"
+    fi
+    git reset -q --hard "$base"
+    printf 'MARK-pub-local\n' >.env; git add .env; git commit -q --no-verify -m local
+    if git push -q origin HEAD:refs/heads/local 2>>"$SCRATCH/log"; then die "$hooks: pushed plaintext under a local override"; fi
+    rm .git/info/attributes; git reset -q --hard "$base"
+    "${hooks}_" lock
+    printf 'MARK-pub-append\n' >>.env; git add .env; git commit -qm appended 2>>"$SCRATCH/log"
+    if git push -q origin HEAD:refs/heads/append 2>>"$SCRATCH/log"; then die "$hooks: pushed a record it could not authenticate"; fi
+    git reset -q --hard "$base"
+    ! git -C "$SCRATCH/pub-$hooks.git" cat-file --batch-all-objects --batch | grep -q MARK-pub || die "$hooks: plaintext reached the remote"
+    ok "publication: $hooks's hooks, in a repository $other set up, push no plaintext under a local attribute override and no unauthenticated record"
 done
 
 # --------------------------------------------------------------------------
