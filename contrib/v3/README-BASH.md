@@ -92,9 +92,11 @@ before it was protected stays in earlier commits.
 
 The portable client is slower: a few OpenSSL processes per file. On a
 repository with 100 protected and 200 other files (Linux, OpenSSL 3.0.13),
-`git status` takes 0.1 s, a checkout switching 10 protected files 1.4 s,
-`lock` or `unlock` about 20 s and a commit after a policy change about 7 s,
-against well under a second for `transcrypt-rs`. It keeps derived keys in
+`git status` takes 0.1 s, a commit 1.3 s, a checkout switching 10
+protected files 1.4 s, and `lock` or `unlock` (every file) about 20 s, or
+7 s for the first commit after a `.gitattributes` change (every protected
+file is authenticated then); `transcrypt-rs` does each in well under a
+second. It keeps derived keys in
 local OpenSSL arguments and plaintext in a private (0700) temporary
 directory while it works, and caches the verification of the stored key next
 to it (`.git/transcrypt-v3/bash-verified`, removed by `lock`). Under the
