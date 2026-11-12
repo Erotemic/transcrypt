@@ -456,7 +456,12 @@ for x in $CLIENTS; do
     expect_plain v3 "$x wrong passphrase"; clean "$x wrong passphrase"
     # Damaged key file (one byte of the key changed): refused, never used,
     # with each client's filters installed.
-    damage() { printf '\x00' | dd of="$key" bs=1 seek=60 conv=notrunc 2>/dev/null; }
+    # The good key's byte, flipped (idempotent): a fixed value would already
+    # be there one run in 256, since the key is random.
+    damage() {
+        local b; b=$(od -An -tu1 -j60 -N1 "$SCRATCH/key.good" | tr -d ' ')
+        printf "\\$(printf '%03o' $((b ^ 255)))" | dd of="$key" bs=1 seek=60 conv=notrunc 2>/dev/null
+    }
     printf 'MARK-A-9\n' >a.env
     for c in sh rs; do
         use_client "$c"
