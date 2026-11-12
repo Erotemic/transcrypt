@@ -314,7 +314,7 @@ Bash 5.2):
   `cargo clippy --workspace --all-targets -D warnings`;
 - `python3 tests/v3/reference/portable_vectors.py` (independent vectors);
 - `bash tests/v3/bash/test_reference.sh` (25 checks, Bash alone);
-- `bash tests/v3/conformance/run.sh` (28 checks, Bash vs Rust);
+- `bash tests/v3/conformance/run.sh` (30 checks, Bash vs Rust);
 - `bash proofs/aeneas/build-v3-tracked.sh`, `check-v3-axioms.sh` (207
   theorems, standard axioms only), `v3_snapshot.py verify`.
 

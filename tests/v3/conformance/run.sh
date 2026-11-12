@@ -213,6 +213,31 @@ for client in sh rs; do
 done
 
 # --------------------------------------------------------------------------
+# reencrypt across clients: one rekeys, the other brings a record of the
+# earlier config forward; both then verify and audit it.
+# --------------------------------------------------------------------------
+for pair in "sh rs" "rs sh"; do
+    set -- $pair
+    first=$1 second=$2
+    seed "$first" scrypt "re-$first"
+    git checkout -q -b old
+    printf 'old branch\n' >old.env
+    git add old.env
+    git commit -qm 'old config'
+    git checkout -q master
+    printf '%s\n' "$P2" | "${first}_" rekey --password-stdin
+    git commit -qm rekey
+    git checkout -q old -- old.env
+    printf '%s\n' "$P1" | "${second}_" reencrypt --password-stdin --yes
+    "$SH" verify-index 2>/dev/null || die "$first/$second: Bash verify-index after reencrypt"
+    "$RS" verify-index 2>/dev/null || die "$first/$second: Rust verify-index after reencrypt"
+    git commit -qm 'brought forward'
+    audits HEAD
+    [[ $(cat old.env) == 'old branch' ]] || die "$first/$second: reencrypt worktree"
+    ok "$first rekeys, $second re-encrypts a record of the earlier config; both clients verify and audit it"
+done
+
+# --------------------------------------------------------------------------
 # v2 migration by Bash, used by Rust (and the reverse).
 # --------------------------------------------------------------------------
 V2=$ROOT/transcrypt
