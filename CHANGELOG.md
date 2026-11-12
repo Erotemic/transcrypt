@@ -47,6 +47,9 @@ system, you must also run the `--upgrade` command in each repository:
   `migrate` of both killed or failing at every Git and OpenSSL call, each
   followed by the documented recovery. `status` reports an interrupted rekey
   with the steps to finish or undo it.
+- Experimental v3: `rekey --continue` and `rekey --abort` (both clients)
+  finish or undo an interrupted rekey from its journal, changing only the
+  index entries it staged; other staged changes are kept exactly.
 
 ### Changed
 
@@ -57,6 +60,10 @@ system, you must also run the `--upgrade` command in each repository:
   key but could not decrypt the worktree (as `transcrypt-bash` does), so a
   script does not go on with ciphertext; `status` names a staged
   (interrupted) rekey and how to finish or undo it.
+- Experimental v3: an interrupted `init` or `migrate`, resumed, keeps what
+  the first run was asked to protect (recorded before it changed anything),
+  even if the rerun names no patterns; before, a resumed `init` without its
+  patterns left matching files unprotected.
 - The v3 Bash and conformance suites no longer depend on the caller's Git
   configuration (for example `init.defaultBranch`).
 - Improve test suite to better use `bats` conventions to run tests in

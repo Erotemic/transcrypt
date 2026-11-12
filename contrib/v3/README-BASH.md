@@ -115,10 +115,13 @@ directions.
 Nothing unencrypted reaches Git, whichever moment a command is killed at.
 Rerun `lock`, `unlock` or `hydrate`; rerun `init` or `migrate` with the
 same passphrase (an uncommitted `.transcrypt/config` is an interrupted setup,
-which the rerun completes). After an interrupted `rekey`,
-`transcrypt-bash status` says whether it is staged and how to finish it (new
-passphrase) or undo it (old passphrase); see "If `rekey` is interrupted" in
-the [user guide](../../docs/verification/V3-USER-GUIDE.md). If Git then
+which the rerun completes, protecting what the first run was asked to even
+if the rerun names nothing). After an interrupted `rekey`,
+`transcrypt-bash status` reports its journal: finish it with `rekey
+--continue` (new passphrase) or undo it with `rekey --abort` (old
+passphrase), which change only the entries the rekey staged and keep
+everything else you staged; see "If `rekey` is interrupted" in the
+[user guide](../../docs/verification/V3-USER-GUIDE.md). If Git then
 reports `index.lock: File exists`, remove `.git/index.lock` as Git says.
 
 ## Known limitation: empty protected files and `git merge`

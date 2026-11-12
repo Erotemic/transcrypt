@@ -198,28 +198,44 @@ encrypted, `status` says so, and `git add` refuses plaintext until you run
 `transcrypt-rs unlock` with the new passphrase.
 
 **If `rekey` is interrupted** (Ctrl-C, a crash, a full disk), nothing is
-lost and no plaintext reaches Git; `status` says what state you are in. The rekey either has not started (the old passphrase still unlocks), or
-it is staged. Finish a staged rekey with the new passphrase:
+lost and no plaintext reaches Git. Before it changes the index, `rekey`
+writes a journal (`.git/transcrypt-v3-rekey`) of every entry it replaces,
+as it was and as it becomes; `status` reports it, and a new `rekey` is
+refused until you either finish it with the new passphrase:
 
 ```bash
-git checkout -- .transcrypt/config  # only if status says the staged config differs
-transcrypt-rs unlock                # the NEW passphrase
+transcrypt-rs rekey --continue      # the NEW passphrase
 git commit -m 'Rekey transcrypt-v3'
 ```
 
 or undo it and keep the old passphrase:
 
 ```bash
-git read-tree HEAD && git checkout HEAD -- .transcrypt/config
-transcrypt-rs unlock                # the OLD passphrase
+transcrypt-rs rekey --abort         # the OLD passphrase
 ```
 
-(`git read-tree` rather than `git reset`: it restores the index without
-running the filter with a key that no longer matches.) If Git reports
-`index.lock: File exists` after a crash, remove `.git/index.lock` as Git
-says. `tests/v3/conformance/lifecycle.sh` interrupts `init`, `rekey`, `lock`,
-`unlock` and `migrate` of both clients at every Git and OpenSSL call and
-checks these recoveries.
+Either changes only the entries the rekey staged (each protected file and
+`.transcrypt/config`), the worktree config and the stored key: anything
+else you had staged, including changes that exist only in the index, stays
+exactly as it was. If one of the rekey's own entries, or the worktree
+config, changed since, both refuse and change nothing, rather than discard
+that change. Each asks for a passphrase only if the key of the config it
+ends with is not already in use, and either can be rerun if it is itself
+interrupted. Either client finishes or undoes the other's rekey. If Git
+reports `index.lock: File exists` after a crash, remove `.git/index.lock`
+as Git says. `tests/v3/conformance/lifecycle.sh` interrupts `init`,
+`rekey`, `rekey --continue`, `rekey --abort`, `lock`, `unlock` and
+`migrate` of both clients at every Git and OpenSSL call and checks these
+recoveries.
+
+**If `init` or `migrate` is interrupted**, rerun it with the same
+passphrase: an uncommitted `.transcrypt/config` is an interrupted setup,
+which the rerun completes. What the first run was asked to protect (the
+patterns given to `init`, the files `migrate` converts) was recorded in
+`.git/transcrypt-v3-setup` before anything changed, and the rerun applies
+it even if you name other patterns or none. To discard an interrupted
+setup instead: `git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r
+.transcrypt; rm -f "$(git rev-parse --git-path transcrypt-v3-setup)"`.
 
 **Work from before a rekey.** A commit cherry-picked or rebased onto a
 `rekey` keeps the records it was made with, under the earlier config. Git
@@ -454,7 +470,10 @@ Not proved, only tested:
   lifecycle suites against `transcrypt-rs` (assumption A27), and it trusts
   OpenSSL's AES, CMAC, scrypt and PBKDF2;
 - the behaviour of real Git workflows (rebase, cherry-pick, stash, worktrees)
-  and recovery from an interrupted command (`lifecycle.sh`);
+  and recovery from an interrupted command (`lifecycle.sh`), including the
+  setup record that keeps an interrupted `init`'s patterns and the rekey
+  journal behind `rekey --continue` and `--abort`: their losslessness is
+  checked by tests at every fault point, not proved;
 - the security of the cryptography itself, which no proof here establishes.
 
 You choose which files are selected; no proof covers that choice. Where the

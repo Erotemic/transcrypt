@@ -313,12 +313,13 @@ Bash 5.2):
 - `cargo test --workspace` (Rust, all suites incl. `portable_vectors.rs`),
   `cargo clippy --workspace --all-targets -D warnings`;
 - `python3 tests/v3/reference/portable_vectors.py` (independent vectors);
-- `bash tests/v3/bash/test_reference.sh` (28 checks, Bash alone);
+- `bash tests/v3/bash/test_reference.sh` (30 checks, Bash alone);
 - `bash tests/v3/conformance/run.sh` (30 checks, Bash vs Rust);
 - `bash tests/v3/conformance/lifecycle.sh` (rebase, cherry-pick and stash
-  across clients; `init`, `rekey`, `lock`, `unlock` and `migrate` of both
-  clients killed or failing at every Git and OpenSSL call, then recovered;
-  damaged and removed key files), with the suites independent of the
+  across clients; `init`, `rekey`, `rekey --continue`, `rekey --abort`,
+  `lock`, `unlock` and `migrate` of both clients killed or failing at
+  every Git and OpenSSL call, then recovered; damaged and removed key
+  files), with the suites independent of the
   caller's Git configuration (`TRANSCRYPT_TEST_BRANCH`);
 - `bash proofs/aeneas/build-v3-tracked.sh`, `check-v3-axioms.sh` (207
   theorems, standard axioms only), `v3_snapshot.py verify`.
@@ -353,8 +354,8 @@ Bash 5.2):
 | Policy drift: `git lfs track` override, broken macro, records moved to unprotected names (refused) | yes | yes | bash 19, 22; review H-78, H-81 |
 | Commands from a subdirectory; audit in a bare repository (server hooks); `--max-commits` | yes | yes | bash 20, 24 |
 | Rebase (clean, conflicted), cherry-pick (byte-identical record, conflicted), stash with staged, unstaged and untracked protected files, by one client, verified, audited and pushed by the other | yes | yes | lifecycle 1–6 |
-| Interrupted `init`, `rekey`, `lock`, `unlock`, `migrate` (SIGKILL or a failing call at every `git`/`openssl` call): no plaintext in Git or `$TMPDIR`; rerun completes `init`/`migrate`/`lock`/`unlock`; `status` names a staged rekey and its finish and undo steps | yes | yes | lifecycle 7–16; review H-88 to H-92 |
-| Damaged or removed key file, wrong passphrase | yes | yes | lifecycle 17–18 |
+| Interrupted `init`, `rekey`, `rekey --continue`, `rekey --abort`, `lock`, `unlock`, `migrate` (SIGKILL or a failing call at every `git`/`openssl` call): no plaintext in Git, a pushed remote or `$TMPDIR`; rerun completes `init` (with its recorded patterns, even when the rerun names none)/`migrate`/`lock`/`unlock`; the rekey journal is finished or undone by either client, keeping unrelated index-only changes exactly | yes | yes | lifecycle 7–20; bash 28–29; review H-88 to H-94 |
+| Damaged or removed key file, wrong passphrase | yes | yes | lifecycle 21–22 |
 | `--private` agent, zeroization, long-running filter | **Rust-only** (local hardening / performance) | yes | by design |
 
 Known shared limitation: an empty protected file makes `git merge` stop with
@@ -368,7 +369,11 @@ hostile history to pass the Bash hooks where Rust's refuse. The lifecycle
 suite then found five more (H-88 to H-92: plaintext scratch left in `$TMPDIR`
 by a killed Bash run, misleading advice after an interrupted rekey, a stale
 index after an interrupted Bash unlock, Bash `init`/`migrate` not resumable,
-Rust `unlock` exiting 0 when its decryption failed), all fixed. Bash
+Rust `unlock` exiting 0 when its decryption failed), all fixed. An external
+review then found two more in both clients (H-93: a resumed `init` could
+drop its patterns and publish plaintext; H-94: the documented rekey undo
+discarded unrelated staged changes), fixed by a setup record and a rekey
+journal shared by the two clients. Bash
 performance, 100 protected and 200 other files: `git status` 0.1 s, checkout
 of 10 protected files 1.4 to 1.8 s, `lock`/`unlock` about 16 s (37 s and 27 s
 before the reindex hand-off and single-pass lock, measured back to back),

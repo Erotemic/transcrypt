@@ -85,7 +85,7 @@ semantics silently or import legacy CBC into the proved core.
 | Wire/AAD/Git behavior | `docs/verification/specs/V3-AUTHENTICATED-P0.md` |
 | Verified pure core (codec + every decision) | `rust/crates/transcrypt-v3-core/src/lib.rs` |
 | Crypto primitives (`Keyed: V3Primitives`), KDF | `rust/crates/transcrypt-rs/src/lib.rs` |
-| Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-rs/src/*.rs`: filters, lifecycle, credentials, Git, worktree, setup, attributes, rekey, audit, migrate, agent, fd-relative FS (module map in `main.rs`) |
+| Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-rs/src/*.rs`: filters, lifecycle, credentials, Git, worktree, setup, attributes, rekey, journal (setup record, rekey journal), audit, migrate, agent, fd-relative FS (module map in `main.rs`) |
 | Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` and `V3Policy/*.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
 | Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle,Snapshot,Objects,EndToEnd}.lean` |
@@ -418,7 +418,7 @@ release archives). Documentation-only pushes run nothing.
    provenance); faster Bash bulk operations; external review R-01.
    When either client changes, run the suites
    (`tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`,
-   `tests/v3/conformance/lifecycle.sh`; the last takes about 40 minutes in
+   `tests/v3/conformance/lifecycle.sh`; the last takes about 65 minutes in
    full, `LIFECYCLE_FAULTS=quick` checks every third fault point, as CI
    does).
 
