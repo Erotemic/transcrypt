@@ -313,7 +313,7 @@ Bash 5.2):
 - `cargo test --workspace` (Rust, all suites incl. `portable_vectors.rs`),
   `cargo clippy --workspace --all-targets -D warnings`;
 - `python3 tests/v3/reference/portable_vectors.py` (independent vectors);
-- `bash tests/v3/bash/test_reference.sh` (25 checks, Bash alone);
+- `bash tests/v3/bash/test_reference.sh` (28 checks, Bash alone);
 - `bash tests/v3/conformance/run.sh` (30 checks, Bash vs Rust);
 - `bash proofs/aeneas/build-v3-tracked.sh`, `check-v3-axioms.sh` (207
   theorems, standard axioms only), `v3_snapshot.py verify`.
@@ -335,7 +335,7 @@ Bash 5.2):
 | --- | --- | --- | --- |
 | Config, records, key-check value, stored key file | identical bytes | identical bytes | vectors; conformance 1, 16 |
 | `init` (patterns, quoting, macro), `protect`, `unprotect` | yes | yes | bash 5, 15; conformance |
-| `unlock` (+hydrate), `lock` (all worktrees), `hydrate`, `status`, `doctor`, `install`/`uninstall` | yes | yes (`unlock` installs) | bash 10, 11, 17, 18 |
+| `unlock` (+hydrate), `lock` (all worktrees; refuses untracked, conflicted or stale-key plaintext), `hydrate`, `status`, `doctor`, `install`/`uninstall` | yes | yes (`unlock` installs) | bash 10, 11, 17, 18, 25 |
 | clean/smudge semantics (locked, stale key, other configs) | yes | yes (+ long-running filter) | bash 10; conformance "stale key" |
 | `git diff`, merges (clean and conflicted, markers in plaintext) | yes | yes | bash 6, 12; conformance merges |
 | `pre-commit`: seal plaintext staged around the filter, re-encrypt `git mv`, refuse copied/foreign records, no laundering | yes | yes | bash 7–9; conformance renames |
@@ -353,9 +353,10 @@ Known shared limitation: an empty protected file makes `git merge` stop with
 `fatal: stash failed` (a Git bug with any clean filter mapping empty to
 non-empty content); both clients' `doctor` name such files.
 
-An independent adversarial review of the Bash client (2026-11-11) found four
-defects, all fixed with regression tests (H-78 to H-81 in the
-[security review](V3-SECURITY-REVIEW.md)). Bash performance, 100 protected
+Two independent adversarial reviews of the Bash client (2026-11-11) found
+ten divergences from Rust, all fixed with regression tests (H-78 to H-87 in
+the [security review](V3-SECURITY-REVIEW.md)); the second found no way for
+hostile history to pass the Bash hooks where Rust's refuse. Bash performance, 100 protected
 and 200 other files: `git status` 0.1 s, checkout of 10 protected files
 1.4 s, `lock`/`unlock` about 20 s, `audit HEAD` 13 s (Rust: under 1 s each).
 

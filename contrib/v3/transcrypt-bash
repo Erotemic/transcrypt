@@ -598,8 +598,12 @@ tc_store_key() {
 # authenticate (stale or damaged).
 tc_try_key() {
 	local file hex digest
+	TC_KEY=''
 	file=$(tc_key_file)
 	[[ -f $file && ! -L $file ]] || return 1
+	# One read: the hex and the digest come from the same bytes.
+	cp -- "$file" "$TC_TMP/key-file" || return 1
+	file=$TC_TMP/key-file
 	hex=$(tc_file_hex "$file")
 	((${#hex} == 128)) && return 1
 	((${#hex} == 316)) || return 2
@@ -635,6 +639,10 @@ tc_key_cache_load() {
 	[[ -f $file && ! -L $file ]] || return 1
 	read -r v digest zero dc df <"$file" || return 1
 	[[ $v == v1 && $digest == "$1" && ${#zero} -eq 32 && ${#dc} -eq 32 && ${#df} -eq 32 ]] || return 1
+	# One CMAC confirms the cache was computed with this very key.
+	tc_hex_bytes 00000000000000000000000000000000 >"$TC_TMP/s2v-zero"
+	tc_cmac_file "$TC_TMP/s2v-zero"
+	[[ $TC_RESULT == "$zero" ]] || return 1
 	TC_S2V_CACHE[zero]=$zero
 	TC_S2V_CACHE[$TC_CONFIG_DOMAIN$'\n'${TC_CONFIG_HEX:0:78}]=$dc
 	TC_S2V_CACHE[$TC_FILE_DOMAIN$'\n'$TC_CONFIG_HEX]=$df
@@ -775,7 +783,7 @@ tc_macro_resolves() {
 	rm -f -- "$TC_TMP/probe-index"
 	{
 		printf '100644 %s 0\ttranscrypt-v3-probe/.gitattributes\0' "$rules"
-		[[ -n $top ]] && printf '100644 %s 0\t.gitattributes\0' "$top"
+		if [[ -n $top ]]; then printf '100644 %s 0\t.gitattributes\0' "$top"; fi
 	} | GIT_INDEX_FILE=$TC_TMP/probe-index git update-index -z --index-info || tc_fail 'cannot build the probe index'
 	value=$(printf 'transcrypt-v3-probe/probe\0' |
 		GIT_INDEX_FILE=$TC_TMP/probe-index git -c core.ignorecase=false check-attr --cached -z --stdin filter |
@@ -932,6 +940,15 @@ tc_smudge() {
 # Check (and with $1=repair, repair local changes in) the staged index.
 tc_check_index() {
 	local repair=$1 i path oid mode count=0 keyless=0 sealed=0 rebound=0 progress=0 state=0
+	tc_repo
+	if [[ ! -e $TC_ROOT/.transcrypt && ! -L $TC_ROOT/.transcrypt && -z $(git ls-files -- .transcrypt/config) ]]; then
+		# A branch from before v3 was set up: fine while nothing is protected.
+		tc_read_index
+		tc_index_paths_file "$TC_TMP/index-paths"
+		tc_selected "$TC_TMP/index-paths" --cached
+		((${#TC_SELECTED[@]} == 0)) || tc_fail "${!TC_SELECTED[*]} would be protected, but this branch has no .transcrypt/config"
+		return 0
+	fi
 	tc_load_config
 	tc_try_key || state=$?
 	((state == 2)) && tc_fail 'the stored key does not match .transcrypt/config; run `transcrypt-bash unlock`'
@@ -956,20 +973,24 @@ tc_check_index() {
 	# not the config differ from both, was checked when it was committed;
 	# it gets the keyless envelope check (the Rust hook's rule, A24).
 	local incremental=0
-	local -A parent_oid=()
-	if ((repair)); then
-		if git rev-parse -q --verify 'HEAD^1^{tree}' >/dev/null 2>&1; then
-			tc_read_tree_listing 'HEAD^1'
-			for path in "${!TC_HEAD_OID[@]}"; do parent_oid[$path]=${TC_HEAD_MODE[$path]}:${TC_HEAD_OID[$path]}; done
-			tc_policy "$TC_TMP/policy-parent"
-			tc_read_tree_listing HEAD
+	local -A parent_oid=() parent_by_oid=()
+	if git rev-parse -q --verify 'HEAD^1^{tree}' >/dev/null 2>&1; then
+		tc_read_tree_listing 'HEAD^1'
+		for path in "${!TC_HEAD_OID[@]}"; do
+			parent_oid[$path]=${TC_HEAD_MODE[$path]}:${TC_HEAD_OID[$path]}
+			parent_by_oid[${TC_HEAD_OID[$path]}]+=$path$'\x1f'
+		done
+		tc_policy "$TC_TMP/policy-parent"
+		tc_read_tree_listing HEAD
+		if ((repair)); then
 			tc_policy "$TC_TMP/policy-head"
 			tc_policy "$TC_TMP/policy-index" index
 			cmp -s "$TC_TMP/policy-parent" "$TC_TMP/policy-head" &&
 				cmp -s "$TC_TMP/policy-head" "$TC_TMP/policy-index" && incremental=1
 		fi
+	else
+		tc_read_tree_listing HEAD
 	fi
-	((incremental)) || tc_read_tree_listing HEAD
 	# Unprotected files staged since HEAD: no record of this config may be
 	# stored where nothing decrypts it (a `git mv` to an unprotected name),
 	# and a file encrypted in HEAD or HEAD^1 that another named filter now
@@ -981,8 +1002,17 @@ tc_check_index() {
 		index_paths_by_oid[${TC_IDX_OID[i]}]+=$path$'\x1f'
 		[[ -z ${TC_SELECTED[$path]-} ]] || continue
 		[[ ${TC_IDX_MODE[i]} == 100644 || ${TC_IDX_MODE[i]} == 100755 ]] || continue
-		[[ ${TC_HEAD_OID[$path]-} == "${TC_IDX_OID[i]}" ]] && continue
 		tc_reserved_path "$path" && continue
+		if [[ ${TC_HEAD_OID[$path]-} == "${TC_IDX_OID[i]}" ]]; then
+			# Held by HEAD: with the key, a record there must open there
+			# (the incremental hook trusts HEAD, as the Rust hook does).
+			if ((!incremental)) && [[ -n $TC_KEY ]] && tc_blob_is_record "${TC_IDX_OID[i]}" "$TC_CONFIG_ID"; then
+				tc_blob "${TC_IDX_OID[i]}" "$TC_TMP/unprotected-record"
+				tc_open_record "$path" "$TC_TMP/unprotected-record" "$TC_TMP/unprotected-plain" ||
+					tc_fail "$path holds a v3 record of this config that does not open there (forged, or moved to an unprotected name)"
+			fi
+			continue
+		fi
 		if tc_blob_is_record "${TC_IDX_OID[i]}" "$TC_CONFIG_ID"; then
 			tc_fail "$path holds a v3 record but is not protected, so nothing would decrypt it (a \`git mv\` to an unprotected name?); move it back, protect the new name, or stage its plaintext"
 		fi
@@ -1002,9 +1032,8 @@ tc_check_index() {
 		oid=${TC_IDX_OID[i]}
 		tc_require_path "$path"
 		[[ $mode == 100644 || $mode == 100755 ]] || tc_fail "protected path is not a regular file (mode $mode): $path"
-		if ((incremental)) && [[ ${TC_HEAD_OID[$path]-} == "$oid" && ${parent_oid[$path]-} == "$mode:$oid" ]]; then
-			git cat-file blob "$oid" | head -c "$TC_FILE_MIN" >"$TC_TMP/settled-prefix" || tc_fail "cannot read Git object $oid"
-			[[ $(tc_record_id "$TC_TMP/settled-prefix") == "$TC_CONFIG_ID" ]] ||
+		if ((incremental)) && [[ ${TC_HEAD_OID[$path]-} == "$oid" && ${TC_HEAD_MODE[$path]-} == "$mode" && ${parent_oid[$path]-} == "$mode:$oid" ]]; then
+			tc_blob_is_record "$oid" "$TC_CONFIG_ID" ||
 				tc_fail "$path is committed without encryption (or under another config) in HEAD; re-add it and commit"
 			continue
 		fi
@@ -1047,7 +1076,8 @@ tc_check_index() {
 			# Locked: records of this config only, never one moved here.
 			tc_envelope_ok "$TC_TMP/staged-blob" "$TC_CONFIG_ID" || tc_fail "$path: not a v3 record of this config, and this checkout is locked; unlock to encrypt it"
 			if [[ ${TC_HEAD_OID[$path]-} != "$oid" ]] &&
-				[[ -n ${TC_HEAD_BY_OID[$oid]-} || ${index_paths_by_oid[$oid]} != "$path"$'\x1f' ]]; then
+				[[ -n ${TC_HEAD_BY_OID[$oid]-} || ${index_paths_by_oid[$oid]} != "$path"$'\x1f' ||
+					(-n ${parent_by_oid[$oid]-} && ${parent_oid[$path]-} != "$mode:$oid") ]]; then
 				tc_fail "$path holds a record committed or staged at another path; unlock to re-encrypt it for its new name"
 			fi
 			keyless=$((keyless + 1))
@@ -1196,18 +1226,42 @@ tc_hydrate() {
 	[[ ${1-} == quiet ]] || tc_log "decrypted $count protected file(s) in the worktree"
 }
 
-# Replace this worktree's protected plaintext with the staged records,
-# refusing first if any has uncommitted changes.
+# The worktrees of this repository into file $1 ("worktree PATH", NUL
+# separated). Git before 2.36 has no `-z`: one field per line there.
+tc_worktrees() {
+	if ! git worktree list --porcelain -z >"$1" 2>/dev/null; then
+		git worktree list --porcelain | tr '\n' '\0' >"$1" || printf 'worktree %s\0' "$TC_ROOT" >"$1"
+	fi
+}
+
+# Lock this worktree. $1: `check` (refuse or succeed, change nothing),
+# `apply` (replace protected plaintext with the staged records) or
+# `encrypted` (no key: succeed only if no protected plaintext is left).
+# Refused in every mode: an unmerged protected file, an untracked one, and
+# (with the key) a protected file with uncommitted changes.
 tc_flush() {
-	local i path file oid n=0
+	local mode=$1 i path file oid n=0
 	local -a targets=() records=() paths=()
+	git ls-files --others -z >"$TC_TMP/untracked" || tc_fail 'cannot list untracked files'
+	tc_selected "$TC_TMP/untracked"
+	((${#TC_SELECTED[@]} == 0)) ||
+		tc_fail "untracked protected file(s) ${!TC_SELECTED[*]} would stay plaintext; add (encrypt) or remove them before locking"
 	tc_read_index
 	tc_index_paths_file "$TC_TMP/flush-paths"
+	for i in "${!TC_IDX_PATH[@]}"; do
+		[[ ${TC_IDX_STAGE[i]} == 0 ]] || printf '%s\0' "${TC_IDX_PATH[i]}" >>"$TC_TMP/flush-paths"
+	done
 	tc_selected "$TC_TMP/flush-paths" --cached
 	for i in "${!TC_IDX_PATH[@]}"; do
 		path=${TC_IDX_PATH[i]}
-		[[ ${TC_IDX_STAGE[i]} == 0 && -n ${TC_SELECTED[$path]-} ]] || continue
+		[[ -n ${TC_SELECTED[$path]-} ]] || continue
+		[[ ${TC_IDX_STAGE[i]} == 0 ]] || tc_fail "$path is unmerged (conflict); resolve and commit it before locking"
 		file=$(tc_worktree_file "$path") || continue
+		if [[ $mode == encrypted ]]; then
+			tc_envelope_ok "$file" "$TC_CONFIG_ID" ||
+				tc_fail "$path holds plaintext, but there is no key to encrypt it; unlock with the current passphrase, then lock"
+			continue
+		fi
 		oid=${TC_IDX_OID[i]}
 		tc_blob "$oid" "$TC_TMP/flush-record-$n"
 		if cmp -s "$file" "$TC_TMP/flush-record-$n"; then continue; fi
@@ -1220,6 +1274,7 @@ tc_flush() {
 		paths+=("$path")
 		n=$((n + 1))
 	done
+	[[ $mode == apply ]] || return 0
 	: >"$TC_TMP/flushed-paths"
 	for i in "${!targets[@]}"; do
 		cat "${records[i]}" >"${targets[i]}"
@@ -1473,17 +1528,28 @@ tc_cmd_lock() {
 	local state=0 file entry wt
 	tc_try_key || state=$?
 	file=$(tc_key_file)
+	tc_worktrees "$TC_TMP/worktrees"
+	local -a others=()
+	while IFS= read -r -d '' entry; do
+		[[ $entry == 'worktree '* ]] || continue
+		wt=${entry#worktree }
+		[[ $wt == "$TC_ROOT" || ! -d $wt ]] || others+=("$wt")
+	done <"$TC_TMP/worktrees"
+	local pass
 	if ((state == 0)); then
-		# Every linked worktree first, so a refusal changes nothing.
-		git worktree list --porcelain -z >"$TC_TMP/worktrees" 2>/dev/null || printf 'worktree %s\0' "$TC_ROOT" >"$TC_TMP/worktrees"
-		while IFS= read -r -d '' entry; do
-			[[ $entry == 'worktree '* ]] || continue
-			wt=${entry#worktree }
-			[[ $wt == "$TC_ROOT" ]] && continue
-			[[ -d $wt ]] || continue
-			(cd -- "$wt" && "$TC_SCRIPT" flush) || tc_fail "cannot lock the worktree at $wt"
-		done <"$TC_TMP/worktrees"
-		tc_flush
+		# Every worktree is checked before any is changed.
+		for pass in check apply; do
+			for wt in "${others[@]}"; do
+				(cd -- "$wt" && "$TC_SCRIPT" flush "--$pass") || tc_fail "cannot lock the worktree at $wt"
+			done
+			tc_flush "$pass"
+		done
+	else
+		# No usable key: the key may go only if no plaintext is left.
+		for wt in "${others[@]}"; do
+			(cd -- "$wt" && "$TC_SCRIPT" flush --encrypted) || tc_fail "cannot lock the worktree at $wt"
+		done
+		tc_flush encrypted
 	fi
 	[[ ! -L $file ]] || tc_fail 'refusing a symlinked key path'
 	rm -f -- "$file" "$(tc_key_cache_file)"
@@ -2187,8 +2253,12 @@ tc_main() {
 	lock) tc_cmd_lock ;;
 	flush)
 		tc_load_config
-		tc_require_key
-		tc_flush
+		case ${1-} in
+		--check) tc_require_key && tc_flush check ;;
+		--apply) tc_require_key && tc_flush apply ;;
+		--encrypted) tc_flush encrypted ;;
+		*) tc_fail 'flush takes --check, --apply or --encrypted' ;;
+		esac
 		;;
 	protect) tc_cmd_protect "$@" ;;
 	unprotect) tc_cmd_unprotect "$@" ;;

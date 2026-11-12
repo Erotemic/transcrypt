@@ -296,6 +296,62 @@ if (cd "$SCRATCH/policy.git" && "$CLI" audit --max-commits=1 master >/dev/null 2
 ok 'audit runs in a bare repository; --max-commits refuses larger ranges'
 
 # ---------------------------------------------------------------------------
+# lock, configless branches and forged unprotected records (second review).
+# ---------------------------------------------------------------------------
+newrepo lock2
+printf 'pub\n' >pub.txt
+git add pub.txt
+git commit -qm before-v3
+printf 'SECRET=1\n' >secret.env
+git add secret.env
+git commit -qm secret
+printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.env' 2>/dev/null
+git commit -qm v3
+# Untracked and unmerged protected plaintext block lock; nothing changes.
+printf 'new\n' >new.env
+if "$CLI" lock 2>/dev/null; then die 'lock with an untracked protected file'; fi
+[[ -e .git/transcrypt-v3/key && $(cat secret.env) == SECRET=1 ]] || die 'refused lock changed something'
+rm new.env
+git checkout -q -b side
+printf 'SECRET=side\n' >secret.env
+git commit -qam side
+git checkout -q master
+printf 'SECRET=master\n' >secret.env
+git commit -qam master
+git merge -q side >/dev/null 2>&1 || true
+if "$CLI" lock 2>/dev/null; then die 'lock with a conflicted protected file'; fi
+git merge --abort
+# A stale key (the config changed) cannot lock away plaintext.
+cp .transcrypt/config "$SCRATCH/cfg"
+printf 'rekey passphrase number two\n' | "$CLI" rekey --password-stdin 2>/dev/null
+git reset -q --hard HEAD
+cp "$SCRATCH/cfg" .transcrypt/config
+printf 'rekey passphrase number two\n' | "$CLI" unlock --password-stdin --no-hydrate 2>/dev/null || true
+git checkout -q -- .transcrypt/config
+if "$CLI" lock 2>/dev/null && [[ $(cat secret.env) == SECRET=master ]]; then die 'a stale key locked away plaintext'; fi
+printf '%s\n' "$PASSPHRASE" | "$CLI" unlock --password-stdin 2>/dev/null
+"$CLI" lock 2>/dev/null
+[[ $(head -c 4 secret.env) == TV3F ]] || die 'lock after unlock'
+printf '%s\n' "$PASSPHRASE" | "$CLI" unlock --password-stdin 2>/dev/null
+ok 'lock refuses untracked, conflicted and stale-key plaintext without changing anything'
+# A branch from before v3 still commits files nothing protects.
+git checkout -q -b pre HEAD~3
+printf 'more\n' >>pub.txt
+git commit -qam 'unprotected edit before v3' || die 'commit on a pre-v3 branch'
+git checkout -q master
+ok 'commits on a branch from before init are accepted when nothing is protected'
+# A forged record at an unprotected path that HEAD holds fails verify-index.
+{ head -c 22 secret.env 2>/dev/null; git show HEAD:secret.env | head -c 22; } >/dev/null
+git show HEAD:secret.env | head -c 22 >"$SCRATCH/forged"
+head -c 40 /dev/urandom >>"$SCRATCH/forged"
+oid=$(git hash-object -w --no-filters "$SCRATCH/forged")
+git update-index --add --cacheinfo "100644,$oid,notes.bak"
+git -c core.hooksPath=/dev/null commit -qm forged
+if "$CLI" verify-index 2>/dev/null; then die 'a forged record at an unprotected path passed verify-index'; fi
+git reset -q --hard HEAD~1
+ok 'verify-index authenticates records at unprotected paths'
+
+# ---------------------------------------------------------------------------
 # v2 migration (needs the repository's Bash v2 script).
 # ---------------------------------------------------------------------------
 V2=$SOURCE_ROOT/transcrypt

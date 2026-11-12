@@ -411,8 +411,9 @@ release archives). Documentation-only pushes run nothing.
 0. **Dual clients (2026-11-11).** Profiles and the portable Bash client
    are done (see the update at the top). Next for that campaign: see CI
    pass the Bash and conformance jobs on Ubuntu 22.04 (OpenSSL 3.0.2) and
-   macOS (BSD utilities); a second independent review of the Bash client
-   after H-78 to H-81; faster Bash bulk operations; external review R-01.
+   macOS (BSD utilities); the shared limitations listed at the end of
+   section 8 of the security review (tags to trees, `--squash`/`-n`
+   provenance); faster Bash bulk operations; external review R-01.
    When either client changes, run both suites
    (`tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`).
 

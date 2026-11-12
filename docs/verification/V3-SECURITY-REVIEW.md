@@ -359,6 +359,29 @@ as set; the locked moved-record check also considers other index paths.
 Not changed (same in Rust, outside the publication threat): a merge driver
 input that is an empty blob counts as empty plaintext.
 
+**Second round (same day, after the fixes).** A second independent review
+focused on the incremental pre-commit rule, the verified-key cache,
+interrupted transactions, merge/rebase flows and push edge cases. It found
+no way for attacker-supplied history to pass the Bash hooks where the Rust
+hooks refuse; the incremental rule matched Rust's. Six divergences, all
+fixed with regression tests:
+
+| ID | Severity | Finding | Fix |
+| --- | --- | --- | --- |
+| H-82 | Medium (local privacy) | `lock`/`uninstall` with a stale key (the config changed, e.g. a rekey from another worktree) deleted the key and reported success while plaintext remained. | Without a usable key, lock succeeds only if every worktree already holds ciphertext; otherwise it refuses and keeps the key. |
+| H-83 | Medium (local privacy) | `lock` left conflicted and untracked protected files in plaintext. | Refused, in every worktree, before anything changes (all worktrees are checked, then all flushed). |
+| H-84 | Low | Locked, an amend could commit a record of `HEAD^1` at another path. | The locked moved-record check covers `HEAD^1`. |
+| H-85 | Low | A race between the two reads of the key file could pair the old key with the new file's cached values (records then refused by the hook). | The key file is read once; the cache is checked against one CMAC of the key. |
+| H-86 | Low (usability) | Commits on a branch from before `init` were refused. | Accepted when nothing is protected, as in Rust. |
+| H-87 | Low | `verify-index` did not authenticate records of the config at unprotected paths that `HEAD` holds; settled entries' mode and size bound were not checked. | Full checks open such records at their path; settled entries need the same mode and a bounded record. |
+
+Shared with the Rust client and not changed (documented limitations): a
+tag pointing at a tree or blob is pushed unaudited; an empty blob on a merge
+side counts as empty plaintext; `git merge --squash`, `cherry-pick -n` and
+`restore -s` leave no in-progress marker, so their staged content counts as
+a local change for the pre-commit repair; `--not --remotes=NAME` trusts
+fetched tracking refs even when `pushurl` differs.
+
 **Profiles.** Examined: downgrade by editing the committed profile byte
 (refused: the byte is in the authenticated prefix, and a relabelled config
 does not authenticate under the passphrase, `config_profile_bound`);
