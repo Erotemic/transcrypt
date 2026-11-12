@@ -5,8 +5,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     ffi::OsString,
-    io::{self, BufRead, Read},
-    path::{Path, PathBuf},
+    io::{self, BufRead, Read, Write},
     process::Stdio,
     rc::Rc,
 };
@@ -14,10 +13,10 @@ use crate::{
     attributes::split_lines,
     credential::Key,
     git::{changed_files, Changes, PathBlob, CONFIG_PATH, config_blob, git, git_blob, git_command, is_attributes_path, paths_of, protected_flags,
-        push_index_record, read_record, tree_files, Attributes, Mode, ObjectId, Repository, Staged, SHORT_OUTPUT_LIMIT},
+        read_record, tree_files, Attributes, ObjectId, Policy, Repository, Staged},
 };
 use transcrypt_v3_core::{
-    commit_needs_no_key, commit_verdict, is_object_id, push_admission, PushAdmission, is_reserved_path, AuditBase, AuditRefusal, AuditedEntries, AuditedEntry,
+    commit_needs_no_key, commit_verdict, is_object_id, authenticated_push_required, push_admission, PushAdmission, PushSetting, is_reserved_path, AuditBase, AuditRefusal, AuditedEntries, AuditedEntry,
     StagedEvidence, StagedRefusal, ATTRIBUTES_NAME, ID_LEN,
 };
 
@@ -53,14 +52,36 @@ pub(crate) struct Audited {
 /// streamed from `rev-list`, and `max_commits` bounds the work a hostile
 /// push can demand of a server hook.
 pub(crate) fn audit(repo: &Repository, revs: &[OsString], keyed: bool, max_commits: Option<usize>) -> Result<Audited, String> {
+    audit_excluding(repo, revs, &[], keyed, max_commits)
+}
+
+/// `audit` of `revs` without the commits reachable from `excluded` (passed
+/// to `rev-list --stdin`, so their number is not bounded by the command
+/// line).
+fn audit_excluding(repo: &Repository, revs: &[OsString], excluded: &[String], keyed: bool, max_commits: Option<usize>)
+    -> Result<Audited, String>
+{
     let mut command = git_command(repo);
     command.args(["rev-list", "--reverse", "--parents"]);
     if revs.is_empty() { command.arg("HEAD"); } else { command.args(revs); }
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    if !excluded.is_empty() { command.arg("--stdin"); }
+    let stdin = if excluded.is_empty() { Stdio::null() } else { Stdio::piped() };
+    command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command.spawn().map_err(|e| format!("cannot run git rev-list: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // rev-list reads all of its input before it prints anything.
+        let lines: String = excluded.iter().map(|oid| format!("^{oid}\n")).collect();
+        let written = stdin.write_all(lines.as_bytes());
+        drop(stdin);
+        if written.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cannot write to git rev-list".into());
+        }
+    }
     let stdout = child.stdout.take().ok_or("git rev-list output pipe missing")?;
     let mut lines = io::BufReader::new(stdout);
-    let mut state = AuditState::new(repo.git_dir());
+    let mut state = AuditState::new();
     let result = (|| -> Result<(), String> {
         let mut line = Vec::new();
         loop {
@@ -105,8 +126,8 @@ struct AuditState {
 }
 
 impl AuditState {
-    /// Nothing audited yet; the policy index is a temporary file in `git_dir`.
-    fn new(git_dir: &Path) -> AuditState {
+    /// Nothing audited yet; the policy index is made on first use.
+    fn new() -> AuditState {
         AuditState {
             authenticated: true,
             commits: 0,
@@ -114,7 +135,7 @@ impl AuditState {
             configs: HashMap::new(),
             commit_configs: HashMap::new(),
             commit_attributes: HashMap::new(),
-            policy: AttributeIndex { file: git_dir.join(format!("transcrypt-v3-audit-{}.index", std::process::id())), files: None },
+            policy: AttributeIndex { policy: None },
             checked: HashSet::new(),
         }
     }
@@ -143,38 +164,32 @@ fn attribute_files(entries: &[Staged]) -> AttributeFiles {
         .map(|e| PathBlob { path: e.path.clone(), oid: e.oid.clone() }).collect()
 }
 
-/// A temporary index holding exactly one commit's `.gitattributes` files,
-/// so that `git check-attr --cached` answers with that commit's policy (on
-/// every Git version, and in a bare repository).
+/// A policy index holding exactly one commit's `.gitattributes` files, so
+/// that `git check-attr --cached` answers with that commit's policy (on
+/// every Git version, and in a bare repository): from those files alone
+/// and with every local attribute source, combined by the verified
+/// `admission_selected` (`Attributes::Index`).
 struct AttributeIndex {
-    file: PathBuf,
-    files: Option<Rc<AttributeFiles>>,
+    policy: Option<Policy>,
 }
 
 impl AttributeIndex {
-    fn protected(&mut self, repo: &Repository, files: &Rc<AttributeFiles>, paths: &[&[u8]]) -> Result<Vec<bool>, String> {
-        if self.files.as_ref() != Some(files) {
-            let _ = std::fs::remove_file(&self.file);
-            self.files = None;
-            if !files.is_empty() {
-                let mut info = Vec::new();
-                for file in files.iter() { push_index_record(&mut info, Mode::REGULAR, &file.oid, &file.path); }
-                let mut command = git_command(repo);
-                command.env("GIT_INDEX_FILE", &self.file).args(["update-index", "-z", "--index-info"]);
-                let finished = crate::git::run_bounded_status(command, Some(&info), SHORT_OUTPUT_LIMIT)?;
-                if !finished.status.success() {
-                    return Err(format!("cannot read a commit's .gitattributes: {}", String::from_utf8_lossy(&finished.errors)));
-                }
-            }
-            self.files = Some(files.clone());
-        }
-        protected_flags(repo, paths, Attributes::Index(&self.file))
+    /// The policy index, holding `files`.
+    fn load(&mut self, repo: &Repository, files: &AttributeFiles) -> Result<&Policy, String> {
+        if self.policy.is_none() { self.policy = Some(Policy::new(repo)?); }
+        let policy = self.policy.as_mut().ok_or("internal error: no policy index")?;
+        policy.load_files(files)?;
+        Ok(policy)
     }
-}
 
-impl Drop for AttributeIndex {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.file);
+    fn protected(&mut self, repo: &Repository, files: &AttributeFiles, paths: &[&[u8]]) -> Result<Vec<bool>, String> {
+        let policy = self.load(repo, files)?;
+        protected_flags(repo, paths, Attributes::Index(policy))
+    }
+
+    /// The policy index last loaded (by `protected`).
+    fn loaded(&self) -> Result<&Policy, String> {
+        self.policy.as_ref().ok_or_else(|| "internal error: no policy index".into())
     }
 }
 
@@ -300,7 +315,7 @@ fn check_policy(repo: &Repository, policy: &AttributeIndex, commit: &str, attrib
         }
     }
     // The policy index holds this commit's attributes (loaded by the caller).
-    if let Some(problem) = crate::git::marked_unfiltered(repo, paths, Attributes::Index(&policy.file))? {
+    if let Some(problem) = crate::git::marked_unfiltered(repo, paths, Attributes::Index(policy.loaded()?))? {
         return Err(format!("commit {commit}: {problem}"));
     }
     Ok(())
@@ -316,7 +331,7 @@ fn check_drift(repo: &Repository, policy: &AttributeIndex, commit: &str, id: &[u
     for (entry, old) in was_record {
         if is_record(old)? && !is_record(&entry.oid)? { drifted.push(entry.path.as_slice()); }
     }
-    let values = crate::git::filter_values(repo, &drifted, Attributes::Index(&policy.file))?;
+    let values = crate::git::filter_values(repo, &drifted, Attributes::Index(policy.loaded()?))?;
     if let Some((path, value)) = drifted.iter().zip(values).find(|(_, v)| crate::git::other_filter(v)) {
         return Err(format!("{}: was encrypted, and is now stored unencrypted for the filter `{}`; a \
             .gitattributes rule (e.g. from `git lfs track`) overrides `transcrypt`", at(commit, path),
@@ -506,7 +521,7 @@ fn moved_away(here: &str, from: &str) -> String {
 /// The pre-push hook: audit every commit being pushed that the remote does
 /// not already have. Git supplies `<local ref> SP <local oid> SP <remote
 /// ref> SP <remote oid>` lines on stdin.
-pub(crate) fn pre_push(repo: &Repository) -> Result<(), String> {
+pub(crate) fn pre_push(repo: &Repository, url: Option<&std::ffi::OsStr>) -> Result<(), String> {
     // Never silently drop refs: oversized input is refused, not truncated.
     let input = read_record(io::stdin()).map_err(|_| "cannot read pre-push input")?;
     let mut revs: Vec<OsString> = Vec::new();
@@ -539,41 +554,47 @@ pub(crate) fn pre_push(repo: &Repository) -> Result<(), String> {
         }
     }
     if revs.is_empty() { return Ok(()); }
-    // Only the remote's own commits of the updated refs bound the range: a
-    // remote-tracking ref is a local ref anyone can point at an unaudited
-    // commit, and no evidence that the remote has it (H-98).
-    let audited = audit(repo, &revs, true, None)
+    // Only the remote's own answers bound the range: its commits of the
+    // updated refs, and every commit it advertises (`ls-remote`), which Git
+    // does not send. A remote-tracking ref is a local ref anyone can point
+    // at an unaudited commit, and no evidence that the remote has it (H-98).
+    let advertised = url.map(|url| crate::git::remote_commits(repo, url)).unwrap_or_default();
+    let audited = audit_excluding(repo, &revs, &advertised, true, None)
         .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-rs audit`"))?;
-    // Some records may have been checked for their envelope only: this
-    // checkout is locked, or the pushed history holds a configuration it
-    // has no key for (before a rekey). Say so, and refuse when the
-    // repository asks for authenticated pushes.
-    let unchecked = "the pushed history's records were checked for their v3 envelope only, not \
-        authenticated: this checkout is locked or has no key for an older configuration";
-    let required = !audited.authenticated && require_authenticated_push(repo);
+    // Some new or changed records may have been checked for their envelope
+    // only: this checkout is locked, or the pushed history holds a
+    // configuration it has no key for (before a rekey). An envelope is no
+    // authentication (plaintext appended to a record keeps it), so such a
+    // push is refused unless the repository explicitly opts out.
+    let missing = "some new or changed protected records in the pushed history could not be \
+        authenticated: no key here for their configuration (this checkout is locked, or they predate a rekey)";
+    let required = authenticated_push_required(push_setting(repo));
     match push_admission(audited.authenticated, required) {
         PushAdmission::Admit => Ok(()),
-        PushAdmission::Refuse => Err(format!("{unchecked}, and {REQUIRE_AUTHENTICATED_PUSH} is set\nrefusing to \
-            push; unlock, or run `transcrypt-rs audit` with the key of every configuration pushed")),
+        PushAdmission::Refuse => Err(format!("{missing}\nrefusing to push; unlock and push again (to publish them \
+            checked by their envelope only, which accepts a record with plaintext appended: \
+            `git -c {REQUIRE_AUTHENTICATED_PUSH}=false push ...`)")),
         PushAdmission::Warn => {
-            eprintln!("transcrypt-rs: warning: {unchecked}; set `git config {REQUIRE_AUTHENTICATED_PUSH} true` \
-                to refuse such pushes");
+            eprintln!("transcrypt-rs: warning: {missing}; they were checked by their envelope only, because \
+                {REQUIRE_AUTHENTICATED_PUSH} is false");
             Ok(())
         },
     }
 }
 
-/// The Git setting that makes the pre-push hook refuse a push whose
-/// records it could not all authenticate with the key.
+/// The Git setting that, set to false, lets the pre-push hook admit
+/// records it could not authenticate (checked by envelope only).
 pub(crate) const REQUIRE_AUTHENTICATED_PUSH: &str = "transcrypt.requireAuthenticatedPush";
 
-/// Whether `REQUIRE_AUTHENTICATED_PUSH` is true in any config scope. A
-/// value Git cannot read as a boolean counts as true: a misspelt setting
-/// must not silently weaken the check.
-fn require_authenticated_push(repo: &Repository) -> bool {
+/// `REQUIRE_AUTHENTICATED_PUSH` in any config scope (`git -c` included): a
+/// value Git reads as boolean false disables; a value it cannot read as a
+/// boolean counts as enabled, so a misspelt setting never weakens the check.
+fn push_setting(repo: &Repository) -> PushSetting {
     match git(repo, &["config", "--get", REQUIRE_AUTHENTICATED_PUSH]) {
-        Err(_) => false,
-        Ok(_) => git(repo, &["config", "--bool", "--get", REQUIRE_AUTHENTICATED_PUSH])
-            .map_or(true, |value| value.trim_ascii_end() != b"false"),
+        Err(_) => PushSetting::Unset,
+        Ok(_) => match git(repo, &["config", "--bool", "--get", REQUIRE_AUTHENTICATED_PUSH]) {
+            Ok(value) if value.trim_ascii_end() == b"false" => PushSetting::Disabled,
+            _ => PushSetting::Enabled,
+        },
     }
 }

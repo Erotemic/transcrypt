@@ -180,6 +180,35 @@ fn git_command_in(dir: Option<&Path>) -> Command {
     command
 }
 
+/// The commits the remote at `url` advertises (`git ls-remote`, its refs
+/// and their peeled tags) that this repository has, by id: what Git's push
+/// to it does not send (A30). The remote's own answer, never a local ref.
+/// Empty when it cannot be asked without a prompt (offline, credentials
+/// needed): then nothing is excluded.
+pub(crate) fn remote_commits(repo: &Repository, url: &std::ffi::OsStr) -> Vec<String> {
+    let mut command = git_command(repo);
+    command.env("GIT_TERMINAL_PROMPT", "0").args(["ls-remote", "--"]).arg(url);
+    let Ok(listing) = output(command) else { return Vec::new() };
+    let mut request = Vec::new();
+    for line in listing.split(|b| *b == b'\n') {
+        let Some(oid) = line.split(|b| *b == b'\t').next().filter(|oid| is_object_id(oid)) else { continue };
+        request.extend_from_slice(oid);
+        request.extend_from_slice(b"^{commit}\n");
+    }
+    if request.is_empty() { return Vec::new(); }
+    let mut command = git_command(repo);
+    command.args(["cat-file", "--batch-check=%(objectname) %(objecttype)"]);
+    let Ok(answer) = run_bounded(command, Some(&request), GIT_OUTPUT_LIMIT) else { return Vec::new() };
+    let mut commits: Vec<String> = answer.split(|b| *b == b'\n')
+        .filter_map(|line| line.strip_suffix(b" commit"))
+        .filter(|oid| is_object_id(oid))
+        .map(|oid| String::from_utf8_lossy(oid).into_owned())
+        .collect();
+    commits.sort();
+    commits.dedup();
+    commits
+}
+
 pub(crate) fn git(repo: &Repository, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let mut command = git_command(repo);
     command.args(arguments);

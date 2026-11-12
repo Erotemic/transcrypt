@@ -1314,50 +1314,189 @@ fn octopus_merges_check_every_incoming_commit() {
     run(&repo, bin(), &["verify-index"], None);
 }
 
-/// A push whose records the pre-push hook cannot all authenticate (history
-/// from before a rekey, whose key this checkout no longer has; or a locked
-/// checkout) passes with a warning that says only envelopes were checked,
-/// and is refused once `transcrypt.requireAuthenticatedPush` is set. A
-/// fully authenticated push says nothing; a setting Git cannot read as a
-/// boolean counts as set.
+/// A push whose new or changed records the pre-push hook cannot all
+/// authenticate (history from before a rekey, whose key this checkout no
+/// longer has; or a locked checkout) is refused by default (H-100), and
+/// with any value of `transcrypt.requireAuthenticatedPush` but an explicit
+/// false (a misspelt one included). Explicitly false, it passes with a
+/// warning that says only envelopes were checked. A fully authenticated
+/// push says nothing.
 #[test]
-fn pushes_checked_by_envelope_only_warn_or_refuse_when_required() {
+fn pushes_checked_by_envelope_only_are_refused_unless_explicitly_allowed() {
     let mut scratch = Scratch::new("strictpush");
     let repo = scratch.repo("repo");
-    for remote in ["origin", "fresh", "strict", "misspelt"] {
+    for remote in ["origin", "fresh", "strict", "misspelt", "weak"] {
         run(&scratch.root, "git", &["init", "-q", "--bare", &format!("{remote}.git")], None);
         run(&repo, "git", &["remote", "add", remote, &format!("../{remote}.git")], None);
     }
-    let push = |remote: &str, branch: &str|
-        exec(&repo, "git", &["push", "-q", remote, &format!("HEAD:refs/heads/{branch}")], None);
+    let push = |config: &[&str], remote: &str| {
+        let refspec = "HEAD:refs/heads/main";
+        let args: Vec<&str> = config.iter().copied().chain(["push", "-q", remote, refspec]).collect();
+        exec(&repo, "git", &args, None)
+    };
     let stderr = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).into_owned();
-    let out = push("origin", "main");
+    let refused = |out: &std::process::Output| !out.status.success() && stderr(out).contains("could not be authenticated")
+        && stderr(out).contains("unlock") && stderr(out).contains("refusing to push");
+    let out = push(&[], "origin");
     assert!(out.status.success() && !stderr(&out).contains("envelope only"), "{}", stderr(&out));
     // After a rekey, history new to `fresh` holds the old configuration,
     // whose key this checkout no longer has.
     run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
     run(&repo, "git", &["commit", "-qm", "rekey"], None);
-    let out = push("fresh", "main");
-    assert!(out.status.success() && stderr(&out).contains("envelope only")
-        && stderr(&out).contains("transcrypt.requireAuthenticatedPush"), "{}", stderr(&out));
-    for (remote, value) in [("strict", "true"), ("misspelt", "yes-please")] {
-        run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", value], None);
-        let out = push(remote, "main");
-        assert!(!out.status.success() && stderr(&out).contains("refusing to push"), "{value}: {}", stderr(&out));
+    let out = push(&[], "fresh");
+    assert!(refused(&out), "{}", stderr(&out));
+    for value in ["true", "yes-please"] {
+        let setting = format!("transcrypt.requireAuthenticatedPush={value}");
+        let out = push(&["-c", &setting], if value == "true" { "strict" } else { "misspelt" });
+        assert!(refused(&out), "{value}: {}", stderr(&out));
     }
+    let out = push(&["-c", "transcrypt.requireAuthenticatedPush=false"], "fresh");
+    assert!(out.status.success() && stderr(&out).contains("envelope only"), "{}", stderr(&out));
     // `origin` has the old history: only commits under the new key are new.
-    run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "true"], None);
-    let out = push("origin", "main");
+    let out = push(&[], "origin");
     assert!(out.status.success() && !stderr(&out).contains("envelope only"), "{}", stderr(&out));
-    // Locked, nothing can be authenticated.
+    // Locked, nothing new can be authenticated.
     fs::write(repo.join("a.secret"), b"after the rekey\n").unwrap();
     commit(&repo, &["a.secret"], "keyed");
     run(&repo, bin(), &["lock"], None);
-    let out = push("origin", "main");
-    assert!(!out.status.success() && stderr(&out).contains("refusing to push"), "{}", stderr(&out));
+    let out = push(&[], "origin");
+    assert!(refused(&out), "{}", stderr(&out));
     run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", "false"], None);
-    let out = push("origin", "main");
+    let out = push(&[], "origin");
     assert!(out.status.success() && stderr(&out).contains("envelope only"), "{}", stderr(&out));
+}
+
+/// SEC-02 (H-100): locked, plaintext appended to a protected file's
+/// ciphertext keeps the record's envelope, and the keyless pre-commit check
+/// accepts it; the push is refused by default, and the remote never
+/// receives the marker. Explicitly disabling authenticated pushes publishes
+/// it (what that setting permits). Unlocked, the same commit is refused as
+/// a record that does not authenticate (not as a missing key), and a valid
+/// update pushes.
+#[test]
+fn appended_plaintext_in_a_locked_record_is_never_pushed_by_default() {
+    let mut scratch = Scratch::new("appendpush");
+    let repo = pushed_repo(&mut scratch);
+    run(&scratch.root, "git", &["init", "-q", "--bare", "weak.git"], None);
+    run(&repo, "git", &["remote", "add", "weak", "../weak.git"], None);
+    let base = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD"], None)).unwrap();
+    run(&repo, bin(), &["lock"], None);
+    let mut locked = fs::read(repo.join("a.secret")).unwrap();
+    assert!(is_record(&locked));
+    locked.extend_from_slice(b"MARK-appended-plaintext\n");
+    fs::write(repo.join("a.secret"), &locked).unwrap();
+    commit(&repo, &["a.secret"], "appended while locked");
+    assert!(committed(&repo, "a.secret").windows(12).any(|w| w == b"MARK-appende"));
+    for setting in [None, Some("transcrypt.requireAuthenticatedPush=true")] {
+        let mut args = vec![];
+        if let Some(setting) = setting { args.extend(["-c", setting]); }
+        args.extend(["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        let err = run_fails(&repo, "git", &args, None);
+        assert!(err.contains("could not be authenticated") && err.contains("no key here"), "{setting:?}: {err}");
+    }
+    let has_marker = |remote: &str| {
+        let objects = run(&scratch.root.join(remote), "git", &["cat-file", "--batch-all-objects", "--batch"], None);
+        objects.windows(12).any(|w| w == b"MARK-appende")
+    };
+    assert!(!has_marker("origin.git"), "plaintext reached the remote");
+    let out = exec(&repo, "git", &["-c", "transcrypt.requireAuthenticatedPush=false", "push", "-q", "weak",
+        "HEAD:refs/heads/main"], None);
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stderr).contains("envelope only"));
+    assert!(has_marker("weak.git"), "the explicit opt-out publishes envelope-checked records");
+    // With the key, the same record is refused as one that does not
+    // authenticate.
+    run(&repo, "git", &["checkout", "-q", base.trim(), "--", "a.secret"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    let err = run_fails(&repo, "git", &["push", "-q", "origin", "HEAD:refs/heads/main"], None);
+    assert!(err.contains("a.secret") && !err.contains("no key here") && err.contains("refusing to push"), "{err}");
+    assert!(!has_marker("origin.git"));
+    run(&repo, "git", &["reset", "-q", "--hard", base.trim()], None);
+    fs::write(repo.join("a.secret"), b"alpha, edited with the key\n").unwrap();
+    commit(&repo, &["a.secret"], "valid update");
+    let (pushed, err) = push_head(&repo);
+    assert!(pushed && !err.contains("envelope only"), "{err}");
+}
+
+/// SEC-01 (H-99): no local attribute source unprotects a file the
+/// committed (or staged) `.gitattributes` protect. Each source below makes
+/// Git's own filter skip `*.secret`, so `git add` stages plaintext: the
+/// pre-commit hook still encrypts it, and a plaintext commit made with the
+/// hooks bypassed is refused at push (with `transcrypt.requireAuthenticatedPush`
+/// on or off), also from a linked worktree. The remote never receives a
+/// marker.
+#[test]
+fn local_attribute_sources_never_unprotect_committed_files() {
+    let mut scratch = Scratch::new("localattrs");
+    let repo = pushed_repo(&mut scratch);
+    let base = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD"], None)).unwrap();
+    let base = base.trim();
+    let empty_tree = String::from_utf8(run(&repo, "git", &["hash-object", "-t", "tree", "/dev/null"], None)).unwrap();
+    let env_git = |dir: &std::path::Path, env: &[(&str, &str)], args: &[&str]| {
+        let mut command = std::process::Command::new("git");
+        command.current_dir(dir).args(args).envs(env.iter().copied());
+        command.output().unwrap()
+    };
+    let info = repo.join(".git/info/attributes");
+    let worktree = scratch.root.join("linked");
+    run(&repo, "git", &["worktree", "add", "-q", "--detach", worktree.to_str().unwrap(), base], None);
+    // (name, rules for .git/info/attributes, environment, checkout)
+    let attr_source = [("GIT_ATTR_SOURCE", empty_tree.trim())];
+    let cases: [OverrideCase; 5] = [
+        ("info/attributes", b"*.secret -transcrypt -filter\n", &[], &repo),
+        ("macro redefined", b"[attr]transcrypt -filter\n", &[], &repo),
+        ("nested override", b"dir/*.secret -filter\n", &[], &repo),
+        ("GIT_ATTR_SOURCE", b"", &attr_source, &repo),
+        ("linked worktree", b"*.secret -transcrypt -filter\n", &[], &worktree),
+    ];
+    for (name, rules, env, dir) in cases {
+        fs::write(&info, rules).unwrap();
+        let file = if name == "nested override" { "dir/b.secret" } else { "a.secret" };
+        let marker = format!("MARK-local-{}\n", name.replace(' ', "-"));
+        fs::write(dir.join(file), &marker).unwrap();
+        let out = env_git(dir, env, &["add", file]);
+        assert!(out.status.success());
+        assert_eq!(committed_in_index(dir, file), marker.as_bytes(), "{name}: Git's filter was not skipped");
+        // Through the hook: encrypted, or refused when the local source
+        // breaks the macro itself (the hook names it).
+        let out = env_git(dir, env, &["commit", "-qm", name]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() {
+            assert!(is_record(&run(dir, "git", &["show", &format!("HEAD:{file}")], None)), "{name}: committed plaintext");
+            run(dir, "git", &["reset", "-q", "--soft", "HEAD~1"], None);
+        } else {
+            assert!(err.contains("`transcrypt` macro"), "{name}: {err}");
+        }
+        // Hooks bypassed: the push refuses.
+        fs::write(dir.join(file), &marker).unwrap();
+        assert!(env_git(dir, env, &["add", file]).status.success());
+        assert!(env_git(dir, env, &["commit", "-q", "--no-verify", "-m", name]).status.success());
+        assert_eq!(run(dir, "git", &["show", &format!("HEAD:{file}")], None), marker.as_bytes());
+        for value in ["false", "true"] {
+            let setting = format!("transcrypt.requireAuthenticatedPush={value}");
+            let out = env_git(dir, env, &["-c", &setting, "push", "-q", "origin", "HEAD:refs/heads/main"]);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success() && (err.contains(file) || err.contains("`transcrypt` macro"))
+                && err.contains("refusing to push"), "{name}: {err}");
+        }
+        run(dir, "git", &["reset", "-q", "--hard", base], None);
+        let objects = run(&scratch.root.join("origin.git"), "git", &["cat-file", "--batch-all-objects", "--batch"], None);
+        assert!(!objects.windows(11).any(|w| w == b"MARK-local-"), "{name}: plaintext reached the remote");
+    }
+    fs::remove_file(&info).unwrap();
+    // Ordinary work is unaffected: a protected edit pushes.
+    fs::write(repo.join("a.secret"), b"alpha, edited\n").unwrap();
+    commit(&repo, &["a.secret"], "edit");
+    let (pushed, err) = push_head(&repo);
+    assert!(pushed && !err.contains("warning"), "{err}");
+}
+
+/// A local attribute source: its name, the rules of `.git/info/attributes`,
+/// the environment of every Git command, and the checkout used.
+type OverrideCase<'a> = (&'a str, &'a [u8], &'a [(&'a str, &'a str)], &'a std::path::Path);
+
+/// The staged blob of `file` in `dir`'s index.
+fn committed_in_index(dir: &std::path::Path, file: &str) -> Vec<u8> {
+    run(dir, "git", &["show", &format!(":{file}")], None)
 }
 
 /// A repository whose history `origin` (a bare remote) already has, pushed

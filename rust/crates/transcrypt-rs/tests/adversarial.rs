@@ -1896,11 +1896,11 @@ fn local_attribute_overrides_never_admit_a_forged_record_through_checked_history
 }
 
 /// A local source that stops selecting a protected file leaves its genuine
-/// record at an unprotected name: every check, policy changes included,
-/// accepts it (it opens at its own path), and it is protected again once the
-/// source is removed. A plaintext committed meanwhile (an informed user's
-/// choice, A19, which the hook reports) is refused as soon as the file is
-/// protected again.
+/// record in place: every check, policy changes included, accepts it (it
+/// opens at its own path, and the committed policy still protects it), and
+/// nothing changes once the source is removed. A plaintext staged meanwhile
+/// (Git's filter skipped it) is still protected by the committed policy
+/// (H-99): the pre-commit hook encrypts it before it is committed.
 #[test]
 fn local_attribute_overrides_that_unprotect_a_file_are_reversible() {
     const UNPROTECT: &[u8] = b"a.secret -filter\n";
@@ -1923,11 +1923,10 @@ fn local_attribute_overrides_that_unprotect_a_file_are_reversible() {
     fs::write(repo.join("a.secret"), b"alpha, unprotected\n").unwrap();
     run(&repo, "git", &["add", "a.secret"], None);
     let err = run_err(&repo, "git", &["commit", "-qm", "plaintext"], None);
-    assert!(err.contains("a.secret") && err.contains("no longer selected"), "{err}");
-    assert_eq!(committed(&repo, "a.secret"), b"alpha, unprotected\n");
+    assert!(err.contains("a.secret") && err.contains("staged unencrypted"), "{err}");
+    assert!(is_record(&committed(&repo, "a.secret")));
     LocalAttributes::Info.clear(&repo);
-    let err = run_fails(&repo, bin(), &["verify-index"], None);
-    assert!(err.contains("a.secret") && err.contains("not encrypted"), "{err}");
+    run(&repo, bin(), &["verify-index"], None);
 }
 
 /// `HEAD`'s records are trusted only where `HEAD` holds the entry's exact
