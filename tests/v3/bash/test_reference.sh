@@ -210,6 +210,92 @@ ok 'linked worktrees share the key; lock flushes every worktree'
 ok 'uninstall removes filters and hooks'
 
 # ---------------------------------------------------------------------------
+# Policy changes, subdirectories, staged-only versions, unprotected records,
+# reencrypt, bare-repository audits (regressions from the 2026-11-11 review).
+# ---------------------------------------------------------------------------
+newrepo policy
+printf 'SECRET=1\n' >secret.env
+mkdir docs
+printf 'doc\n' >docs/readme.txt
+git add -A
+git commit -qm start
+printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.env' 2>/dev/null
+git commit -qm v3
+# Another named filter claiming a protected file (git lfs track).
+cp .gitattributes "$SCRATCH/attrs"
+printf '*.env filter=lfs diff=lfs merge=lfs -text\n' >>.gitattributes
+git add .gitattributes
+printf 'SECRET=2\n' >secret.env
+git -c filter.lfs.clean=cat -c filter.lfs.smudge=cat add secret.env
+if git -c filter.lfs.clean=cat commit -qm lfs 2>"$SCRATCH/err"; then die 'a filter override of a protected file was committed'; fi
+grep -q 'filter `lfs`' "$SCRATCH/err" || die 'filter override not named'
+# A redefined macro (no filter) is refused too.
+sed 's/^\[attr\]transcrypt filter=transcrypt-v3 /[attr]transcrypt /' "$SCRATCH/attrs" >.gitattributes
+git add .gitattributes secret.env
+if git commit -qm macro 2>"$SCRATCH/err"; then die 'a broken macro was committed'; fi
+grep -q 'macro does not set filter' "$SCRATCH/err" || die 'broken macro not named'
+cp "$SCRATCH/attrs" .gitattributes
+git add .gitattributes
+git add --renormalize secret.env
+git commit -qm restored
+ok 'a .gitattributes change that unprotects files (lfs override, broken macro) is refused'
+# Commands from a subdirectory act on the whole repository.
+cd docs
+"$CLI" lock 2>/dev/null
+[[ $(head -c 4 ../secret.env) == TV3F ]] || die 'lock from a subdirectory left plaintext'
+printf '%s\n' "$PASSPHRASE" | "$CLI" unlock --password-stdin 2>/dev/null
+[[ $(cat ../secret.env) == SECRET=2 ]] || die 'unlock from a subdirectory'
+cd ..
+git -c filter.transcrypt-v3.clean=cat -c filter.transcrypt-v3.required=false -c core.hooksPath=/dev/null commit -qm 'plaintext' --allow-empty
+printf 'leak\n' >leak.env
+git -c filter.transcrypt-v3.clean=cat -c filter.transcrypt-v3.required=false add leak.env
+git -c core.hooksPath=/dev/null commit -qm 'plaintext leak'
+if (cd docs && "$CLI" audit HEAD >/dev/null 2>&1); then die 'audit from a subdirectory missed plaintext'; fi
+git reset -q --hard HEAD~2
+ok 'lock, unlock and audit from a subdirectory act on the whole repository'
+# protect keeps a staged-only version.
+printf 'v1\n' >p.cfg
+git add p.cfg
+git commit -qm p
+printf 'v1\nSTAGED-ONLY\n' >p.cfg
+git add p.cfg
+printf 'v1\nworktree\n' >p.cfg
+"$CLI" protect p.cfg 2>/dev/null
+[[ $(git cat-file blob :p.cfg | "$CLI" decrypt p.cfg) == $'v1\nSTAGED-ONLY' ]] || die 'protect lost the staged-only version'
+[[ $(cat p.cfg) == $'v1\nworktree' ]] || die 'protect changed the worktree'
+git add p.cfg
+git commit -qm 'protect p.cfg'
+ok 'protect keeps a staged-only version of a file'
+# A record moved to an unprotected name is refused.
+git mv secret.env secret.bak
+if git commit -qm mv 2>"$SCRATCH/err"; then die 'a record at an unprotected name was committed'; fi
+grep -q 'not protected' "$SCRATCH/err" || die 'unprotected record not named'
+git mv secret.bak secret.env
+ok 'a record moved to an unprotected name is refused'
+# reencrypt brings a record across a rekey.
+git checkout -q -b old
+printf 'from the old branch\n' >old.env
+git add old.env
+git commit -qm 'old config'
+git checkout -q master
+printf 'rekey passphrase number two\n' | "$CLI" rekey --password-stdin 2>/dev/null
+git commit -qm rekey
+# Staging the old branch's file brings its record, of the earlier config.
+git checkout -q old -- old.env 2>/dev/null
+[[ -n $(git ls-files old.env) ]] || die 'setup: old.env not staged'
+printf '%s\n' "$PASSPHRASE" | "$CLI" reencrypt --password-stdin --yes 2>/dev/null
+"$CLI" verify-index 2>/dev/null
+git commit -qm 'brought forward'
+[[ $(git show HEAD:old.env | "$CLI" decrypt old.env) == 'from the old branch' ]] || die 'reencrypt'
+ok 'reencrypt re-encrypts a record of an earlier config under the current one'
+# Bare repositories audit (server-side hooks); --max-commits refuses.
+git init -q --bare "$SCRATCH/policy.git"
+git push -q "$SCRATCH/policy.git" master 2>/dev/null
+(cd "$SCRATCH/policy.git" && "$CLI" audit master >/dev/null 2>"$SCRATCH/err") || die "audit in a bare repository: $(cat "$SCRATCH/err")"
+if (cd "$SCRATCH/policy.git" && "$CLI" audit --max-commits=1 master >/dev/null 2>&1); then die '--max-commits did not refuse'; fi
+ok 'audit runs in a bare repository; --max-commits refuses larger ranges'
+
+# ---------------------------------------------------------------------------
 # v2 migration (needs the repository's Bash v2 script).
 # ---------------------------------------------------------------------------
 V2=$SOURCE_ROOT/transcrypt

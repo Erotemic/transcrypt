@@ -336,6 +336,49 @@ Attack review of the new surface:
   and still-encrypted v2 files, rolls back the attribute rewrite, the hook
   and `init` on failure, and never deletes the v2 password.
 
+## 8. Profiles and the portable Bash client (2026-11-11)
+
+**Scope.** Configuration profiles (the profile byte, key-derivation
+dispatch, conversions) in the core and the Rust client, and the new portable
+client `contrib/v3/transcrypt-bash`. An independent adversarial review
+(an agent given only the code, the specs and the threat model, reproducing
+each finding in real repositories against both clients) found four defects
+in the Bash client; the Rust client handled all four correctly.
+
+| ID | Severity | Finding | Fix and regression test |
+| --- | --- | --- | --- |
+| H-78 | High (Bash only) | Selection used only `filter == transcrypt-v3`: a pulled `.gitattributes` that lets another filter claim a protected file (`git lfs track`) or redefines the `transcrypt` macro without `filter=` made the file plaintext, and commit, pre-push and audit all accepted it. | Ported Rust's checks: the macro probe (`tc_macro_resolves`), files marked `transcrypt` with another or no filter (`tc_check_marked`), and drift of files encrypted in `HEAD`/`HEAD^1`, in the hook and per audited commit; `check-attr` case-sensitive. Test "a .gitattributes change that unprotects files…" |
+| H-79 | Medium (Bash only) | Commands run from a subdirectory used Git listings relative to it: `audit` passed a plaintext commit, `lock` left plaintext and deleted the key, `rekey` half-applied. | Every command works from the worktree root (drivers' file arguments made absolute first). Test "lock, unlock and audit from a subdirectory…" |
+| H-80 | Medium (Bash only) | `protect` re-indexed every protected worktree file, replacing a staged-only version (`git add` then further edits) with the worktree's. | Only files holding exactly the staged content are re-indexed, and the index is restored if any refresh changed an object. Test "protect keeps a staged-only version" |
+| H-81 | Low (Bash only) | `git mv` of a protected file to an unprotected name committed a record nothing decrypts. | The hook refuses records of the config at unprotected paths staged since `HEAD`; the audit authenticates them there (keyed) or counts them as needing the key. Test "a record moved to an unprotected name is refused" |
+
+Suspected items, dispositions: the pre-push audit no longer runs in a
+subshell where `set -e` is off (a config that fails to parse is refused);
+`transcrypt.requireAuthenticatedPush` counts any value but an explicit false
+as set; the locked moved-record check also considers other index paths.
+Not changed (same in Rust, outside the publication threat): a merge driver
+input that is an empty blob counts as empty plaintext.
+
+**Profiles.** Examined: downgrade by editing the committed profile byte
+(refused: the byte is in the authenticated prefix, and a relabelled config
+does not authenticate under the passphrase, `config_profile_bound`);
+unknown profiles (refused before any derivation, `derive_config_key_spec`;
+no output at all, `seal_record_refuses_unknown_profile`); parameters
+smuggled through the config (none are read from it, `profile_kdf_spec`);
+records moved between profiles (their config ids and associated data
+differ, `transplant_needs_siv_collision`); a portable client meeting a
+profile-1 repository (named, nothing changed, conformance test). OpenSSL
+misbehaviour in the Bash client fails closed: known-answer probes before
+key derivation, length and format checks of every MAC, digest and key, an
+AES-CTR output equal to its input refused, plaintext released only after
+the S2V tag matches.
+
+**Shared limitation found.** An empty protected file makes `git merge` stop
+with "stash failed" (a Git bug: Git's racy-entry marker `sd_size == 0`
+never clears for an empty file whose clean form is not empty, and
+`git stash create` then exits 1). Both clients' `doctor` name such files;
+the user guide gives the workaround.
+
 ## Review package
 
 For the external review (R-01), in reading order:

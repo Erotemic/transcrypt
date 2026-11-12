@@ -46,6 +46,7 @@ transcrypt-bash rekey [--profile=pbkdf2]           # new passphrase (and profile
 transcrypt-bash lock                               # ciphertext back in the worktree, key forgotten
 transcrypt-bash audit origin/main..HEAD            # check what you are about to publish
 transcrypt-bash migrate                            # convert a Bash transcrypt (v2) checkout
+transcrypt-bash reencrypt                          # files cherry-picked across a rekey
 transcrypt-bash doctor                             # filters, hooks, OpenSSL capabilities, index
 ```
 
@@ -89,16 +90,21 @@ before it was protected stays in earlier commits.
 
 ## Differences from transcrypt-rs
 
-The portable client is slower (a few OpenSSL processes per file) and keeps
-derived keys in local OpenSSL arguments and plaintext in a private (0700)
-temporary directory while it works. Under the Transcrypt threat model the
-developer's machine is trusted; none of this reaches Git. `transcrypt-rs`
-additionally offers profile 1, the `--private` mode (key only in a
-memory-only agent, private file permissions), `reencrypt` for records
-brought across a rekey by cherry-picks, a long-running filter process, and
-in-memory key handling with zeroization. Everything else is the same
-behavior; `tests/v3/conformance/run.sh` checks it in real repositories in
-both directions.
+The portable client is slower: a few OpenSSL processes per file. On a
+repository with 100 protected and 200 other files (Linux, OpenSSL 3.0.13),
+`git status` takes 0.1 s, a checkout switching 10 protected files 1.4 s,
+`lock` or `unlock` about 20 s and a commit after a policy change about 7 s,
+against well under a second for `transcrypt-rs`. It keeps derived keys in
+local OpenSSL arguments and plaintext in a private (0700) temporary
+directory while it works, and caches the verification of the stored key next
+to it (`.git/transcrypt-v3/bash-verified`, removed by `lock`). Under the
+Transcrypt threat model the developer's machine is trusted; none of this
+reaches Git. `transcrypt-rs` additionally offers profile 1, the `--private`
+mode (key only in a memory-only agent, private file permissions), a
+long-running filter process and in-memory key handling with zeroization.
+The shared commands make the same security decisions;
+`tests/v3/conformance/run.sh` checks them in real repositories in both
+directions.
 
 ## Known limitation: empty protected files and `git merge`
 

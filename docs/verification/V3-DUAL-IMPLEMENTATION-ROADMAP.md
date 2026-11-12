@@ -313,7 +313,7 @@ Bash 5.2):
 - `cargo test --workspace` (Rust, all suites incl. `portable_vectors.rs`),
   `cargo clippy --workspace --all-targets -D warnings`;
 - `python3 tests/v3/reference/portable_vectors.py` (independent vectors);
-- `bash tests/v3/bash/test_reference.sh` (19 checks, Bash alone);
+- `bash tests/v3/bash/test_reference.sh` (25 checks, Bash alone);
 - `bash tests/v3/conformance/run.sh` (28 checks, Bash vs Rust);
 - `bash proofs/aeneas/build-v3-tracked.sh`, `check-v3-axioms.sh` (207
   theorems, standard axioms only), `v3_snapshot.py verify`.
@@ -344,12 +344,21 @@ Bash 5.2):
 | v2 `migrate` | yes | yes | bash 19; conformance migration |
 | Linked worktrees, fresh clones, non-UTF-8/Unicode/blank paths, binary and empty files | yes | yes | bash 16–17; conformance 1 |
 | Profile 1 | recognized, refused unchanged | yes | conformance 21 |
-| `--private` agent, `reencrypt`, zeroization, long-running filter | **Rust-only** (local hardening / convenience) | yes | by design |
+| `reencrypt` (records cherry-picked across a rekey) | yes | yes | bash 23 |
+| Policy drift: `git lfs track` override, broken macro, records moved to unprotected names (refused) | yes | yes | bash 19, 22; review H-78, H-81 |
+| Commands from a subdirectory; audit in a bare repository (server hooks); `--max-commits` | yes | yes | bash 20, 24 |
+| `--private` agent, zeroization, long-running filter | **Rust-only** (local hardening / performance) | yes | by design |
 
 Known shared limitation: an empty protected file makes `git merge` stop with
 `fatal: stash failed` (a Git bug with any clean filter mapping empty to
 non-empty content); both clients' `doctor` name such files.
 
-Remaining: an external cryptographic and adapter review (R-01); a Bash
-`reencrypt` (records cherry-picked across a rekey must be re-added by hand);
-benchmarks of the Bash client on large repositories.
+An independent adversarial review of the Bash client (2026-11-11) found four
+defects, all fixed with regression tests (H-78 to H-81 in the
+[security review](V3-SECURITY-REVIEW.md)). Bash performance, 100 protected
+and 200 other files: `git status` 0.1 s, checkout of 10 protected files
+1.4 s, `lock`/`unlock` about 20 s, `audit HEAD` 13 s (Rust: under 1 s each).
+
+Remaining: an external cryptographic and adapter review (R-01); faster
+bulk operations in the Bash client (one OpenSSL process per primitive call is
+the floor without a long-running helper).

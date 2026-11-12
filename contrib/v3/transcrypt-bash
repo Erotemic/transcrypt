@@ -34,7 +34,9 @@ readonly TC_KEY_CHECK_PLAINTEXT=transcrypt/v3/key-check
 readonly TC_MACRO='[attr]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text'
 readonly TC_MACRO_COMMENT='# transcrypt-v3: files matching a pattern marked `transcrypt` are encrypted in Git'
 readonly TC_ZERO_OID_RE='^0+$'
-TC_SCRIPT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")
+TC_SCRIPT=${BASH_SOURCE[0]}
+[[ $TC_SCRIPT == */* ]] || TC_SCRIPT=$(command -v -- "$TC_SCRIPT")
+TC_SCRIPT=$(cd -- "${TC_SCRIPT%/*}" && pwd -P)/${TC_SCRIPT##*/}
 readonly TC_SCRIPT
 
 TC_TMP=''
@@ -42,6 +44,7 @@ TC_ROOT=''
 TC_COMMON=''
 TC_CONFIG_FILE='' # the config in force (worktree, or staged copy)
 TC_CONFIG_ID=''   # its id, hex
+TC_CONFIG_HEX=''  # its 55 bytes, hex
 TC_PROFILE=''     # its profile byte, 1..3
 TC_KEY=''         # 128 hex digits, when unlocked
 TC_K1=''
@@ -54,8 +57,9 @@ declare -A TC_S2V_CACHE=()
 # Basics
 # ---------------------------------------------------------------------------
 
+TC_FAIL_PREFIX=''
 tc_fail() {
-	printf 'transcrypt-bash: %s\n' "$*" >&2
+	printf 'transcrypt-bash: %s%s\n' "$TC_FAIL_PREFIX" "$*" >&2
 	exit 1
 }
 tc_log() { printf 'transcrypt-bash: %s\n' "$*" >&2; }
@@ -132,10 +136,14 @@ tc_cmac_file() {
 }
 
 # The S2V chain value after the domain string $1 and, if given, the
-# associated-data file $2 (cached: both are constant for one key).
+# associated-data file $2 whose hex is $3 when known (cached: both are
+# constant for one key; see also tc_key_cache).
 tc_s2v_prefix() {
-	local domain=$1 adfile=${2-} key=$1 d
-	[[ -n $adfile ]] && key+=$'\n'$(tc_file_hex "$adfile")
+	local domain=$1 adfile=${2-} adhex=${3-} key=$1 d
+	if [[ -n $adfile ]]; then
+		[[ -n $adhex ]] || adhex=$(tc_file_hex "$adfile")
+		key+=$'\n'$adhex
+	fi
 	if [[ -n ${TC_S2V_CACHE[$key]+x} ]]; then
 		TC_RESULT=${TC_S2V_CACHE[$key]}
 		return 0
@@ -165,8 +173,8 @@ tc_s2v_prefix() {
 # S2V over [domain, adfile?, pathfile?] and the plaintext file. The tag is
 # left in TC_RESULT (32 hex digits).
 tc_s2v() {
-	local plain=$1 domain=$2 adfile=${3-} pathfile=${4-} d size end
-	tc_s2v_prefix "$domain" "$adfile"
+	local plain=$1 domain=$2 adfile=${3-} pathfile=${4-} adhex=${5-} size=${6-} d end
+	tc_s2v_prefix "$domain" "$adfile" "$adhex"
 	d=$TC_RESULT
 	if [[ -n $pathfile ]]; then
 		tc_cmac_file "$pathfile"
@@ -175,10 +183,10 @@ tc_s2v() {
 		tc_xor_block "$TC_RESULT" "$mac"
 		d=$TC_RESULT
 	fi
-	size=$(tc_file_size "$plain")
+	[[ -n $size ]] || size=$(tc_file_size "$plain")
 	if ((size >= 16)); then
 		head -c "$((size - 16))" "$plain" >"$TC_TMP/s2v-input" || tc_fail 'cannot read plaintext'
-		end=$(tail -c 16 "$plain" | od -An -tx1 -v | tr -d ' \n')
+		end=$(od -An -tx1 -v -j "$((size - 16))" "$plain" | tr -d ' \n')
 		tc_xor_block "$end" "$d"
 		tc_hex_bytes "$TC_RESULT" >>"$TC_TMP/s2v-input"
 	else
@@ -195,12 +203,13 @@ tc_s2v() {
 # AES-256-CTR of file $2 into $3 with the SIV $1 as counter, its bits 63
 # and 31 cleared (RFC 5297, section 2.5).
 tc_ctr_file() {
-	local iv=$1 pos octet
+	local iv=$1 pos octet size=${4-}
 	for pos in 16 24; do
 		printf -v octet '%02x' "$((16#${iv:pos:2} & 127))"
 		iv=${iv:0:pos}$octet${iv:pos+2}
 	done
-	if [[ $(tc_file_size "$2") -eq 0 ]]; then
+	[[ -n $size ]] || size=$(tc_file_size "$2")
+	if ((size == 0)); then
 		: >"$3"
 		return 0
 	fi
@@ -215,14 +224,26 @@ tc_use_key() {
 	TC_S2V_CACHE=()
 }
 
+# Whether $1 is the config file in force (whose hex is known).
+tc_adhex_of() {
+	[[ $1 == "$TC_CONFIG_FILE" ]] && printf %s "$TC_CONFIG_HEX"
+	return 0
+}
+
 # Seal plaintext file $3 at Git path $1 under config file $2 into $4:
 # the 16-byte tag, then the ciphertext (no record header).
 tc_siv_seal() {
-	local path=$1 config=$2 plain=$3 out=$4 tag
+	local path=$1 config=$2 plain=$3 out=$4 tag size
+	size=$(tc_file_size "$plain")
 	printf %s "$path" >"$TC_TMP/siv-path"
-	tc_s2v "$plain" "$TC_FILE_DOMAIN" "$config" "$TC_TMP/siv-path"
+	tc_s2v "$plain" "$TC_FILE_DOMAIN" "$config" "$TC_TMP/siv-path" "$(tc_adhex_of "$config")" "$size"
 	tag=$TC_RESULT
-	tc_ctr_file "$tag" "$plain" "$TC_TMP/siv-body"
+	tc_ctr_file "$tag" "$plain" "$TC_TMP/siv-body" "$size"
+	# A cipher that returned its input would publish plaintext: for any
+	# input of a block or more, CTR output equal to it is not encryption.
+	if ((size >= 16)) && cmp -s "$plain" "$TC_TMP/siv-body"; then
+		tc_fail 'OpenSSL AES-CTR returned its input unchanged; refusing to store it'
+	fi
 	{
 		tc_hex_bytes "$tag"
 		cat "$TC_TMP/siv-body"
@@ -235,11 +256,11 @@ tc_siv_open() {
 	rm -f -- "$out"
 	size=$(tc_file_size "$sealed")
 	((size >= 16)) || return 1
-	tag=$(head -c 16 "$sealed" | od -An -tx1 -v | tr -d ' \n')
+	tag=$(od -An -tx1 -v -N 16 "$sealed" | tr -d ' \n')
 	tail -c "+17" "$sealed" >"$TC_TMP/siv-ct"
-	tc_ctr_file "$tag" "$TC_TMP/siv-ct" "$TC_TMP/siv-unauthenticated"
+	tc_ctr_file "$tag" "$TC_TMP/siv-ct" "$TC_TMP/siv-unauthenticated" "$((size - 16))"
 	printf %s "$path" >"$TC_TMP/siv-path"
-	tc_s2v "$TC_TMP/siv-unauthenticated" "$TC_FILE_DOMAIN" "$config" "$TC_TMP/siv-path"
+	tc_s2v "$TC_TMP/siv-unauthenticated" "$TC_FILE_DOMAIN" "$config" "$TC_TMP/siv-path" "$(tc_adhex_of "$config")" "$((size - 16))"
 	if [[ $TC_RESULT != "$tag" ]]; then
 		rm -f -- "$TC_TMP/siv-unauthenticated"
 		return 1
@@ -388,13 +409,19 @@ tc_read_passphrase() {
 # Configuration and records
 # ---------------------------------------------------------------------------
 
-tc_digest_id() { openssl dgst -sha256 -binary "$1" | head -c 16 | od -An -tx1 -v | tr -d ' \n'; }
+tc_digest_id() {
+	local out
+	out=$(openssl dgst -sha256 -hex "$1") || tc_fail 'OpenSSL SHA-256 failed'
+	out=${out##* }
+	[[ ${#out} -eq 64 && $out != *[!0-9a-f]* ]] || tc_fail 'OpenSSL returned a malformed SHA-256'
+	printf %s "${out:0:32}"
+}
 
 # The profile byte of config file $1, or a failure naming what is wrong.
-tc_config_profile() {
-	local file=$1 hex
-	[[ $(tc_file_size "$file") -eq 55 ]] || tc_fail 'invalid v3 configuration (not 55 bytes)'
-	hex=$(head -c 7 "$file" | od -An -tx1 -v | tr -d ' \n')
+tc_config_profile() { tc_profile_of_hex "$(tc_file_hex "$1")"; }
+tc_profile_of_hex() {
+	local hex=$1
+	[[ ${#hex} -eq 110 ]] || tc_fail 'invalid v3 configuration (not 55 bytes)'
 	[[ ${hex:0:12} == "$TC_FAMILY_HEX" ]] || tc_fail 'invalid v3 configuration (no TCFG3 marker)'
 	case ${hex:12:2} in
 	01) printf 1 ;;
@@ -406,12 +433,12 @@ tc_config_profile() {
 
 # Whether config file $1 authenticates under the current key.
 tc_config_authentic() {
-	local config=$1 tag
-	head -c 39 "$config" >"$TC_TMP/config-prefix"
-	tag=$(tail -c 16 "$config" | od -An -tx1 -v | tr -d ' \n')
+	local config=$1 hex
+	if [[ $config == "$TC_CONFIG_FILE" ]]; then hex=$TC_CONFIG_HEX; else hex=$(tc_file_hex "$config"); fi
+	tc_hex_bytes "${hex:0:78}" >"$TC_TMP/config-prefix"
 	: >"$TC_TMP/empty"
-	tc_s2v "$TC_TMP/empty" "$TC_CONFIG_DOMAIN" "$TC_TMP/config-prefix"
-	[[ $TC_RESULT == "$tag" ]]
+	tc_s2v "$TC_TMP/empty" "$TC_CONFIG_DOMAIN" "$TC_TMP/config-prefix" "" "${hex:0:78}" 0
+	[[ $TC_RESULT == "${hex:78:32}" ]]
 }
 
 # A new config of profile $1 under passphrase file $2: TC_NEW_CONFIG names
@@ -423,7 +450,7 @@ tc_new_config() {
 	tc_derive "$profile" "$passfile" "$salt"
 	tc_hex_bytes "${TC_FAMILY_HEX}0${profile}${salt}" >"$TC_TMP/new-prefix"
 	: >"$TC_TMP/empty"
-	tc_s2v "$TC_TMP/empty" "$TC_CONFIG_DOMAIN" "$TC_TMP/new-prefix"
+	tc_s2v "$TC_TMP/empty" "$TC_CONFIG_DOMAIN" "$TC_TMP/new-prefix" "" "${TC_FAMILY_HEX}0${profile}${salt}" 0
 	tag=$TC_RESULT
 	TC_NEW_CONFIG=$TC_TMP/new-config
 	{
@@ -435,11 +462,13 @@ tc_new_config() {
 # Make config file $1 the one in force (copied, so later changes to the
 # worktree cannot change it underneath).
 tc_set_config() {
-	cp -- "$1" "$TC_TMP/config-in-force"
+	local hex
+	hex=$(tc_file_hex "$1") || tc_fail "cannot read $1"
+	TC_PROFILE=$(tc_profile_of_hex "$hex")
+	TC_CONFIG_HEX=$hex
+	tc_hex_bytes "$hex" >"$TC_TMP/config-in-force"
 	TC_CONFIG_FILE=$TC_TMP/config-in-force
-	TC_PROFILE=$(tc_config_profile "$TC_CONFIG_FILE")
 	TC_CONFIG_ID=$(tc_digest_id "$TC_CONFIG_FILE")
-	[[ ${#TC_CONFIG_ID} -eq 32 ]] || tc_fail 'cannot hash the config'
 }
 
 # Whether file $1 is a record of config id $2 by its envelope: size within
@@ -448,14 +477,14 @@ tc_envelope_ok() {
 	local file=$1 id=$2 size
 	size=$(tc_file_size "$file")
 	((size >= TC_FILE_MIN && size <= TC_MAX_FILE + TC_FILE_MIN)) || return 1
-	[[ $(head -c 22 "$file" | od -An -tx1 -v | tr -d ' \n') == "$TC_RECORD_MAGIC_HEX$id" ]]
+	[[ $(od -An -tx1 -v -N 22 "$file" | tr -d ' \n') == "$TC_RECORD_MAGIC_HEX$id" ]]
 }
 # The config id named by record header of file $1 (empty if it has none).
 tc_record_id() {
 	local file=$1 hex
-	(($(tc_file_size "$file") >= TC_FILE_MIN)) || return 0
-	hex=$(head -c 22 "$file" | od -An -tx1 -v | tr -d ' \n')
-	[[ ${hex:0:12} == "$TC_RECORD_MAGIC_HEX" ]] && printf %s "${hex:12}"
+	hex=$(od -An -tx1 -v -N "$TC_FILE_MIN" "$file" | tr -d ' \n')
+	((${#hex} == 2 * TC_FILE_MIN)) || return 0
+	[[ ${hex:0:12} == "$TC_RECORD_MAGIC_HEX" ]] && printf %s "${hex:12:32}"
 	return 0
 }
 
@@ -503,11 +532,23 @@ tc_open_record() {
 # Repository, config in force and the stored key
 # ---------------------------------------------------------------------------
 
+# Find the repository and work from the top of its worktree: Git's
+# listings, attributes and `update-index --stdin` are relative to the
+# current directory, the index updates to the root. With $1=bare, a bare
+# repository is accepted too (TC_ROOT empty; the audit).
 tc_repo() {
-	[[ -n $TC_ROOT ]] && return 0
-	TC_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || tc_fail 'not in a Git worktree'
-	TC_COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
-		TC_COMMON=$(cd -- "$(git rev-parse --git-common-dir)" && pwd -P) || tc_fail 'cannot find the Git directory'
+	[[ -n $TC_COMMON ]] && return 0
+	local out
+	if [[ ${1-} == bare && $(git rev-parse --is-bare-repository 2>/dev/null) == true ]]; then
+		TC_COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || tc_fail 'not in a Git repository'
+		TC_ROOT=''
+		return 0
+	fi
+	out=$(git rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>/dev/null) || tc_fail 'not in a Git worktree'
+	TC_COMMON=${out%%$'\n'*}
+	TC_ROOT=${out#*$'\n'}
+	[[ -n $TC_ROOT && $TC_ROOT != "$out" && -d $TC_COMMON ]] || tc_fail 'not in a Git worktree'
+	cd -- "$TC_ROOT" || tc_fail "cannot enter $TC_ROOT"
 }
 
 # Load the config in force: the worktree's .transcrypt/config, else the
@@ -556,26 +597,60 @@ tc_store_key() {
 # (locked); 2: a key for another config, or one that does not
 # authenticate (stale or damaged).
 tc_try_key() {
-	local file
+	local file hex digest
 	file=$(tc_key_file)
 	[[ -f $file && ! -L $file ]] || return 1
-	local size
-	size=$(tc_file_size "$file")
-	[[ $size -eq 64 ]] && return 1
-	[[ $size -eq 158 ]] || return 2
-	head -c 55 "$file" >"$TC_TMP/stored-config"
-	cmp -s "$TC_TMP/stored-config" "$TC_CONFIG_FILE" || return 2
-	tc_use_key "$(head -c 119 "$file" | tail -c 64 | od -An -tx1 -v | tr -d ' \n')"
+	hex=$(tc_file_hex "$file")
+	((${#hex} == 128)) && return 1
+	((${#hex} == 316)) || return 2
+	[[ ${hex:0:110} == "$TC_CONFIG_HEX" ]] || return 2
+	tc_use_key "${hex:110:128}"
+	# The verification below costs a dozen OpenSSL processes; a cache file
+	# next to the key records, for the key file's exact SHA-256, that it
+	# passed, with the S2V values it computed (as secret as the key).
+	digest=$(tc_digest_id "$file")
+	if tc_key_cache_load "$digest"; then return 0; fi
 	tc_config_authentic "$TC_CONFIG_FILE" || {
 		TC_KEY=''
 		return 2
 	}
-	tail -c 39 "$file" >"$TC_TMP/stored-check"
+	tc_hex_bytes "${hex:238:78}" >"$TC_TMP/stored-check"
 	if ! tc_siv_open "$TC_KEY_CHECK_PATH" "$TC_CONFIG_FILE" "$TC_TMP/stored-check" "$TC_TMP/stored-check-plain" ||
 		[[ $(cat "$TC_TMP/stored-check-plain") != "$TC_KEY_CHECK_PLAINTEXT" ]]; then
 		TC_KEY=''
 		return 2
 	fi
+	tc_key_cache_store "$digest"
+	return 0
+}
+
+# The verified-key cache: "v1 DIGEST ZERO D_CONFIG D_FILE", where DIGEST is
+# the key file's id (truncated SHA-256) and the rest are the S2V chain values
+# after the zero block, after [config domain, config prefix] and after [file
+# domain, config]. Any mismatch means a full verification.
+tc_key_cache_file() { printf '%s/transcrypt-v3/bash-verified' "$TC_COMMON"; }
+tc_key_cache_load() {
+	local file v digest zero dc df
+	file=$(tc_key_cache_file)
+	[[ -f $file && ! -L $file ]] || return 1
+	read -r v digest zero dc df <"$file" || return 1
+	[[ $v == v1 && $digest == "$1" && ${#zero} -eq 32 && ${#dc} -eq 32 && ${#df} -eq 32 ]] || return 1
+	TC_S2V_CACHE[zero]=$zero
+	TC_S2V_CACHE[$TC_CONFIG_DOMAIN$'\n'${TC_CONFIG_HEX:0:78}]=$dc
+	TC_S2V_CACHE[$TC_FILE_DOMAIN$'\n'$TC_CONFIG_HEX]=$df
+	return 0
+}
+tc_key_cache_store() {
+	local file tmp dc df
+	tc_s2v_prefix "$TC_CONFIG_DOMAIN" "$TC_TMP/config-prefix" "${TC_CONFIG_HEX:0:78}"
+	dc=$TC_RESULT
+	tc_s2v_prefix "$TC_FILE_DOMAIN" "$TC_CONFIG_FILE" "$TC_CONFIG_HEX"
+	df=$TC_RESULT
+	file=$(tc_key_cache_file)
+	[[ ! -L $file ]] || return 0
+	tmp=$(umask 077 && mktemp "$file.XXXXXXXX") || return 0
+	printf 'v1 %s %s %s %s\n' "$1" "${TC_S2V_CACHE[zero]}" "$dc" "$df" >"$tmp"
+	mv -f -- "$tmp" "$file" || rm -f -- "$tmp"
 	return 0
 }
 tc_require_key() {
@@ -637,20 +712,97 @@ tc_read_tree_listing() {
 	done <"$TC_TMP/tree-listing"
 }
 
+# The protection policy of the tree listing in TC_HEAD_* (or, with
+# `index`, of the index), into file $1: every attribute file and the
+# config, with mode and object id, NUL-separated and sorted.
+tc_policy() {
+	local out=$1 path i
+	{
+		if [[ ${2-} == index ]]; then
+			for i in "${!TC_IDX_PATH[@]}"; do
+				path=${TC_IDX_PATH[i]}
+				[[ ${TC_IDX_STAGE[i]} == 0 ]] || continue
+				[[ $path == .transcrypt/config || $path == .gitattributes || $path == */.gitattributes ]] &&
+					printf '%s %s %s\0' "${TC_IDX_MODE[i]}" "${TC_IDX_OID[i]}" "$path"
+			done
+		else
+			for path in "${!TC_HEAD_OID[@]}"; do
+				[[ $path == .transcrypt/config || $path == .gitattributes || $path == */.gitattributes ]] &&
+					printf '%s %s %s\0' "${TC_HEAD_MODE[$path]}" "${TC_HEAD_OID[$path]}" "$path"
+			done
+		fi
+		return 0
+	} | LC_ALL=C sort -z >"$out" || tc_fail 'cannot sort the policy entries'
+}
+
 declare -A TC_SELECTED=()
 # Which of the NUL-separated paths in file $1 Git's attributes protect:
 # TC_SELECTED[path]=1. $2: --cached (staged attributes) or empty (worktree).
+# Also TC_FILTER[path] (the `filter` value) and TC_MARKED[path] (set when
+# the `transcrypt` macro is set for it). Patterns match case-sensitively
+# on every system, as for the Rust client.
+declare -A TC_FILTER=() TC_MARKED=()
 tc_selected() {
 	local list=$1 path name value
 	local -a source=()
 	[[ -n ${2-} ]] && source=("$2")
 	TC_SELECTED=()
+	TC_FILTER=()
+	TC_MARKED=()
 	[[ -s $list ]] || return 0
-	git check-attr "${source[@]}" -z --stdin filter <"$list" >"$TC_TMP/attrs" || tc_fail 'git check-attr failed'
+	git -c core.ignorecase=false check-attr "${source[@]}" -z --stdin filter transcrypt <"$list" >"$TC_TMP/attrs" ||
+		tc_fail 'git check-attr failed'
 	while IFS= read -r -d '' path && IFS= read -r -d '' name && IFS= read -r -d '' value; do
-		[[ $name == filter && $value == transcrypt-v3 ]] && TC_SELECTED[$path]=1
+		if [[ $name == filter ]]; then
+			TC_FILTER[$path]=$value
+			[[ $value == transcrypt-v3 ]] && TC_SELECTED[$path]=1
+		elif [[ $name == transcrypt && $value == set ]]; then
+			TC_MARKED[$path]=1
+		fi
 	done <"$TC_TMP/attrs"
 	return 0
+}
+
+readonly TC_MACRO_MISSING='the `transcrypt` macro does not set filter=transcrypt-v3 here (the top-level .gitattributes lost its `[attr]transcrypt` line, or another rule redefines or overrides it), so files marked `transcrypt` would be stored unencrypted; restore the line (`transcrypt-bash protect` with any of your patterns re-adds it) and remove the other definition'
+
+# Whether Git resolves the `transcrypt` macro to filter=transcrypt-v3 for a
+# commit whose top-level .gitattributes is blob $1 (none if empty): probed
+# in a temporary index holding that file and a directory whose own rules
+# say `probe transcrypt` (the Rust client's `macro_resolves`).
+tc_macro_resolves() {
+	local top=$1 rules value
+	rules=$(printf 'probe transcrypt\n' | git hash-object -w --no-filters --stdin) || tc_fail 'cannot write a Git object'
+	rm -f -- "$TC_TMP/probe-index"
+	{
+		printf '100644 %s 0\ttranscrypt-v3-probe/.gitattributes\0' "$rules"
+		[[ -n $top ]] && printf '100644 %s 0\t.gitattributes\0' "$top"
+	} | GIT_INDEX_FILE=$TC_TMP/probe-index git update-index -z --index-info || tc_fail 'cannot build the probe index'
+	value=$(printf 'transcrypt-v3-probe/probe\0' |
+		GIT_INDEX_FILE=$TC_TMP/probe-index git -c core.ignorecase=false check-attr --cached -z --stdin filter |
+		tr '\0' '\n' | tail -n 1) || tc_fail 'git check-attr failed'
+	[[ $value == transcrypt-v3 ]]
+}
+
+# Refuse (prefix $1 for messages) any path marked `transcrypt` whose filter is
+# neither transcrypt-v3 nor explicitly unset (TC_MARKED, TC_FILTER).
+tc_check_marked() {
+	local where=$1 path value
+	for path in "${!TC_MARKED[@]}"; do
+		value=${TC_FILTER[$path]-unspecified}
+		[[ $value == transcrypt-v3 || $value == unset ]] && continue
+		if [[ $value == unspecified ]]; then tc_fail "$where$path: $TC_MACRO_MISSING"; fi
+		tc_fail "$where$path is marked \`transcrypt\`, but another rule gives it the filter \`$value\` (from \`git lfs track\`?), so it would be stored unencrypted; narrow that rule"
+	done
+	return 0
+}
+
+# Whether Git object $1 starts as a record of config id $2 (keyless).
+tc_blob_is_record() {
+	local size
+	size=$(git cat-file -s "$1") || tc_fail "cannot read Git object $1"
+	((size >= TC_FILE_MIN && size <= TC_MAX_FILE + TC_FILE_MIN)) || return 1
+	git cat-file blob "$1" | head -c "$TC_FILE_MIN" >"$TC_TMP/prefix-probe" || tc_fail "cannot read Git object $1"
+	[[ $(tc_record_id "$TC_TMP/prefix-probe") == "$2" ]]
 }
 # Index paths (stage 0) into file $1, NUL-separated.
 tc_index_paths_file() {
@@ -794,8 +946,53 @@ tc_check_index() {
 	for path in .transcrypt/config .gitattributes .gitmodules; do
 		[[ -n ${TC_SELECTED[$path]-} ]] && tc_fail "$path is selected for encryption, but Git and v3 must read it unencrypted; narrow the pattern in .gitattributes"
 	done
+	local top=''
+	[[ -n ${TC_IDX_AT[".gitattributes"]-} ]] && top=${TC_IDX_OID[${TC_IDX_AT[".gitattributes"]}]}
+	tc_macro_resolves "$top" || tc_fail "$TC_MACRO_MISSING"
+	tc_check_marked ''
 	tc_operation_in_progress && progress=1
-	tc_read_tree_listing HEAD
+	# The pre-commit hook authenticates only what changed: an entry that
+	# HEAD and HEAD^1 already hold at its path, while no attribute file and
+	# not the config differ from both, was checked when it was committed;
+	# it gets the keyless envelope check (the Rust hook's rule, A24).
+	local incremental=0
+	local -A parent_oid=()
+	if ((repair)); then
+		if git rev-parse -q --verify 'HEAD^1^{tree}' >/dev/null 2>&1; then
+			tc_read_tree_listing 'HEAD^1'
+			for path in "${!TC_HEAD_OID[@]}"; do parent_oid[$path]=${TC_HEAD_MODE[$path]}:${TC_HEAD_OID[$path]}; done
+			tc_policy "$TC_TMP/policy-parent"
+			tc_read_tree_listing HEAD
+			tc_policy "$TC_TMP/policy-head"
+			tc_policy "$TC_TMP/policy-index" index
+			cmp -s "$TC_TMP/policy-parent" "$TC_TMP/policy-head" &&
+				cmp -s "$TC_TMP/policy-head" "$TC_TMP/policy-index" && incremental=1
+		fi
+	fi
+	((incremental)) || tc_read_tree_listing HEAD
+	# Unprotected files staged since HEAD: no record of this config may be
+	# stored where nothing decrypts it (a `git mv` to an unprotected name),
+	# and a file encrypted in HEAD or HEAD^1 that another named filter now
+	# claims (`git lfs track`) silently lost its protection.
+	local -A index_paths_by_oid=()
+	for i in "${!TC_IDX_PATH[@]}"; do
+		path=${TC_IDX_PATH[i]}
+		[[ ${TC_IDX_STAGE[i]} == 0 ]] || continue
+		index_paths_by_oid[${TC_IDX_OID[i]}]+=$path$'\x1f'
+		[[ -z ${TC_SELECTED[$path]-} ]] || continue
+		[[ ${TC_IDX_MODE[i]} == 100644 || ${TC_IDX_MODE[i]} == 100755 ]] || continue
+		[[ ${TC_HEAD_OID[$path]-} == "${TC_IDX_OID[i]}" ]] && continue
+		tc_reserved_path "$path" && continue
+		if tc_blob_is_record "${TC_IDX_OID[i]}" "$TC_CONFIG_ID"; then
+			tc_fail "$path holds a v3 record but is not protected, so nothing would decrypt it (a \`git mv\` to an unprotected name?); move it back, protect the new name, or stage its plaintext"
+		fi
+		local old value=${TC_FILTER[$path]-unspecified}
+		[[ $value == transcrypt-v3 || $value == unspecified || $value == unset ]] && continue
+		for old in "${TC_HEAD_OID[$path]-}" "${parent_oid[$path]#*:}"; do
+			[[ -n $old ]] && tc_blob_is_record "$old" "$TC_CONFIG_ID" &&
+				tc_fail "$path was encrypted and would now be stored unencrypted for the filter \`$value\`: a .gitattributes rule (e.g. from \`git lfs track\`) overrides \`transcrypt\`. Narrow that rule, or \`transcrypt-bash unprotect\` the file deliberately"
+		done
+	done
 	tc_index_info_reset
 	for i in "${!TC_IDX_PATH[@]}"; do
 		path=${TC_IDX_PATH[i]}
@@ -805,6 +1002,12 @@ tc_check_index() {
 		oid=${TC_IDX_OID[i]}
 		tc_require_path "$path"
 		[[ $mode == 100644 || $mode == 100755 ]] || tc_fail "protected path is not a regular file (mode $mode): $path"
+		if ((incremental)) && [[ ${TC_HEAD_OID[$path]-} == "$oid" && ${parent_oid[$path]-} == "$mode:$oid" ]]; then
+			git cat-file blob "$oid" | head -c "$TC_FILE_MIN" >"$TC_TMP/settled-prefix" || tc_fail "cannot read Git object $oid"
+			[[ $(tc_record_id "$TC_TMP/settled-prefix") == "$TC_CONFIG_ID" ]] ||
+				tc_fail "$path is committed without encryption (or under another config) in HEAD; re-add it and commit"
+			continue
+		fi
 		tc_blob "$oid" "$TC_TMP/staged-blob"
 		local local_change=0
 		((progress == 0)) && [[ ${TC_HEAD_OID[$path]-} != "$oid" ]] && local_change=1
@@ -843,8 +1046,9 @@ tc_check_index() {
 		else
 			# Locked: records of this config only, never one moved here.
 			tc_envelope_ok "$TC_TMP/staged-blob" "$TC_CONFIG_ID" || tc_fail "$path: not a v3 record of this config, and this checkout is locked; unlock to encrypt it"
-			if [[ ${TC_HEAD_OID[$path]-} != "$oid" && -n ${TC_HEAD_BY_OID[$oid]-} ]]; then
-				tc_fail "$path holds a record committed at another path; unlock to re-encrypt it for its new name"
+			if [[ ${TC_HEAD_OID[$path]-} != "$oid" ]] &&
+				[[ -n ${TC_HEAD_BY_OID[$oid]-} || ${index_paths_by_oid[$oid]} != "$path"$'\x1f' ]]; then
+				tc_fail "$path holds a record committed or staged at another path; unlock to re-encrypt it for its new name"
 			fi
 			keyless=$((keyless + 1))
 		fi
@@ -948,13 +1152,17 @@ tc_remove_installation() {
 # filter, which gives back exactly their staged records, so Git's stat data
 # matches the plaintext; refuse if any staged object changed.
 tc_reindex() {
-	local list=$1
+	local list=$1 index
 	[[ -s $list ]] || return 0
+	index=${GIT_INDEX_FILE:-$(git rev-parse --path-format=absolute --git-path index)}
+	cp -p -- "$index" "$TC_TMP/index-backup" || tc_fail 'cannot back up the index'
 	git ls-files -s -z >"$TC_TMP/reindex-before" || tc_fail 'cannot list the index'
 	git update-index -z --stdin <"$list" || tc_fail 'cannot refresh the index'
 	git ls-files -s -z >"$TC_TMP/reindex-after" || tc_fail 'cannot list the index'
-	cmp -s "$TC_TMP/reindex-before" "$TC_TMP/reindex-after" ||
-		tc_fail 'staged Git objects changed while refreshing the index; inspect `git diff --cached`'
+	if ! cmp -s "$TC_TMP/reindex-before" "$TC_TMP/reindex-after"; then
+		cat "$TC_TMP/index-backup" >"$index"
+		tc_fail 'a worktree file did not clean to its staged object; the index was restored, inspect `git status`'
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -978,8 +1186,10 @@ tc_hydrate() {
 			tc_log "warning: $path does not open at its path; left encrypted"
 			continue
 		}
+		local staged_record=0
+		[[ $(git hash-object --no-filters "$file") == "${TC_IDX_OID[i]}" ]] && staged_record=1
 		cat "$TC_TMP/hydrated" >"$file"
-		printf '%s\0' "$path" >>"$TC_TMP/hydrated-paths"
+		((staged_record)) && printf '%s\0' "$path" >>"$TC_TMP/hydrated-paths"
 		count=$((count + 1))
 	done
 	tc_reindex "$TC_TMP/hydrated-paths"
@@ -1160,7 +1370,12 @@ tc_protect_patterns() {
 		[[ -n $(tc_record_id "$TC_TMP/protect-blob") ]] && continue
 		tc_seal_record "$path" "$TC_TMP/protect-blob" "$TC_TMP/protect-record"
 		tc_index_info_add "$mode" "$(tc_write_blob "$TC_TMP/protect-record")" "$path"
-		tc_worktree_file "$path" >/dev/null && printf '%s\0' "$path" >>"$TC_TMP/protect-sealed"
+		# Only a worktree file holding exactly the staged content is
+		# re-indexed: a staged-only version must stay what is staged.
+		local wt
+		if wt=$(tc_worktree_file "$path") && cmp -s "$wt" "$TC_TMP/protect-blob"; then
+			printf '%s\0' "$path" >>"$TC_TMP/protect-sealed"
+		fi
 		sealed=$((sealed + 1))
 	done
 	tc_index_info_apply
@@ -1206,6 +1421,7 @@ tc_cmd_unprotect() {
 	}
 	tc_selected "$TC_TMP/unprotect-paths"
 	tc_index_info_reset
+	: >"$TC_TMP/unprotect-reindex"
 	for i in "${before[@]}"; do
 		path=${TC_IDX_PATH[i]}
 		[[ -z ${TC_SELECTED[$path]-} ]] || continue
@@ -1215,11 +1431,16 @@ tc_cmd_unprotect() {
 			tc_fail "$path does not authenticate; nothing was changed"
 		fi
 		tc_index_info_add "${TC_IDX_MODE[i]}" "$(tc_write_blob "$TC_TMP/unprotect-plain")" "$path"
+		local wt
+		if wt=$(tc_worktree_file "$path") && cmp -s "$wt" "$TC_TMP/unprotect-plain"; then
+			printf '%s\0' "$path" >>"$TC_TMP/unprotect-reindex"
+		fi
 		n=$((n + 1))
 		tc_log "UNPROTECTED: $path will be committed as plaintext"
 	done
 	git add -- .gitattributes || tc_fail 'cannot stage .gitattributes'
 	tc_index_info_apply
+	tc_reindex "$TC_TMP/unprotect-reindex"
 	tc_hydrate quiet
 	tc_log "$n file(s) staged in plaintext"
 }
@@ -1265,7 +1486,7 @@ tc_cmd_lock() {
 		tc_flush
 	fi
 	[[ ! -L $file ]] || tc_fail 'refusing a symlinked key path'
-	rm -f -- "$file"
+	rm -f -- "$file" "$(tc_key_cache_file)"
 	tc_log 'locked: protected files hold ciphertext and the key is forgotten'
 }
 
@@ -1320,6 +1541,113 @@ tc_cmd_rekey() {
 	printf '%s\0' .transcrypt/config >>"$TC_TMP/rekey-reindex"
 	tc_reindex "$TC_TMP/rekey-reindex"
 	tc_log "rekeyed $n file(s) under $(tc_profile_description "$profile"); the new config and records are staged. Commit them now, e.g. git commit -m 'Rekey transcrypt-v3'. Earlier commits stay readable with the old passphrase: if it was exposed, change the secrets themselves."
+}
+
+# `reencrypt [--password-stdin] [--yes]`: staged protected files still
+# encrypted under an earlier config of this branch (a commit cherry-picked or
+# rebased across a rekey brings its records unchanged) are opened under that
+# config, authenticated with its passphrase, at their own path, and re-sealed
+# under the current one. Nothing else changes; the result is staged.
+tc_cmd_reencrypt() {
+	local stdin=0 yes=0 arg i path found n=0
+	for arg in "$@"; do
+		case $arg in
+		--password-stdin) stdin=1 ;;
+		--yes) yes=1 ;;
+		*) tc_fail "reencrypt: unexpected argument $arg" ;;
+		esac
+	done
+	tc_load_config
+	tc_require_key
+	cp -- "$TC_CONFIG_FILE" "$TC_TMP/current-config"
+	local current_key=$TC_KEY current_id=$TC_CONFIG_ID
+	tc_read_index
+	tc_index_paths_file "$TC_TMP/reencrypt-paths"
+	tc_selected "$TC_TMP/reencrypt-paths" --cached
+	local -a stale=() stale_id=()
+	for i in "${!TC_IDX_PATH[@]}"; do
+		path=${TC_IDX_PATH[i]}
+		[[ ${TC_IDX_STAGE[i]} == 0 && -n ${TC_SELECTED[$path]-} ]] || continue
+		tc_blob "${TC_IDX_OID[i]}" "$TC_TMP/reencrypt-blob"
+		found=$(tc_record_id "$TC_TMP/reencrypt-blob")
+		[[ -n $found && $found != "$current_id" ]] || continue
+		stale+=("$i")
+		stale_id+=("$found")
+	done
+	if ((${#stale[@]} == 0)); then
+		tc_log 'every staged protected file is encrypted under the current config'
+		return 0
+	fi
+	# Earlier configs of this branch, by id.
+	local -A earlier=()
+	local commit oid id
+	git log --format=%H HEAD -- .transcrypt/config >"$TC_TMP/config-commits" 2>/dev/null || true
+	while IFS= read -r commit; do
+		oid=$(git rev-parse -q --verify "$commit:.transcrypt/config" 2>/dev/null) || continue
+		tc_blob "$oid" "$TC_TMP/earlier-config"
+		(tc_config_profile "$TC_TMP/earlier-config") >/dev/null 2>&1 || continue
+		id=$(tc_digest_id "$TC_TMP/earlier-config")
+		[[ $id == "$current_id" || -n ${earlier[$id]-} ]] && continue
+		cp -- "$TC_TMP/earlier-config" "$TC_TMP/earlier-$id"
+		earlier[$id]=${commit:0:12}
+	done <"$TC_TMP/config-commits"
+	tc_log 'these staged files are encrypted under an earlier config; re-encrypting them makes their content trusted under the current config:'
+	for n in "${!stale[@]}"; do
+		path=${TC_IDX_PATH[${stale[n]}]}
+		[[ -n ${earlier[${stale_id[n]}]-} ]] || tc_fail "$path is encrypted under a config this branch never had before its current one (from another branch, or newer); reencrypt only brings forward earlier configs of this branch"
+		printf '  %s (config %s, introduced by %s)\n' "$path" "${stale_id[n]:0:12}" "${earlier[${stale_id[n]}]}" >&2
+	done
+	if ((!yes)); then
+		if ((stdin)) || [[ ! -t 0 ]]; then
+			tc_fail 'not confirmed; review those commits, then run `transcrypt-bash reencrypt --yes`'
+		fi
+		local answer
+		read -r -p 'Type yes to continue: ' answer
+		[[ $answer == yes ]] || tc_fail 'not confirmed'
+	fi
+	# Every earlier passphrase is asked for and checked before any write.
+	local -A done_ids=()
+	for n in "${!stale[@]}"; do
+		id=${stale_id[n]}
+		[[ -n ${done_ids[$id]-} ]] && continue
+		tc_set_config "$TC_TMP/earlier-$id"
+		tc_require_portable "$TC_PROFILE"
+		tc_log "passphrase of config ${id:0:12} (introduced by ${earlier[$id]})"
+		tc_read_passphrase "$stdin" 0
+		tc_derive "$TC_PROFILE" "$TC_TMP/passphrase" "$(head -c 39 "$TC_CONFIG_FILE" | tail -c 32 | od -An -tx1 -v | tr -d ' \n')"
+		rm -f -- "$TC_TMP/passphrase"
+		tc_config_authentic "$TC_CONFIG_FILE" || tc_fail "incorrect passphrase for config ${id:0:12}"
+		local m
+		for m in "${!stale[@]}"; do
+			[[ ${stale_id[m]} == "$id" ]] || continue
+			path=${TC_IDX_PATH[${stale[m]}]}
+			tc_blob "${TC_IDX_OID[${stale[m]}]}" "$TC_TMP/reencrypt-old"
+			tc_open_record "$path" "$TC_TMP/reencrypt-old" "$TC_TMP/reencrypt-plain-$m" || tc_fail "$path does not authenticate under config ${id:0:12}"
+		done
+		done_ids[$id]=1
+	done
+	# Re-seal under the current config; the index changes last.
+	tc_set_config "$TC_TMP/current-config"
+	tc_use_key "$current_key"
+	tc_index_info_reset
+	: >"$TC_TMP/reencrypt-reindex"
+	for n in "${!stale[@]}"; do
+		i=${stale[n]}
+		path=${TC_IDX_PATH[i]}
+		tc_seal_record "$path" "$TC_TMP/reencrypt-plain-$n" "$TC_TMP/reencrypt-new"
+		tc_index_info_add "${TC_IDX_MODE[i]}" "$(tc_write_blob "$TC_TMP/reencrypt-new")" "$path"
+		local wt
+		if wt=$(tc_worktree_file "$path"); then
+			tc_blob "${TC_IDX_OID[i]}" "$TC_TMP/reencrypt-old"
+			if cmp -s "$wt" "$TC_TMP/reencrypt-old"; then
+				cat "$TC_TMP/reencrypt-plain-$n" >"$wt"
+				printf '%s\0' "$path" >>"$TC_TMP/reencrypt-reindex"
+			fi
+		fi
+	done
+	tc_index_info_apply
+	tc_reindex "$TC_TMP/reencrypt-reindex"
+	tc_log "re-encrypted ${#stale[@]} file(s) under the current config; they are staged. Commit them."
 }
 
 tc_cmd_rebind() {
@@ -1562,22 +1890,52 @@ tc_audit_commit() {
 	: >"$TC_TMP/audit-paths"
 	for path in "${!TC_HEAD_OID[@]}"; do printf '%s\0' "$path" >>"$TC_TMP/audit-paths"; done
 	printf '%s\0' .transcrypt/config .gitattributes .gitmodules >>"$TC_TMP/audit-paths"
+	rm -f -- "$TC_TMP/audit-index"
 	GIT_INDEX_FILE=$TC_TMP/audit-index git read-tree "$rev" || tc_fail "cannot read commit $rev"
 	GIT_INDEX_FILE=$TC_TMP/audit-index tc_selected "$TC_TMP/audit-paths" --cached
 	for path in .transcrypt/config .gitattributes .gitmodules; do
 		[[ -n ${TC_SELECTED[$path]-} ]] && tc_fail "commit $rev: $path is selected for encryption"
 	done
-	((${#TC_SELECTED[@]})) || return 0
-	[[ -n $cfg_oid ]] || tc_fail "commit $rev protects files but has no .transcrypt/config"
+	if [[ -z $cfg_oid ]]; then
+		((${#TC_SELECTED[@]} == 0)) || tc_fail "commit $rev protects files but has no .transcrypt/config"
+		return 0
+	fi
+	tc_macro_resolves "${TC_HEAD_OID[".gitattributes"]-}" || tc_fail "commit $rev: $TC_MACRO_MISSING"
+	tc_check_marked "commit $rev: "
 	tc_blob "$cfg_oid" "$TC_TMP/audit-config"
-	profile=$(tc_config_profile "$TC_TMP/audit-config")
-	local id
-	id=$(tc_digest_id "$TC_TMP/audit-config")
-	local keyed=0
+	local hex id keyed=0
+	hex=$(tc_file_hex "$TC_TMP/audit-config") || tc_fail "cannot read the config of $rev"
+	profile=$(tc_profile_of_hex "$hex") || tc_fail "commit $rev: invalid .transcrypt/config"
+	id=$(tc_digest_id "$TC_TMP/audit-config") || tc_fail 'cannot hash a config'
 	if [[ $profile == [23] ]]; then
 		tc_set_config "$TC_TMP/audit-config"
 		tc_try_key && keyed=1
 	fi
+	# Unprotected files changed since the parent: a record of this config
+	# there must authenticate at that path (or needs the key), and a file
+	# that was a record in the parent may not be taken by another filter.
+	local value
+	for path in "${!TC_HEAD_OID[@]}"; do
+		[[ -z ${TC_SELECTED[$path]-} ]] || continue
+		oid=${TC_HEAD_OID[$path]}
+		[[ ${parent_oid[$path]-} == "$oid" ]] && continue
+		[[ ${TC_HEAD_MODE[$path]} == 100644 || ${TC_HEAD_MODE[$path]} == 100755 ]] || continue
+		tc_reserved_path "$path" && continue
+		if tc_blob_is_record "$oid" "$id"; then
+			if ((keyed)); then
+				tc_blob "$oid" "$TC_TMP/audit-blob"
+				tc_open_record "$path" "$TC_TMP/audit-blob" "$TC_TMP/audit-plain" ||
+					tc_fail "commit $rev: $path holds a record of its config that does not authenticate there (moved to an unprotected name?)"
+			else
+				TC_AUDIT_KEYLESS=$((TC_AUDIT_KEYLESS + 1))
+				TC_AUDIT_NEEDS_KEY=1
+			fi
+		elif [[ -n ${parent_oid[$path]-} ]] && tc_blob_is_record "${parent_oid[$path]}" "$id"; then
+			value=${TC_FILTER[$path]-unspecified}
+			[[ $value == transcrypt-v3 || $value == unspecified || $value == unset ]] ||
+				tc_fail "commit $rev: $path was encrypted, and is now stored unencrypted for the filter \`$value\`; a .gitattributes rule (e.g. from \`git lfs track\`) overrides \`transcrypt\`"
+		fi
+	done
 	for path in "${!TC_SELECTED[@]}"; do
 		oid=${TC_HEAD_OID[$path]-}
 		[[ -n $oid ]] || continue
@@ -1599,7 +1957,7 @@ tc_audit_commit() {
 }
 
 tc_cmd_audit() {
-	tc_repo
+	tc_repo bare
 	local rev max=''
 	if [[ ${1-} == --max-commits=* ]]; then
 		max=${1#--max-commits=}
@@ -1608,8 +1966,13 @@ tc_cmd_audit() {
 	(($#)) || set -- HEAD
 	git rev-list "$@" >"$TC_TMP/audit-commits" || tc_fail 'git rev-list failed'
 	local n=0
+	if [[ -n $max ]]; then
+		[[ $max =~ ^[0-9]+$ ]] || tc_fail '--max-commits takes a number'
+		n=$(wc -l <"$TC_TMP/audit-commits")
+		((n <= max)) || tc_fail "refusing to audit $((n)) commits (more than --max-commits=$max)"
+		n=0
+	fi
 	while IFS= read -r rev; do
-		[[ -n $max ]] && ((n >= max)) && break
 		tc_audit_commit "$rev"
 		n=$((n + 1))
 	done <"$TC_TMP/audit-commits"
@@ -1635,21 +1998,20 @@ tc_cmd_pre_push() {
 	if [[ $remote =~ ^[A-Za-z0-9._-]+$ ]]; then revs+=(--not "--remotes=$remote"); fi
 	tc_repo
 	git rev-list "${revs[@]}" >"$TC_TMP/push-commits" || tc_fail 'cannot list the pushed commits'
-	local rev n=0
+	local rev n=0 required
+	# A failure anywhere in the audit exits with this prefix.
+	TC_FAIL_PREFIX='refusing to push: '
 	while IFS= read -r rev; do
-		(
-			tc_audit_commit "$rev"
-			printf '%s %s\n' "$TC_AUDIT_KEYLESS" "$TC_AUDIT_NEEDS_KEY" >"$TC_TMP/push-audit"
-		) ||
-			tc_fail "refusing to push: commit $rev failed the audit; see \`transcrypt-bash audit $rev\`"
-		read -r k needs <"$TC_TMP/push-audit"
-		TC_AUDIT_KEYLESS=$((TC_AUDIT_KEYLESS + k))
-		((needs)) && TC_AUDIT_NEEDS_KEY=1
+		tc_audit_commit "$rev"
 		n=$((n + 1))
 	done <"$TC_TMP/push-commits"
+	TC_FAIL_PREFIX=''
 	if ((TC_AUDIT_KEYLESS)); then
 		tc_log "pre-push: $TC_AUDIT_KEYLESS protected file(s) in $n commit(s) checked by envelope only (no key here for their config)"
-		if ((TC_AUDIT_NEEDS_KEY)) && [[ $(git config --bool transcrypt.requireAuthenticatedPush 2>/dev/null || true) == true ]]; then
+		# Any value but an explicit false counts as set (fail safe).
+		required=$(git config --get transcrypt.requireAuthenticatedPush 2>/dev/null || true)
+		required=${required,,}
+		if ((TC_AUDIT_NEEDS_KEY)) && [[ -n $required && $required != false && $required != no && $required != off && $required != 0 ]]; then
 			tc_fail 'refusing to push: transcrypt.requireAuthenticatedPush is set and some records could not be authenticated; unlock (for older configs, audit where their key is available)'
 		fi
 	fi
@@ -1789,6 +2151,8 @@ Typical workflow
   transcrypt-bash status | doctor | profiles
   transcrypt-bash lock                  restore ciphertext in the worktree and forget the key
   transcrypt-bash rekey [--profile=NAME] new passphrase (and profile); records re-encrypted, staged
+  transcrypt-bash reencrypt [--yes]     re-encrypt staged files still under an earlier config
+                            (cherry-picked or rebased across a rekey)
   transcrypt-bash hydrate               decrypt ciphertext left in the worktree
   transcrypt-bash audit [<rev-list args>] check every protected file of the given commits
   transcrypt-bash migrate [--profile=NAME] convert a Bash transcrypt (v2) checkout
@@ -1836,6 +2200,7 @@ tc_main() {
 		;;
 	rebind) tc_cmd_rebind ;;
 	rekey) tc_cmd_rekey "$@" ;;
+	reencrypt) tc_cmd_reencrypt "$@" ;;
 	migrate) tc_cmd_migrate "$@" ;;
 	clean | smudge)
 		(($# == 1)) || tc_fail 'Git filter requires exactly one %f pathname'
@@ -1861,8 +2226,19 @@ tc_main() {
 	pre-commit) tc_check_index 1 ;;
 	pre-push) tc_cmd_pre_push "$@" ;;
 	audit) tc_cmd_audit "$@" ;;
-	diff) tc_cmd_diff "$@" ;;
-	merge) tc_cmd_merge "$@" ;;
+	diff | merge)
+		# Git passes temporary files relative to where it runs us.
+		local -a args=()
+		local a i=0
+		for a in "$@"; do
+			i=$((i + 1))
+			if [[ ($command == merge && $i -le 3) || ($command == diff && ($i == 2 || $i == 5)) ]] && [[ -n $a && $a != /* ]]; then
+				a=$PWD/$a
+			fi
+			args+=("$a")
+		done
+		if [[ $command == diff ]]; then tc_cmd_diff "${args[@]}"; else tc_cmd_merge "${args[@]}"; fi
+		;;
 	status) tc_cmd_status ;;
 	doctor) tc_cmd_doctor ;;
 	*) tc_fail "unknown command $command (see transcrypt-bash help)" ;;
