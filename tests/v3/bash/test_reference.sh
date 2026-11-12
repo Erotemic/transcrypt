@@ -191,6 +191,19 @@ grep -q 'refusing to push' "$SCRATCH/push.log" || die 'pre-push refusal message'
 git reset -q --hard HEAD~2
 ok 'pre-push refuses a plaintext commit hidden behind a later fix'
 
+# Push: a tag of a tree or blob (whose files rev-list never walks) is refused.
+blob=$(printf 'MARK-tree-plaintext\n' | git hash-object -w --stdin)
+tree=$(printf '100644 blob %s\t.gitattributes\n100644 blob %s\ttwo.env\n' "$(git rev-parse HEAD:.gitattributes)" "$blob" | git mktree)
+for target in "$tree" "$blob"; do
+    git update-ref refs/tags/not-a-commit "$target"
+    if git push -q origin refs/tags/not-a-commit 2>"$SCRATCH/push.log"; then die 'pre-push accepted a tag of a tree or blob'; fi
+    grep -q 'names no commit' "$SCRATCH/push.log" || die 'pre-push refusal message for a tree or blob'
+done
+git update-ref -d refs/tags/not-a-commit
+git tag -a -m release v1; git push -q origin refs/tags/v1 2>/dev/null || die 'pre-push refused an annotated tag of a commit'
+! git -C "$SCRATCH/remote.git" cat-file --batch-all-objects --batch | grep -q MARK-tree || die 'plaintext reached the remote'
+ok 'pre-push refuses tags of trees and blobs, admits tags of commits'
+
 # Unprotect publishes plaintext deliberately.
 "$CLI" unprotect 'dir with space/**' 2>/dev/null
 [[ $(git cat-file blob ':dir with space/blob.bin' | od -An -tx1 | tr -d ' \n') == 00ff2062696e6172790a ]] || die 'unprotect'
@@ -391,6 +404,10 @@ if [[ $(id -u) != 0 ]]; then
     git commit -qm 'third rekey'; git checkout -- notes.txt
     [[ $(git show HEAD:three.env | "$CLI" decrypt three.env) == 'staged only' ]] || die 'rekey --continue: three.env'
     git diff --quiet || die 'not clean after rekey --continue'
+    oid=$(git rev-parse HEAD:three.env)
+    printf 'transcrypt-v3-rekey 1\0%s\0%s\0100644\0%s\0%s\0three.env\0100644\0%s\0%s\0three.env\0' "$oid" "$oid" "$oid" "$oid" "$oid" "$oid" >.git/transcrypt-v3-rekey
+    if printf 'x\n' | "$CLI" rekey --abort --password-stdin 2>/dev/null; then die 'a journal naming a path twice was used'; fi
+    rm -f .git/transcrypt-v3-rekey
     ok 'an interrupted rekey: --abort and --continue change only its entries, keeping index-only changes'
 fi
 
@@ -409,6 +426,21 @@ printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.env' 2>/dev/null
 rm -f .git/transcrypt-v3-setup
 if printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin 2>/dev/null; then die 'resumed without a record or patterns'; fi
 ok 'an interrupted init resumed without its patterns still protects them; without a record it needs them'
+
+# An unfinished setup record refuses the other command.
+newrepo other-setup
+printf 'x\n' >README; git add README; git commit -qm seed
+printf 'transcrypt-v3-setup 1\0migrate\0started\0*.env\0' >.git/transcrypt-v3-setup
+if printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.secret' 2>"$SCRATCH/other.err"; then die 'init over an interrupted migrate'; fi
+grep -q 'interrupted `migrate`' "$SCRATCH/other.err" && [[ ! -e .transcrypt ]] || die 'init over an interrupted migrate changed something'
+printf 'transcrypt-v3-setup 1\0init\0started\0*.env\0' >.git/transcrypt-v3-setup
+git config filter.crypt.clean cat
+if printf '%s\n' "$PASSPHRASE" | "$CLI" migrate --password-stdin 2>"$SCRATCH/other.err"; then die 'migrate over an interrupted init'; fi
+grep -q 'interrupted `init`' "$SCRATCH/other.err" && [[ ! -e .transcrypt ]] || die 'migrate over an interrupted init changed something'
+git config --unset filter.crypt.clean
+printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin 2>"$SCRATCH/other.err" || die 'init resuming its own record'
+grep -qx '\*\.env transcrypt' .gitattributes || die 'init did not protect what its record holds'
+ok 'an unfinished setup record refuses the other command and binds its own'
 
 # ---------------------------------------------------------------------------
 # v2 migration (needs the repository's Bash v2 script).

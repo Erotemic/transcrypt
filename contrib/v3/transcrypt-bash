@@ -34,6 +34,8 @@ readonly TC_KEY_CHECK_PLAINTEXT=transcrypt/v3/key-check
 readonly TC_MACRO='[attr]transcrypt filter=transcrypt-v3 diff=transcrypt-v3 merge=transcrypt-v3 -text'
 readonly TC_MACRO_COMMENT='# transcrypt-v3: files matching a pattern marked `transcrypt` are encrypted in Git'
 readonly TC_ZERO_OID_RE='^0+$'
+# An object id as Git prints it: SHA-1 or SHA-256.
+readonly TC_OID_RE='^[0-9a-f]{40}([0-9a-f]{24})?$'
 TC_SCRIPT=${BASH_SOURCE[0]}
 [[ $TC_SCRIPT == */* ]] || TC_SCRIPT=$(command -v -- "$TC_SCRIPT")
 TC_SCRIPT=$(cd -- "${TC_SCRIPT%/*}" && pwd -P)/${TC_SCRIPT##*/}
@@ -1480,6 +1482,18 @@ tc_write_fields() {
 		tc_fail "cannot write $file"
 	fi
 }
+# Replace worktree file $2 by the contents of $1 whole, by a rename from a
+# file next to it with its mode (an interruption leaves the old or the new
+# contents, never a mix, so a rerun recognizes it). $2 is a regular file
+# or missing (callers have refused symlinks).
+tc_replace_file() {
+	local tmp
+	tmp=$(mktemp "${2%/*}/.transcrypt-v3.XXXXXXXX") || tc_fail "cannot write $2"
+	if { [[ -e $2 ]] && ! cp -p -- "$2" "$tmp"; } || ! cat -- "$1" >"$tmp" || ! mv -f -- "$tmp" "$2"; then
+		rm -f -- "$tmp"
+		tc_fail "cannot write $2"
+	fi
+}
 # Read the NUL-terminated fields of file $1 into TC_FIELDS; fails unless
 # the file ends with a complete field.
 declare -a TC_FIELDS=()
@@ -1534,6 +1548,24 @@ tc_setup_save() {
 	tc_write_fields "$file" "$TC_SETUP_MAGIC" "$@"
 }
 
+# What a run of command $1 does with the setup record (the verified core's
+# setup_record_use, transcrypt-rs: journal.rs): $2 resuming (1/0), $3
+# named (it was asked to protect something, 1/0), the record as
+# tc_setup_load left it (TC_SETUP_KIND empty: none). Sets TC_RECORD_USE to
+# fresh, merge, other or unrecorded.
+TC_RECORD_USE=''
+tc_record_use() {
+	if [[ -z $TC_SETUP_KIND ]]; then
+		if (($2)) && ! (($3)); then TC_RECORD_USE=unrecorded; else TC_RECORD_USE=fresh; fi
+	elif ! (($2)) && [[ $TC_SETUP_STATE == complete ]]; then
+		TC_RECORD_USE=fresh
+	elif [[ $TC_SETUP_KIND == "$1" ]]; then
+		TC_RECORD_USE=merge
+	else
+		TC_RECORD_USE=other
+	fi
+}
+
 # Resuming: the interrupted setup's config, authenticated by the passphrase.
 tc_resume_key() {
 	(tc_load_config) >/dev/null 2>&1 || tc_fail "unusable .transcrypt/config (left by an interrupted setup?); to start over: $TC_START_OVER"
@@ -1569,23 +1601,23 @@ tc_cmd_init() {
 	tc_interrupted_setup '.transcrypt already exists: this repository is set up; run `transcrypt-bash unlock`' && resuming=1
 	# What an earlier, interrupted run was asked to protect is kept: the
 	# patterns of this run are added to it.
-	if tc_setup_load; then
-		if ((resuming)) && [[ $TC_SETUP_KIND != init ]]; then
-			tc_fail 'an interrupted `migrate` set up this checkout; rerun migrate to complete it'
-		fi
-		if ((resuming)) || [[ $TC_SETUP_KIND == init && $TC_SETUP_STATE == started ]]; then
-			for item in ${TC_SETUP_ITEMS[@]+"${TC_SETUP_ITEMS[@]}"}; do
-				have=0
-				for arg in ${patterns[@]+"${patterns[@]}"}; do [[ $arg == "$item" ]] && have=1; done
-				((have)) || {
-					patterns+=("$item")
-					recorded+=("$item")
-				}
-			done
-		fi
-	elif ((resuming && ${#patterns[@]} == 0)); then
-		tc_fail "an interrupted setup left .transcrypt, but no record of what it was to protect; rerun init naming the patterns to protect, or start over: $TC_START_OVER"
-	fi
+	tc_setup_load || true
+	tc_record_use init "$resuming" "$((${#patterns[@]} > 0))"
+	case $TC_RECORD_USE in
+	fresh) ;;
+	merge)
+		for item in ${TC_SETUP_ITEMS[@]+"${TC_SETUP_ITEMS[@]}"}; do
+			have=0
+			for arg in ${patterns[@]+"${patterns[@]}"}; do [[ $arg == "$item" ]] && have=1; done
+			((have)) || {
+				patterns+=("$item")
+				recorded+=("$item")
+			}
+		done
+		;;
+	other) tc_fail "an interrupted \`migrate\` set up this checkout; rerun migrate to complete it, or start over: $TC_START_OVER" ;;
+	*) tc_fail "an interrupted setup left .transcrypt, but no record of what it was to protect; rerun init naming the patterns to protect, or start over: $TC_START_OVER" ;;
+	esac
 	((${#recorded[@]} == 0)) || tc_log "also protecting what the interrupted init was asked to: ${recorded[*]}"
 	if ((resuming)); then
 		tc_resume_key "$stdin"
@@ -1881,6 +1913,7 @@ readonly TC_REKEY_PENDING='an interrupted rekey: finish it with `transcrypt-bash
 # Load the journal (1 if there is none); every object it names must exist.
 tc_rekey_load() {
 	local file i n oid
+	local -A seen=()
 	tc_gitdir
 	file=$(tc_rekey_file)
 	TC_RJ_MODE=() TC_RJ_OLD=() TC_RJ_NEW=() TC_RJ_PATH=()
@@ -1894,6 +1927,9 @@ tc_rekey_load() {
 	printf '%s\n%s\n' "$TC_RJ_OLD_CONFIG" "$TC_RJ_NEW_CONFIG" >>"$TC_TMP/rj-oids"
 	for ((i = 3; i < n; i += 4)); do
 		[[ ${TC_FIELDS[i]} == 100644 || ${TC_FIELDS[i]} == 100755 ]] || tc_fail "unrecognized $file"
+		# Each path once: a recovery decides and writes per path.
+		[[ -z ${seen[${TC_FIELDS[i + 3]}]-} ]] || tc_fail "unrecognized $file"
+		seen[${TC_FIELDS[i + 3]}]=1
 		TC_RJ_MODE+=("${TC_FIELDS[i]}")
 		TC_RJ_OLD+=("${TC_FIELDS[i + 1]}")
 		TC_RJ_NEW+=("${TC_FIELDS[i + 2]}")
@@ -1901,7 +1937,7 @@ tc_rekey_load() {
 		printf '%s\n%s\n' "${TC_FIELDS[i + 1]}" "${TC_FIELDS[i + 2]}" >>"$TC_TMP/rj-oids"
 	done
 	while IFS= read -r oid; do
-		[[ $oid =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || tc_fail "unrecognized $file"
+		[[ $oid =~ $TC_OID_RE ]] || tc_fail "unrecognized $file"
 	done <"$TC_TMP/rj-oids"
 	git cat-file --batch-check='%(objecttype)' <"$TC_TMP/rj-oids" >"$TC_TMP/rj-types" || tc_fail 'git cat-file failed'
 	if grep -qv '^blob$' "$TC_TMP/rj-types" || (($(wc -l <"$TC_TMP/rj-types") != $(wc -l <"$TC_TMP/rj-oids"))); then
@@ -1980,7 +2016,7 @@ tc_cmd_rekey() {
 	journal_file=$(tc_rekey_file)
 	tc_write_fields "$journal_file" "${journal[@]}"
 	tc_index_info_apply
-	cat "$TC_CONFIG_FILE" >"$TC_ROOT/.transcrypt/config"
+	tc_replace_file "$TC_CONFIG_FILE" "$TC_ROOT/.transcrypt/config"
 	tc_store_key
 	: >"$TC_TMP/rekey-reindex"
 	for i in "${idx[@]}"; do printf '%s\0' "${TC_IDX_PATH[i]}" >>"$TC_TMP/rekey-reindex"; done
@@ -2066,7 +2102,7 @@ tc_rekey_resume() {
 	((stored)) || tc_store_key
 	cmp -s "$wtconfig" "$TC_TMP/rj-want-config" 2>/dev/null || {
 		mkdir -p -- "$TC_ROOT/.transcrypt"
-		cat "$TC_TMP/rj-want-config" >"$wtconfig"
+		tc_replace_file "$TC_TMP/rj-want-config" "$wtconfig"
 	}
 	tc_index_info_reset
 	for j in ${todo[@]+"${todo[@]}"}; do
@@ -2079,7 +2115,7 @@ tc_rekey_resume() {
 	: >"$TC_TMP/rj-reindex"
 	for j in ${relock[@]+"${relock[@]}"}; do
 		file=$(tc_worktree_file "${TC_RJ_PATH[j]}") || continue
-		cat "$TC_TMP/rj-want-$j" >"$file"
+		tc_replace_file "$TC_TMP/rj-want-$j" "$file"
 		tc_handoff_add "${TC_RJ_PATH[j]}" "$TC_TMP/rj-want-$j" "$TC_TMP/rj-want-$j"
 		printf '%s\0' "${TC_RJ_PATH[j]}" >>"$TC_TMP/rj-reindex"
 	done
@@ -2561,7 +2597,12 @@ tc_cmd_pre_push() {
 	local -a revs=()
 	while read -r _ localoid _ remoteoid; do
 		[[ -n ${localoid-} ]] || continue
+		[[ $localoid =~ $TC_OID_RE && ${remoteoid-} =~ $TC_OID_RE ]] || tc_fail 'refusing to push: malformed pre-push input'
 		[[ $localoid =~ $TC_ZERO_OID_RE ]] && continue
+		# rev-list walks commits only: a pushed tree or blob (a tag naming
+		# one) would be published without being audited.
+		git cat-file -e "$localoid^{commit}" 2>/dev/null ||
+			tc_fail "refusing to push: $localoid names no commit (a tag of a tree or blob?): its files cannot be audited"
 		revs+=("$localoid")
 		if ! [[ $remoteoid =~ $TC_ZERO_OID_RE ]] && git cat-file -e "$remoteoid^{commit}" 2>/dev/null; then
 			revs+=("^$remoteoid")
@@ -2624,9 +2665,13 @@ tc_cmd_migrate() {
 			chosen[$path]=1
 		fi
 	done <"$TC_TMP/migrate-attrs"
-	# And whatever the interrupted run recorded that it converts.
-	if ((resuming)) && tc_setup_load; then
-		[[ $TC_SETUP_KIND == migrate ]] || tc_fail 'an interrupted `init` set up this checkout; rerun init to complete it'
+	# And whatever an interrupted run recorded that it converts (a recorded
+	# path no longer in the index was removed by the user).
+	tc_setup_load || true
+	tc_record_use migrate "$resuming" "$((${#selected[@]} > 0))"
+	case $TC_RECORD_USE in
+	fresh) ;;
+	merge)
 		local -A indexed=()
 		for path in "${TC_IDX_PATH[@]}"; do indexed[$path]=1; done
 		for path in ${TC_SETUP_ITEMS[@]+"${TC_SETUP_ITEMS[@]}"}; do
@@ -2634,7 +2679,10 @@ tc_cmd_migrate() {
 			selected+=("$path")
 			chosen[$path]=1
 		done
-	fi
+		;;
+	other) tc_fail "an interrupted \`init\` set up this checkout; rerun init to complete it, or start over: $TC_START_OVER" ;;
+	*) tc_fail "an interrupted setup left .transcrypt, but no record of what it was to convert and no Bash transcrypt rules select anything; start over: $TC_START_OVER" ;;
+	esac
 	# A committed state, except for an interrupted conversion's own changes.
 	local entry
 	git status --porcelain -z --untracked-files=no >"$TC_TMP/migrate-status" || tc_fail 'git status failed'
