@@ -268,3 +268,4 @@ open Transcrypt.V3Verification
 #print axioms open_record_refuses_unknown_profile
 -- Unlocking with a passphrase (model of ValidatedKey::unlock)
 #print axioms unlock_uses_the_profile_key_and_authenticates
+#print axioms init_creates_the_profile_config

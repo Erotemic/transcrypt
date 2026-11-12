@@ -68,4 +68,75 @@ theorem unlock_uses_the_profile_key_and_authenticates (hK : KdfRealizes kinst kd
     intro prims hp
     cases hp
 
+/-- `ValidatedKey::initialize` (`init`, `rekey`, `migrate`): derive the key of
+    the chosen profile from the passphrase and a fresh salt, seal the new
+    configuration with it, and authenticate the result. (The adapter builds
+    the sealing primitives with `Keyed::new`, which is what `from_key` does
+    for a 64-byte key, A17.) -/
+def initFlow {K P : Type} (kinst : V3Kdf K) (kdf : K) (inst : V3Primitives P) (sched : V3KeySchedule P)
+    (profile : Profile) (salt : Std.Array U8 32#usize) (pw : Slice U8) :
+    RustM (core.result.Result (P × Std.Array U8 55#usize) Refusal × Std.Array U8 64#usize) := do
+  let (r, key) ← derive_profile_key kinst kdf profile pw salt (Std.Array.repeat 64#usize 0#u8)
+  match r with
+  | core.result.Result.Err e => ok (core.result.Result.Err e, key)
+  | core.result.Result.Ok _ =>
+    let o ← sched.from_key (Std.Array.to_slice key)
+    match o with
+    | core.option.Option.None => ok (core.result.Result.Err Refusal.Primitive, key)
+    | core.option.Option.Some sealing =>
+      let c ← initialize_config inst sealing profile salt
+      match c with
+      | core.result.Result.Err e => ok (core.result.Result.Err e, key)
+      | core.result.Result.Ok cfg =>
+        let a ← authenticate_key inst sched (Std.Array.to_slice key) cfg
+        match a with
+        | core.result.Result.Ok prims => ok (core.result.Result.Ok (prims, cfg), key)
+        | core.result.Result.Err e => ok (core.result.Result.Err e, key)
+
+/-- **A new configuration has the chosen profile and its key.** If
+    initialization succeeds, the new configuration is the encoding of the
+    requested profile and the fresh salt, the key is that profile's
+    derivation of the passphrase and salt, and the configuration
+    authenticates under it (so `unlock` with the same passphrase derives the
+    same key, `unlock_uses_the_profile_key_and_authenticates`). -/
+theorem init_creates_the_profile_config (hK : KdfRealizes kinst kdf D)
+    (hS : KeyScheduleRealizes inst sched σ) (profile : Profile) (salt : Std.Array U8 32#usize) (pw : Slice U8) :
+    initFlow kinst kdf inst sched profile salt pw ⦃ r => ∀ prims cfg, r.1 = core.result.Result.Ok (prims, cfg) →
+      (∃ tag, wireBytes cfg = Transcrypt.V3Wire.encodeConfig (profileSpec profile) (wireBytes salt) tag) ∧
+        wireBytes r.2 = D.derive (profileKdf (profileSpec profile)) (sliceBytes pw) (wireBytes salt) ∧
+        Realizes inst prims (σ (wireBytes r.2)) ∧ ConfigAuthentic (σ (wireBytes r.2)) (wireBytes cfg) ⦄ := by
+  unfold initFlow
+  step with derive_profile_key_spec hK profile pw salt (Std.Array.repeat 64#usize 0#u8) as ⟨ r1, key1, h1 ⟩
+  have hsb : sliceBytes (Std.Array.to_slice key1) = wireBytes key1 := rfl
+  rcases r1 with u | e
+  · obtain ⟨_, hkey⟩ := h1
+    step with hS (Std.Array.to_slice key1) as ⟨ o, ho ⟩
+    rcases o with _ | sealing
+    · try simp only [WP.spec_ok]
+      intro prims cfg hp
+      cases hp
+    · have hR := ho sealing rfl
+      rw [hsb] at hR
+      step with initialize_config_spec hR profile salt as ⟨ c, hc ⟩
+      rcases c with cfg | e
+      · obtain ⟨_, hcfg⟩ := hc
+        step with authenticate_key_spec hS (Std.Array.to_slice key1) cfg as ⟨ a, ha ⟩
+        rcases a with prims | e
+        · try simp only [WP.spec_ok]
+          intro prims' cfg' hp
+          simp only [core.result.Result.Ok.injEq, Prod.mk.injEq] at hp
+          obtain ⟨rfl, rfl⟩ := hp
+          obtain ⟨hR2, hA⟩ := ha prims rfl
+          rw [hsb] at hR2 hA
+          exact ⟨⟨_, hcfg⟩, hkey, hR2, hA⟩
+        · try simp only [WP.spec_ok]
+          intro prims' cfg' hp
+          cases hp
+      · try simp only [WP.spec_ok]
+        intro prims cfg hp
+        cases hp
+  · try simp only [WP.spec_ok]
+    intro prims cfg hp
+    cases hp
+
 end Transcrypt.V3Verification

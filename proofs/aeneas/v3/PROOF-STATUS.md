@@ -7,7 +7,7 @@ translation of the production `rust/crates/transcrypt-v3-core/src/lib.rs`
 program equality `record_envelope_prefix_ok_record` are `WP.spec` triples,
 so they also exclude panics (index, overflow) and divergence. The
 default `V3Wire` target builds all of them;
-`bash proofs/aeneas/check-v3-axioms.sh` confirms that all 212 theorems listed in
+`bash proofs/aeneas/check-v3-axioms.sh` confirms that all 213 theorems listed in
 `audit/Axioms.lean` (those named in the table below) use only `propext`,
 `Classical.choice` and `Quot.sound`. No `sorry`, `admit`,
 `axiom`, `native_decide` or `bv_decide` occurs in any verification module
@@ -41,6 +41,7 @@ the trust-ordered [`V3-ASSUMPTIONS.md`](../../../docs/verification/V3-ASSUMPTION
 | `Profiles` | `passphrase_ok` | `passphrase_ok_spec` | Exactly the spec's `passphraseOk`: 1 to 4096 bytes; the portable profiles also refuse NUL |
 | `Profiles` | `derive_profile_key` | `derive_profile_key_spec` | Relative to `KdfRealizes`: `Ok` only for an accepted passphrase, with exactly `profileKey` (the profile's own function); a refused passphrase reaches no derivation; a failed derivation is `Err Primitive`, never a fallback |
 | `Profiles` | `derive_config_key` | `derive_config_key_spec`, `derive_config_key_uses_config_profile` | Exactly the spec's `configKey`: an undecodable config (in particular an unknown profile) is refused before any derivation; on `Ok` the config is `encodeConfig p salt tag` and the key is `profileKdf p` of the passphrase and that salt |
+| `UnlockFlow` (model of `ValidatedKey::initialize`) | `derive_profile_key`, `initialize_config`, `authenticate_key` | `init_creates_the_profile_config` | A new config (init, rekey, migrate) encodes the requested profile and fresh salt, its key is that profile's derivation, and it authenticates under it |
 | `UnlockFlow` (model of `ValidatedKey::unlock`) | `derive_config_key` then `authenticate_key` | `unlock_uses_the_profile_key_and_authenticates` | Relative to `KdfRealizes` and `KeyScheduleRealizes`: a successful unlock's config encodes some profile and salt, its key is that profile's derivation of the passphrase and salt, and the primitives realize exactly that key, under which the config authenticates |
 | `Profiles` | `seal_record`, `open_record` | `seal_record_refuses_unknown_profile`, `open_record_refuses_unknown_profile` | Under a config whose profile byte names no profile, neither ever returns `Ok`: no record, no pass-through, no plaintext |
 | `Profiles` | `open_record`, `seal_record` | `open_record_of_other_context_needs_collision`, `seal_record_deterministic` | `open_record` accepting a record `seal_record` made for another path or config implies an AES-SIV collision (`SivCollision`, excluded by A10); two seals at one path and config are equal iff the plaintexts are |
