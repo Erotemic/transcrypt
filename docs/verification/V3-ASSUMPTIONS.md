@@ -52,7 +52,7 @@ one.
 | A10 | AES-SIV, Argon2id, scrypt, PBKDF2-HMAC-SHA256, SHA-256 security | ASSUMED (standard) |
 | A11 | A Git object id names exactly one content | ASSUMED (Git's hash) |
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
-| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`; a keyless commit that needed no key, `commit_needs_no_key`, authenticates: `keyless_dag_audit_authenticated`): only the boundary remains |
+| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`; a keyless commit that needed no key, `commit_needs_no_key`, authenticates: `keyless_dag_audit_authenticated`): only the boundary remains; for a push PROVED (model) that the boundary is the remote's own history and this remote's tracking refs, and that every commit Git sends keeps the record invariant (`push_publishes_no_protected_plaintext`, with A30) |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
@@ -67,6 +67,9 @@ one.
 | A25 | Each platform's OS adapter (`fsat*.rs`, `os_*.rs`) provides the primitives A6, A8, A12 and A17 name | TESTED: the whole suite on Linux, FreeBSD 14.5, NetBSD 10.1, OpenBSD 7.9 and Windows Server 2025 (non-administrator); macOS not yet run (its CI jobs have not been seen passing); REVIEWED |
 | A26 | The key-derivation implementation computes the function and parameters the core asks for (`V3Kdf`: RustCrypto Argon2id, scrypt, PBKDF2) | Which function and parameters: PROVED (`derive_config_key_uses_config_profile`, `profile_kdf_spec`); the computation: TESTED (independent vectors for every profile, `portable_vectors.rs`, `v3_differential.rs`) |
 | A27 | The portable Bash client behaves as the specification and the Rust client | Not proved (Bash source is not verified). TESTED: independent byte vectors, real-Git workflows (`tests/v3/bash/test_reference.sh`), two-way conformance with the Rust client (`tests/v3/conformance/run.sh`), OpenSSL known-answer probes at run time; on OpenSSL 3.0.13 (Ubuntu 24.04) |
+| A28 | Interrupted setups and rekey recoveries: one `transcrypt` process at a time per checkout; each makes its durable writes in the order the models give (`SetupStep`, `Interrupted`), each one atomic (rename; Git's `index.lock`), and only after its own refusals and passphrase check | Decisions PROVED (`setup_record_use_spec`, `entry_recovery_spec`, `config_recovery_spec`, `file_recovery_spec`); the persistence and lossless-recovery theorems PROVED (model) over every interruption point (`interrupted_setup_completes_with_its_policy`, `interrupted_init_completes_with_its_patterns`, `interrupted_rekey_recovers`, `interrupted_rekey_abort_restores`); the adapter's write order TESTED at every Git and OpenSSL call of both clients (`tests/v3/conformance/lifecycle.sh`) + REVIEWED |
+| A29 | The rekey journal names exactly the entries `rekey` replaces, as the index held them (`RekeyStart`), and Git's index update replaces exactly the entries it is given | TESTED (`tests/v3/conformance/lifecycle.sh`: every staged record and both configs compared after `--abort`; `stage_objects` reads the index back) |
+| A30 | Git's push contract: after the pre-push hook succeeds, Git sends only commits reachable from a pushed commit and from no ref the remote advertised that this repository has; the hook is told the remote's current commit of each updated ref | ASSUMED (Git's documented push protocol); TESTED (`pre_push_and_audit_refuse_plaintext_in_history`, `pushes_of_trees_and_blobs_are_refused`, Bash check 14); used by `push_publishes_no_protected_plaintext` (PROVED (model)) |
 
 ## Detailed register
 
@@ -1227,6 +1230,57 @@ from `openssl mac` (CMAC) and `openssl enc` (CTR) and runs known-answer
 probes before deriving keys. Derived keys in local OpenSSL arguments and
 plaintext in a private temporary directory are accepted local exposures
 (charter); neither enters Git.
+
+### A28 — One process, ordered atomic writes (new, 2026-11-12)
+
+The setup record (`.git/transcrypt-v3-setup`) and the rekey journal
+(`.git/transcrypt-v3-rekey`) carry an interrupted command's intent across
+processes. What a resumed command decides from them is the verified core
+(`setup_record_use`; `entry_recovery`, `config_recovery`, `file_recovery`),
+and the models in `proofs/lean/Transcrypt/V3Policy/Interruption.lean` prove
+what any sequence of interruptions, reruns, rollbacks and user changes can
+lead to. What the models assume of the adapter:
+
+- one `init`, `migrate`, `rekey` or recovery at a time in a checkout (two
+  concurrent setups are not modeled; recoveries take the staging lock);
+- each durable write is atomic: the record and the journal are written to
+  a temporary file and renamed, the worktree config and relocked files are
+  replaced by a rename (both clients; Bash since 2026-11-12), the index by
+  Git's `index.lock`;
+- a setup saves its record before it writes anything else, and marks it
+  complete only after everything it planned is protected; a failed setup
+  that found no config rolls back, putting back the record it found
+  (removing its own only once the config is gone); a recovery writes
+  nothing until its check admitted the state.
+
+These are the orders in `setup.rs`, `migrate.rs`, `rekey.rs` and
+`transcrypt-bash`, exercised at every Git and OpenSSL call by the lifecycle
+campaign (both clients, killed or failing, then recovered and pushed).
+Start over (removing the record) is the operator's authorization to drop
+what a setup was asked to protect; it is deliberately no step of the model.
+
+### A29 — The journal names what `rekey` replaced (new, 2026-11-12)
+
+`rekey` builds its journal from the index listing it re-encrypts (every
+protected entry and `.transcrypt/config`, each path once), so each
+journaled entry's old object is what the index held (`RekeyStart`); the
+journal file refuses duplicate paths on load. `update-index --index-info`
+replaces exactly the entries given (Rust reads the index back and checks).
+
+### A30 — Git's push contract (new, 2026-11-12)
+
+What `git push` sends after its pre-push hook succeeded: the commits
+reachable from the pushed commits and from no ref the remote advertised
+that this repository has (`PushContract`). The hook is given, for each
+updated ref, the remote's current commit; the adapter excludes it from the
+audit only when this repository has it. A pushed tip that is no commit (a
+tag of a tree or blob) is refused by both clients, so every object sent
+belongs to a sent commit (or is a tag object). With A13 for the remote's
+own history and this remote's tracking refs (`PublishedAdmitted`: already
+public, or admitted by an earlier push of this repository; a tracking ref
+moved by hand to an unadmitted commit is outside it),
+`push_publishes_no_protected_plaintext` proves that every commit sent keeps
+the record invariant.
 
 ## Ranked unresolved risks and *product* opportunities
 

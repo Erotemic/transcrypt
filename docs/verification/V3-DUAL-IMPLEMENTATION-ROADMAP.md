@@ -313,7 +313,7 @@ Bash 5.2):
 - `cargo test --workspace` (Rust, all suites incl. `portable_vectors.rs`),
   `cargo clippy --workspace --all-targets -D warnings`;
 - `python3 tests/v3/reference/portable_vectors.py` (independent vectors);
-- `bash tests/v3/bash/test_reference.sh` (30 checks, Bash alone);
+- `bash tests/v3/bash/test_reference.sh` (32 checks, Bash alone);
 - `bash tests/v3/conformance/run.sh` (30 checks, Bash vs Rust);
 - `bash tests/v3/conformance/lifecycle.sh` (rebase, cherry-pick and stash
   across clients; `init`, `rekey`, `rekey --continue`, `rekey --abort`,
@@ -354,8 +354,9 @@ Bash 5.2):
 | Policy drift: `git lfs track` override, broken macro, records moved to unprotected names (refused) | yes | yes | bash 19, 22; review H-78, H-81 |
 | Commands from a subdirectory; audit in a bare repository (server hooks); `--max-commits` | yes | yes | bash 20, 24 |
 | Rebase (clean, conflicted), cherry-pick (byte-identical record, conflicted), stash with staged, unstaged and untracked protected files, by one client, verified, audited and pushed by the other | yes | yes | lifecycle 1–6 |
-| Interrupted `init`, `rekey`, `rekey --continue`, `rekey --abort`, `lock`, `unlock`, `migrate` (SIGKILL or a failing call at every `git`/`openssl` call): no plaintext in Git, a pushed remote or `$TMPDIR`; rerun completes `init` (with its recorded patterns, even when the rerun names none)/`migrate`/`lock`/`unlock`; the rekey journal is finished or undone by either client, keeping unrelated index-only changes exactly | yes | yes | lifecycle 7–20; bash 28–29; review H-88 to H-94 |
+| Interrupted `init`, `rekey`, `rekey --continue`, `rekey --abort`, `lock`, `unlock`, `migrate` (SIGKILL or a failing call at every `git`/`openssl` call): no plaintext in Git, a pushed remote or `$TMPDIR`; rerun completes `init` (with its recorded patterns, even when the rerun names none)/`migrate`/`lock`/`unlock`; the rekey journal is finished or undone by either client, keeping unrelated index-only changes exactly | yes | yes | lifecycle 7–20; bash 28–31; review H-88 to H-96; proved (model) for the shared decisions, `V3Policy/Interruption.lean` |
 | Damaged or removed key file, wrong passphrase | yes | yes | lifecycle 21–22 |
+| Pre-push refuses a pushed tag of a tree or blob; what an admitted push sends is proved (model) to hold only v3 records at protected paths (`Publication.lean`) | yes | yes | bash 15; `pushes_of_trees_and_blobs_are_refused`; review H-97 |
 | `--private` agent, zeroization, long-running filter | **Rust-only** (local hardening / performance) | yes | by design |
 
 Known shared limitation: an empty protected file makes `git merge` stop with
@@ -373,7 +374,11 @@ Rust `unlock` exiting 0 when its decryption failed), all fixed. An external
 review then found two more in both clients (H-93: a resumed `init` could
 drop its patterns and publish plaintext; H-94: the documented rekey undo
 discarded unrelated staged changes), fixed by a setup record and a rekey
-journal shared by the two clients. Bash
+journal shared by the two clients. Proving those repairs (their
+decisions now verified core functions that Bash mirrors) found H-95 (a
+rollback deleting an earlier run's record, Rust) and H-96 (a non-atomic
+config write in Bash recovery), and proving what a push sends found H-97
+(tags of trees or blobs pushed unaudited, both clients), all fixed. Bash
 performance, 100 protected and 200 other files: `git status` 0.1 s, checkout
 of 10 protected files 1.4 to 1.8 s, `lock`/`unlock` about 16 s (37 s and 27 s
 before the reindex hand-off and single-pass lock, measured back to back),

@@ -301,7 +301,9 @@ catch this:
   every envelope, and warns that it did no more. A commit that needs no key
   (say, a locked checkout pushing edits to unprotected files only) pushes
   without a warning. To refuse the pushes that warn instead, set
-  `git config transcrypt.requireAuthenticatedPush true`.
+  `git config transcrypt.requireAuthenticatedPush true`. A pushed tag that
+  names a tree or a blob instead of a commit is refused: its files could
+  not be audited.
 - `transcrypt-rs audit <rev-list arguments>` needs no key. Run it in CI or a
   server hook to refuse plaintext from any checkout. Each commit is judged
   by its own `.gitattributes`. Without the key, the audit checks that every
@@ -457,6 +459,21 @@ specification:
   bytes as a protected file;
 - that `lock` never discards unrecoverable plaintext and `hydrate` only
   replaces exact staged ciphertext.
+- that an interrupted `init` or `migrate`, however often it is
+  interrupted, rerun (naming other patterns or none) or rolled back, can
+  only complete protecting at least what it was first asked to: only
+  starting over releases that;
+- that after `rekey` was interrupted at any point, `rekey --abort` puts back
+  exactly what `rekey` found (the staged entries it changed, the config,
+  the key, locked files) and leaves every other staged change, including
+  changes that exist only in the index, exactly as you left it;
+- that every commit `git push` sends after the pre-push hook accepted it
+  holds only v3 records at the paths its own attributes select, assuming
+  Git sends what its push protocol says and that what the remote and this
+  remote's tracking refs already have was itself checked.
+
+The last three are proved about models of the commands' steps, which the
+programs follow (checked by killing them at every step, not proved).
 
 These guarantees assume:
 - the cryptographic primitives behave as AES-SIV, SHA-256 and the profile's
@@ -469,11 +486,10 @@ Not proved, only tested:
   independent vectors, its own suite and the two-way conformance and
   lifecycle suites against `transcrypt-rs` (assumption A27), and it trusts
   OpenSSL's AES, CMAC, scrypt and PBKDF2;
-- the behaviour of real Git workflows (rebase, cherry-pick, stash, worktrees)
-  and recovery from an interrupted command (`lifecycle.sh`), including the
-  setup record that keeps an interrupted `init`'s patterns and the rekey
-  journal behind `rekey --continue` and `--abort`: their losslessness is
-  checked by tests at every fault point, not proved;
+- the behaviour of real Git workflows (rebase, cherry-pick, stash, worktrees),
+  and that each command's code makes its writes in the order the proofs
+  model (`lifecycle.sh` kills or fails both clients at every Git and
+  OpenSSL call and checks the recovery);
 - the security of the cryptography itself, which no proof here establishes.
 
 You choose which files are selected; no proof covers that choice. Where the

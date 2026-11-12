@@ -381,6 +381,9 @@ fixed with regression tests:
 | H-92 | Low (usability) | transcrypt-rs `unlock` exited 0 when its decryption step failed (the key stored, the worktree still ciphertext), unlike transcrypt-bash; a script running `unlock && build` went on with ciphertext. | It still stores the key and says so, and exits non-zero with the reason and `hydrate` as the next step. |
 | H-93 | High | An `init` killed after storing its key but before applying its patterns, then resumed without naming them (both clients), reported success with nothing protected: a matching file committed and pushed afterwards reached the remote in plaintext (external review, reproduced). | `init` and `migrate` record what they were asked to protect (`.git/transcrypt-v3-setup`, shared format) before changing anything; resuming applies it whatever the rerun names, and a resume with no record requires the patterns. Bash `migrate` now sets up v3 (macro, filters, key) before rewriting any v2 rule, as Rust does. Lifecycle: every interrupted init is resumed without its patterns, committed and pushed, and the remote is checked for plaintext. |
 | H-94 | Medium (data loss) | The documented undo of an interrupted rekey (`git read-tree HEAD`) reset the whole index, discarding unrelated staged changes, including any that existed only in the index (external review). | `rekey` writes a journal of each entry it replaces (old and new object) before changing the index; `rekey --abort` and `--continue` (both clients, either finishing the other's) change exactly those entries, the worktree config and the key, refuse with nothing changed if any of them changed since, and are themselves resumable. Lifecycle: rekey runs with an unrelated staged file (edited again in the worktree) and a staged-only protected file, both kept exactly by every recovery; `--continue` and `--abort` are interrupted at every call too. |
+| H-95 | Medium | A failed `init` or `migrate` that found an earlier, interrupted run's record (no config yet) rolled back by deleting that record (Rust): the earlier run's patterns were forgotten, and a later run naming none completed unprotected. An unfinished record of one command was also ignored by a fresh run of the other. | A rollback puts back the record it found, and removes its own only once the config is gone; an unfinished record binds every later run: its own command merges it, the other is refused (both clients, decided by the verified `setup_record_use`). Proved over every interruption point (`interrupted_setup_completes_with_its_policy`); tested (`unfinished_setup_records_survive_other_commands_and_rollbacks`, Bash check 31). |
+| H-96 | Medium (recovery) | transcrypt-bash wrote the worktree `.transcrypt/config` (rekey and its recovery) and relocked files with `cat >`: a kill between truncation and write left an empty config, which `--continue`/`--abort` then refused as changed (only a manual fix recovered). The fault campaign could not see it (it injects faults at `git`/`openssl` calls). | Every such write is a rename of a complete file next to it, with the file's mode (`tc_replace_file`), as in Rust; the model's atomic-write assumption (A28) now holds for both clients. |
+| H-97 | Medium | A pushed tag naming a tree or blob was admitted unaudited by both clients' pre-push hooks (`rev-list` walks commits only): a tree whose own attributes protect a path, holding that path's plaintext, reached the remote (formerly a documented limitation). | The hook refuses a pushed tip that is not a commit (`<oid>^{commit}`), before the audit; tags of commits and deletions push as before. Tested in both clients (`pushes_of_trees_and_blobs_are_refused`, Bash check 15); this is what lets `push_publishes_no_protected_plaintext` speak of commits only. |
 
 **Interruption and lifecycle (2026-11-11).** `tests/v3/conformance/lifecycle.sh`
 kills (SIGKILL of the process group) or fails each client's `init`, `rekey`, `lock`,
@@ -399,8 +402,21 @@ resumed with them) and H-94 (the rekey undo was not selective); the campaign
 now resumes `init` without its patterns and pushes, and covers the rekey
 journal's `--continue` and `--abort`.
 
-Shared with the Rust client and not changed (documented limitations): a
-tag pointing at a tree or blob is pushed unaudited; an empty blob on a merge
+**Proofs of the repairs (2026-11-12).** The decisions behind both repairs
+are now verified core functions (`setup_record_use`, `entry_recovery`,
+`config_recovery`, `file_recovery`), and Lean models of every durable
+transition prove what any interleaving of interruptions, reruns, rollbacks
+and the user's changes can lead to (`V3Policy/Interruption.lean`): an
+interrupted setup completes with at least what it was asked to protect,
+unless the operator starts over; `rekey --abort` restores exactly what
+`rekey` found at its entries and keeps everything else. Writing those
+proofs found H-95 and H-96. Publication admission was taken to the same
+level (`Publication.lean`): every commit `git push` sends after the hook
+admitted it keeps the record invariant, under Git's push contract and with
+the remote's history and tracking refs as the only trusted boundary; that
+proof needed H-97.
+
+Shared with the Rust client and not changed (documented limitations): an empty blob on a merge
 side counts as empty plaintext; `git merge --squash`, `cherry-pick -n` and
 `restore -s` leave no in-progress marker, so their staged content counts as
 a local change for the pre-commit repair; `--not --remotes=NAME` trusts

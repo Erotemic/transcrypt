@@ -98,6 +98,19 @@ a shared target for empirical Bash conformance; on a common profile, the
 Bash and Rust outputs must match byte for byte. The independent
 vectors in `tests/v3/reference/` are the conformance tests it must pass.
 
+The decisions behind interrupted commands and the pre-push verdict are
+verified core functions in Rust; `transcrypt-bash` reimplements each one
+line for line, and the two clients' suites and the lifecycle campaign test
+that they agree (assumption A27; no theorem covers the Bash source):
+
+| Verified core (`transcrypt-v3-core`) | `transcrypt-bash` |
+| --- | --- |
+| `setup_record_use` | `tc_record_use` (fresh, merge, other, unrecorded) |
+| `entry_recovery` | `tc_rekey_resume`: `case ${now[$path]}` (mode and want: done; mode and other: todo; else changed) |
+| `config_recovery` | `tc_rekey_resume`: the `cmp -s` of the worktree config against both configs |
+| `file_recovery` | `tc_rekey_resume`: relock on `cmp` with the replaced record, keep on the wanted one, else the plaintext check |
+| `push_admission` | `tc_cmd_pre_push`: refuse when keyless records needed the key and `transcrypt.requireAuthenticatedPush` is set |
+
 ## Legacy review, retained security guarantees and migration boundary
 
 The [independent October 2026 assessment]

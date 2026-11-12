@@ -427,6 +427,77 @@ Remaining limits:
 - Files above 16 MiB are refused.
 - Rollback of Git history is not detected.
 
+## Interrupted commands
+
+Two files in the checkout's Git directory (per worktree) carry an
+interrupted command's intent to the next run. Both are NUL-terminated
+fields, the first naming the format, written whole to a temporary file and
+renamed; both clients read and write them byte for byte alike.
+
+**The setup record** `transcrypt-v3-setup`: `transcrypt-v3-setup 1`, the
+command (`init` or `migrate`), its state (`started` or `complete`), then its
+items (`init`: the patterns as given; `migrate`: the paths it converts).
+A run saves it, with everything it plans to protect, after its refusals and
+its passphrase check and before it writes anything else, and marks it
+`complete` only after everything planned is protected. What a run of
+command `K` does with the record (`setup_record_use`; `resuming`:
+`.transcrypt` exists and `HEAD` has no config; `named`: the run was asked
+to protect something):
+
+| Record | Decision |
+| --- | --- |
+| none, `resuming` and nothing named | refused (`Unrecorded`): what the setup was to protect is unknown |
+| none, otherwise | `Fresh` |
+| `complete`, not `resuming` | `Fresh` (the setup finished and left this checkout) |
+| any other record of `K` | `Merge`: the plan is what was named and every recorded item (`migrate`: every recorded path still in the index) |
+| any other record of another command | refused (`OtherSetup`) |
+
+A failed run that found no config rolls back and puts back the record it
+found; it removes a record it created only once the config is gone. Start
+over (removing `.transcrypt` and the record) is the operator's explicit
+authorization to drop what a setup was asked to protect. Consequence
+(`interrupted_setup_completes_with_its_policy`): once a setup saved its
+record, the first run to complete protects every recorded item.
+
+**The rekey journal** `transcrypt-v3-rekey`: `transcrypt-v3-rekey 1`, the
+object ids of the old worktree config and the new config, then per entry
+`mode`, old object id, new object id, path: every protected index entry
+`rekey` replaces and `.transcrypt/config`, each path once. `rekey` writes
+the new records as Git objects, then the journal, then one index update,
+the worktree config, the key, and removes the journal last; it refuses to
+start while a journal exists. `rekey --continue` ends each entry at its new
+object, `rekey --abort` at its old one; for a recovery ending at `want` from
+`other`:
+
+- each journaled entry (`entry_recovery`): staged with its mode at `want`:
+  done; at `other`: to stage as `want`; anything else (removed, unmerged,
+  another mode or object): changed;
+- the worktree config (`config_recovery`): missing or the other config:
+  written; the config the recovery ends with: done; anything else: changed;
+- anything changed refuses the recovery before any write;
+- each worktree file at a journaled path (`file_recovery`): exactly the
+  record being replaced (a locked file): replaced by the other record;
+  exactly that record: kept; anything else (plaintext, an edit): never
+  written, only re-indexed if it is that record's plaintext;
+- the key of the config the recovery ends with is the stored one, or is
+  derived from that config's passphrase and authenticated, before anything
+  is written; then key, worktree config, one index update of the entries to
+  stage, each relocked file, and the journal removed last.
+
+No other index entry or worktree file is read for a decision or written.
+Consequence (`interrupted_rekey_abort_restores`): after any interruptions of
+`rekey` and of recoveries in either direction, `--abort` puts back exactly
+what `rekey` found at every journaled entry and file, the config and the
+key, and keeps every other entry, including changes only in the index.
+
+**The pre-push verdict.** The hook refuses any pushed tip that is not a
+commit (a tag of a tree or blob: `rev-list` walks commits only), audits
+`rev-list <pushed>... ^<remote>... --not --remotes=<name>`, and after an
+accepted audit decides `push_admission(authenticated, required)`: admit when
+every protected file was authenticated, otherwise refuse when
+`transcrypt.requireAuthenticatedPush` is set (any value but an explicit
+false) and warn when it is not.
+
 ## Machine checkability and implementation correspondence
 
 - `rust/crates/transcrypt-v3-core/src/lib.rs`: pure `no_std` implementation

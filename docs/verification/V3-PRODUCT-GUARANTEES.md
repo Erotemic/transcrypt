@@ -436,6 +436,60 @@ What the graph theorem covers, and what it leaves out:
   a validated key. The theorem's keys are stored keys (`StoredKeysUnlocked`).
   The private agent's key is not part of the statement (A6).
 
+## What a push sends (`Publication.lean`)
+
+The audit theorems above are about the commits an audit walked. What the
+pre-push hook guards is a push, so `push_publishes_no_protected_plaintext`
+states the guarantee about what `git push` actually sends:
+
+> If the pre-push hook's audit accepted every commit of its `rev-list`
+> range, then every commit Git sends keeps the record invariant under its
+> own configuration and attributes: with that configuration's key, its
+> records and every selected path authenticate; without it, every selected
+> path has the configuration's envelope. In particular
+> (`push_sends_no_protected_plaintext`) no path a sent commit's own
+> attributes select holds anything but a v3 record.
+
+Hypotheses: Git's push contract (A30: Git sends only commits reachable from
+the pushed commits and from no ref the remote advertised that this
+repository has); the audit is of the hook's range with each commit's own
+tree, attributes and configuration (`HookAudit`, A19, A20); and published
+history was admitted (`PublishedAdmitted`, A13): the remote's history and
+this remote's tracking refs keep the invariant. The last replaces the
+earlier, weaker form of A13 (any first parent outside the range):
+`boundary_outside` proves that every such parent is the remote's or a
+tracking ref's. The hook refuses a pushed tip that is not a commit (H-97),
+which is what lets the statement speak of commits only. With
+`transcrypt.requireAuthenticatedPush`, `push_admission_required` adds that
+the push proceeds only when every protected file was authenticated.
+
+## Interrupted commands (`V3Policy/Interruption.lean`)
+
+Two more guarantees are about what a command leaves when it is
+interrupted, at any of its steps:
+
+- **Protection is never weaker than requested**
+  (`interrupted_setup_completes_with_its_policy`,
+  `interrupted_init_completes_with_its_patterns`): once `init` or `migrate`
+  saved its setup record, the first run to complete, after any number of
+  interruptions, reruns naming other patterns or none, failed runs rolled
+  back and the user's own changes, protects every recorded item. Only
+  starting over (the operator's decision) releases it.
+- **Undoing a rekey is lossless** (`interrupted_rekey_abort_restores`,
+  `interrupted_rekey_abort_restores_exactly`): after `rekey` and any
+  recoveries in either direction were interrupted anywhere, `rekey --abort`
+  puts back exactly what `rekey` found at every journaled index entry and
+  worktree file, the worktree config and the key, and leaves every other
+  index entry (including changes only in the index) and file as the user
+  left them; `--continue` ends as `rekey` itself would have
+  (`interrupted_rekey_continue_finishes`).
+
+The decisions are verified core functions (`setup_record_use`,
+`entry_recovery`, `config_recovery`, `file_recovery`); the models assume one
+process at a time and atomic writes in the adapters' order (A28) and a
+journal of what `rekey` replaced (A29), which the lifecycle campaign tests
+at every Git and OpenSSL call of both clients.
+
 ## What remains trusted
 
 These are the hypotheses of `transcrypt_product_assurance` and the
@@ -461,8 +515,10 @@ boundaries it does not cross. Each is defined in
   `GuardedHistoryStep`.
 - **The start of the audited range** (A13): the parent of the first audited
   commit is trusted when it lies outside the range, so the pre-push range
-  trusts what the remote already has. An audit from the root, or from a
-  configuration change, trusts nothing.
+  trusts what the remote already has. For a push this is narrowed to the
+  remote's own history and this remote's tracking refs
+  (`PublishedAdmitted`), under Git's push contract (A30). An audit from the
+  root, or from a configuration change, trusts nothing.
 - **An unaudited local checkout** (A24, open): the theorem needs a
   `HistoryStart`. A local history that was never audited is still trusted
   by the incremental hook in that checkout. This is tested: such a history

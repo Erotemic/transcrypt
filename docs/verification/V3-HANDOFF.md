@@ -1,5 +1,24 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
+> **Update (2026-11-12):** interrupted commands and publication are
+> **proved**, not only tested. The setup record (H-93) and the rekey
+> journal (H-94) are decided by verified core functions
+> (`setup_record_use`; `entry_recovery`, `config_recovery`,
+> `file_recovery`; `Recovery.lean`), and Lean models of every durable
+> transition (`proofs/lean/Transcrypt/V3Policy/Interruption.lean`) prove
+> that an interrupted setup completes with at least what it was asked to
+> protect unless the operator starts over
+> (`interrupted_setup_completes_with_its_policy`), and that `rekey --abort`
+> restores exactly what `rekey` found and keeps every unrelated (index-only
+> included) change (`interrupted_rekey_abort_restores`). `Publication.lean`
+> proves that every commit `git push` sends after the hook admitted it keeps
+> the record invariant (`push_publishes_no_protected_plaintext`), under
+> Git's push contract (A30), with the remote's history and tracking refs as
+> the boundary (A13). Found and fixed on the way: H-95 (a rollback deleted
+> an earlier run's record), H-96 (Bash wrote the config non-atomically),
+> H-97 (a pushed tag of a tree or blob was unaudited; now refused). New
+> assumptions A28 to A30.
+
 > **Update (2026-11-11, evening):** configuration **profiles** are
 > implemented end to end. The config's byte 6 names the key derivation
 > (1 Argon2id, 2 scrypt, 3 PBKDF2-HMAC-SHA256); records stay `TV3F 00 01`.
@@ -88,7 +107,7 @@ semantics silently or import legacy CBC into the proved core.
 | Git adapter, credentials, fd-relative FS | `rust/crates/transcrypt-rs/src/*.rs`: filters, lifecycle, credentials, Git, worktree, setup, attributes, rekey, journal (setup record, rekey journal), audit, migrate, agent, fd-relative FS (module map in `main.rs`) |
 | Independent Lean spec | `proofs/lean/Transcrypt/{V3Wire,V3WireCodec,V3Policy}.lean` and `V3Policy/*.lean` |
 | Generated Lean (do not edit) | `proofs/aeneas/v3/V3Wire/Extraction/` |
-| Proofs | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle,Snapshot,Objects,EndToEnd}.lean` |
+| Proofs (interrupted commands: `Recovery.lean` and the spec models `V3Policy/Interruption.lean`; publication: `Publication.lean`) | `proofs/aeneas/v3/V3Wire/Verification/{Copy,Codec,Bytes,Path,Attr,Index,Envelope,Filters,Frame,Pkt,Protocol,Lifecycle,Snapshot,Objects,EndToEnd}.lean` |
 | Theorem ledger | `proofs/aeneas/v3/PROOF-STATUS.md` |
 | Tests | `rust/crates/transcrypt-rs/tests/{workflows,git_lifecycle,adversarial,v3_vectors,v3_differential}.rs`, `tests/v3/reference/` (`differential.py` regenerates the OpenSSL/argon2 corpus); Bash v2: `tests/v2`, `tests/v3` (bats) |
 
@@ -414,8 +433,8 @@ release archives). Documentation-only pushes run nothing.
    are done (see the update at the top). Next for that campaign: see CI
    pass the Bash and conformance jobs on Ubuntu 22.04 (OpenSSL 3.0.2) and
    macOS (BSD utilities); the shared limitations listed at the end of
-   section 8 of the security review (tags to trees, `--squash`/`-n`
-   provenance); faster Bash bulk operations; external review R-01.
+   section 8 of the security review (`--squash`/`-n` provenance; tags of
+   trees and blobs are now refused at push, H-97); faster Bash bulk operations; external review R-01.
    When either client changes, run the suites
    (`tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`,
    `tests/v3/conformance/lifecycle.sh`; the last takes about 65 minutes in

@@ -36,6 +36,14 @@ system, you must also run the `--upgrade` command in each repository:
 
 ### Added
 
+- Experimental v3: proofs for interrupted commands and publication. The
+  setup record's and rekey journal's decisions are verified core
+  functions, and Lean models of every step prove that an interrupted
+  `init`/`migrate` completes with at least what it was asked to protect
+  (unless started over), that `rekey --abort` restores exactly what `rekey`
+  found and keeps unrelated staged changes, and that every commit a push
+  admitted by the pre-push hook sends holds only v3 records at its
+  protected paths (under Git's push contract).
 - Experimental v3: configuration profiles. A v3 config names its key
   derivation: 1 Argon2id (unchanged), 2 scrypt, 3 PBKDF2-HMAC-SHA256;
   `transcrypt-rs init|migrate|rekey --profile=NAME`, `transcrypt-rs profiles`.
@@ -71,6 +79,12 @@ system, you must also run the `--upgrade` command in each repository:
 
 ### Fixed
 
+- Experimental v3: a pushed tag naming a tree or blob is refused by the
+  pre-push hook (its files were not audited). A failed `init`/`migrate`
+  rolls back to the setup record it found instead of deleting an earlier
+  interrupted run's record, and an unfinished record of one command refuses
+  the other. transcrypt-bash replaces the worktree config and relocked
+  files atomically during `rekey` and its recovery.
 - Show warning message instead of crashing for `--uninstall` or `--upgrade`
   action when _transcrypt_'s saved pre-commit-crypt hook file is missing (#212)
 - Make `--install` and `--upgrade` actions support a gitattributes file that is
