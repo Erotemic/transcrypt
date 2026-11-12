@@ -361,6 +361,55 @@ if "$CLI" verify-index 2>/dev/null; then die 'a forged record at an unprotected 
 git reset -q --hard HEAD~1
 ok 'verify-index authenticates records at unprotected paths'
 
+# An interrupted rekey (its worktree config not writable, after the index
+# update) leaves its journal; --abort and --continue change only its
+# entries, keeping changes that exist only in the index.
+if [[ $(id -u) != 0 ]]; then
+    printf 'staged\n' >notes.txt; git add notes.txt; printf 'staged, then edited\n' >notes.txt
+    printf 'staged only\n' >three.env; git add three.env
+    git ls-files -s >"$SCRATCH/index-before"
+    cp .transcrypt/config "$SCRATCH/config-before"
+    interrupt_rekey() {
+        chmod 444 .transcrypt/config
+        if printf 'a third rekey passphrase\n' | "$CLI" rekey --password-stdin 2>/dev/null; then die 'rekey wrote a read-only config'; fi
+        chmod 644 .transcrypt/config
+        [[ -e .git/transcrypt-v3-rekey ]] || die 'an interrupted rekey left no journal'
+    }
+    interrupt_rekey
+    [[ $("$CLI" status) == *'interrupted rekey'* ]] || die 'status does not report the interrupted rekey'
+    if printf 'a third rekey passphrase\n' | "$CLI" rekey --password-stdin 2>/dev/null; then die 'a rekey over an interrupted one'; fi
+    printf 'rekey passphrase number two\n' | "$CLI" rekey --abort --password-stdin 2>/dev/null || die 'rekey --abort'
+    git ls-files -s | cmp -s - "$SCRATCH/index-before" || die 'rekey --abort did not restore the index exactly'
+    cmp -s .transcrypt/config "$SCRATCH/config-before" || die 'rekey --abort did not restore the config'
+    [[ $(cat notes.txt) == 'staged, then edited' && ! -e .git/transcrypt-v3-rekey ]] || die 'rekey --abort: worktree or journal'
+    "$CLI" verify-index 2>/dev/null || die 'verify-index after rekey --abort'
+    interrupt_rekey
+    printf 'a third rekey passphrase\n' | "$CLI" rekey --continue --password-stdin 2>/dev/null || die 'rekey --continue'
+    [[ $(git ls-files -s notes.txt) == $(awk -F '\t' '$2 == "notes.txt"' "$SCRATCH/index-before") ]] || die 'rekey --continue changed an unrelated staged file'
+    [[ ! -e .git/transcrypt-v3-rekey ]] || die 'rekey --continue left its journal'
+    "$CLI" verify-index 2>/dev/null || die 'verify-index after rekey --continue'
+    git commit -qm 'third rekey'; git checkout -- notes.txt
+    [[ $(git show HEAD:three.env | "$CLI" decrypt three.env) == 'staged only' ]] || die 'rekey --continue: three.env'
+    git diff --quiet || die 'not clean after rekey --continue'
+    ok 'an interrupted rekey: --abort and --continue change only its entries, keeping index-only changes'
+fi
+
+# An interrupted init resumed without its patterns still protects them.
+newrepo resume-init
+printf 'x\n' >README; git add README; git commit -qm seed
+printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.env' 2>/dev/null
+grep -v '^\*\.env' .gitattributes >"$SCRATCH/macro-only"; cat "$SCRATCH/macro-only" >.gitattributes; git add .gitattributes
+printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin 2>"$SCRATCH/resume.err" || die 'resuming init'
+grep -q 'interrupted init was asked to: \*\.env' "$SCRATCH/resume.err" || die 'resumed init does not name the recorded pattern'
+printf 'MARK-secret-not-to-publish\n' >private.env; git add -A; git commit -qm init
+[[ $(git cat-file blob HEAD:private.env | head -c 4) == TV3F ]] || die 'resumed init left *.env unprotected'
+newrepo resume-unrecorded
+printf 'x\n' >README; git add README; git commit -qm seed
+printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.env' 2>/dev/null
+rm -f .git/transcrypt-v3-setup
+if printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin 2>/dev/null; then die 'resumed without a record or patterns'; fi
+ok 'an interrupted init resumed without its patterns still protects them; without a record it needs them'
+
 # ---------------------------------------------------------------------------
 # v2 migration (needs the repository's Bash v2 script).
 # ---------------------------------------------------------------------------

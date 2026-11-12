@@ -6,21 +6,26 @@
 #      cherry-pick (clean and conflicted) and stash (including untracked
 #      files), each done by one client and read, verified and audited by the
 #      other.
-#   2. Interruption: init, rekey, migrate, lock and unlock are killed (SIGKILL of
-#      the whole process group) right before their k-th call of `git`, and of
-#      `openssl` for the Bash client, for every k until the operation
-#      completes; and, separately, that call is made to fail instead. After
-#      every fault: no plaintext of a protected file in any Git object or in
-#      $TMPDIR, an operation reported as successful really succeeded, and the
-#      documented recovery (with either client) reaches a clean, verified,
-#      audited state with every secret intact.
+#   2. Interruption: init, rekey, migrate, lock and unlock, and `rekey
+#      --continue` and `rekey --abort` of an interrupted rekey, are killed
+#      (SIGKILL of the whole process group) right before their k-th call of
+#      `git`, and of `openssl` for the Bash client, for every k until the
+#      operation completes; and, separately, that call is made to fail
+#      instead. After every fault: no plaintext of a protected file in any Git
+#      object or in $TMPDIR, an operation reported as successful really
+#      succeeded, and the documented recovery (with either client) reaches a
+#      clean, verified, audited state with every secret intact. An
+#      interrupted init is resumed without its patterns and pushed (they must
+#      still apply); a rekey runs with unrelated changes staged (only in the
+#      index), which continuing or aborting it must keep exactly.
 #   3. Recovery from a missing or damaged stored key and a wrong passphrase.
 #
 #   bash tests/v3/conformance/lifecycle.sh [path/to/transcrypt-rs]
 #
 # LIFECYCLE_FAULTS=quick checks every third fault point only (faster).
 # LIFECYCLE_SECTIONS, LIFECYCLE_OPS and LIFECYCLE_CLIENTS select a subset
-# (defaults "1 2 3", "init rekey lock unlock migrate" and "sh rs").
+# (defaults "1 2 3", "init rekey rekey-continue rekey-abort lock unlock
+# migrate" and "sh rs").
 set -euo pipefail
 export LC_ALL=C
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd -P)
@@ -42,7 +47,7 @@ git config --global user.email t@example.invalid
 git config --global user.name Test
 git config --global commit.gpgsign false
 SECTIONS=" ${LIFECYCLE_SECTIONS:-1 2 3} "
-OPS=${LIFECYCLE_OPS:-init rekey lock unlock migrate}
+OPS=${LIFECYCLE_OPS:-init rekey rekey-continue rekey-abort lock unlock migrate}
 CLIENTS=${LIFECYCLE_CLIENTS:-sh rs}
 PASS=0
 ok() { PASS=$((PASS + 1)); printf 'ok %d - %s\n' "$PASS" "$*"; }
@@ -197,6 +202,7 @@ for tool in git openssl; do
 if [ "\${FAULT_TOOL-}" = $tool ]; then
     n=\$(( \$(cat "\$FAULT_COUNTER" 2>/dev/null || echo 0) + 1 ))
     echo "\$n" >"\$FAULT_COUNTER"
+    [ -z "\${FAULT_LOG-}" ] || printf '%s %s\n' "\$n" "\$*" >>"\$FAULT_LOG"
     if [ "\$n" -eq "\$FAULT_AT" ]; then
         printf '%s\n' "\$*" >"\$FAULT_COUNTER.hit"
         [ "\$FAULT_MODE" = crash ] && kill -KILL 0
@@ -219,6 +225,38 @@ for x in sh rs; do
     rm -rf "$SCRATCH/tpl-$x-locked"; cp -a "$SCRATCH/tpl-$x-unlocked" "$SCRATCH/tpl-$x-locked"
     (cd "$SCRATCH/tpl-$x-locked" && run "$x" lock)
 done
+# For rekey: unrelated changes only in the index (README staged, its
+# worktree changed again; c.env, protected, staged but never committed).
+for x in sh rs; do
+    rm -rf "$SCRATCH/tpl-$x-rekey"; cp -a "$SCRATCH/tpl-$x-unlocked" "$SCRATCH/tpl-$x-rekey"; cd "$SCRATCH/tpl-$x-rekey"
+    printf 'public, staged\n' >README; git add README; printf 'public, staged, then edited\n' >README
+    printf 'MARK-C-1 staged only\n' >c.env; git add c.env
+done
+# For rekey --continue and --abort: a rekey by the other client stopped by
+# a failing Git call, at the index update (journal written, nothing
+# staged: tpl-$x-early) or at the final refresh (everything done but the
+# journal's removal: tpl-$x-late).
+interrupted_rekey() {
+    local x=$1 name=$2 pattern=$3 k
+    rm -rf "$SCRATCH/calls"
+    rm -rf "$SCRATCH/f"; cp -a "$SCRATCH/tpl-$x-rekey" "$SCRATCH/f"; cd "$SCRATCH/f"
+    printf '%s\n' "$P2" | FAULT_TOOL=git FAULT_AT=100000 FAULT_COUNTER=$SCRATCH/counter FAULT_LOG=$SCRATCH/calls \
+        run "$x" rekey --password-stdin >/dev/null
+    rm -f "$SCRATCH/counter"
+    k=$(grep -F -- "$pattern" "$SCRATCH/calls" | tail -n 1 | cut -d' ' -f1)
+    [[ -n $k ]] || die "$x rekey: no call of git $pattern"
+    rm -rf "$SCRATCH/$name"; cp -a "$SCRATCH/tpl-$x-rekey" "$SCRATCH/$name"; cd "$SCRATCH/$name"
+    if printf '%s\n' "$P2" | FAULT_TOOL=git FAULT_MODE=fail FAULT_AT=$k FAULT_COUNTER=$SCRATCH/counter run "$x" rekey --password-stdin; then
+        die "$x rekey: did not fail at git call $k"
+    fi
+    rm -f "$SCRATCH/counter" "$SCRATCH/counter.hit"
+    [[ -e .git/transcrypt-v3-rekey ]] || die "$x rekey stopped at $pattern: no journal"
+}
+for x in sh rs; do
+    interrupted_rekey "$(otherof "$x")" "tpl-$x-early" 'update-index -z --index-info'
+    interrupted_rekey "$(otherof "$x")" "tpl-$x-late" 'update-index -z --stdin'
+    [[ $(git rev-parse :.transcrypt/config) != "$(git rev-parse HEAD:.transcrypt/config)" ]] || die "tpl-$x-late: nothing staged"
+done
 rm -rf "$SCRATCH/tpl-v2"; mkdir "$SCRATCH/tpl-v2"; cd "$SCRATCH/tpl-v2"; git init -q
 printf 'public\n' >README; git add README; git commit -qm seed
 "$V2" -c aes-256-cbc -p v2-password -y >/dev/null 2>&1
@@ -239,61 +277,79 @@ expect_plain() {
 staged_config_differs() { [[ $(git rev-parse -q --verify :.transcrypt/config) != "$(git rev-parse -q --verify HEAD:.transcrypt/config)" ]]; }
 
 # Recovery after a faulted operation $op by client $x (rc $rc); recovery
-# steps run with client $r. These are the documented steps.
+# steps run with client $r. These are the documented steps. For a rekey,
+# $REF is the repository it started from.
 recover() {
     local op=$1 x=$2 r=$3 rc=$4 at=$5 undo=$6
     # A crash inside a Git command the client ran (one that ran a filter)
     # leaves Git's own index.lock: Git says to remove it, nothing else.
     [[ ! -e .git/index.lock ]] || rm -f .git/index.lock
+    local journal=.git/transcrypt-v3-rekey
     case $op in
-    rekey)
-        if ((rc == 0)); then
-            # Reported as done: staged, in the worktree, and the key in use.
-            staged_config_differs || die "$at: rekey reported success but staged nothing"
-            [[ $(git rev-parse :.transcrypt/config) == $(git hash-object .transcrypt/config) ]] \
-                || die "$at: rekey reported success but the worktree config is not the staged one"
-            [[ $(run "$r" status) == *'key:        unlocked'* ]] || die "$at: rekey reported success but the new key is not in use"
-            verified "$at"; git commit -qm rekey 2>>"$SCRATCH/log" || die "$at: commit the rekey"
-        fi
-        if ((rc != 0)) && staged_config_differs \
-            && [[ $(git rev-parse :.transcrypt/config) != "$(git hash-object .transcrypt/config)" ]]; then
+    rekey | rekey-continue | rekey-abort)
+        # rekey-continue/-abort: the faulted command is rerun (by $r).
+        local dir=''
+        [[ $op == rekey-continue ]] && dir=continue
+        [[ $op == rekey-abort ]] && dir=abort
+        if [[ -z $dir && $rc != 0 && -e $journal ]]; then
             [[ $(run sh status) == *'interrupted rekey'* && $(run rs status) == *'interrupted rekey'* ]] \
                 || die "$at: status does not report the interrupted rekey"
+            dir=continue; ((undo)) && dir=abort
         fi
-        if ((rc == 0)); then
-            :
-        elif staged_config_differs && ((undo)); then
-            # Undo the staged rekey (as status says): the index and the
-            # config from HEAD without a refresh (no filter runs under the
-            # stale key), then the old passphrase.
-            git read-tree HEAD; git checkout -q HEAD -- .transcrypt/config
-            printf '%s\n' "$P1" | run "$r" unlock --password-stdin || die "$at: unlock with the old passphrase after undoing"
-        elif staged_config_differs; then
-            # Finish it: the staged config in the worktree, the new passphrase.
-            if [[ $(git rev-parse :.transcrypt/config) != "$(git hash-object .transcrypt/config)" ]]; then
-                git checkout -q -- .transcrypt/config
-            fi
-            printf '%s\n' "$P2" | run "$r" unlock --password-stdin || die "$at: unlock with the new passphrase to finish"
-            verified "$at finished"; expect_plain v3 "$at finished"
-            git commit -qm rekey 2>>"$SCRATCH/log" || die "$at: commit the finished rekey"
-        else
-            ((rc != 0)) || die "$at: rekey reported success but staged nothing"
+        if [[ -n $dir && $rc != 0 ]]; then
+            local pass=$P2; [[ $dir == abort ]] && pass=$P1
+            printf '%s\n' "$pass" | run "$r" rekey --"$dir" --password-stdin || die "$at: rekey --$dir"
+        fi
+        [[ ! -e $journal ]] || die "$at: the rekey journal is still there"
+        if [[ $dir == abort ]]; then
+            # Exactly as before the rekey: config, and every staged record.
+            [[ $(git rev-parse :.transcrypt/config) == $(git rev-parse HEAD:.transcrypt/config) ]] \
+                || die "$at: abort did not restore the staged config"
             [[ $(git hash-object .transcrypt/config) == $(git rev-parse HEAD:.transcrypt/config) ]] \
-                || die "$at: worktree config changed although no rekey is staged"
+                || die "$at: abort did not restore the worktree config"
+            for p in a.env d/b.env c.env; do
+                [[ $(git rev-parse ":$p") == $(git -C "$REF" rev-parse ":$p") ]] \
+                    || die "$at: abort did not restore the staged record of $p exactly"
+            done
+        elif [[ $dir == continue || $rc == 0 ]]; then
+            staged_config_differs || die "$at: the rekey is not staged"
+            [[ $(git rev-parse :.transcrypt/config) == $(git hash-object .transcrypt/config) ]] \
+                || die "$at: the worktree config is not the staged one"
+        else
+            # Stopped before its journal: nothing staged or changed.
+            [[ $(git rev-parse :.transcrypt/config) == $(git rev-parse HEAD:.transcrypt/config) &&
+                $(git hash-object .transcrypt/config) == $(git rev-parse HEAD:.transcrypt/config) ]] \
+                || die "$at: the config changed although the rekey stopped before its journal"
             printf '%s\n' "$P1" | run "$r" unlock --password-stdin || die "$at: unlock with the old passphrase"
         fi
+        [[ $(run "$r" status) == *'key:        unlocked'* ]] || die "$at: the key of the resulting config is not in use"
+        # The unrelated, index-only changes are kept exactly.
+        [[ $(git rev-parse :README) == $(git -C "$REF" rev-parse :README) ]] \
+            || die "$at: the staged README (an index-only change) was not kept"
+        cmp -s README "$REF/README" || die "$at: the worktree README changed"
+        has "$at" c.env 'MARK-C-1 staged only'
+        verified "$at"
+        git commit -qm 'rekey, recovered' 2>>"$SCRATCH/log" || die "$at: commit"
+        git checkout -q -- README
         ;;
     lock) ((rc == 0)) || run "$r" lock || die "$at: lock again" ;;
     unlock) ((rc == 0)) || printf '%s\n' "$P1" | run "$r" unlock --password-stdin || die "$at: unlock again" ;;
     init | migrate)
         # Rerunning an interrupted init or migrate, with the same
-        # passphrase, completes it (by either client).
+        # passphrase, completes it (by either client). An init that left
+        # anything is rerun without its patterns: they were recorded.
         if ((rc != 0)); then
-            printf '%s\n' "$P1" | run "$r" "$op" --password-stdin --profile=scrypt ${INIT_PATTERN[@]+"${INIT_PATTERN[@]}"} \
+            local -a again=(${INIT_PATTERN[@]+"${INIT_PATTERN[@]}"})
+            [[ -e .transcrypt || -e .git/transcrypt-v3-setup ]] && again=()
+            printf '%s\n' "$P1" | run "$r" "$op" --password-stdin --profile=scrypt ${again[@]+"${again[@]}"} \
                 || die "$at: rerunning $op does not complete it"
         fi
         git add -A
         git commit -qm "$op" 2>>"$SCRATCH/log" || die "$at: commit after $op"
+        # Published as usual: no plaintext reaches the remote.
+        rm -rf "$SCRATCH/remote.git"; git init -q --bare "$SCRATCH/remote.git"
+        git push -q "$SCRATCH/remote.git" "HEAD:refs/heads/$BRANCH" 2>>"$SCRATCH/log" || die "$at: push after $op"
+        (cd "$SCRATCH/remote.git" && no_leaks "$at, the pushed repository")
         ;;
     esac
     case $op in
@@ -317,11 +373,16 @@ faults() {
     unlock) tpl=$SCRATCH/tpl-$x-locked ;;
     migrate) tpl=$SCRATCH/tpl-v2 ;;
     init) tpl=$SCRATCH/tpl-plain INIT_PATTERN=('*.env') ;;
+    rekey) tpl=$SCRATCH/tpl-$x-rekey REF=$tpl ;;
+    rekey-continue) tpl=$SCRATCH/tpl-$x-early REF=$SCRATCH/tpl-$(otherof "$x")-rekey ;;
+    rekey-abort) tpl=$SCRATCH/tpl-$x-late REF=$SCRATCH/tpl-$(otherof "$x")-rekey ;;
     *) tpl=$SCRATCH/tpl-$x-unlocked ;;
     esac
     local input='' args=("$op" --password-stdin)
     case $op in
     rekey) input=$P2 ;;
+    rekey-continue) input=$P2 args=(rekey --continue --password-stdin) ;;
+    rekey-abort) input=$P1 args=(rekey --abort --password-stdin) ;;
     unlock) input=$P1 ;;
     migrate) input=$P1 args+=(--profile=scrypt) ;;
     init) input=$P1 args+=(--profile=scrypt '*.env') ;;

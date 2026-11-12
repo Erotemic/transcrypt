@@ -1035,48 +1035,117 @@ fn rekey_rotates_the_passphrase() {
     assert_ne!(old_config, fs::read(repo.join(".transcrypt/config")).unwrap());
 }
 
-/// A rekey interrupted after its index update (the new config and records
-/// staged, the worktree config and the stored key still the old ones):
-/// `status` says so and labels the records as the staged config's, not as
-/// work to re-encrypt; committing is refused; the documented steps finish
-/// it with the new passphrase or undo it with the old one.
+/// An interrupted rekey (here: the worktree config cannot be written, after
+/// the index update) leaves its journal: status reports it, a new rekey is
+/// refused, and `rekey --abort` (old passphrase, unless its key is still in
+/// use) or `rekey --continue` (new)
+/// changes exactly the entries the rekey staged. Unrelated changes that
+/// exist only in the index (an unprotected file staged and then edited
+/// again, a protected file staged but never committed, a staged edit of a
+/// committed one) are kept exactly. A changed entry or worktree config is
+/// refused with nothing changed, as is the wrong passphrase.
 #[test]
-fn interrupted_rekey_is_reported_and_recoverable() {
+#[cfg(unix)]
+fn interrupted_rekey_continues_or_aborts_losslessly() {
+    use std::os::unix::fs::PermissionsExt;
     const NEW: &[u8] = b"a completely different long passphrase\n";
     let mut scratch = Scratch::new("rekey-interrupted");
-    // A rekey, then back to the state of a crash between its index update
-    // and the worktree config.
-    let mut interrupted = |name: &str| {
-        let repo = scratch.repo(name);
-        let key = repo.join(".git/transcrypt-v3/key");
-        let (old_key, old_config) = (fs::read(&key).unwrap(), fs::read(repo.join(".transcrypt/config")).unwrap());
-        run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
-        fs::write(repo.join(".transcrypt/config"), &old_config).unwrap();
-        fs::write(&key, &old_key).unwrap();
-        (repo, old_config)
+    let listing = |repo: &Path| run(repo, "git", &["ls-files", "--stage"], None);
+    let interrupted = |repo: &Path| {
+        let dir = repo.join(".transcrypt");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let err = run_fails(repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.contains("rekey --continue") && err.contains("rekey --abort"), "{err}");
+        assert!(repo.join(".git/transcrypt-v3-rekey").exists());
     };
-    let (repo, _) = interrupted("finish");
+    let repo = scratch.repo("abort");
+    fs::write(repo.join("notes.txt"), b"staged\n").unwrap();
+    fs::write(repo.join("a.secret"), b"alpha, staged edit\n").unwrap();
+    fs::write(repo.join("dir/c.secret"), b"gamma, staged only\n").unwrap();
+    run(&repo, "git", &["add", "notes.txt", "a.secret", "dir/c.secret"], None);
+    fs::write(repo.join("notes.txt"), b"staged, then edited\n").unwrap();
+    let before = listing(&repo);
+    let old_config = fs::read(repo.join(".transcrypt/config")).unwrap();
+    interrupted(&repo);
+    assert_ne!(listing(&repo), before);
     let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
-    assert!(status.contains("interrupted rekey") && status.contains("git read-tree HEAD"), "{status}");
-    assert!(status.contains("staged config (rekey)") && !status.contains("reencrypt"), "{status}");
-    let err = run_fails(&repo, "git", &["commit", "-qm", "half a rekey"], None);
-    assert!(err.contains("interrupted `rekey`"), "{err}");
-    // Finish: the staged config in the worktree, the new passphrase.
-    run(&repo, "git", &["checkout", "--", ".transcrypt/config"], None);
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(NEW));
+    assert!(status.contains("interrupted rekey") && !status.contains("read-tree"), "{status}");
+    let err = run_fails(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+    assert!(err.contains("interrupted rekey"), "{err}");
+    // The wrong passphrase, and a changed worktree config: refused, nothing changed.
+    let staged = listing(&repo);
+    let err = run_fails(&repo, bin(), &["rekey", "--continue", "--password-stdin"], Some(PASS));
+    assert!(err.contains("new config"), "{err}");
+    fs::write(repo.join(".transcrypt/config"), b"not a config").unwrap();
+    let err = run_fails(&repo, bin(), &["rekey", "--abort", "--password-stdin"], Some(PASS));
+    assert!(err.contains(".transcrypt/config (worktree)") && err.contains("nothing was changed"), "{err}");
+    assert_eq!(listing(&repo), staged);
+    fs::write(repo.join(".transcrypt/config"), &old_config).unwrap();
+    // Abort: every entry exactly as before; the worktree untouched.
+    run(&repo, bin(), &["rekey", "--abort", "--password-stdin"], Some(PASS));
+    assert_eq!(listing(&repo), before);
+    assert!(!repo.join(".git/transcrypt-v3-rekey").exists());
+    assert_eq!(fs::read(repo.join(".transcrypt/config")).unwrap(), old_config);
+    assert_eq!(fs::read(repo.join("notes.txt")).unwrap(), b"staged, then edited\n");
+    assert_eq!(fs::read(repo.join("dir/c.secret")).unwrap(), b"gamma, staged only\n");
+    run(&repo, bin(), &["verify-index"], None);
+    assert!(unlocked(&repo));
+    let err = run_fails(&repo, bin(), &["rekey", "--abort"], None);
+    assert!(err.contains("no interrupted rekey"), "{err}");
+    // Continue: the new config and records; everything else kept.
+    interrupted(&repo);
+    run(&repo, bin(), &["rekey", "--continue", "--password-stdin"], Some(NEW));
+    assert!(!repo.join(".git/transcrypt-v3-rekey").exists());
+    let after = String::from_utf8(listing(&repo)).unwrap();
+    let line = |listing: &str, path: &str| listing.lines().find(|l| l.ends_with(&format!("\t{path}"))).unwrap().to_owned();
+    let before = String::from_utf8(before).unwrap();
+    assert_eq!(line(&after, "notes.txt"), line(&before, "notes.txt"));
+    assert_ne!(line(&after, "dir/c.secret"), line(&before, "dir/c.secret"));
+    assert_ne!(fs::read(repo.join(".transcrypt/config")).unwrap(), old_config);
     run(&repo, bin(), &["verify-index"], None);
     run(&repo, "git", &["commit", "-qm", "rekey"], None);
-    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    assert_eq!(fs::read(repo.join("dir/c.secret")).unwrap(), b"gamma, staged only\n");
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha, staged edit\n");
+    run(&repo, "git", &["checkout", "--", "notes.txt"], None);
     assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
-    // Undo: index and config from HEAD (no refresh), the old passphrase.
-    let (repo, old_config) = interrupted("undo");
-    run(&repo, "git", &["read-tree", "HEAD"], None);
-    run(&repo, "git", &["checkout", "HEAD", "--", ".transcrypt/config"], None);
-    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
-    run(&repo, bin(), &["verify-index"], None);
-    assert_eq!(fs::read(repo.join(".transcrypt/config")).unwrap(), old_config);
-    assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
-    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    run(&repo, bin(), &["lock"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(NEW));
+}
+
+/// An init interrupted after it stored the key but before it applied its
+/// patterns, then resumed without naming them: the recorded patterns still
+/// apply, so a matching file committed and pushed afterwards reaches the
+/// remote encrypted. Without a record, resuming requires the patterns.
+#[test]
+fn interrupted_init_keeps_its_patterns_when_resumed() {
+    let mut scratch = Scratch::new("init-interrupted");
+    let repo = scratch.git_repo("repo");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    // Back to the state before `protect`: the macro only.
+    let attributes = fs::read_to_string(repo.join(".gitattributes")).unwrap();
+    let macro_only: String = attributes.lines().filter(|l| !l.starts_with("*.env")).map(|l| format!("{l}\n")).collect();
+    assert_ne!(attributes, macro_only);
+    fs::write(repo.join(".gitattributes"), &macro_only).unwrap();
+    run(&repo, "git", &["add", ".gitattributes"], None);
+    let out = run_err(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    assert!(out.contains("*.env"), "{out}");
+    fs::write(repo.join("private.env"), b"MARK-secret-not-to-publish\n").unwrap();
+    run(&repo, "git", &["add", "-A"], None);
+    run(&repo, "git", &["commit", "-qm", "init"], None);
+    let remote = scratch.git_repo("remote.git");
+    run(&remote, "git", &["config", "receive.denyCurrentBranch", "ignore"], None);
+    run(&repo, "git", &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/published"], None);
+    let objects = run(&remote, "git", &["cat-file", "--batch-all-objects", "--batch"], None);
+    assert!(!objects.windows(10).any(|w| w == b"MARK-secre"), "plaintext reached the remote");
+    assert!(is_record(&committed(&repo, "private.env")));
+    // Without a record of the patterns, resuming needs them named.
+    let repo = scratch.git_repo("unrecorded");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
+    fs::remove_file(repo.join(".git/transcrypt-v3-setup")).unwrap();
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    assert!(err.contains("no record of what it was to protect"), "{err}");
+    run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
 }
 
 /// A protected file deleted in the worktree (or absent in a sparse
