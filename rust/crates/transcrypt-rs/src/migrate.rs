@@ -17,6 +17,7 @@ use crate::{
     setup::{init_with_rollback, uncommitted_setup},
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
     cli::MigrateArgs,
+    journal::{SetupKind, SetupRecord},
 };
 
 /// How a Bash transcrypt (v2) record starts: OpenSSL's `Salted__`, in
@@ -99,10 +100,22 @@ pub(crate) fn migrate(repo: &Repository, args: &MigrateArgs) -> Result<(), Strin
     // The files Bash protects, by its attributes.
     let entries = indexed_files(repo)?;
     let paths = paths_of(&entries);
-    // When resuming, rules already converted select with transcrypt-v3.
-    let selected: Vec<&[u8]> = paths.iter().zip(filter_values(repo, &paths, Attributes::Worktree)?)
+    // When resuming, rules already converted select with transcrypt-v3,
+    // and whatever the interrupted run recorded that it converts is kept.
+    let mut selected: Vec<&[u8]> = paths.iter().zip(filter_values(repo, &paths, Attributes::Worktree)?)
         .filter(|(_, value)| v2_value(value) || (resuming && value == b"transcrypt-v3"))
         .map(|(path, _)| *path).collect();
+    let record = if resuming { SetupRecord::load(repo)? } else { None };
+    if let Some(record) = &record {
+        if record.kind != SetupKind::Migrate {
+            return Err("an interrupted `init` set up this checkout; rerun init to complete it".into());
+        }
+        for item in &record.items {
+            if let Some(path) = paths.iter().find(|p| ***p == item[..]) {
+                if !selected.contains(path) { selected.push(path); }
+            }
+        }
+    }
     // A committed state, except for an interrupted migration's own changes.
     let status = git(repo, &["status", "--porcelain", "-z", "--untracked-files=no"])?;
     // `git status --porcelain`: the two status letters, a space, the path.
@@ -148,7 +161,8 @@ pub(crate) fn migrate(repo: &Repository, args: &MigrateArgs) -> Result<(), Strin
         }
         let _ = git(repo, &["reset", "-q", "--", "."]);
     };
-    let rollback = match init_with_rollback(repo, args.mode, args.profile, |_| Ok(password)) {
+    let mut record = SetupRecord { kind: SetupKind::Migrate, complete: false, items: selected.iter().map(|p| p.to_vec()).collect() };
+    let rollback = match init_with_rollback(repo, args.mode, args.profile, |_| Ok(password), &record) {
         Ok(rollback) => rollback,
         Err(e) if resuming => return Err(format!("{e}; rerun `transcrypt-rs migrate` to complete the conversion")),
         Err(e) => { restore_bash(); return Err(format!("{e}; the conversion was rolled back")); },
@@ -169,6 +183,8 @@ pub(crate) fn migrate(repo: &Repository, args: &MigrateArgs) -> Result<(), Strin
         restore_bash();
         return Err(format!("{e}; the conversion was rolled back"));
     }
+    record.complete = true;
+    record.save(repo)?;
     eprintln!("Converted {} file(s) from Bash transcrypt to v3; review and commit:\n  \
         git commit -m 'Convert to transcrypt-v3'\n\
         Then clone the repository afresh and check that `transcrypt-rs unlock` decrypts it. Only then \

@@ -116,7 +116,7 @@ fn check_staged(repo: &Repository, config: &[u8], snapshot: Snapshot, head: &Lis
     match entries.iter().find(|e| e.path == CONFIG_PATH.as_bytes()) {
         Some(e) if e.regular() && git_blob(repo, &e.oid)? == config => {},
         _ => return Err("staged .transcrypt/config is missing, not a regular file or differs from the worktree \
-            (an interrupted `rekey`? `transcrypt-rs status` says how to finish or undo it)".into()),
+            (an interrupted `rekey`? see `transcrypt-rs status`)".into()),
     }
     let top = entries.iter().find(|e| e.path == ATTRIBUTES_NAME && e.regular()).map(|e| &e.oid);
     if !macro_resolves(repo, top)? {

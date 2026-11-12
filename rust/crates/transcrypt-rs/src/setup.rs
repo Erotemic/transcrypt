@@ -20,13 +20,15 @@ use crate::{
     load_config, os, passphrase, session,
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
     cli::{InitArgs, KeyMode, UnlockArgs},
+    journal::{RekeyJournal, SetupKind, SetupRecord, REKEY_PENDING},
 };
 
 const HOOKS_BYPASSED: &str = "core.hooksPath is set, so Git does not run the v3 pre-commit and \
     pre-push checks installed in .git/hooks";
 
 /// How to discard an interrupted `init`, for its refusals.
-const START_OVER: &str = "`git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`";
+pub(crate) const START_OVER: &str = "`git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt; \
+    rm -f \"$(git rev-parse --git-path transcrypt-v3-setup)\"`";
 
 /// Where Git runs hooks from by default, and v3 installs its own.
 fn hooks_dir(repo: &Repository) -> PathBuf {
@@ -239,17 +241,57 @@ pub(crate) fn activate(repo: &Repository, key: &ValidatedKey, mode: KeyMode) -> 
 /// `.gitattributes`, filters and hooks, the key stored (or the private
 /// agent started), and then `protect` for each pattern.
 pub(crate) fn init(repo: &Repository, args: &InitArgs) -> Result<(), String> {
-    let rollback = init_with_rollback(repo, args.mode, args.profile, |new| passphrase(args.password_stdin, new))?;
-    if !args.patterns.is_empty() {
-        if let Err(e) = protect(repo, &args.patterns) {
+    let resuming = uncommitted_setup(repo, INIT_COMMITTED)?;
+    let patterns = init_patterns(repo, resuming, &args.patterns)?;
+    let items: Vec<Vec<u8>> = patterns.iter().map(|p| os::os_bytes(p).to_vec()).collect();
+    let mut record = SetupRecord { kind: SetupKind::Init, complete: false, items };
+    let rollback = init_with_rollback(repo, args.mode, args.profile, |new| passphrase(args.password_stdin, new), &record)?;
+    if !patterns.is_empty() {
+        if let Err(e) = protect(repo, &patterns) {
+            if resuming { return Err(format!("{e}; rerun to complete the initialization")); }
             rollback.run(repo);
             return Err(format!("{e}; initialization rolled back"));
         }
     } else {
         eprintln!("Choose what to encrypt, for example:\n  transcrypt-rs protect .env 'secrets/**'");
     }
+    record.complete = true;
+    record.save(repo)?;
     eprintln!("Then commit:\n  git commit -m 'Enable transcrypt-v3'");
     Ok(())
+}
+
+const INIT_COMMITTED: &str = ".transcrypt already exists: this repository is set up; run `transcrypt-rs unlock`";
+
+/// The patterns `init` protects: those given, and whatever an earlier,
+/// interrupted run (`resuming`, or one that stopped before it wrote the
+/// config) was asked to protect, so that resuming cannot drop them.
+fn init_patterns(repo: &Repository, resuming: bool, given: &[std::ffi::OsString]) -> Result<Vec<std::ffi::OsString>, String> {
+    let mut patterns = given.to_vec();
+    match SetupRecord::load(repo)? {
+        Some(record) if resuming && record.kind != SetupKind::Init => {
+            return Err("an interrupted `migrate` set up this checkout; rerun migrate to complete it".into());
+        },
+        Some(record) if resuming || (record.kind == SetupKind::Init && !record.complete) => {
+            let mut recorded = Vec::new();
+            for item in &record.items {
+                let pattern = os::os_string(item)?;
+                if !patterns.contains(&pattern) {
+                    recorded.push(pattern.to_string_lossy().into_owned());
+                    patterns.push(pattern);
+                }
+            }
+            if !recorded.is_empty() {
+                eprintln!("Also protecting what the interrupted init was asked to: {}", recorded.join(" "));
+            }
+        },
+        None if resuming && patterns.is_empty() => {
+            return Err(format!("an interrupted setup left .transcrypt, but no record of what it was to protect; \
+                rerun init naming the patterns to protect, or start over: {START_OVER}"));
+        },
+        _ => {},
+    }
+    Ok(patterns)
 }
 
 /// What a successful initialization created, so that a later failure of
@@ -279,6 +321,7 @@ impl Rollback {
         remove_filters(repo);
         let _ = credential::forget(repo);
         let _ = session::stop(repo, &self.config);
+        let _ = SetupRecord::remove(repo);
     }
 }
 
@@ -303,12 +346,11 @@ pub(crate) fn uncommitted_setup(repo: &Repository, committed: &str) -> Result<bo
 /// one); on failure everything is rolled back, on success the caller gets the
 /// rollback for later steps.
 pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode, profile: Profile,
-    password: impl FnOnce(bool) -> Result<Zeroizing<Vec<u8>>, String>) -> Result<Rollback, String>
+    password: impl FnOnce(bool) -> Result<Zeroizing<Vec<u8>>, String>, record: &SetupRecord) -> Result<Rollback, String>
 {
     // An existing config not yet in `HEAD` is an interrupted `init`: rerunning
     // with the same passphrase completes it.
-    let committed = ".transcrypt already exists: this repository is set up; run `transcrypt-rs unlock`";
-    let interrupted = if uncommitted_setup(repo, committed)? {
+    let interrupted = if uncommitted_setup(repo, INIT_COMMITTED)? {
         Some(load_config(repo).map_err(|e| format!("{e} (left by an interrupted init? to start over: {START_OVER})"))?)
     } else { None };
     check_hook_available(repo)?;
@@ -325,6 +367,8 @@ pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode, profile: Prof
         attributes_before: worktree_attributes(repo)?,
         hook_preexisted: HOOKS.map(|(name, _)| fs::symlink_metadata(hook_path(repo, name)).is_ok()),
     };
+    // What this setup protects is recorded before it changes anything.
+    record.save(repo)?;
     let staging = staging_dir(repo)?;
     let result = (|| -> Result<(), String> {
         if interrupted.is_none() {
@@ -364,9 +408,15 @@ pub(crate) fn unlock(repo: &Repository, args: &UnlockArgs) -> Result<(), String>
         return Ok(());
     }
     let password = passphrase(args.password_stdin, false)?;
-    let key = ValidatedKey::unlock(&password, &config)?; // Authenticate BEFORE any persistent writes.
+    // Authenticate BEFORE any persistent writes.
+    let key = ValidatedKey::unlock(&password, &config).map_err(|e| {
+        if RekeyJournal::pending(repo) { format!("{e}; there is {REKEY_PENDING}") } else { e }
+    })?;
     install(repo)?;
     activate(repo, &key, args.mode)?;
+    if RekeyJournal::pending(repo) {
+        eprintln!("Note: there is {REKEY_PENDING}.");
+    }
     let mode = if args.mode.private() { "private mode: key in memory until lock or logout" }
         else { "key stored in .git/transcrypt-v3/key until lock" };
     if !args.hydrate {
@@ -391,6 +441,9 @@ pub(crate) fn unlock(repo: &Repository, args: &UnlockArgs) -> Result<(), String>
 /// committed `.transcrypt/config` and `.gitattributes` stay: removing them
 /// from the repository is a commit, and the history stays encrypted.
 pub(crate) fn uninstall(repo: &Repository) -> Result<(), String> {
+    if RekeyJournal::pending(repo) {
+        return Err(format!("{REKEY_PENDING}; then uninstall"));
+    }
     // On a branch without a v3 config (made before `init`) there is nothing
     // to lock here; other worktrees must still hold no plaintext.
     if let Ok(config) = load_config(repo) {
@@ -445,15 +498,15 @@ pub(crate) fn status(repo: &Repository) -> Result<(), String> {
         Unlock::Locked => "locked",
         Unlock::Stale => "locked: the stored key does not match .transcrypt/config (rekeyed?, or damaged); run unlock",
     });
-    // A staged config other than the worktree's: a rekey staged but not
-    // finished (interrupted before the worktree config was written).
+    // An interrupted rekey (its journal), and a staged config other than
+    // the worktree's (such as a rekey staged but not finished).
+    if RekeyJournal::pending(repo) {
+        println!("note:       {REKEY_PENDING}");
+    }
     let staged_config = git(repo, &["cat-file", "blob", ":.transcrypt/config"]).ok().filter(|staged| *staged != config);
     let staged_id = staged_config.as_deref().map(transcrypt_rs::config_id);
     if let Some(staged) = &staged_id {
-        println!("note:       the staged .transcrypt/config ({}) differs from the worktree's: an interrupted rekey? \
-            to finish it, `git checkout -- .transcrypt/config` and unlock with the new passphrase; to undo it, \
-            `git read-tree HEAD && git checkout HEAD -- .transcrypt/config` and unlock with the old one",
-            short_id(staged));
+        println!("note:       the staged .transcrypt/config ({}) differs from the worktree's", short_id(staged));
     }
     let key = unlock.key();
     let mut counts = [0usize; BUCKETS];

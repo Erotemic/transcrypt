@@ -27,8 +27,9 @@ pub(crate) enum Command {
     Hydrate { auto: bool },
     Init(InitArgs),
     Unlock(UnlockArgs),
-    /// `rekey`; with a profile, also convert to it.
-    Rekey { password_stdin: bool, profile: Option<Profile> },
+    /// `rekey`; with a profile, also convert to it. With `resume`, finish
+    /// (`--continue`) or undo (`--abort`) an interrupted one instead.
+    Rekey { password_stdin: bool, profile: Option<Profile>, resume: Option<Resume> },
     Migrate(MigrateArgs),
     Reencrypt(ReencryptArgs),
     /// `.gitattributes` patterns, at least one.
@@ -44,6 +45,15 @@ pub(crate) enum Command {
     Filter { clean: bool, path: OsString },
     /// The pre-push hook: Git passes the remote's name (and URL).
     PrePush { remote: Option<OsString> },
+}
+
+/// What `rekey --continue` or `rekey --abort` does with an interrupted rekey.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Resume {
+    /// Finish it: the new config and records.
+    Continue,
+    /// Undo it: the old ones.
+    Abort,
 }
 
 /// Where an unlocked key is kept.
@@ -186,6 +196,7 @@ fn parse_passphrase_command(action: &str, args: &[OsString]) -> Result<Command, 
     let (mut password_stdin, mut private, mut hydrate, mut yes) = (false, false, true, false);
     let mut idle = None;
     let mut profile = None;
+    let mut resume = None;
     let mut patterns = Vec::new();
     for arg in args {
         let flag = arg.to_str();
@@ -202,6 +213,8 @@ fn parse_passphrase_command(action: &str, args: &[OsString]) -> Result<Command, 
             (Some("--private"), "init" | "unlock" | "migrate") => private = true,
             (Some("--no-hydrate"), "unlock") => hydrate = false,
             (Some("--yes"), "reencrypt") => yes = true,
+            (Some("--continue"), "rekey") => resume = Some(Resume::Continue),
+            (Some("--abort"), "rekey") => resume = Some(Resume::Abort),
             (Some(flag), _) if flag.starts_with('-') => return Err(format!("{action}: unknown option {flag}")),
             (_, "init") => patterns.push(arg.clone()),
             _ => return Err(format!("{action}: unexpected argument {}", arg.to_string_lossy())),
@@ -215,7 +228,10 @@ fn parse_passphrase_command(action: &str, args: &[OsString]) -> Result<Command, 
     Ok(match action {
         "init" => Command::Init(InitArgs { password_stdin, profile: profile.unwrap_or(DEFAULT_PROFILE), mode, patterns }),
         "unlock" => Command::Unlock(UnlockArgs { password_stdin, mode, hydrate }),
-        "rekey" => Command::Rekey { password_stdin, profile },
+        "rekey" if resume.is_some() && profile.is_some() => {
+            return Err("rekey --continue and --abort take no --profile".into());
+        },
+        "rekey" => Command::Rekey { password_stdin, profile, resume },
         "migrate" => Command::Migrate(MigrateArgs { password_stdin, profile: profile.unwrap_or(DEFAULT_PROFILE), mode }),
         _ => Command::Reencrypt(ReencryptArgs { password_stdin, yes }),
     })
@@ -262,6 +278,9 @@ Typical workflow
   transcrypt-rs rekey [--profile=NAME]
                             change the passphrase (and, with --profile, the profile): a new
                             config and every protected file re-encrypted, staged to commit
+  transcrypt-rs rekey --continue | --abort
+                            finish (new passphrase) or undo (old one) an interrupted rekey,
+                            changing only the index entries it staged
   transcrypt-rs reencrypt [--yes]
                             re-encrypt staged files still encrypted under an earlier config
                             (cherry-picked or rebased across a rekey): lists them with the
@@ -343,7 +362,10 @@ mod tests {
         assert!(matches!(parse("migrate --private"),
             Ok(Command::Migrate(MigrateArgs { mode: KeyMode::Private { idle: None }, .. }))));
         assert!(matches!(parse("reencrypt --yes"), Ok(Command::Reencrypt(ReencryptArgs { yes: true, .. }))));
-        assert!(matches!(parse("rekey --password-stdin"), Ok(Command::Rekey { password_stdin: true, profile: None })));
+        assert!(matches!(parse("rekey --password-stdin"), Ok(Command::Rekey { password_stdin: true, profile: None, resume: None })));
+        assert!(matches!(parse("rekey --abort"), Ok(Command::Rekey { resume: Some(Resume::Abort), .. })));
+        assert!(matches!(parse("rekey --continue --password-stdin"), Ok(Command::Rekey { resume: Some(Resume::Continue), .. })));
+        assert!(parse("rekey --continue --profile=scrypt").is_err());
         assert!(matches!(parse("rekey --profile=scrypt"), Ok(Command::Rekey { profile: Some(Profile::Scrypt), .. })));
         assert!(matches!(parse("init --profile=3"), Ok(Command::Init(InitArgs { profile: Profile::Pbkdf2, .. }))));
         assert!(matches!(parse("init"), Ok(Command::Init(InitArgs { profile: Profile::Argon2id, .. }))));

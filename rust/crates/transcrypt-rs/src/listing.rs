@@ -30,6 +30,11 @@ impl Mode {
     pub(crate) fn regular(self) -> bool {
         self.0 == REGULAR_MODE || self.0 == EXECUTABLE_MODE
     }
+
+    /// `bytes` as the mode of a regular file (100644 or 100755), if it is.
+    pub(crate) fn parse_regular(bytes: &[u8]) -> Option<Mode> {
+        <[u8; MODE_LEN]>::try_from(bytes).ok().map(Mode).filter(|mode| mode.regular())
+    }
 }
 
 impl fmt::Display for Mode {

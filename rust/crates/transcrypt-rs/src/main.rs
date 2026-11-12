@@ -18,7 +18,10 @@
 //! - `setup.rs`: init, unlock, uninstall, filters and hooks, `status` and
 //!   `doctor`.
 //! - `attributes.rs`: the `transcrypt` macro, `protect` and `unprotect`.
-//! - `rekey.rs`: `rekey` and `reencrypt`; `migrate.rs`: from Bash transcrypt.
+//! - `rekey.rs`: `rekey` (with `--continue`/`--abort`) and `reencrypt`;
+//!   `migrate.rs`: from Bash transcrypt.
+//! - `journal.rs`: the setup record and the rekey journal, which let an
+//!   interrupted `init`, `migrate` or `rekey` be completed or undone exactly.
 //! - `audit.rs`: keyless history audit and the pre-push hook.
 //! - `merge.rs` and `diff.rs`: the merge and diff drivers for protected files.
 #[cfg(not(any(unix, windows)))]
@@ -41,6 +44,7 @@ mod filter;
 #[cfg_attr(windows, path = "fsat_windows.rs")]
 mod fsat;
 mod git;
+mod journal;
 mod lifecycle;
 mod listing;
 mod merge;
@@ -126,7 +130,8 @@ fn run() -> Result<(), String> {
         Command::Hydrate { auto: true } => auto_hydrate(&repo),
         Command::Init(args) => init(&repo, &args),
         Command::Unlock(args) => unlock(&repo, &args),
-        Command::Rekey { password_stdin, profile } => rekey(&repo, password_stdin, profile),
+        Command::Rekey { password_stdin, profile, resume: None } => rekey(&repo, password_stdin, profile),
+        Command::Rekey { password_stdin, resume: Some(resume), .. } => rekey::resume(&repo, password_stdin, resume),
         Command::Migrate(args) => migrate::migrate(&repo, &args),
         Command::Reencrypt(args) => reencrypt(&repo, &args),
         Command::Protect(patterns) => protect(&repo, &patterns),

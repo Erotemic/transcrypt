@@ -62,35 +62,63 @@ impl<'a> IndexUpdate<'a> {
     }
 
     /// Write the blobs and stage them, with `update-index` `options` (such as
-    /// `--add`). `update-index` skips a path it considers invalid (on
-    /// Windows, one that NTFS cannot name) with only a warning and success,
-    /// so the index is read back: every entry must now be staged exactly.
-    pub(crate) fn apply(mut self, options: &[&str]) -> Result<(), String> {
-        if self.entries.is_empty() { return Ok(()); }
+    /// `--add`).
+    pub(crate) fn apply(self, options: &[&str]) -> Result<(), String> {
+        self.write()?.apply(options)
+    }
+
+    /// Write the blobs, without staging them yet.
+    pub(crate) fn write(mut self) -> Result<Written<'a>, String> {
+        if self.entries.is_empty() { return Ok(Written { repo: self.repo, entries: Vec::new() }); }
         for (mark, bytes) in std::mem::take(&mut self.held).iter().enumerate() {
             self.importer()?.blob(mark + 1, bytes)?;
         }
         let marks = self.entries.len();
         let oids = self.importer()?.finish(marks)?;
-        let repo = self.repo;
-        let mut info = Vec::new();
-        for ((mode, path), oid) in self.entries.iter().zip(&oids) {
-            push_index_record(&mut info, *mode, oid, path);
-        }
-        let arguments: Vec<&str> = ["update-index", "-z"].into_iter().chain(options.iter().copied())
-            .chain(["--index-info"]).collect();
-        git_with_input(repo, &arguments, &info)?;
-        let listing = index_listing(repo)?;
-        let staged: std::collections::HashSet<&[u8]> = git_records(&listing)?.into_iter().collect();
-        for ((mode, path), oid) in self.entries.iter().zip(oids) {
-            let mut record = format!("{mode} {oid} 0\t").into_bytes();
-            record.extend_from_slice(path);
-            if !staged.contains(&record[..]) {
-                return Err(format!("Git did not stage {} (it refuses that path name here)", String::from_utf8_lossy(path)));
-            }
-        }
-        Ok(())
+        let entries = std::mem::take(&mut self.entries).into_iter().zip(oids)
+            .map(|((mode, path), oid)| (mode, oid, path)).collect();
+        Ok(Written { repo: self.repo, entries })
     }
+}
+
+/// The blobs of an `IndexUpdate`, written: each entry's mode, object id and
+/// path.
+pub(crate) struct Written<'a> {
+    repo: &'a Repository,
+    pub(crate) entries: Vec<(Mode, ObjectId, Vec<u8>)>,
+}
+
+impl Written<'_> {
+    /// Stage them, with `update-index` `options`.
+    pub(crate) fn apply(self, options: &[&str]) -> Result<(), String> {
+        stage_objects(self.repo, &self.entries, options)
+    }
+}
+
+/// Stage existing objects: each entry's mode, object id and path, with
+/// `update-index` `options`. `update-index` skips a path it considers
+/// invalid (on Windows, one that NTFS cannot name) with only a warning and
+/// success, so the index is read back: every entry must now be staged
+/// exactly.
+pub(crate) fn stage_objects(repo: &Repository, entries: &[(Mode, ObjectId, Vec<u8>)], options: &[&str]) -> Result<(), String> {
+    if entries.is_empty() { return Ok(()); }
+    let mut info = Vec::new();
+    for (mode, oid, path) in entries {
+        push_index_record(&mut info, *mode, oid, path);
+    }
+    let arguments: Vec<&str> = ["update-index", "-z"].into_iter().chain(options.iter().copied())
+        .chain(["--index-info"]).collect();
+    git_with_input(repo, &arguments, &info)?;
+    let listing = index_listing(repo)?;
+    let staged: std::collections::HashSet<&[u8]> = git_records(&listing)?.into_iter().collect();
+    for (mode, oid, path) in entries {
+        let mut record = format!("{mode} {oid} 0\t").into_bytes();
+        record.extend_from_slice(path);
+        if !staged.contains(&record[..]) {
+            return Err(format!("Git did not stage {} (it refuses that path name here)", String::from_utf8_lossy(path)));
+        }
+    }
+    Ok(())
 }
 
 /// Git settings for writing v3 records: their bytes are random, so no
