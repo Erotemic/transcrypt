@@ -64,10 +64,44 @@ tc_fail() {
 }
 tc_log() { printf 'transcrypt-bash: %s\n' "$*" >&2; }
 
+# Private scratch space for plaintext and derived keys while a command
+# works (never Git content). In a repository it is an owner-only directory
+# in this checkout's Git directory, like transcrypt-rs's staging area: a
+# run that is killed leaves it there, not in a shared temporary directory,
+# and the next run removes it once that process (its name) no longer
+# exists. Outside a repository, or if that directory is unusable, $TMPDIR.
+# Removed on exit either way.
+readonly TC_SCRATCH_NAME=transcrypt-v3-bash-scratch
 tc_workspace() {
 	[[ -n $TC_TMP ]] && return 0
-	TC_TMP=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/transcrypt-bash.XXXXXXXX") || tc_fail 'cannot create a temporary directory'
+	local gitdir base='' entry pid
+	if gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) && [[ -d $gitdir ]]; then
+		base=$gitdir/$TC_SCRATCH_NAME
+		if [[ -L $base ]] || ! (umask 077 && mkdir -p -- "$base") 2>/dev/null || [[ ! -d $base || ! -O $base ]] ||
+			! chmod 700 -- "$base" 2>/dev/null; then
+			base=''
+		fi
+	fi
+	if [[ -n $base ]]; then
+		for entry in "$base"/*.*; do
+			[[ -d $entry && ! -L $entry ]] || continue
+			pid=${entry##*/}
+			pid=${pid%%.*}
+			[[ $pid =~ ^[0-9]+$ && $pid != "$$" ]] || continue
+			tc_process_gone "$pid" && rm -rf -- "$entry"
+		done
+		TC_TMP=$(umask 077 && mktemp -d "$base/$$.XXXXXXXX") || tc_fail 'cannot create a private scratch directory'
+	else
+		TC_TMP=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/transcrypt-bash.XXXXXXXX") || tc_fail 'cannot create a temporary directory'
+	fi
 	trap 'rm -rf -- "$TC_TMP"' EXIT
+}
+
+# Whether no process $1 exists (a process of another user is not "gone").
+tc_process_gone() {
+	local out
+	out=$(kill -0 "$1" 2>&1) && return 1
+	[[ $out == *'No such process'* ]]
 }
 
 tc_require_tools() {
@@ -518,14 +552,27 @@ tc_seal_record() {
 		cat "$TC_TMP/sealed"
 	} >"$out"
 }
-# Open record file $2 at path $1 under the config in force into $3; 1 if it
-# is not an authentic record of this config at this path.
+# Open record file $2 at Git path $1 under the config in force into $3; 1
+# if it is not an authentic record of this config at this path. (The checks
+# of tc_envelope_ok and tc_siv_open, in one pass over the 38 header bytes.)
 tc_open_record() {
-	local path=$1 record=$2 out=$3
+	local path=$1 record=$2 out=$3 size hex tag
+	rm -f -- "$out"
 	tc_valid_path "$path" || return 1
-	tc_envelope_ok "$record" "$TC_CONFIG_ID" || return 1
-	tail -c "+23" "$record" >"$TC_TMP/open-sealed"
-	tc_siv_open "$path" "$TC_CONFIG_FILE" "$TC_TMP/open-sealed" "$out"
+	size=$(tc_file_size "$record")
+	((size >= TC_FILE_MIN && size <= TC_MAX_FILE + TC_FILE_MIN)) || return 1
+	hex=$(od -An -tx1 -v -N "$TC_FILE_MIN" "$record" | tr -d ' \n')
+	[[ ${hex:0:44} == "$TC_RECORD_MAGIC_HEX$TC_CONFIG_ID" ]] || return 1
+	tag=${hex:44:32}
+	tail -c "+$((TC_FILE_MIN + 1))" "$record" >"$TC_TMP/siv-ct"
+	tc_ctr_file "$tag" "$TC_TMP/siv-ct" "$TC_TMP/siv-unauthenticated" "$((size - TC_FILE_MIN))"
+	printf %s "$path" >"$TC_TMP/siv-path"
+	tc_s2v "$TC_TMP/siv-unauthenticated" "$TC_FILE_DOMAIN" "$TC_CONFIG_FILE" "$TC_TMP/siv-path" "$TC_CONFIG_HEX" "$((size - TC_FILE_MIN))"
+	if [[ $TC_RESULT != "$tag" ]]; then
+		rm -f -- "$TC_TMP/siv-unauthenticated"
+		return 1
+	fi
+	mv -f -- "$TC_TMP/siv-unauthenticated" "$out"
 }
 
 # ---------------------------------------------------------------------------
@@ -1178,6 +1225,36 @@ tc_remove_installation() {
 	return 0
 }
 
+# Hand-off to the clean filter processes a reindex makes Git run: entries
+# "path NUL content NUL record NUL" for files this process just wrote (the
+# plaintext it decrypted from, or the record it restored from, the staged
+# record). A filter given exactly that content at that path returns that
+# record without loading the key: the result is the staged object or the
+# reindex below fails, so the shortcut decides nothing.
+tc_handoff_reset() {
+	mkdir -p -- "$TC_TMP/handoff" || tc_fail 'cannot prepare the reindex'
+	: >"$TC_TMP/handoff/list"
+	TC_HANDOFF_N=0
+}
+tc_handoff_add() {
+	local path=$1 content=$2 record=$3 n=$((TC_HANDOFF_N += 1))
+	cp -- "$content" "$TC_TMP/handoff/c$n" || tc_fail 'cannot prepare the reindex'
+	cp -- "$record" "$TC_TMP/handoff/r$n" || tc_fail 'cannot prepare the reindex'
+	printf '%s\0%s\0%s\0' "$path" "$TC_TMP/handoff/c$n" "$TC_TMP/handoff/r$n" >>"$TC_TMP/handoff/list"
+}
+# In a clean filter: the record handed off for path $1 and the content in
+# $2, if any (printed).
+tc_handoff_take() {
+	local path=$1 input=$2 dir=${TC_BASH_HANDOFF-} p c r
+	[[ -n $dir && $dir == /*/$TC_SCRATCH_NAME/*/handoff && -d $dir && ! -L $dir && -O $dir && -f $dir/list ]] || return 1
+	while IFS= read -r -d '' p && IFS= read -r -d '' c && IFS= read -r -d '' r; do
+		[[ $p == "$path" ]] || continue
+		[[ $c == "$dir"/c* && $r == "$dir"/r* ]] && cmp -s -- "$input" "$c" && cat -- "$r" && return 0
+		return 1
+	done <"$dir/list"
+	return 1
+}
+
 # Re-index the worktree files named (NUL-separated) in $1 through the clean
 # filter, which gives back exactly their staged records, so Git's stat data
 # matches the plaintext; refuse if any staged object changed.
@@ -1187,7 +1264,12 @@ tc_reindex() {
 	index=${GIT_INDEX_FILE:-$(git rev-parse --path-format=absolute --git-path index)}
 	cp -p -- "$index" "$TC_TMP/index-backup" || tc_fail 'cannot back up the index'
 	git ls-files -s -z >"$TC_TMP/reindex-before" || tc_fail 'cannot list the index'
-	git update-index -z --stdin <"$list" || tc_fail 'cannot refresh the index'
+	if [[ -s $TC_TMP/handoff/list ]]; then
+		TC_BASH_HANDOFF=$TC_TMP/handoff git update-index -z --stdin <"$list" || tc_fail 'cannot refresh the index'
+		rm -rf -- "$TC_TMP/handoff"
+	else
+		git update-index -z --stdin <"$list" || tc_fail 'cannot refresh the index'
+	fi
 	git ls-files -s -z >"$TC_TMP/reindex-after" || tc_fail 'cannot list the index'
 	if ! cmp -s "$TC_TMP/reindex-before" "$TC_TMP/reindex-after"; then
 		cat "$TC_TMP/index-backup" >"$index"
@@ -1201,27 +1283,79 @@ tc_reindex() {
 
 # Replace worktree records of this config with their plaintext. $1=quiet.
 tc_hydrate() {
-	local i path file count=0
+	local i path file count=0 oid
+	local -a todo=() files=()
 	tc_read_index
 	: >"$TC_TMP/hydrated-paths"
+	tc_handoff_reset
 	tc_index_paths_file "$TC_TMP/hydrate-paths"
 	tc_selected "$TC_TMP/hydrate-paths" --cached
+	: >"$TC_TMP/hydrate-files"
 	for i in "${!TC_IDX_PATH[@]}"; do
 		path=${TC_IDX_PATH[i]}
 		[[ ${TC_IDX_STAGE[i]} == 0 && -n ${TC_SELECTED[$path]-} ]] || continue
 		tc_valid_path "$path" || continue
 		file=$(tc_worktree_file "$path") || continue
 		tc_envelope_ok "$file" "$TC_CONFIG_ID" || continue
+		todo+=("$i")
+		files+=("$file")
+		# (--stdin-paths is line-based: a name with a newline is hashed alone.)
+		[[ $file == *$'\n'* ]] || printf '%s\n' "$file" >>"$TC_TMP/hydrate-files"
+	done
+	# Which worktree records are the staged ones (one Git process for all).
+	local -a hashed=() oids=()
+	if [[ -s $TC_TMP/hydrate-files ]]; then
+		git hash-object --no-filters --stdin-paths <"$TC_TMP/hydrate-files" >"$TC_TMP/hydrate-oids" || tc_fail 'cannot hash the worktree files'
+		mapfile -t hashed <"$TC_TMP/hydrate-oids"
+	fi
+	local n m=0
+	for n in "${!todo[@]}"; do
+		if [[ ${files[n]} == *$'\n'* ]]; then
+			oids[n]=$(git hash-object --no-filters -- "${files[n]}") || tc_fail 'cannot hash the worktree files'
+		else
+			oids[n]=${hashed[m]-}
+			m=$((m + 1))
+		fi
+	done
+	((m == ${#hashed[@]})) || tc_fail 'cannot hash the worktree files'
+	for n in "${!todo[@]}"; do
+		i=${todo[n]}
+		path=${TC_IDX_PATH[i]}
+		file=${files[n]}
 		tc_open_record "$path" "$file" "$TC_TMP/hydrated" || {
 			tc_log "warning: $path does not open at its path; left encrypted"
 			continue
 		}
-		local staged_record=0
-		[[ $(git hash-object --no-filters "$file") == "${TC_IDX_OID[i]}" ]] && staged_record=1
-		cat "$TC_TMP/hydrated" >"$file"
-		((staged_record)) && printf '%s\0' "$path" >>"$TC_TMP/hydrated-paths"
+		oid=${oids[n]}
+		if [[ $oid == "${TC_IDX_OID[i]}" ]]; then
+			cp -- "$file" "$TC_TMP/hydrate-record"
+			cat "$TC_TMP/hydrated" >"$file"
+			printf '%s\0' "$path" >>"$TC_TMP/hydrated-paths"
+			tc_handoff_add "$path" "$TC_TMP/hydrated" "$TC_TMP/hydrate-record"
+		else
+			cat "$TC_TMP/hydrated" >"$file"
+		fi
 		count=$((count + 1))
 	done
+	# Files already holding the plaintext of their staged record whose
+	# index entry is stale (an earlier hydrate interrupted before its
+	# reindex): Git counts a size change as a modification without running
+	# the filter, so they are reindexed too.
+	local -A done_paths=()
+	for n in "${!todo[@]}"; do done_paths[${TC_IDX_PATH[${todo[n]}]}]=1; done
+	git diff-files --name-only -z >"$TC_TMP/hydrate-stale" || tc_fail 'cannot list the worktree changes'
+	while IFS= read -r -d '' path; do
+		i=${TC_IDX_AT[$path]-}
+		[[ -n $i && -z ${done_paths[$path]-} && ${TC_IDX_STAGE[i]} == 0 && -n ${TC_SELECTED[$path]-} ]] || continue
+		tc_valid_path "$path" || continue
+		file=$(tc_worktree_file "$path") || continue
+		[[ -z $(tc_record_id "$file") ]] || continue
+		tc_blob "${TC_IDX_OID[i]}" "$TC_TMP/hydrate-record"
+		tc_open_record "$path" "$TC_TMP/hydrate-record" "$TC_TMP/hydrated" || continue
+		cmp -s -- "$file" "$TC_TMP/hydrated" || continue
+		printf '%s\0' "$path" >>"$TC_TMP/hydrated-paths"
+		tc_handoff_add "$path" "$TC_TMP/hydrated" "$TC_TMP/hydrate-record"
+	done <"$TC_TMP/hydrate-stale"
 	tc_reindex "$TC_TMP/hydrated-paths"
 	[[ ${1-} == quiet ]] || tc_log "decrypted $count protected file(s) in the worktree"
 }
@@ -1274,11 +1408,38 @@ tc_flush() {
 		paths+=("$path")
 		n=$((n + 1))
 	done
+	# What was verified, for tc_flush_write (and, after a check, for
+	# tc_flush_checked in this process, with a copy of each plaintext: the
+	# file must still hold it when it is replaced).
+	TC_FLUSH_TARGETS=(${targets[@]+"${targets[@]}"})
+	TC_FLUSH_RECORDS=(${records[@]+"${records[@]}"})
+	TC_FLUSH_PATHS=(${paths[@]+"${paths[@]}"})
+	if [[ $mode == check ]]; then
+		for i in "${!targets[@]}"; do cp -- "${targets[i]}" "$TC_TMP/flush-checked-$i" || tc_fail 'cannot read the worktree'; done
+		return 0
+	fi
 	[[ $mode == apply ]] || return 0
+	tc_flush_write
+}
+# Apply the check made by `tc_flush check` in this process: each file must
+# be byte for byte the plaintext that was checked.
+tc_flush_checked() {
+	local i
+	for i in "${!TC_FLUSH_TARGETS[@]}"; do
+		cmp -s -- "${TC_FLUSH_TARGETS[i]}" "$TC_TMP/flush-checked-$i" ||
+			tc_fail "${TC_FLUSH_PATHS[i]} changed while locking; nothing in this worktree was replaced"
+	done
+	tc_flush_write
+}
+# Replace each verified plaintext (TC_FLUSH_*) with its staged record.
+tc_flush_write() {
+	local i
 	: >"$TC_TMP/flushed-paths"
-	for i in "${!targets[@]}"; do
-		cat "${records[i]}" >"${targets[i]}"
-		printf '%s\0' "${paths[i]}" >>"$TC_TMP/flushed-paths"
+	tc_handoff_reset
+	for i in "${!TC_FLUSH_TARGETS[@]}"; do
+		cat "${TC_FLUSH_RECORDS[i]}" >"${TC_FLUSH_TARGETS[i]}"
+		printf '%s\0' "${TC_FLUSH_PATHS[i]}" >>"$TC_TMP/flushed-paths"
+		tc_handoff_add "${TC_FLUSH_PATHS[i]}" "${TC_FLUSH_RECORDS[i]}" "${TC_FLUSH_RECORDS[i]}"
 	done
 	tc_reindex "$TC_TMP/flushed-paths"
 	return 0
@@ -1287,6 +1448,29 @@ tc_flush() {
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+# An uncommitted .transcrypt (HEAD has no config) is an interrupted init or
+# migrate: rerunning it with the same passphrase completes it, as in
+# transcrypt-rs. Returns 0 when resuming, 1 for a fresh setup; refuses a
+# committed setup with message $1.
+readonly TC_START_OVER='`git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`'
+tc_interrupted_setup() {
+	[[ -e $TC_ROOT/.transcrypt || -L $TC_ROOT/.transcrypt ]] || return 1
+	git rev-parse -q --verify 'HEAD:.transcrypt/config' >/dev/null 2>&1 && tc_fail "$1"
+	return 0
+}
+# Resuming: the interrupted setup's config, authenticated by the passphrase.
+tc_resume_key() {
+	(tc_load_config) >/dev/null 2>&1 || tc_fail "unusable .transcrypt/config (left by an interrupted setup?); to start over: $TC_START_OVER"
+	tc_load_config
+	tc_require_probe
+	tc_read_passphrase "$1" 0
+	tc_derive "$TC_PROFILE" "$TC_TMP/passphrase" "$(head -c 39 "$TC_CONFIG_FILE" | tail -c 32 | od -An -tx1 -v | tr -d ' \n')"
+	rm -f -- "$TC_TMP/passphrase"
+	tc_config_authentic "$TC_CONFIG_FILE" ||
+		tc_fail "an interrupted setup left .transcrypt/config under another passphrase; rerun with that one, or start over: $TC_START_OVER"
+	tc_log 'completing an interrupted setup (its .transcrypt/config is not committed yet)'
+}
 
 tc_cmd_init() {
 	local stdin=0 profile=2 arg
@@ -1301,15 +1485,19 @@ tc_cmd_init() {
 		esac
 	done
 	tc_repo
-	[[ ! -e $TC_ROOT/.transcrypt && ! -L $TC_ROOT/.transcrypt ]] || tc_fail '.transcrypt already exists: this repository is set up; run `transcrypt-bash unlock`'
 	tc_check_hooks_available
-	tc_require_probe
-	tc_read_passphrase "$stdin" 1
-	tc_new_config "$profile" "$TC_TMP/passphrase"
-	rm -f -- "$TC_TMP/passphrase"
-	mkdir -m 755 -- "$TC_ROOT/.transcrypt"
-	cp -- "$TC_NEW_CONFIG" "$TC_ROOT/.transcrypt/config"
-	tc_set_config "$TC_ROOT/.transcrypt/config"
+	if tc_interrupted_setup '.transcrypt already exists: this repository is set up; run `transcrypt-bash unlock`'; then
+		tc_resume_key "$stdin"
+		profile=$TC_PROFILE
+	else
+		tc_require_probe
+		tc_read_passphrase "$stdin" 1
+		tc_new_config "$profile" "$TC_TMP/passphrase"
+		rm -f -- "$TC_TMP/passphrase"
+		mkdir -m 755 -- "$TC_ROOT/.transcrypt"
+		cp -- "$TC_NEW_CONFIG" "$TC_ROOT/.transcrypt/config"
+		tc_set_config "$TC_ROOT/.transcrypt/config"
+	fi
 	tc_edit_attributes
 	git add -- .transcrypt/config .gitattributes || tc_fail 'cannot stage the v3 metadata'
 	tc_install
@@ -1515,7 +1703,12 @@ tc_cmd_unlock() {
 	tc_read_passphrase "$stdin" 0
 	tc_derive "$TC_PROFILE" "$TC_TMP/passphrase" "$(head -c 39 "$TC_CONFIG_FILE" | tail -c 32 | od -An -tx1 -v | tr -d ' \n')"
 	rm -f -- "$TC_TMP/passphrase"
-	tc_config_authentic "$TC_CONFIG_FILE" || tc_fail 'incorrect credentials or tampered public v3 configuration'
+	if ! tc_config_authentic "$TC_CONFIG_FILE"; then
+		if git cat-file blob :.transcrypt/config >"$TC_TMP/unlock-staged" 2>/dev/null && ! cmp -s "$TC_TMP/unlock-staged" "$TC_CONFIG_FILE"; then
+			tc_fail 'incorrect passphrase for the worktree .transcrypt/config, and the staged one differs from it (an interrupted rekey? `transcrypt-bash status` says how to finish or undo it)'
+		fi
+		tc_fail 'incorrect credentials or tampered public v3 configuration'
+	fi
 	tc_install
 	tc_store_key
 	tc_log "unlocked; the derived key is stored in .git/transcrypt-v3/key"
@@ -1542,7 +1735,7 @@ tc_cmd_lock() {
 			for wt in "${others[@]}"; do
 				(cd -- "$wt" && "$TC_SCRIPT" flush "--$pass") || tc_fail "cannot lock the worktree at $wt"
 			done
-			tc_flush "$pass"
+			if [[ $pass == check ]]; then tc_flush check; else tc_flush_checked; fi
 		done
 	else
 		# No usable key: the key may go only if no plaintext is left.
@@ -1733,6 +1926,14 @@ tc_cmd_status() {
 		printf 'key:        this profile needs transcrypt-rs\n'
 		return 0
 	fi
+	# A staged config other than the worktree's: a rekey staged but not
+	# finished (interrupted before the worktree config was written).
+	local staged_id='' found
+	if git cat-file blob :.transcrypt/config >"$TC_TMP/status-staged-config" 2>/dev/null &&
+		! cmp -s "$TC_TMP/status-staged-config" "$TC_CONFIG_FILE"; then
+		staged_id=$(tc_digest_id "$TC_TMP/status-staged-config")
+		printf 'note:       the staged .transcrypt/config (%s) differs from the worktree'"'"'s: an interrupted rekey? to finish it, `git checkout -- .transcrypt/config` and unlock with the new passphrase; to undo it, `git read-tree HEAD && git checkout HEAD -- .transcrypt/config` and unlock with the old one\n' "${staged_id:0:12}"
+	fi
 	local state=0
 	tc_try_key || state=$?
 	case $state in
@@ -1753,7 +1954,14 @@ tc_cmd_status() {
 		else
 			tc_blob "${TC_IDX_OID[i]}" "$TC_TMP/status-blob"
 			if ! tc_envelope_ok "$TC_TMP/status-blob" "$TC_CONFIG_ID"; then
-				if [[ -n $(tc_record_id "$TC_TMP/status-blob") ]]; then label='other config (reencrypt)'; else label='staged unencrypted'; fi
+				found=$(tc_record_id "$TC_TMP/status-blob")
+				if [[ -z $found ]]; then
+					label='staged unencrypted'
+				elif [[ $found == "$staged_id" ]]; then
+					label='staged config (rekey)'
+				else
+					label='other config (reencrypt)'
+				fi
 				o=$((o + 1))
 			elif ! file=$(tc_worktree_file "$path"); then
 				label=deleted
@@ -2098,39 +2306,62 @@ tc_cmd_migrate() {
 	done
 	tc_repo
 	cd -- "$TC_ROOT"
-	[[ ! -e .transcrypt ]] || tc_fail 'this repository already uses v3'
+	local resuming=0
+	tc_interrupted_setup 'this repository already uses v3' && resuming=1
 	git config --get filter.crypt.clean >/dev/null || tc_fail 'Bash transcrypt (v2) is not set up in this checkout: unlock it with the v2 password first, so the worktree holds plaintext'
 	if [[ -f $TC_COMMON/info/attributes ]] && grep -Eq '(filter|diff|merge)=crypt' "$TC_COMMON/info/attributes"; then
 		tc_fail "$TC_COMMON/info/attributes has Bash transcrypt rules; move them to .gitattributes (and commit) first"
 	fi
-	[[ -z $(git status --porcelain --untracked-files=no) ]] || tc_fail 'commit or discard your changes first; the conversion must start from a committed state'
 	tc_read_index
 	tc_index_paths_file "$TC_TMP/migrate-paths"
 	local path name value
 	local -a selected=()
+	local -A chosen=()
 	git check-attr -z --stdin filter <"$TC_TMP/migrate-paths" >"$TC_TMP/migrate-attrs" || tc_fail 'git check-attr failed'
 	while IFS= read -r -d '' path && IFS= read -r -d '' name && IFS= read -r -d '' value; do
-		[[ $value == crypt || $value == crypt-* ]] && selected+=("$path")
+		# When resuming, rules already converted select with transcrypt-v3.
+		if [[ $value == crypt || $value == crypt-* ]] || { ((resuming)) && [[ $value == transcrypt-v3 ]]; }; then
+			selected+=("$path")
+			chosen[$path]=1
+		fi
 	done <"$TC_TMP/migrate-attrs"
+	# A committed state, except for an interrupted conversion's own changes.
+	local entry
+	git status --porcelain -z --untracked-files=no >"$TC_TMP/migrate-status" || tc_fail 'git status failed'
+	while IFS= read -r -d '' entry; do
+		path=${entry:3}
+		if ((resuming)) && [[ ${entry:0:1} != R ]] &&
+			[[ $path == .transcrypt/config || $path == .gitattributes || $path == */.gitattributes || -n ${chosen[$path]-} ]]; then
+			continue
+		fi
+		tc_fail 'commit or discard your changes first; the conversion must start from a committed state'
+	done <"$TC_TMP/migrate-status"
 	for path in "${selected[@]}"; do
 		local file
 		file=$(tc_worktree_file "$path") || tc_fail "$path is missing from the worktree"
 		[[ $(head -c 8 "$file") != U2FsdGVk ]] || tc_fail "$path still holds v2 ciphertext: unlock it with Bash transcrypt first"
 	done
 	tc_check_hooks_available_except_v2
-	tc_require_probe
-	tc_read_passphrase "$stdin" 1
+	if ((resuming)); then
+		tc_resume_key "$stdin"
+		profile=$TC_PROFILE
+	else
+		tc_require_probe
+		tc_read_passphrase "$stdin" 1
+	fi
 	local hooks
 	hooks=$(tc_hooks_dir)
 	if [[ -f $hooks/pre-commit ]] && grep -q 'transcrypt' "$hooks/pre-commit" && ! tc_is_v3_hook "$hooks/pre-commit"; then
 		mv -f -- "$hooks/pre-commit" "$hooks/pre-commit.transcrypt-v2"
 		tc_log 'the Bash transcrypt pre-commit hook was renamed to .git/hooks/pre-commit.transcrypt-v2'
 	fi
-	tc_new_config "$profile" "$TC_TMP/passphrase"
-	rm -f -- "$TC_TMP/passphrase"
-	mkdir -m 755 .transcrypt
-	cp -- "$TC_NEW_CONFIG" .transcrypt/config
-	tc_set_config .transcrypt/config
+	if ((!resuming)); then
+		tc_new_config "$profile" "$TC_TMP/passphrase"
+		rm -f -- "$TC_TMP/passphrase"
+		mkdir -m 755 .transcrypt
+		cp -- "$TC_NEW_CONFIG" .transcrypt/config
+		tc_set_config .transcrypt/config
+	fi
 	# Rewrite every tracked .gitattributes with v2 rules.
 	local attrfile
 	git ls-files -z >"$TC_TMP/migrate-all"
@@ -2275,6 +2506,7 @@ tc_main() {
 	clean | smudge)
 		(($# == 1)) || tc_fail 'Git filter requires exactly one %f pathname'
 		cat >"$TC_TMP/filter-input" || tc_fail 'cannot read the filter input'
+		[[ $command == clean ]] && tc_handoff_take "$1" "$TC_TMP/filter-input" && return 0
 		if [[ $command == clean ]]; then tc_clean "$1"; else tc_smudge "$1"; fi
 		;;
 	encrypt | decrypt)
