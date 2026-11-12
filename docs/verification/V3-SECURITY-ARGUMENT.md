@@ -321,6 +321,29 @@ realizes the suite of the bytes `k`, **A5**/**A17**), the file I/O, and
 that a damaged key (either AES-SIV half) gives a different check value,
 the cipher's property (**A10**, tested for every bit, **A17**).
 
+## Theorem 4: the configuration decides the key derivation (profiles)
+
+Since 2026-11-11 a configuration names its profile (byte 6: Argon2id,
+scrypt or PBKDF2-HMAC-SHA256). `derive_config_key_uses_config_profile`
+proves that when the production `derive_config_key` succeeds, the committed
+configuration is `encodeConfig p salt tag` and the key is exactly the
+profile's function `profileKdf p` (fixed parameters) of the passphrase and
+that salt, relative to `KdfRealizes` (**A26**); an unknown profile byte is
+refused before any derivation (`derive_config_key_spec`) and nothing can be
+sealed or opened under it (`seal_record_refuses_unknown_profile`,
+`open_record_refuses_unknown_profile`). The profile byte is in the
+authenticated prefix, so a relabelled configuration authenticating under the
+same key would be an AES-SIV collision (`config_profile_bound`, **A10**).
+Records are profile-independent; moving one to another path or
+configuration, profile included, also needs a collision
+(`open_record_of_other_context_needs_collision`), and determinism reveals
+exactly equality of plaintexts at one path under one configuration
+(`seal_record_deterministic`). Every theorem above is stated for any
+configuration, so it holds for every profile; a profile change is a rekey
+(a configuration change, `rekey_commit_starts_epoch`). The portable Bash
+client is not covered by these theorems (**A27**: independent vectors and
+two-way conformance tests).
+
 ## The product theorems (`ProductSecurity.lean`)
 
 The theorems above are restated, and composed, as a short portfolio over

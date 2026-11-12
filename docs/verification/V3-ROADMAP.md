@@ -19,10 +19,11 @@ required daemon, and can opt into strict local privacy if desired. Source-
 derived Lean theorems constrain the actual Rust core under explicit crypto,
 Git, OS and translation assumptions. Legacy Bash-to-v3 *transition* must be
 safe; legacy wire interoperability is not required. **A standalone Bash v3
-with empirical functional parity on portable profiles is now a first-class
-target**, without sacrificing the existing Rust-only Argon2id profile.
-The [dual-implementation plan](V3-DUAL-IMPLEMENTATION-ROADMAP.md) defines
-that campaign and the OpenSSL 3.0.13 portability baseline.
+with empirical functional parity on portable profiles** exists since
+2026-11-11 (`contrib/v3/transcrypt-bash`, profiles 2 and 3, two-way
+conformance tests), with the Rust-only Argon2id profile kept as profile 1.
+The [dual-implementation plan](V3-DUAL-IMPLEMENTATION-ROADMAP.md) records
+that campaign, its parity matrix and the OpenSSL 3.0.13 baseline.
 
 This is an **experimental security design**, not a production security
 certification. The exact bytes and threat assumptions live in the

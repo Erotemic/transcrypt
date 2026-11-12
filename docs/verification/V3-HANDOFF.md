@@ -408,6 +408,14 @@ release archives). Documentation-only pushes run nothing.
 
 ## Next tasks (resume after each checkpoint)
 
+0. **Dual clients (2026-11-11).** Profiles and the portable Bash client
+   are done (see the update at the top). Next for that campaign: see CI
+   pass the Bash and conformance jobs on Ubuntu 22.04 (OpenSSL 3.0.2) and
+   macOS (BSD utilities); a second independent review of the Bash client
+   after H-78 to H-81; faster Bash bulk operations; external review R-01.
+   When either client changes, run both suites
+   (`tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`).
+
 1. **Adversarial agent review: converged.** Seven rounds (H-28 to H-73 in
    [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md)) ended with nothing above
    Low. The invariants that got there are the design rules for new code:
