@@ -181,6 +181,12 @@ jobs:
         run: |
           (cd rust && cargo build --locked --release)
           bash tests/v3/conformance/run.sh rust/target/release/transcrypt-rs
+      - name: Bash/Rust lifecycle and interruption (every third fault point)
+        if: ${{ !cancelled() && runner.os != 'Windows' }}
+        env:
+          TRANSCRYPT_TEST_BRANCH: topic/ci
+          LIFECYCLE_FAULTS: quick
+        run: bash tests/v3/conformance/lifecycle.sh rust/target/release/transcrypt-rs
       - name: Clippy (warnings are errors)
         if: matrix.os == 'ubuntu-24.04'
         run: |
