@@ -42,6 +42,7 @@ readonly TC_SCRIPT
 TC_TMP=''
 TC_ROOT=''
 TC_COMMON=''
+TC_GITDIR=''      # this checkout's own Git directory, absolute
 TC_CONFIG_FILE='' # the config in force (worktree, or staged copy)
 TC_CONFIG_ID=''   # its id, hex
 TC_CONFIG_HEX=''  # its 55 bytes, hex
@@ -76,6 +77,7 @@ tc_workspace() {
 	[[ -n $TC_TMP ]] && return 0
 	local gitdir base='' entry pid
 	if gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) && [[ -d $gitdir ]]; then
+		TC_GITDIR=$gitdir
 		base=$gitdir/$TC_SCRATCH_NAME
 		if [[ -L $base ]] || ! (umask 077 && mkdir -p -- "$base") 2>/dev/null || [[ ! -d $base || ! -O $base ]] ||
 			! chmod 700 -- "$base" 2>/dev/null; then
@@ -1453,28 +1455,105 @@ tc_flush_write() {
 # migrate: rerunning it with the same passphrase completes it, as in
 # transcrypt-rs. Returns 0 when resuming, 1 for a fresh setup; refuses a
 # committed setup with message $1.
-readonly TC_START_OVER='`git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt`'
+readonly TC_START_OVER='`git rm -q -r --cached --ignore-unmatch .transcrypt; rm -r .transcrypt; rm -f "$(git rev-parse --git-path transcrypt-v3-setup)"`'
 tc_interrupted_setup() {
 	[[ -e $TC_ROOT/.transcrypt || -L $TC_ROOT/.transcrypt ]] || return 1
 	git rev-parse -q --verify 'HEAD:.transcrypt/config' >/dev/null 2>&1 && tc_fail "$1"
 	return 0
 }
+# This checkout's own Git directory (a linked worktree has its own index,
+# so the records below are per worktree), found by tc_workspace. Callers of
+# the path functions below assign their output (a failure then stops the
+# command), never pass it as an argument.
+tc_gitdir() {
+	[[ -n $TC_GITDIR ]] && return 0
+	TC_GITDIR=$(git rev-parse --absolute-git-dir) || tc_fail 'not in a Git repository'
+}
+# Write the NUL-terminated fields $2... to file $1, atomically.
+tc_write_fields() {
+	local file=$1 tmp
+	shift
+	[[ ! -L $file ]] || tc_fail "refusing a symlinked $file"
+	tmp=$(umask 077 && mktemp "$file.XXXXXXXX") || tc_fail "cannot write $file"
+	if ! printf '%s\0' "$@" >"$tmp" || ! mv -f -- "$tmp" "$file"; then
+		rm -f -- "$tmp"
+		tc_fail "cannot write $file"
+	fi
+}
+# Read the NUL-terminated fields of file $1 into TC_FIELDS; fails unless
+# the file ends with a complete field.
+declare -a TC_FIELDS=()
+tc_read_fields() {
+	local field
+	TC_FIELDS=()
+	[[ -f $1 && ! -L $1 ]] || tc_fail "unusable $1"
+	while IFS= read -r -d '' field; do TC_FIELDS+=("$field"); done <"$1"
+	[[ -z $field ]] || tc_fail "$1 is truncated"
+}
+
+# What `init` or `migrate` was asked to protect, recorded in the Git
+# directory before either changes anything, so that resuming an interrupted
+# one cannot drop it (the rerun may name other patterns, or none). Shared
+# with transcrypt-rs: the NUL-terminated fields "transcrypt-v3-setup 1",
+# the command (init or migrate), its state (started, or complete once it
+# finished: a fresh setup then ignores it) and its items: for init, the
+# patterns as given; for migrate, the paths it converts.
+readonly TC_SETUP_MAGIC='transcrypt-v3-setup 1'
+TC_SETUP_KIND=''
+TC_SETUP_STATE=''
+declare -a TC_SETUP_ITEMS=()
+tc_setup_file() {
+	tc_gitdir
+	printf '%s/transcrypt-v3-setup' "$TC_GITDIR"
+}
+# Load the record: 1 if there is none.
+tc_setup_load() {
+	local file
+	tc_gitdir
+	file=$(tc_setup_file)
+	TC_SETUP_KIND=''
+	TC_SETUP_STATE=''
+	TC_SETUP_ITEMS=()
+	[[ -e $file || -L $file ]] || return 1
+	tc_read_fields "$file"
+	if ((${#TC_FIELDS[@]} < 3)) || [[ ${TC_FIELDS[0]} != "$TC_SETUP_MAGIC" ]] ||
+		[[ ${TC_FIELDS[1]} != init && ${TC_FIELDS[1]} != migrate ]] ||
+		[[ ${TC_FIELDS[2]} != started && ${TC_FIELDS[2]} != complete ]]; then
+		tc_fail "unrecognized $file; to start over: $TC_START_OVER"
+	fi
+	TC_SETUP_KIND=${TC_FIELDS[1]}
+	TC_SETUP_STATE=${TC_FIELDS[2]}
+	TC_SETUP_ITEMS=("${TC_FIELDS[@]:3}")
+	return 0
+}
+# Record command $1 in state $2 with items $3...
+tc_setup_save() {
+	local file
+	tc_gitdir
+	file=$(tc_setup_file)
+	tc_write_fields "$file" "$TC_SETUP_MAGIC" "$@"
+}
+
 # Resuming: the interrupted setup's config, authenticated by the passphrase.
 tc_resume_key() {
 	(tc_load_config) >/dev/null 2>&1 || tc_fail "unusable .transcrypt/config (left by an interrupted setup?); to start over: $TC_START_OVER"
 	tc_load_config
 	tc_require_probe
+	tc_authenticate "$1" || tc_fail "an interrupted setup left .transcrypt/config under another passphrase; rerun with that one, or start over: $TC_START_OVER"
+	tc_log 'completing an interrupted setup (its .transcrypt/config is not committed yet)'
+}
+# Read the passphrase (stdin if $1) and derive the key of the config in
+# force: 1 unless the config authenticates under it.
+tc_authenticate() {
 	tc_read_passphrase "$1" 0
 	tc_derive "$TC_PROFILE" "$TC_TMP/passphrase" "$(head -c 39 "$TC_CONFIG_FILE" | tail -c 32 | od -An -tx1 -v | tr -d ' \n')"
 	rm -f -- "$TC_TMP/passphrase"
-	tc_config_authentic "$TC_CONFIG_FILE" ||
-		tc_fail "an interrupted setup left .transcrypt/config under another passphrase; rerun with that one, or start over: $TC_START_OVER"
-	tc_log 'completing an interrupted setup (its .transcrypt/config is not committed yet)'
+	tc_config_authentic "$TC_CONFIG_FILE"
 }
 
 tc_cmd_init() {
-	local stdin=0 profile=2 arg
-	local -a patterns=()
+	local stdin=0 profile=2 arg item have
+	local -a patterns=() recorded=()
 	for arg in "$@"; do
 		case $arg in
 		--password-stdin) stdin=1 ;;
@@ -1486,14 +1565,38 @@ tc_cmd_init() {
 	done
 	tc_repo
 	tc_check_hooks_available
-	if tc_interrupted_setup '.transcrypt already exists: this repository is set up; run `transcrypt-bash unlock`'; then
+	local resuming=0
+	tc_interrupted_setup '.transcrypt already exists: this repository is set up; run `transcrypt-bash unlock`' && resuming=1
+	# What an earlier, interrupted run was asked to protect is kept: the
+	# patterns of this run are added to it.
+	if tc_setup_load; then
+		if ((resuming)) && [[ $TC_SETUP_KIND != init ]]; then
+			tc_fail 'an interrupted `migrate` set up this checkout; rerun migrate to complete it'
+		fi
+		if ((resuming)) || [[ $TC_SETUP_KIND == init && $TC_SETUP_STATE == started ]]; then
+			for item in ${TC_SETUP_ITEMS[@]+"${TC_SETUP_ITEMS[@]}"}; do
+				have=0
+				for arg in ${patterns[@]+"${patterns[@]}"}; do [[ $arg == "$item" ]] && have=1; done
+				((have)) || {
+					patterns+=("$item")
+					recorded+=("$item")
+				}
+			done
+		fi
+	elif ((resuming && ${#patterns[@]} == 0)); then
+		tc_fail "an interrupted setup left .transcrypt, but no record of what it was to protect; rerun init naming the patterns to protect, or start over: $TC_START_OVER"
+	fi
+	((${#recorded[@]} == 0)) || tc_log "also protecting what the interrupted init was asked to: ${recorded[*]}"
+	if ((resuming)); then
 		tc_resume_key "$stdin"
 		profile=$TC_PROFILE
+		tc_setup_save init started ${patterns[@]+"${patterns[@]}"}
 	else
 		tc_require_probe
 		tc_read_passphrase "$stdin" 1
 		tc_new_config "$profile" "$TC_TMP/passphrase"
 		rm -f -- "$TC_TMP/passphrase"
+		tc_setup_save init started ${patterns[@]+"${patterns[@]}"}
 		mkdir -m 755 -- "$TC_ROOT/.transcrypt"
 		cp -- "$TC_NEW_CONFIG" "$TC_ROOT/.transcrypt/config"
 		tc_set_config "$TC_ROOT/.transcrypt/config"
@@ -1508,6 +1611,7 @@ tc_cmd_init() {
 	else
 		tc_log "choose what to encrypt, for example: transcrypt-bash protect .env 'secrets/**'"
 	fi
+	tc_setup_save init complete ${patterns[@]+"${patterns[@]}"}
 	tc_log "then commit: git commit -m 'Enable transcrypt-v3'"
 }
 
@@ -1704,14 +1808,16 @@ tc_cmd_unlock() {
 	tc_derive "$TC_PROFILE" "$TC_TMP/passphrase" "$(head -c 39 "$TC_CONFIG_FILE" | tail -c 32 | od -An -tx1 -v | tr -d ' \n')"
 	rm -f -- "$TC_TMP/passphrase"
 	if ! tc_config_authentic "$TC_CONFIG_FILE"; then
+		if tc_rekey_pending; then tc_fail "incorrect passphrase for the worktree .transcrypt/config; there is $TC_REKEY_PENDING"; fi
 		if git cat-file blob :.transcrypt/config >"$TC_TMP/unlock-staged" 2>/dev/null && ! cmp -s "$TC_TMP/unlock-staged" "$TC_CONFIG_FILE"; then
-			tc_fail 'incorrect passphrase for the worktree .transcrypt/config, and the staged one differs from it (an interrupted rekey? `transcrypt-bash status` says how to finish or undo it)'
+			tc_fail 'incorrect passphrase for the worktree .transcrypt/config (the staged one differs from it)'
 		fi
 		tc_fail 'incorrect credentials or tampered public v3 configuration'
 	fi
 	tc_install
 	tc_store_key
 	tc_log "unlocked; the derived key is stored in .git/transcrypt-v3/key"
+	if tc_rekey_pending; then tc_log "note: there is $TC_REKEY_PENDING"; fi
 	((hydrate)) && tc_hydrate
 	return 0
 }
@@ -1749,15 +1855,79 @@ tc_cmd_lock() {
 	tc_log 'locked: protected files hold ciphertext and the key is forgotten'
 }
 
+# rekey's journal, written in the Git directory before it changes the
+# index and removed once it finished: what each index entry it replaces
+# was and becomes, so that `rekey --continue` and `rekey --abort` change
+# exactly those entries and nothing else staged. Shared with transcrypt-rs:
+# the NUL-terminated fields "transcrypt-v3-rekey 1", the object ids of the
+# old config (the worktree's, which the old passphrase opens) and of the
+# new one, then for each entry (every protected file, and
+# .transcrypt/config) its mode, old object id, new object id and path.
+readonly TC_REKEY_MAGIC='transcrypt-v3-rekey 1'
+TC_RJ_OLD_CONFIG=''
+TC_RJ_NEW_CONFIG=''
+declare -a TC_RJ_MODE=() TC_RJ_OLD=() TC_RJ_NEW=() TC_RJ_PATH=()
+tc_rekey_file() {
+	tc_gitdir
+	printf '%s/transcrypt-v3-rekey' "$TC_GITDIR"
+}
+tc_rekey_pending() {
+	local file
+	tc_gitdir
+	file=$(tc_rekey_file)
+	[[ -e $file || -L $file ]]
+}
+readonly TC_REKEY_PENDING='an interrupted rekey: finish it with `transcrypt-bash rekey --continue` (the new passphrase) or undo it with `transcrypt-bash rekey --abort` (the old one); either changes only what the rekey staged'
+# Load the journal (1 if there is none); every object it names must exist.
+tc_rekey_load() {
+	local file i n oid
+	tc_gitdir
+	file=$(tc_rekey_file)
+	TC_RJ_MODE=() TC_RJ_OLD=() TC_RJ_NEW=() TC_RJ_PATH=()
+	[[ -e $file || -L $file ]] || return 1
+	tc_read_fields "$file"
+	n=${#TC_FIELDS[@]}
+	if ((n < 3 || (n - 3) % 4 != 0)) || [[ ${TC_FIELDS[0]} != "$TC_REKEY_MAGIC" ]]; then tc_fail "unrecognized $file"; fi
+	TC_RJ_OLD_CONFIG=${TC_FIELDS[1]}
+	TC_RJ_NEW_CONFIG=${TC_FIELDS[2]}
+	: >"$TC_TMP/rj-oids"
+	printf '%s\n%s\n' "$TC_RJ_OLD_CONFIG" "$TC_RJ_NEW_CONFIG" >>"$TC_TMP/rj-oids"
+	for ((i = 3; i < n; i += 4)); do
+		[[ ${TC_FIELDS[i]} == 100644 || ${TC_FIELDS[i]} == 100755 ]] || tc_fail "unrecognized $file"
+		TC_RJ_MODE+=("${TC_FIELDS[i]}")
+		TC_RJ_OLD+=("${TC_FIELDS[i + 1]}")
+		TC_RJ_NEW+=("${TC_FIELDS[i + 2]}")
+		TC_RJ_PATH+=("${TC_FIELDS[i + 3]}")
+		printf '%s\n%s\n' "${TC_FIELDS[i + 1]}" "${TC_FIELDS[i + 2]}" >>"$TC_TMP/rj-oids"
+	done
+	while IFS= read -r oid; do
+		[[ $oid =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || tc_fail "unrecognized $file"
+	done <"$TC_TMP/rj-oids"
+	git cat-file --batch-check='%(objecttype)' <"$TC_TMP/rj-oids" >"$TC_TMP/rj-types" || tc_fail 'git cat-file failed'
+	if grep -qv '^blob$' "$TC_TMP/rj-types" || (($(wc -l <"$TC_TMP/rj-types") != $(wc -l <"$TC_TMP/rj-oids"))); then
+		tc_fail "$file names objects this repository lacks"
+	fi
+	return 0
+}
+
 tc_cmd_rekey() {
-	local stdin=0 profile='' arg i path n=0
+	local stdin=0 profile='' arg i path n=0 resume=''
 	for arg in "$@"; do
 		case $arg in
 		--password-stdin) stdin=1 ;;
 		--profile=*) profile=$(tc_parse_profile "${arg#--profile=}") ;;
+		--continue) resume='continue' ;;
+		--abort) resume='abort' ;;
 		*) tc_fail "rekey: unexpected argument $arg" ;;
 		esac
 	done
+	tc_repo
+	if [[ -n $resume ]]; then
+		[[ -z $profile ]] || tc_fail "rekey --$resume takes no --profile"
+		tc_rekey_resume "$resume" "$stdin"
+		return 0
+	fi
+	if tc_rekey_pending; then tc_fail "$TC_REKEY_PENDING"; fi
 	tc_load_config
 	tc_require_key
 	[[ -n $profile ]] || profile=$TC_PROFILE
@@ -1768,8 +1938,10 @@ tc_cmd_rekey() {
 	tc_index_paths_file "$TC_TMP/rekey-paths"
 	tc_selected "$TC_TMP/rekey-paths" --cached
 	local -a idx=()
+	local config_oid=''
 	for i in "${!TC_IDX_PATH[@]}"; do
 		path=${TC_IDX_PATH[i]}
+		if [[ $path == .transcrypt/config && ${TC_IDX_STAGE[i]} == 0 ]]; then config_oid=${TC_IDX_OID[i]}; fi
 		[[ ${TC_IDX_STAGE[i]} == 0 && -n ${TC_SELECTED[$path]-} ]] || continue
 		tc_blob "${TC_IDX_OID[i]}" "$TC_TMP/rekey-record"
 		tc_open_record "$path" "$TC_TMP/rekey-record" "$TC_TMP/rekey-plain-$n" || tc_fail "$path does not authenticate; run \`transcrypt-bash verify-index\`"
@@ -1780,18 +1952,33 @@ tc_cmd_rekey() {
 		idx+=("$i")
 		n=$((n + 1))
 	done
+	[[ -n $config_oid ]] || tc_fail '.transcrypt/config is not staged; `git add .transcrypt/config` first'
 	tc_read_passphrase "$stdin" 1
+	local old_config new_config
+	old_config=$(tc_write_blob "$TC_CONFIG_FILE")
 	tc_new_config "$profile" "$TC_TMP/passphrase"
 	rm -f -- "$TC_TMP/passphrase"
 	tc_set_config "$TC_NEW_CONFIG"
+	new_config=$(tc_write_blob "$TC_CONFIG_FILE")
+	# Every new record is written before the journal, the journal before
+	# the index changes.
+	local -a journal=("$TC_REKEY_MAGIC" "$old_config" "$new_config")
 	tc_index_info_reset
 	n=0
+	local oid
 	for i in "${idx[@]}"; do
 		tc_seal_record "${TC_IDX_PATH[i]}" "$TC_TMP/rekey-plain-$n" "$TC_TMP/rekey-new"
-		tc_index_info_add "${TC_IDX_MODE[i]}" "$(tc_write_blob "$TC_TMP/rekey-new")" "${TC_IDX_PATH[i]}"
+		oid=$(tc_write_blob "$TC_TMP/rekey-new")
+		tc_index_info_add "${TC_IDX_MODE[i]}" "$oid" "${TC_IDX_PATH[i]}"
+		journal+=("${TC_IDX_MODE[i]}" "${TC_IDX_OID[i]}" "$oid" "${TC_IDX_PATH[i]}")
 		n=$((n + 1))
 	done
-	tc_index_info_add 100644 "$(tc_write_blob "$TC_CONFIG_FILE")" .transcrypt/config
+	tc_index_info_add 100644 "$new_config" .transcrypt/config
+	journal+=(100644 "$config_oid" "$new_config" .transcrypt/config)
+	local journal_file
+	tc_gitdir
+	journal_file=$(tc_rekey_file)
+	tc_write_fields "$journal_file" "${journal[@]}"
 	tc_index_info_apply
 	cat "$TC_CONFIG_FILE" >"$TC_ROOT/.transcrypt/config"
 	tc_store_key
@@ -1799,7 +1986,118 @@ tc_cmd_rekey() {
 	for i in "${idx[@]}"; do printf '%s\0' "${TC_IDX_PATH[i]}" >>"$TC_TMP/rekey-reindex"; done
 	printf '%s\0' .transcrypt/config >>"$TC_TMP/rekey-reindex"
 	tc_reindex "$TC_TMP/rekey-reindex"
+	rm -f -- "$journal_file"
 	tc_log "rekeyed $n file(s) under $(tc_profile_description "$profile"); the new config and records are staged. Commit them now, e.g. git commit -m 'Rekey transcrypt-v3'. Earlier commits stay readable with the old passphrase: if it was exposed, change the secrets themselves."
+}
+
+# `rekey --continue` ($1 continue) or `rekey --abort` ($1 abort): bring
+# each entry of the journal to its new (continue) or old (abort) object,
+# with the worktree config and the stored key to match. Lossless: an entry,
+# or the worktree config, that is neither what the rekey found nor what it
+# wrote changed afterwards, and then nothing is changed; no other entry is
+# touched. A worktree file holding the record being replaced (a locked
+# checkout) gets the other record; one holding the plaintext stays and is
+# re-indexed; one holding anything else (an edit) is left as it is.
+# Rerunning after an interruption finishes the job.
+tc_rekey_resume() {
+	local dir=$1 stdin=$2 j i path want from file
+	tc_rekey_load || tc_fail 'no interrupted rekey here (nothing to continue or abort)'
+	local want_config=$TC_RJ_NEW_CONFIG from_config=$TC_RJ_OLD_CONFIG which=new
+	if [[ $dir == abort ]]; then
+		want_config=$TC_RJ_OLD_CONFIG
+		from_config=$TC_RJ_NEW_CONFIG
+		which=old
+	fi
+	tc_blob "$want_config" "$TC_TMP/rj-want-config"
+	tc_blob "$from_config" "$TC_TMP/rj-from-config"
+	tc_read_index
+	local -A now=()
+	for i in "${!TC_IDX_PATH[@]}"; do
+		path=${TC_IDX_PATH[i]}
+		if [[ ${TC_IDX_STAGE[i]} == 0 ]]; then now[$path]="${TC_IDX_MODE[i]} ${TC_IDX_OID[i]}"; else now[$path]=unmerged; fi
+	done
+	local -a todo=() conflicts=()
+	for j in "${!TC_RJ_PATH[@]}"; do
+		path=${TC_RJ_PATH[j]}
+		want=${TC_RJ_NEW[j]} from=${TC_RJ_OLD[j]}
+		[[ $dir == continue ]] || { want=${TC_RJ_OLD[j]} from=${TC_RJ_NEW[j]}; }
+		case ${now[$path]-} in
+		"${TC_RJ_MODE[j]} $want") ;;
+		"${TC_RJ_MODE[j]} $from") todo+=("$j") ;;
+		*) conflicts+=("$path (staged)") ;;
+		esac
+	done
+	local wtconfig=$TC_ROOT/.transcrypt/config
+	if [[ -L $wtconfig || -L $TC_ROOT/.transcrypt ]]; then
+		conflicts+=('.transcrypt/config (a symlink)')
+	elif [[ -e $wtconfig ]] && ! cmp -s "$wtconfig" "$TC_TMP/rj-want-config" && ! cmp -s "$wtconfig" "$TC_TMP/rj-from-config"; then
+		conflicts+=('.transcrypt/config (worktree)')
+	fi
+	((${#conflicts[@]} == 0)) ||
+		tc_fail "changed since the rekey was interrupted, so --$dir would lose that change (nothing was changed): ${conflicts[*]}; put back what the rekey left there (\`git status\`, \`git diff --cached\`), then rerun"
+	# The key of the config this ends with: the stored one, or derived from
+	# its passphrase (checked before anything is written).
+	tc_set_config "$TC_TMP/rj-want-config"
+	local stored=1
+	tc_try_key || {
+		stored=0
+		tc_require_probe
+		tc_authenticate "$stdin" || tc_fail "that is not the $which passphrase (rekey --$dir needs the passphrase of the $which config)"
+	}
+	# Each protected worktree file: the record being replaced (locked) gets
+	# the other one; the plaintext stays and is re-indexed.
+	local -a relock=() replain=()
+	for j in "${!TC_RJ_PATH[@]}"; do
+		path=${TC_RJ_PATH[j]}
+		[[ $path != .transcrypt/config ]] || continue
+		file=$(tc_worktree_file "$path") || continue
+		want=${TC_RJ_NEW[j]} from=${TC_RJ_OLD[j]}
+		[[ $dir == continue ]] || { want=${TC_RJ_OLD[j]} from=${TC_RJ_NEW[j]}; }
+		tc_blob "$want" "$TC_TMP/rj-want-$j"
+		tc_blob "$from" "$TC_TMP/rj-from"
+		if cmp -s "$file" "$TC_TMP/rj-from"; then
+			relock+=("$j")
+		elif cmp -s "$file" "$TC_TMP/rj-want-$j"; then
+			:
+		elif tc_open_record "$path" "$TC_TMP/rj-want-$j" "$TC_TMP/rj-plain-$j" && cmp -s "$file" "$TC_TMP/rj-plain-$j"; then
+			replain+=("$j")
+		fi
+	done
+	((stored)) || tc_store_key
+	cmp -s "$wtconfig" "$TC_TMP/rj-want-config" 2>/dev/null || {
+		mkdir -p -- "$TC_ROOT/.transcrypt"
+		cat "$TC_TMP/rj-want-config" >"$wtconfig"
+	}
+	tc_index_info_reset
+	for j in ${todo[@]+"${todo[@]}"}; do
+		want=${TC_RJ_NEW[j]}
+		[[ $dir == continue ]] || want=${TC_RJ_OLD[j]}
+		tc_index_info_add "${TC_RJ_MODE[j]}" "$want" "${TC_RJ_PATH[j]}"
+	done
+	tc_index_info_apply
+	tc_handoff_reset
+	: >"$TC_TMP/rj-reindex"
+	for j in ${relock[@]+"${relock[@]}"}; do
+		file=$(tc_worktree_file "${TC_RJ_PATH[j]}") || continue
+		cat "$TC_TMP/rj-want-$j" >"$file"
+		tc_handoff_add "${TC_RJ_PATH[j]}" "$TC_TMP/rj-want-$j" "$TC_TMP/rj-want-$j"
+		printf '%s\0' "${TC_RJ_PATH[j]}" >>"$TC_TMP/rj-reindex"
+	done
+	for j in ${replain[@]+"${replain[@]}"}; do
+		tc_handoff_add "${TC_RJ_PATH[j]}" "$TC_TMP/rj-plain-$j" "$TC_TMP/rj-want-$j"
+		printf '%s\0' "${TC_RJ_PATH[j]}" >>"$TC_TMP/rj-reindex"
+	done
+	printf '%s\0' .transcrypt/config >>"$TC_TMP/rj-reindex"
+	tc_reindex "$TC_TMP/rj-reindex"
+	local journal_file
+	tc_gitdir
+	journal_file=$(tc_rekey_file)
+	rm -f -- "$journal_file"
+	if [[ $dir == continue ]]; then
+		tc_log "finished the interrupted rekey: ${#TC_RJ_PATH[@]} entries staged under the new config; commit them"
+	else
+		tc_log "undid the interrupted rekey: ${#todo[@]} staged entries put back, the old config and key restored; nothing else was changed"
+	fi
 }
 
 # `reencrypt [--password-stdin] [--yes]`: staged protected files still
@@ -1926,13 +2224,14 @@ tc_cmd_status() {
 		printf 'key:        this profile needs transcrypt-rs\n'
 		return 0
 	fi
-	# A staged config other than the worktree's: a rekey staged but not
-	# finished (interrupted before the worktree config was written).
+	# An interrupted rekey (its journal), and a staged config other than
+	# the worktree's (such as a rekey staged but not finished).
 	local staged_id='' found
+	if tc_rekey_pending; then printf 'note:       %s\n' "$TC_REKEY_PENDING"; fi
 	if git cat-file blob :.transcrypt/config >"$TC_TMP/status-staged-config" 2>/dev/null &&
 		! cmp -s "$TC_TMP/status-staged-config" "$TC_CONFIG_FILE"; then
 		staged_id=$(tc_digest_id "$TC_TMP/status-staged-config")
-		printf 'note:       the staged .transcrypt/config (%s) differs from the worktree'"'"'s: an interrupted rekey? to finish it, `git checkout -- .transcrypt/config` and unlock with the new passphrase; to undo it, `git read-tree HEAD && git checkout HEAD -- .transcrypt/config` and unlock with the old one\n' "${staged_id:0:12}"
+		printf 'note:       the staged .transcrypt/config (%s) differs from the worktree'"'"'s\n' "${staged_id:0:12}"
 	fi
 	local state=0
 	tc_try_key || state=$?
@@ -2325,6 +2624,17 @@ tc_cmd_migrate() {
 			chosen[$path]=1
 		fi
 	done <"$TC_TMP/migrate-attrs"
+	# And whatever the interrupted run recorded that it converts.
+	if ((resuming)) && tc_setup_load; then
+		[[ $TC_SETUP_KIND == migrate ]] || tc_fail 'an interrupted `init` set up this checkout; rerun init to complete it'
+		local -A indexed=()
+		for path in "${TC_IDX_PATH[@]}"; do indexed[$path]=1; done
+		for path in ${TC_SETUP_ITEMS[@]+"${TC_SETUP_ITEMS[@]}"}; do
+			[[ -n ${indexed[$path]-} && -z ${chosen[$path]-} ]] || continue
+			selected+=("$path")
+			chosen[$path]=1
+		done
+	fi
 	# A committed state, except for an interrupted conversion's own changes.
 	local entry
 	git status --porcelain -z --untracked-files=no >"$TC_TMP/migrate-status" || tc_fail 'git status failed'
@@ -2349,6 +2659,7 @@ tc_cmd_migrate() {
 		tc_require_probe
 		tc_read_passphrase "$stdin" 1
 	fi
+	tc_setup_save migrate started ${selected[@]+"${selected[@]}"}
 	local hooks
 	hooks=$(tc_hooks_dir)
 	if [[ -f $hooks/pre-commit ]] && grep -q 'transcrypt' "$hooks/pre-commit" && ! tc_is_v3_hook "$hooks/pre-commit"; then
@@ -2362,6 +2673,14 @@ tc_cmd_migrate() {
 		cp -- "$TC_NEW_CONFIG" .transcrypt/config
 		tc_set_config .transcrypt/config
 	fi
+	# v3 is set up (the macro, the filters, the key) before any rule is
+	# rewritten: an interruption leaves each rule converted or still v2's,
+	# and every converted one already encrypts.
+	TC_ATTR_ADD=()
+	TC_ATTR_REMOVE=()
+	tc_edit_attributes
+	tc_install
+	tc_store_key
 	# Rewrite every tracked .gitattributes with v2 rules.
 	local attrfile
 	git ls-files -z >"$TC_TMP/migrate-all"
@@ -2369,11 +2688,6 @@ tc_cmd_migrate() {
 		[[ $attrfile == .gitattributes || $attrfile == */.gitattributes ]] || continue
 		tc_migrate_rewrite "$attrfile"
 	done <"$TC_TMP/migrate-all"
-	TC_ATTR_ADD=()
-	TC_ATTR_REMOVE=()
-	tc_edit_attributes
-	tc_install
-	tc_store_key
 	git add -- .transcrypt/config || tc_fail 'cannot stage the config'
 	while IFS= read -r -d '' attrfile; do
 		[[ $attrfile == .gitattributes || $attrfile == */.gitattributes ]] && git add -- "$attrfile"
@@ -2387,6 +2701,7 @@ tc_cmd_migrate() {
 		[[ -n ${TC_SELECTED[$path]-} ]] || tc_fail "$path would no longer be protected after the conversion (a rule could not be converted); convert it in .gitattributes by hand"
 	done
 	tc_check_index 0
+	tc_setup_save migrate complete ${selected[@]+"${selected[@]}"}
 	tc_log "converted ${#selected[@]} file(s) from Bash transcrypt to v3 ($(tc_profile_description "$profile")); review and commit: git commit -m 'Convert to transcrypt-v3'. Then clone afresh and check that unlock decrypts it; only then remove the v2 password (git config --remove-section transcrypt). Earlier commits keep their v2 ciphertext: if that password or the history was exposed, change the secrets themselves."
 }
 tc_check_hooks_available_except_v2() {
@@ -2427,6 +2742,7 @@ tc_migrate_rewrite() {
 
 tc_cmd_uninstall() {
 	tc_repo
+	if tc_rekey_pending; then tc_fail "$TC_REKEY_PENDING; then uninstall"; fi
 	if (tc_load_config) >/dev/null 2>&1; then
 		tc_cmd_lock
 	fi
@@ -2448,6 +2764,9 @@ Typical workflow
   transcrypt-bash status | doctor | profiles
   transcrypt-bash lock                  restore ciphertext in the worktree and forget the key
   transcrypt-bash rekey [--profile=NAME] new passphrase (and profile); records re-encrypted, staged
+  transcrypt-bash rekey --continue | --abort
+                            finish (new passphrase) or undo (old one) an interrupted rekey,
+                            changing only the entries it staged
   transcrypt-bash reencrypt [--yes]     re-encrypt staged files still under an earlier config
                             (cherry-picked or rebased across a rekey)
   transcrypt-bash hydrate               decrypt ciphertext left in the worktree
