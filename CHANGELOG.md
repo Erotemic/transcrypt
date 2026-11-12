@@ -42,9 +42,23 @@ system, you must also run the `--upgrade` command in each repository:
 - Experimental v3: `contrib/v3/transcrypt-bash`, a portable v3 client (Bash,
   Git, OpenSSL 3.0) for profiles 2 and 3, byte-compatible with
   `transcrypt-rs`; independent vectors and a two-way conformance suite.
+- Experimental v3: `tests/v3/conformance/lifecycle.sh`: rebase, cherry-pick
+  and stash across the two clients, and `init`, `rekey`, `lock`, `unlock` and
+  `migrate` of both killed or failing at every Git and OpenSSL call, each
+  followed by the documented recovery. `status` reports an interrupted rekey
+  with the steps to finish or undo it.
 
 ### Changed
 
+- Experimental v3: the Bash client keeps its scratch files in the checkout's
+  Git directory (removed after a crash by the next run), not in `$TMPDIR`;
+  `lock` and `unlock` take about half as long.
+- Experimental v3: `transcrypt-rs unlock` exits non-zero when it stored the
+  key but could not decrypt the worktree (as `transcrypt-bash` does), so a
+  script does not go on with ciphertext; `status` names a staged
+  (interrupted) rekey and how to finish or undo it.
+- The v3 Bash and conformance suites no longer depend on the caller's Git
+  configuration (for example `init.defaultBranch`).
 - Improve test suite to better use `bats` conventions to run tests in
   isoloation, so they can be run faster in parallel (#217, #218)
 

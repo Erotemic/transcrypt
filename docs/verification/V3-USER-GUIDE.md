@@ -130,7 +130,8 @@ background process:
 - worktrees.
 
 If decryption cannot run (for example, a protected file is a symlink), it
-changes nothing; unlock still succeeds and tells you why. Fix the cause and
+changes nothing: the checkout is unlocked, and `unlock` says why and exits
+non-zero (so a script does not go on with ciphertext). Fix the cause and
 run `transcrypt-rs hydrate`, which is safe to rerun at any time.
 `unlock --no-hydrate` leaves the ciphertext in place.
 
@@ -195,6 +196,30 @@ key. Adding a plaintext protected file fails until you unlock.
 `.transcrypt/config`, your stored key no longer matches. Pulled files stay
 encrypted, `status` says so, and `git add` refuses plaintext until you run
 `transcrypt-rs unlock` with the new passphrase.
+
+**If `rekey` is interrupted** (Ctrl-C, a crash, a full disk), nothing is
+lost and no plaintext reaches Git; `status` says what state you are in. The rekey either has not started (the old passphrase still unlocks), or
+it is staged. Finish a staged rekey with the new passphrase:
+
+```bash
+git checkout -- .transcrypt/config  # only if status says the staged config differs
+transcrypt-rs unlock                # the NEW passphrase
+git commit -m 'Rekey transcrypt-v3'
+```
+
+or undo it and keep the old passphrase:
+
+```bash
+git read-tree HEAD && git checkout HEAD -- .transcrypt/config
+transcrypt-rs unlock                # the OLD passphrase
+```
+
+(`git read-tree` rather than `git reset`: it restores the index without
+running the filter with a key that no longer matches.) If Git reports
+`index.lock: File exists` after a crash, remove `.git/index.lock` as Git
+says. `tests/v3/conformance/lifecycle.sh` interrupts `init`, `rekey`, `lock`,
+`unlock` and `migrate` of both clients at every Git and OpenSSL call and
+checks these recoveries.
 
 **Work from before a rekey.** A commit cherry-picked or rebased onto a
 `rekey` keeps the records it was made with, under the earlier config. Git
@@ -418,9 +443,19 @@ specification:
   replaces exact staged ciphertext.
 
 These guarantees assume:
-- the cryptographic primitives behave as AES-SIV, Argon2id and SHA-256;
+- the cryptographic primitives behave as AES-SIV, SHA-256 and the profile's
+  key derivation (Argon2id, scrypt or PBKDF2), as implemented by RustCrypto;
 - Git evaluates attributes and invokes the filters as documented;
 - the unverified Git/OS adapter follows the modeled steps.
+
+Not proved, only tested:
+- `transcrypt-bash`: no theorem covers its source. Its evidence is the
+  independent vectors, its own suite and the two-way conformance and
+  lifecycle suites against `transcrypt-rs` (assumption A27), and it trusts
+  OpenSSL's AES, CMAC, scrypt and PBKDF2;
+- the behaviour of real Git workflows (rebase, cherry-pick, stash, worktrees)
+  and recovery from an interrupted command (`lifecycle.sh`);
+- the security of the cryptography itself, which no proof here establishes.
 
 You choose which files are selected; no proof covers that choice. Where the
 key waits (stored or in the private agent) does not change the ciphertext.

@@ -93,12 +93,14 @@ before it was protected stays in earlier commits.
 The portable client is slower: a few OpenSSL processes per file. On a
 repository with 100 protected and 200 other files (Linux, OpenSSL 3.0.13),
 `git status` takes 0.1 s, a commit 1.3 s, a checkout switching 10
-protected files 1.4 s, and `lock` or `unlock` (every file) about 20 s, or
-7 s for the first commit after a `.gitattributes` change (every protected
-file is authenticated then); `transcrypt-rs` does each in well under a
-second. It keeps derived keys in
-local OpenSSL arguments and plaintext in a private (0700) temporary
-directory while it works, and caches the verification of the stored key next
+protected files 1.4 to 1.8 s, `lock` and `unlock` (every file) about 16 s
+(37 s and 27 s before the scratch hand-off of 2026-11-11, measured back to
+back on the same, busy, machine), and the first commit after a
+`.gitattributes` change 7 to 9 s (every protected file is authenticated
+then); `transcrypt-rs` does each in about a second or less. It keeps derived keys in
+local OpenSSL arguments and plaintext in a private (0700) scratch
+directory in the checkout's Git directory while it works (a run that is
+killed leaves it there; the next run removes it), and caches the verification of the stored key next
 to it (`.git/transcrypt-v3/bash-verified`, removed by `lock`). Under the
 Transcrypt threat model the developer's machine is trusted; none of this
 reaches Git. `transcrypt-rs` additionally offers profile 1, the `--private`
@@ -107,6 +109,17 @@ long-running filter process and in-memory key handling with zeroization.
 The shared commands make the same security decisions;
 `tests/v3/conformance/run.sh` checks them in real repositories in both
 directions.
+
+## If a command is interrupted
+
+Nothing unencrypted reaches Git, whichever moment a command is killed at.
+Rerun `lock`, `unlock` or `hydrate`; rerun `init` or `migrate` with the
+same passphrase (an uncommitted `.transcrypt/config` is an interrupted setup,
+which the rerun completes). After an interrupted `rekey`,
+`transcrypt-bash status` says whether it is staged and how to finish it (new
+passphrase) or undo it (old passphrase); see "If `rekey` is interrupted" in
+the [user guide](../../docs/verification/V3-USER-GUIDE.md). If Git then
+reports `index.lock: File exists`, remove `.git/index.lock` as Git says.
 
 ## Known limitation: empty protected files and `git merge`
 
@@ -122,6 +135,8 @@ example a newline) or do not protect empty files.
 ```bash
 bash tests/v3/bash/test_reference.sh            # this client alone (no Rust, no Python)
 bash tests/v3/conformance/run.sh [transcrypt-rs] # both clients, both directions
+bash tests/v3/conformance/lifecycle.sh           # rebase/cherry-pick/stash across clients;
+                                                 # init/rekey/lock/unlock/migrate killed at every call
 python3 tests/v3/reference/portable_vectors.py  # regenerate/check the independent vectors
 ```
 

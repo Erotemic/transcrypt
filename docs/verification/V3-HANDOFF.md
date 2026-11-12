@@ -10,7 +10,9 @@
 > profiles 2/3 and the shared workflows with the same bytes and key file.
 > Evidence: `tests/v3/reference/portable_vectors.py`,
 > `rust/crates/transcrypt-rs/tests/portable_vectors.rs`,
-> `tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`. Status
+> `tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`,
+> `tests/v3/conformance/lifecycle.sh` (cross-client rebase/cherry-pick/stash;
+> every operation killed or failing at every Git/OpenSSL call). Status
 > and parity matrix: [dual-implementation roadmap](V3-DUAL-IMPLEMENTATION-ROADMAP.md).
 > Build note: Lean `.lake` and `rust/target` may be bind-mounted from local
 > disk when the checkout is on a slow network filesystem.
@@ -414,8 +416,11 @@ release archives). Documentation-only pushes run nothing.
    macOS (BSD utilities); the shared limitations listed at the end of
    section 8 of the security review (tags to trees, `--squash`/`-n`
    provenance); faster Bash bulk operations; external review R-01.
-   When either client changes, run both suites
-   (`tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`).
+   When either client changes, run the suites
+   (`tests/v3/bash/test_reference.sh`, `tests/v3/conformance/run.sh`,
+   `tests/v3/conformance/lifecycle.sh`; the last takes about 40 minutes in
+   full, `LIFECYCLE_FAULTS=quick` checks every third fault point, as CI
+   does).
 
 1. **Adversarial agent review: converged.** Seven rounds (H-28 to H-73 in
    [V3-SECURITY-REVIEW](V3-SECURITY-REVIEW.md)) ended with nothing above

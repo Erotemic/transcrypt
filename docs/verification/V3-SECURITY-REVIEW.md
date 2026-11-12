@@ -374,6 +374,24 @@ fixed with regression tests:
 | H-85 | Low | A race between the two reads of the key file could pair the old key with the new file's cached values (records then refused by the hook). | The key file is read once; the cache is checked against one CMAC of the key. |
 | H-86 | Low (usability) | Commits on a branch from before `init` were refused. | Accepted when nothing is protected, as in Rust. |
 | H-87 | Low | `verify-index` did not authenticate records of the config at unprotected paths that `HEAD` holds; settled entries' mode and size bound were not checked. | Full checks open such records at their path; settled entries need the same mode and a bounded record. |
+| H-88 | Low (local privacy) | A Bash client killed mid-command (SIGKILL, a crash) left its scratch directory, with decrypted plaintext, in the shared `$TMPDIR` indefinitely. | Scratch space is an owner-only directory in the checkout's Git directory, named after the process, like transcrypt-rs's staging area; the next run removes those of processes that no longer exist. |
+| H-89 | Low (usability) | After a rekey interrupted between its index update and the worktree config, both clients' `status` labelled the staged records "other config (reencrypt)" (wrong advice), and Bash's `unlock` with the new passphrase said only "incorrect credentials"; the obvious undo, `git reset`, fails in the Bash client's window (its refresh runs the filter with the stale key). | `status` of both reports the interrupted rekey with the finish and undo steps (`git read-tree HEAD`, which does not refresh); records of the staged config are labelled as such; Bash's `unlock` names the interrupted rekey. |
+| H-90 | Low (usability) | Bash `unlock` killed after writing plaintext but before its reindex left files Git reports as modified (a size change counts without running the filter), and running `unlock` again did not repair them (they no longer hold records). | `hydrate` also reindexes stat-dirty files that are byte for byte the plaintext of their staged record. |
+| H-91 | Low (usability) | An interrupted Bash `init` or `migrate` could not be rerun ("already uses v3"), unlike transcrypt-rs and the user guide's promise; the user had to undo it by hand. | An uncommitted `.transcrypt/config` is an interrupted setup, as in Rust: rerunning with the same passphrase authenticates it and completes the setup (another passphrase is refused, with the start-over command). |
+| H-92 | Low (usability) | transcrypt-rs `unlock` exited 0 when its decryption step failed (the key stored, the worktree still ciphertext), unlike transcrypt-bash; a script running `unlock && build` went on with ciphertext. | It still stores the key and says so, and exits non-zero with the reason and `hydrate` as the next step. |
+
+**Interruption and lifecycle (2026-11-11).** `tests/v3/conformance/lifecycle.sh`
+kills (SIGKILL of the process group) or fails each client's `init`, `rekey`, `lock`,
+`unlock` and `migrate` at every call of `git` and, for Bash, `openssl`,
+and checks after every fault that no protected plaintext is in any Git object
+or in `$TMPDIR`, that an operation reporting success did succeed, and that the
+documented recovery, by either client, reaches a verified, audited, clean
+state with every secret intact. No fault point published plaintext or lost
+data. It also runs rebase, cherry-pick and stash (with untracked files) by one
+client and verification, audit and push by the other, and recovery from a
+damaged or removed key file and a wrong passphrase. H-88 to H-92 are its
+findings. A crash inside a Git command that ran a filter leaves Git's own
+`index.lock`, removed as Git instructs.
 
 Shared with the Rust client and not changed (documented limitations): a
 tag pointing at a tree or blob is pushed unaudited; an empty blob on a merge
