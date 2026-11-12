@@ -2593,7 +2593,7 @@ tc_cmd_audit() {
 }
 
 tc_cmd_pre_push() {
-	local remote=${1-} localoid remoteoid
+	local localoid remoteoid
 	local -a revs=()
 	while read -r _ localoid _ remoteoid; do
 		[[ -n ${localoid-} ]] || continue
@@ -2609,7 +2609,9 @@ tc_cmd_pre_push() {
 		fi
 	done
 	((${#revs[@]})) || return 0
-	if [[ $remote =~ ^[A-Za-z0-9._-]+$ ]]; then revs+=(--not "--remotes=$remote"); fi
+	# Only the remote's own commits of the updated refs bound the range: a
+	# remote-tracking ref is a local ref anyone can point at an unaudited
+	# commit, and no evidence that the remote has it (H-98).
 	tc_repo
 	git rev-list "${revs[@]}" >"$TC_TMP/push-commits" || tc_fail 'cannot list the pushed commits'
 	local rev n=0 required

@@ -4,7 +4,7 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     io::{self, BufRead, Read},
     path::{Path, PathBuf},
     process::Stdio,
@@ -46,10 +46,12 @@ pub(crate) struct Audited {
 ///
 /// Each commit is checked for what it changes relative to its first parent
 /// (its whole tree for a root commit or when it changes the config or any
-/// `.gitattributes`). A parent outside the selected range is trusted: it is
-/// already published (the pre-push and pre-receive ranges) or deliberately
-/// excluded. Commits are streamed from `rev-list`, and `max_commits` bounds
-/// the work a hostile push can demand of a server hook.
+/// `.gitattributes`). A parent outside the selected range is trusted: in
+/// the pre-push range it is the remote's own history (Git reported its
+/// commit as the remote's value of a pushed ref), in the pre-receive range
+/// the server's; otherwise it is deliberately excluded. Commits are
+/// streamed from `rev-list`, and `max_commits` bounds the work a hostile
+/// push can demand of a server hook.
 pub(crate) fn audit(repo: &Repository, revs: &[OsString], keyed: bool, max_commits: Option<usize>) -> Result<Audited, String> {
     let mut command = git_command(repo);
     command.args(["rev-list", "--reverse", "--parents"]);
@@ -504,7 +506,7 @@ fn moved_away(here: &str, from: &str) -> String {
 /// The pre-push hook: audit every commit being pushed that the remote does
 /// not already have. Git supplies `<local ref> SP <local oid> SP <remote
 /// ref> SP <remote oid>` lines on stdin.
-pub(crate) fn pre_push(repo: &Repository, remote: Option<&OsStr>) -> Result<(), String> {
+pub(crate) fn pre_push(repo: &Repository) -> Result<(), String> {
     // Never silently drop refs: oversized input is refused, not truncated.
     let input = read_record(io::stdin()).map_err(|_| "cannot read pre-push input")?;
     let mut revs: Vec<OsString> = Vec::new();
@@ -537,15 +539,9 @@ pub(crate) fn pre_push(repo: &Repository, remote: Option<&OsStr>) -> Result<(), 
         }
     }
     if revs.is_empty() { return Ok(()); }
-    // Commits on this remote's tracking branches were audited when pushed.
-    // Only a plain remote name is used as a pattern; anything else (a URL)
-    // audits the complete history being pushed.
-    if let Some(name) = remote.and_then(OsStr::to_str) {
-        if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) {
-            revs.push("--not".into());
-            revs.push(format!("--remotes={name}").into());
-        }
-    }
+    // Only the remote's own commits of the updated refs bound the range: a
+    // remote-tracking ref is a local ref anyone can point at an unaudited
+    // commit, and no evidence that the remote has it (H-98).
     let audited = audit(repo, &revs, true, None)
         .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-rs audit`"))?;
     // Some records may have been checked for their envelope only: this

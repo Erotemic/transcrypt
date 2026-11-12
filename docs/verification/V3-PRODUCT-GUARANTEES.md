@@ -453,12 +453,16 @@ states the guarantee about what `git push` actually sends:
 Hypotheses: Git's push contract (A30: Git sends only commits reachable from
 the pushed commits and from no ref the remote advertised that this
 repository has); the audit is of the hook's range with each commit's own
-tree, attributes and configuration (`HookAudit`, A19, A20); and published
-history was admitted (`PublishedAdmitted`, A13): the remote's history and
-this remote's tracking refs keep the invariant. The last replaces the
-earlier, weaker form of A13 (any first parent outside the range):
-`boundary_outside` proves that every such parent is the remote's or a
-tracking ref's. The hook refuses a pushed tip that is not a commit (H-97),
+tree, attributes and configuration (`HookAudit`, A19, A20); and the
+remote's own history was admitted (`RemoteAdmitted`, A13): the commits the
+remote advertised it has, and their ancestors, keep the invariant. The last
+replaces the earlier, weaker form of A13 (any first parent outside the
+range): `boundary_outside` and `knownRemote_advertised` prove that every
+such parent is reachable from a commit the remote advertised, so it is
+already on the remote and Git does not send it. No local ref is trusted: a
+remote-tracking ref, planted or stale after the remote's URL changed, is no
+evidence that the remote has a commit, and the hook no longer excludes
+them (H-98). The hook refuses a pushed tip that is not a commit (H-97),
 which is what lets the statement speak of commits only. With
 `transcrypt.requireAuthenticatedPush`, `push_admission_required` adds that
 the push proceeds only when every protected file was authenticated.
@@ -516,8 +520,8 @@ boundaries it does not cross. Each is defined in
 - **The start of the audited range** (A13): the parent of the first audited
   commit is trusted when it lies outside the range, so the pre-push range
   trusts what the remote already has. For a push this is narrowed to the
-  remote's own history and this remote's tracking refs
-  (`PublishedAdmitted`), under Git's push contract (A30). An audit from the
+  remote's own history (`RemoteAdmitted`: commits the remote advertised and
+  their ancestors), under Git's push contract (A30). An audit from the
   root, or from a configuration change, trusts nothing.
 - **An unaudited local checkout** (A24, open): the theorem needs a
   `HistoryStart`. A local history that was never audited is still trusted

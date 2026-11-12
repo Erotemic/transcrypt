@@ -469,8 +469,10 @@ specification:
   changes that exist only in the index, exactly as you left it;
 - that every commit `git push` sends after the pre-push hook accepted it
   holds only v3 records at the paths its own attributes select, assuming
-  Git sends what its push protocol says and that what the remote and this
-  remote's tracking refs already have was itself checked.
+  Git sends what its push protocol says and that what the remote already
+  has was itself checked. Your remote-tracking refs (`origin/main` and the
+  like) are not trusted: they are local refs and can be stale or wrong, so
+  pushing a new branch audits its whole history.
 
 The last three are proved about models of the commands' steps, which the
 programs follow (checked by killing them at every step, not proved).

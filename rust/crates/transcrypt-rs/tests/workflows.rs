@@ -1404,6 +1404,40 @@ fn pushes_of_trees_and_blobs_are_refused() {
     assert!(!objects.windows(10).any(|w| w == b"MARK-tree-"), "plaintext reached the remote");
 }
 
+/// No local ref bounds the pre-push audit (H-98): a remote-tracking ref is
+/// a local ref that anyone can point at a commit, and after the remote's
+/// URL changes it names commits the remote does not have. A plaintext
+/// commit (committed with the hooks bypassed) behind a planted or stale
+/// tracking ref is refused, with or without
+/// `transcrypt.requireAuthenticatedPush`; clean history to a new remote is
+/// audited whole and pushed.
+#[test]
+fn remote_tracking_refs_bound_no_push_audit() {
+    let mut scratch = Scratch::new("trackpush");
+    let repo = pushed_repo(&mut scratch);
+    let blob = run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(b"MARK-poison-plaintext\n"));
+    let entry = format!("{REGULAR_FILE_MODE},{},a.secret", String::from_utf8_lossy(&blob).trim());
+    run(&repo, "git", &["update-index", "--cacheinfo", &entry], None);
+    run(&repo, "git", &["commit", "-q", "--no-verify", "-m", "unsafe, hooks bypassed"], None);
+    run(&repo, "git", &["update-ref", "refs/remotes/origin/poison", "HEAD"], None);
+    let (pushed, err) = push_head(&repo);
+    assert!(!pushed && err.contains("refusing to push"), "planted tracking ref: {err}");
+    run(&scratch.root, "git", &["init", "-q", "--bare", "moved.git"], None);
+    run(&repo, "git", &["remote", "set-url", "origin", "../moved.git"], None);
+    for strict in ["false", "true"] {
+        run(&repo, "git", &["config", "transcrypt.requireAuthenticatedPush", strict], None);
+        let (pushed, err) = push_head(&repo);
+        assert!(!pushed && err.contains("refusing to push"), "stale tracking ref, strict={strict}: {err}");
+    }
+    run(&repo, "git", &["reset", "-q", "--hard", "HEAD~1"], None);
+    let (pushed, err) = push_head(&repo);
+    assert!(pushed && !err.contains("envelope only"), "{err}");
+    for remote in ["origin.git", "moved.git"] {
+        let objects = run(&scratch.root.join(remote), "git", &["cat-file", "--batch-all-objects", "--batch"], None);
+        assert!(!objects.windows(12).any(|w| w == b"MARK-poison-"), "plaintext reached {remote}");
+    }
+}
+
 /// Locked, a push of commits that change only unprotected files needs no
 /// key: it neither warns nor, with `transcrypt.requireAuthenticatedPush`,
 /// refuses.

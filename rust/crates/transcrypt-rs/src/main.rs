@@ -154,7 +154,7 @@ fn run() -> Result<(), String> {
             let output = Filters::new(&repo).convert(clean, os::os_bytes(&path), input)?;
             io::stdout().write_all(&output).map_err(|_| "cannot write output".into())
         },
-        Command::PrePush { remote } => pre_push(&repo, remote.as_deref()),
+        Command::PrePush => pre_push(&repo),
     }
 }
 

@@ -384,6 +384,7 @@ fixed with regression tests:
 | H-95 | Medium | A failed `init` or `migrate` that found an earlier, interrupted run's record (no config yet) rolled back by deleting that record (Rust): the earlier run's patterns were forgotten, and a later run naming none completed unprotected. An unfinished record of one command was also ignored by a fresh run of the other. | A rollback puts back the record it found, and removes its own only once the config is gone; an unfinished record binds every later run: its own command merges it, the other is refused (both clients, decided by the verified `setup_record_use`). Proved over every interruption point (`interrupted_setup_completes_with_its_policy`); tested (`unfinished_setup_records_survive_other_commands_and_rollbacks`, Bash check 31). |
 | H-96 | Medium (recovery) | transcrypt-bash wrote the worktree `.transcrypt/config` (rekey and its recovery) and relocked files with `cat >`: a kill between truncation and write left an empty config, which `--continue`/`--abort` then refused as changed (only a manual fix recovered). The fault campaign could not see it (it injects faults at `git`/`openssl` calls). | Every such write is a rename of a complete file next to it, with the file's mode (`tc_replace_file`), as in Rust; the model's atomic-write assumption (A28) now holds for both clients. |
 | H-97 | Medium | A pushed tag naming a tree or blob was admitted unaudited by both clients' pre-push hooks (`rev-list` walks commits only): a tree whose own attributes protect a path, holding that path's plaintext, reached the remote (formerly a documented limitation). | The hook refuses a pushed tip that is not a commit (`<oid>^{commit}`), before the audit; tags of commits and deletions push as before. Tested in both clients (`pushes_of_trees_and_blobs_are_refused`, Bash check 15); this is what lets `push_publishes_no_protected_plaintext` speak of commits only. |
+| H-98 | High | Both clients' pre-push hooks excluded every commit reachable from this remote's tracking refs (`--not --remotes=<name>`) from the audit, and `Publication.lean` assumed those commits admitted (`PublishedAdmitted`). A tracking ref is a local ref: one created by hand (`refs/remotes/origin/poison`) at a commit made with the hooks bypassed, or left stale after `git remote set-url`, let that commit's protected plaintext be pushed unaudited, with or without `transcrypt.requireAuthenticatedPush`. Found by an external review of the publication proof (reproduced against the Bash client; Rust had the same exclusion). | The range now excludes only the remote's current commit of each pushed ref that Git reports on the hook's stdin (one the remote advertised, so Git does not send it); no local ref bounds it, and the first push of a new branch audits its whole history. The proof's boundary assumption is narrowed to match (`RemoteAdmitted`: commits reachable from a commit the remote advertised, `knownRemote_advertised`), and `sent_audited` shows every sent commit is in the audited range. Tested in both clients (`remote_tracking_refs_bound_no_push_audit`, Bash check 32), each failing before the fix. |
 
 **Interruption and lifecycle (2026-11-11).** `tests/v3/conformance/lifecycle.sh`
 kills (SIGKILL of the process group) or fails each client's `init`, `rekey`, `lock`,
@@ -413,14 +414,15 @@ unless the operator starts over; `rekey --abort` restores exactly what
 proofs found H-95 and H-96. Publication admission was taken to the same
 level (`Publication.lean`): every commit `git push` sends after the hook
 admitted it keeps the record invariant, under Git's push contract and with
-the remote's history and tracking refs as the only trusted boundary; that
-proof needed H-97.
+the remote's own history as the only trusted boundary; that proof needed
+H-97, and an external review of it found H-98 (the proof had assumed this
+remote's tracking refs were admitted, which no client checked).
 
 Shared with the Rust client and not changed (documented limitations): an empty blob on a merge
 side counts as empty plaintext; `git merge --squash`, `cherry-pick -n` and
 `restore -s` leave no in-progress marker, so their staged content counts as
-a local change for the pre-commit repair; `--not --remotes=NAME` trusts
-fetched tracking refs even when `pushurl` differs.
+a local change for the pre-commit repair. (The pre-push hook's trust of
+`--not --remotes=NAME`, listed here before, was H-98 and is removed.)
 
 **Profiles.** Examined: downgrade by editing the committed profile byte
 (refused: the byte is in the authenticated prefix, and a relabelled config

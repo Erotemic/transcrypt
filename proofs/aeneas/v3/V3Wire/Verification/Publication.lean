@@ -11,18 +11,22 @@ boundary lies.
 
 * **The hook's range** (`HookRange`): `pre_push` (`audit.rs`; Bash
   `tc_cmd_pre_push`) runs `git rev-list` on every pushed commit, excluding
-  the remote's current commit of each updated ref when this repository has
-  it and, for a remote given by name, this remote's tracking refs
-  (`--not --remotes=<name>`). A pushed tip that is no commit (a tag of a
-  tree or blob, whose files `rev-list` would not walk) is refused before
-  the audit, so every pushed object Git sends belongs to a pushed commit.
+  only the remote's current commit of each updated ref when this
+  repository has it. No local ref bounds the range: a remote-tracking ref
+  is a local ref that anyone can point at an unaudited commit, and stale
+  after the remote's URL changes, so it is no evidence that the remote has
+  a commit (H-98: excluding `--remotes=<name>` let a planted tracking ref
+  publish plaintext). A pushed tip that is no commit (a tag of a tree or
+  blob, whose files `rev-list` would not walk) is refused before the
+  audit, so every pushed object Git sends belongs to a pushed commit.
 * **Git's push contract** (`PushContract`, A30): Git sends only commits
   reachable from a pushed commit and from no ref the remote advertised that
   this repository has; the remote commit the hook is told for an updated
   ref is one the remote advertised.
-* **Every sent commit was audited, or lies behind a tracking ref**
-  (`sent_audited_or_tracked`), and **every boundary parent is the remote's
-  or a tracking ref's** (`boundary_outside`): pure graph facts.
+* **Every sent commit was audited** (`sent_audited`), and **every boundary
+  parent is the remote's own history** (`boundary_outside`,
+  `knownRemote_advertised`: reachable from a commit the remote
+  advertised): pure graph facts.
 * **No protected plaintext is sent** (`push_publishes_no_protected_plaintext`,
   `push_sends_no_protected_plaintext`): if the hook's audit accepted every
   commit of its range (keyed where this checkout has the configuration's
@@ -31,9 +35,9 @@ boundary lies.
   authenticates at that path; without it, has its configuration's envelope.
   In particular no path a sent commit's own attributes select holds
   anything but a v3 record. The trusted boundary is no longer an arbitrary
-  parent (A13) but the remote's own history and this remote's tracking refs
-  (`PublishedAdmitted`, A13): commits that are already public, or that an
-  earlier push admitted.
+  parent (A13) but the remote's own history (`RemoteAdmitted`, A13):
+  commits the remote advertised it has, and their ancestors, which are
+  public already and which Git does not send.
 -/
 
 open CoreModels Aeneas
@@ -85,11 +89,10 @@ def Pushed {C : Type} (parents : C → List C) (ups : List (PushUpdate C)) (c : 
 def KnownRemote {C : Type} (parents : C → List C) (ups : List (PushUpdate C)) (c : C) : Prop :=
   ∃ u ∈ ups, ∃ r, u.remote = some r ∧ Reaches parents r c
 
-/-- **What the hook audits**: `git rev-list <pushed>... ^<remote>... --not
-    --remotes=<name>` (`tracking`: this remote's tracking refs; none for a
-    remote given by URL). -/
-def HookRange {C : Type} (parents : C → List C) (ups : List (PushUpdate C)) (tracking : List C) (c : C) : Prop :=
-  Pushed parents ups c ∧ ¬ KnownRemote parents ups c ∧ ¬ ReachedFrom parents tracking c
+/-- **What the hook audits**: `git rev-list <pushed>... ^<remote>...`. No
+    local ref (no remote-tracking ref) is excluded. -/
+def HookRange {C : Type} (parents : C → List C) (ups : List (PushUpdate C)) (c : C) : Prop :=
+  Pushed parents ups c ∧ ¬ KnownRemote parents ups c
 
 /-- **A30: Git's push contract.** After the pre-push hook succeeded, Git
     sends only commits reachable from a pushed commit and from no ref the
@@ -100,32 +103,36 @@ structure PushContract {C : Type} (parents : C → List C) (ups : List (PushUpda
   sends : ∀ c, sent c → Pushed parents ups c ∧ ¬ ReachedFrom parents advertised c
   told : ∀ u ∈ ups, ∀ r, u.remote = some r → r ∈ advertised
 
-/-- **Every commit Git sends was audited by the hook, or lies behind one of
-    this remote's tracking refs.** -/
-theorem sent_audited_or_tracked {C : Type} {parents : C → List C} {ups : List (PushUpdate C)}
-    {advertised tracking : List C} {sent : C → Prop} (h : PushContract parents ups advertised sent) {c : C}
-    (hc : sent c) : HookRange parents ups tracking c ∨ ReachedFrom parents tracking c := by
+/-- **Every commit Git sends was audited by the hook.** -/
+theorem sent_audited {C : Type} {parents : C → List C} {ups : List (PushUpdate C)}
+    {advertised : List C} {sent : C → Prop} (h : PushContract parents ups advertised sent) {c : C}
+    (hc : sent c) : HookRange parents ups c := by
   obtain ⟨hpushed, hadv⟩ := h.sends c hc
-  by_cases ht : ReachedFrom parents tracking c
-  · exact Or.inr ht
-  · refine Or.inl ⟨hpushed, ?_, ht⟩
-    rintro ⟨u, hu, r, hr, hreach⟩
-    exact hadv ⟨r, h.told u hu r hr, hreach⟩
+  refine ⟨hpushed, ?_⟩
+  rintro ⟨u, hu, r, hr, hreach⟩
+  exact hadv ⟨r, h.told u hu r hr, hreach⟩
 
-/-- **The audit's boundary is the remote's or a tracking ref's.** A parent
-    of an audited commit that the hook did not audit is reachable from a
-    remote commit it was told of, or from a tracking ref. -/
-theorem boundary_outside {C : Type} {parents : C → List C} {ups : List (PushUpdate C)} {tracking : List C}
-    {c p : C} (hc : HookRange parents ups tracking c) (hp : p ∈ parents c)
-    (hout : ¬ HookRange parents ups tracking p) :
-    KnownRemote parents ups p ∨ ReachedFrom parents tracking p := by
-  obtain ⟨⟨u, hu, l, hl, hreach⟩, _, _⟩ := hc
+/-- **The audit's boundary is the remote's.** A parent of an audited commit
+    that the hook did not audit is reachable from a remote commit it was
+    told of. -/
+theorem boundary_outside {C : Type} {parents : C → List C} {ups : List (PushUpdate C)}
+    {c p : C} (hc : HookRange parents ups c) (hp : p ∈ parents c)
+    (hout : ¬ HookRange parents ups p) : KnownRemote parents ups p := by
+  obtain ⟨⟨u, hu, l, hl, hreach⟩, _⟩ := hc
   have hpushed : Pushed parents ups p := ⟨u, hu, l, hl, hreach.tail hp⟩
   by_cases hk : KnownRemote parents ups p
-  · exact Or.inl hk
-  · by_cases ht : ReachedFrom parents tracking p
-    · exact Or.inr ht
-    · exact absurd ⟨hpushed, hk, ht⟩ hout
+  · exact hk
+  · exact absurd ⟨hpushed, hk⟩ hout
+
+/-- **A commit reachable from a remote commit the hook was told of is
+    reachable from a commit the remote advertised**: it is the remote's own
+    history, which Git neither sends nor needs to. -/
+theorem knownRemote_advertised {C : Type} {parents : C → List C} {ups : List (PushUpdate C)}
+    {advertised : List C} {sent : C → Prop} (h : PushContract parents ups advertised sent) {p : C}
+    (hp : KnownRemote parents ups p) : ReachedFrom parents advertised p ∧ ¬ sent p := by
+  obtain ⟨u, hu, r, hr, hreach⟩ := hp
+  have hadv : ReachedFrom parents advertised p := ⟨r, h.told u hu r hr, hreach⟩
+  exact ⟨hadv, fun hs => (h.sends p hs).2 hadv⟩
 
 /-! ## The hook's audit run -/
 
@@ -136,10 +143,10 @@ theorem boundary_outside {C : Type} {parents : C → List C} {ups : List (PushUp
     compared with a first parent outside the range compared with that
     parent's tree, under the same configuration and the same selection
     when it trusted the parent (no attribute file or config changed). -/
-structure HookAudit {C A : Type} (parents : C → List C) (ups : List (PushUpdate C)) (tracking : List C)
+structure HookAudit {C A : Type} (parents : C → List C) (ups : List (PushUpdate C))
     (tree : C → List Entry) (filter : C → List Nat → List Nat) (config : C → List Nat) (d : AuditedRange C A) :
     Prop where
-  commits_iff : ∀ c, c ∈ d.commits ↔ HookRange parents ups tracking c
+  commits_iff : ∀ c, c ∈ d.commits ↔ HookRange parents ups c
   parents_eq : d.parents = parents
   tree_eq : ∀ c ∈ d.commits, (d.run c).commit.tree = tree c
   filter_eq : ∀ c ∈ d.commits, (d.run c).commit.filter = filter c
@@ -165,16 +172,16 @@ def CommitEnveloped {C : Type} (keys : EpochKeys P) (σ₀ : Suite) (g : GitStat
     (filter : C → List Nat → List Nat) (config : C → List Nat) (c : C) : Prop :=
   keys (config c) = none → SelectionEnveloped (σ₀.digest16 (config c)) g (filter c) (tree c)
 
-/-- **A13, for a push: published history was admitted.** Every commit
-    reachable from a remote commit the hook was told of, or from this
-    remote's tracking refs, keeps the record invariant: it is the remote's
-    own history (audited when it was pushed there, or by the remote's
-    pre-receive audit), or an earlier push of this repository that the hook
-    admitted (Git updates a tracking ref after a push or a fetch). -/
-def PublishedAdmitted {C : Type} (keys : EpochKeys P) (σ₀ : Suite) (g : GitState) (parents : C → List C)
-    (ups : List (PushUpdate C)) (tracking : List C) (tree : C → List Entry) (filter : C → List Nat → List Nat)
+/-- **A13, for a push: the remote's own history was admitted.** Every
+    commit reachable from a remote commit the hook was told of (which the
+    remote advertised: `knownRemote_advertised`) keeps the record
+    invariant: it is already on the remote, audited when it was pushed
+    there or by the remote's pre-receive audit. Nothing is assumed of any
+    local ref. -/
+def RemoteAdmitted {C : Type} (keys : EpochKeys P) (σ₀ : Suite) (g : GitState) (parents : C → List C)
+    (ups : List (PushUpdate C)) (tree : C → List Entry) (filter : C → List Nat → List Nat)
     (config : C → List Nat) : Prop :=
-  ∀ p, KnownRemote parents ups p ∨ ReachedFrom parents tracking p →
+  ∀ p, KnownRemote parents ups p →
     CommitKeyed keys g tree filter config p ∧ CommitEnveloped keys σ₀ g tree filter config p
 
 theorem firstParent_mem {C A : Type} {d : AuditedRange C A} {c p : C} (h : d.firstParent c = some p) :
@@ -188,22 +195,21 @@ theorem firstParent_mem {C A : Type} {d : AuditedRange C A} {c p : C} (h : d.fir
     subst h
     exact List.mem_cons_self
 
-/-- A parent the hook did not audit is published. -/
-theorem boundary_published {C A : Type} {parents : C → List C} {ups : List (PushUpdate C)} {tracking : List C}
+/-- A parent the hook did not audit is the remote's. -/
+theorem boundary_published {C A : Type} {parents : C → List C} {ups : List (PushUpdate C)}
     {tree : C → List Entry} {filter : C → List Nat → List Nat} {config : C → List Nat} {d : AuditedRange C A}
-    (haudit : HookAudit parents ups tracking tree filter config d) {c p : C} (hc : c ∈ d.commits)
-    (hfp : d.firstParent c = some p) (hp : p ∉ d.commits) :
-    KnownRemote parents ups p ∨ ReachedFrom parents tracking p := by
+    (haudit : HookAudit parents ups tree filter config d) {c p : C} (hc : c ∈ d.commits)
+    (hfp : d.firstParent c = some p) (hp : p ∉ d.commits) : KnownRemote parents ups p := by
   have hmem : p ∈ parents c := haudit.parents_eq ▸ firstParent_mem hfp
   exact boundary_outside ((haudit.commits_iff c).mp hc) hmem (fun h => hp ((haudit.commits_iff p).mpr h))
 
 /-- **The keyed boundary of the hook's audit is trusted** when published
     history was admitted. -/
 theorem keyed_boundary_of_published {C A : Type} {keys : EpochKeys P} {σ₀ : Suite} {g : GitState}
-    {parents : C → List C} {ups : List (PushUpdate C)} {tracking : List C} {tree : C → List Entry}
+    {parents : C → List C} {ups : List (PushUpdate C)} {tree : C → List Entry}
     {filter : C → List Nat → List Nat} {config : C → List Nat} {d : AuditedRange C A}
-    (haudit : HookAudit parents ups tracking tree filter config d)
-    (hpub : PublishedAdmitted keys σ₀ g parents ups tracking tree filter config) :
+    (haudit : HookAudit parents ups tree filter config d)
+    (hpub : RemoteAdmitted keys σ₀ g parents ups tree filter config) :
     KeyedBoundaryTrusted keys g d := by
   intro c hc p hfp hp hbase k hk
   have hcfg : d.config c = config p := (haudit.config_eq c hc).trans (haudit.boundary_config c hc p hfp hp hbase)
@@ -216,10 +222,10 @@ theorem keyed_boundary_of_published {C A : Type} {keys : EpochKeys P} {σ₀ : S
 /-- **The keyless boundary of the hook's audit is trusted** when published
     history was admitted. -/
 theorem keyless_boundary_of_published {C A : Type} {keys : EpochKeys P} {σ₀ : Suite} {g : GitState}
-    {parents : C → List C} {ups : List (PushUpdate C)} {tracking : List C} {tree : C → List Entry}
+    {parents : C → List C} {ups : List (PushUpdate C)} {tree : C → List Entry}
     {filter : C → List Nat → List Nat} {config : C → List Nat} {d : AuditedRange C A}
-    (haudit : HookAudit parents ups tracking tree filter config d)
-    (hpub : PublishedAdmitted keys σ₀ g parents ups tracking tree filter config) :
+    (haudit : HookAudit parents ups tree filter config d)
+    (hpub : RemoteAdmitted keys σ₀ g parents ups tree filter config) :
     KeylessBoundaryTrusted keys σ₀ g d := by
   intro c hc p hfp hp hbase hk
   have hcfg : d.config c = config p := (haudit.config_eq c hc).trans (haudit.boundary_config c hc p hfp hp hbase)
@@ -234,36 +240,35 @@ theorem keyless_boundary_of_published {C A : Type} {keys : EpochKeys P} {σ₀ :
     where this checkout has the configuration's key (each realizing its
     suite, A5) and keyless otherwise, along Git's first parents
     (`FirstParentEdges`, A11, A20); Git's push contract (`PushContract`,
-    A30); and published history admitted (`PublishedAdmitted`, A13). Then
+    A30); and the remote's own history admitted (`RemoteAdmitted`, A13).
+    Then
     every commit Git sends keeps the record invariant under its own
     configuration and attributes: with the key, every record and every
     selected path authenticate; without it, every selected path has the
     configuration's envelope. -/
 theorem push_publishes_no_protected_plaintext {C A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A)
     (keys : EpochKeys P) (hkeys : KeysRealize inst keys) (σ₀ : Suite) (g : GitState)
-    {parents : C → List C} {ups : List (PushUpdate C)} {advertised tracking : List C} {sent : C → Prop}
+    {parents : C → List C} {ups : List (PushUpdate C)} {advertised : List C} {sent : C → Prop}
     {tree : C → List Entry} {filter : C → List Nat → List Nat} {config : C → List Nat} (d : AuditedRange C A)
     (hcontract : PushContract parents ups advertised sent)
-    (haudit : HookAudit parents ups tracking tree filter config d) (hedges : FirstParentEdges d)
+    (haudit : HookAudit parents ups tree filter config d) (hedges : FirstParentEdges d)
     (hkeyed : ∀ c ∈ d.commits, ∀ k, keys (d.config c) = some k → KeyedAudit aans acache inst k.prims k.suite g (d.run c))
     (hkeyless : ∀ c ∈ d.commits, keys (d.config c) = none → KeylessAudit aans acache inst σ₀ g (d.run c))
-    (hpub : PublishedAdmitted keys σ₀ g parents ups tracking tree filter config) :
+    (hpub : RemoteAdmitted keys σ₀ g parents ups tree filter config) :
     ∀ c, sent c → CommitKeyed keys g tree filter config c ∧ CommitEnveloped keys σ₀ g tree filter config c := by
   intro c hc
-  rcases sent_audited_or_tracked (tracking := tracking) hcontract hc with hrange | htracked
-  · have hcd : c ∈ d.commits := (haudit.commits_iff c).mpr hrange
-    have hcfg := haudit.config_eq c hcd
-    refine ⟨fun k hk => ?_, fun hk => ?_⟩
-    · have h := keyed_dag_audit_authenticated aans acache keys hkeys g d hedges hkeyed
-        (keyed_boundary_of_published haudit hpub) c hcd k (by rw [hcfg]; exact hk)
-      unfold AuditedCommitAuthentic at h
-      rw [hcfg, haudit.tree_eq c hcd, haudit.filter_eq c hcd] at h
-      exact h
-    · have h := keyless_dag_audit_enveloped (inst := inst) aans acache keys σ₀ g d hedges hkeyless
-        (keyless_boundary_of_published haudit hpub) c hcd (by rw [hcfg]; exact hk)
-      rw [hcfg, haudit.tree_eq c hcd, haudit.filter_eq c hcd] at h
-      exact h
-  · exact hpub c (Or.inr htracked)
+  have hcd : c ∈ d.commits := (haudit.commits_iff c).mpr (sent_audited hcontract hc)
+  have hcfg := haudit.config_eq c hcd
+  refine ⟨fun k hk => ?_, fun hk => ?_⟩
+  · have h := keyed_dag_audit_authenticated aans acache keys hkeys g d hedges hkeyed
+      (keyed_boundary_of_published haudit hpub) c hcd k (by rw [hcfg]; exact hk)
+    unfold AuditedCommitAuthentic at h
+    rw [hcfg, haudit.tree_eq c hcd, haudit.filter_eq c hcd] at h
+    exact h
+  · have h := keyless_dag_audit_enveloped (inst := inst) aans acache keys σ₀ g d hedges hkeyless
+      (keyless_boundary_of_published haudit hpub) c hcd (by rw [hcfg]; exact hk)
+    rw [hcfg, haudit.tree_eq c hcd, haudit.filter_eq c hcd] at h
+    exact h
 
 /-- **No protected plaintext is sent.** Under the hypotheses of
     `push_publishes_no_protected_plaintext`, every path that a sent
@@ -272,13 +277,13 @@ theorem push_publishes_no_protected_plaintext {C A : Type} (aans : StagedEvidenc
     plaintext. -/
 theorem push_sends_no_protected_plaintext {C A : Type} (aans : StagedEvidence A) (acache : AuditedEntries A)
     (keys : EpochKeys P) (hkeys : KeysRealize inst keys) (σ₀ : Suite) (g : GitState)
-    {parents : C → List C} {ups : List (PushUpdate C)} {advertised tracking : List C} {sent : C → Prop}
+    {parents : C → List C} {ups : List (PushUpdate C)} {advertised : List C} {sent : C → Prop}
     {tree : C → List Entry} {filter : C → List Nat → List Nat} {config : C → List Nat} (d : AuditedRange C A)
     (hcontract : PushContract parents ups advertised sent)
-    (haudit : HookAudit parents ups tracking tree filter config d) (hedges : FirstParentEdges d)
+    (haudit : HookAudit parents ups tree filter config d) (hedges : FirstParentEdges d)
     (hkeyed : ∀ c ∈ d.commits, ∀ k, keys (d.config c) = some k → KeyedAudit aans acache inst k.prims k.suite g (d.run c))
     (hkeyless : ∀ c ∈ d.commits, keys (d.config c) = none → KeylessAudit aans acache inst σ₀ g (d.run c))
-    (hpub : PublishedAdmitted keys σ₀ g parents ups tracking tree filter config) :
+    (hpub : RemoteAdmitted keys σ₀ g parents ups tree filter config) :
     ∀ c, sent c → ∀ x ∈ tree c, Selected (filter c x.path) → ¬ Reserved x.path →
       x.Regular ∧ ∃ content id, g.blob x.oid = some content ∧ EnvelopeOk content id := by
   intro c hc x hx hs hr

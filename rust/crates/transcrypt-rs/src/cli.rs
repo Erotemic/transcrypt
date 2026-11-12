@@ -43,8 +43,9 @@ pub(crate) enum Command {
     Merge(MergeArgs),
     /// Git's clean (`clean`) or smudge filter of the file at `path` (`%f`).
     Filter { clean: bool, path: OsString },
-    /// The pre-push hook: Git passes the remote's name (and URL).
-    PrePush { remote: Option<OsString> },
+    /// The pre-push hook. Git passes the remote's name and URL; neither
+    /// bounds the audit (only the remote commits on stdin do).
+    PrePush,
 }
 
 /// What `rekey --continue` or `rekey --abort` does with an interrupted rekey.
@@ -178,7 +179,7 @@ impl Command {
                 _ => return Err("Git filter requires exactly one %f pathname".into()),
             },
             "pre-push" if args.len() > PRE_PUSH_ARGUMENTS => return Err("pre-push takes the remote name and URL".into()),
-            "pre-push" => Command::PrePush { remote: args.first().cloned() },
+            "pre-push" => Command::PrePush,
             _ => return Err(format!("unknown v3 operation; {USAGE}")),
         })
     }
@@ -372,7 +373,7 @@ mod tests {
         assert!(parse("init --profile=aes").is_err_and(|e| e.starts_with("unknown profile")));
         assert!(parse("unlock --profile=scrypt").is_err_and(|e| e == "unlock: unknown option --profile=scrypt"));
         assert!(matches!(parse("hydrate --auto"), Ok(Command::Hydrate { auto: true })));
-        assert!(matches!(parse("pre-push origin url"), Ok(Command::PrePush { remote: Some(_) })));
+        assert!(matches!(parse("pre-push origin url"), Ok(Command::PrePush)));
         assert!(matches!(parse("diff a.env old 1 100644 new 2 100644 b.env renamed"),
             Ok(Command::Diff(DiffArgs { old_path, new_path, .. })) if old_path == "a.env" && new_path == "b.env"));
         for (line, refusal) in [

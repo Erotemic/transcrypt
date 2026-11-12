@@ -13,11 +13,17 @@
 > included) change (`interrupted_rekey_abort_restores`). `Publication.lean`
 > proves that every commit `git push` sends after the hook admitted it keeps
 > the record invariant (`push_publishes_no_protected_plaintext`), under
-> Git's push contract (A30), with the remote's history and tracking refs as
-> the boundary (A13). Found and fixed on the way: H-95 (a rollback deleted
-> an earlier run's record), H-96 (Bash wrote the config non-atomically),
-> H-97 (a pushed tag of a tree or blob was unaudited; now refused). New
-> assumptions A28 to A30.
+> Git's push contract (A30), with the remote's own history as the boundary
+> (A13). Found and fixed on the way: H-95 (a rollback deleted an earlier
+> run's record), H-96 (Bash wrote the config non-atomically), H-97 (a pushed
+> tag of a tree or blob was unaudited; now refused). New assumptions A28 to
+> A30. External review of that commit found **H-98**: both pre-push hooks
+> excluded `--not --remotes=<name>`, so a planted or stale remote-tracking
+> ref let a plaintext commit be pushed unaudited, and the proof's boundary
+> assumption covered those refs. Fixed: the range excludes only the remote
+> commits Git reports on the hook's stdin, and the boundary assumption is
+> `RemoteAdmitted` (commits the remote advertised). Regressions:
+> `remote_tracking_refs_bound_no_push_audit`, Bash check 32.
 
 > **Update (2026-11-11, evening):** configuration **profiles** are
 > implemented end to end. The config's byte 6 names the key derivation

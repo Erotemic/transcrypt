@@ -292,7 +292,8 @@ open Transcrypt.V3Verification
 -- Publication: the pre-push verdict and what a push sends
 #print axioms push_admission_spec
 #print axioms push_admission_required
-#print axioms sent_audited_or_tracked
+#print axioms sent_audited
+#print axioms knownRemote_advertised
 #print axioms boundary_outside
 #print axioms keyed_boundary_of_published
 #print axioms keyless_boundary_of_published

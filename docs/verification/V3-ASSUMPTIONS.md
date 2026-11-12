@@ -52,7 +52,7 @@ one.
 | A10 | AES-SIV, Argon2id, scrypt, PBKDF2-HMAC-SHA256, SHA-256 security | ASSUMED (standard) |
 | A11 | A Git object id names exactly one content | ASSUMED (Git's hash) |
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
-| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`; a keyless commit that needed no key, `commit_needs_no_key`, authenticates: `keyless_dag_audit_authenticated`): only the boundary remains; for a push PROVED (model) that the boundary is the remote's own history and this remote's tracking refs, and that every commit Git sends keeps the record invariant (`push_publishes_no_protected_plaintext`, with A30) |
+| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`; a keyless commit that needed no key, `commit_needs_no_key`, authenticates: `keyless_dag_audit_authenticated`): only the boundary remains; for a push PROVED (model) that the boundary is the remote's own history (commits it advertised; no local ref, H-98), and that every commit Git sends keeps the record invariant (`push_publishes_no_protected_plaintext`, with A30) |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
@@ -1275,12 +1275,15 @@ that this repository has (`PushContract`). The hook is given, for each
 updated ref, the remote's current commit; the adapter excludes it from the
 audit only when this repository has it. A pushed tip that is no commit (a
 tag of a tree or blob) is refused by both clients, so every object sent
-belongs to a sent commit (or is a tag object). With A13 for the remote's
-own history and this remote's tracking refs (`PublishedAdmitted`: already
-public, or admitted by an earlier push of this repository; a tracking ref
-moved by hand to an unadmitted commit is outside it),
-`push_publishes_no_protected_plaintext` proves that every commit sent keeps
-the record invariant.
+belongs to a sent commit (or is a tag object). No local ref bounds the
+audit: a remote-tracking ref is no evidence that the remote has a commit
+(H-98). With A13 for the remote's own history only (`RemoteAdmitted`: the
+commits the remote advertised and their ancestors, already public and not
+sent), `push_publishes_no_protected_plaintext` proves that every commit
+sent keeps the record invariant. If the remote's own history breaks the
+invariant (it was pushed with `--no-verify` and the remote runs no
+`pre-receive` audit), a new commit that keeps such a file unchanged is not
+re-examined; that file is already public.
 
 ## Ranked unresolved risks and *product* opportunities
 

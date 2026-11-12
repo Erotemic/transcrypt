@@ -79,6 +79,13 @@ system, you must also run the `--upgrade` command in each repository:
 
 ### Fixed
 
+- Experimental v3 (H-98): the pre-push hook no longer excludes commits on
+  the remote's tracking refs (`--not --remotes=<name>`) from its audit. A
+  tracking ref is a local ref: one planted by hand, or left stale after the
+  remote's URL changed, let a commit holding protected plaintext be pushed
+  unaudited. Only the remote's current commits of the pushed refs, as Git
+  reports them to the hook, now bound the audit, so the first push of a new
+  branch audits its whole history. Both clients.
 - Experimental v3: a pushed tag naming a tree or blob is refused by the
   pre-push hook (its files were not audited). A failed `init`/`migrate`
   rolls back to the setup record it found instead of deleting an earlier

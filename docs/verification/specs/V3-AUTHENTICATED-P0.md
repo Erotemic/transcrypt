@@ -307,8 +307,9 @@ trusted state and is outside this POC.
     outside the selected range is trusted as already published.
   - `--max-commits=N` bounds the work. Every Git subprocess's output is
     capped at 256 MiB.
-  - The `pre-push` hook audits the pushed commits not already on the
-    remote's tracking branches.
+  - The `pre-push` hook audits the pushed commits not reachable from the
+    remote's current commit of a pushed ref (as Git reports it on the
+    hook's stdin). Remote-tracking refs are local refs and bound nothing.
 - `rekey`: requires the key and that every protected file is exactly the
   plaintext of its staged record (after hydrating).
   1. A fresh salt and the new passphrase give a new config.
@@ -492,7 +493,7 @@ key, and keeps every other entry, including changes only in the index.
 
 **The pre-push verdict.** The hook refuses any pushed tip that is not a
 commit (a tag of a tree or blob: `rev-list` walks commits only), audits
-`rev-list <pushed>... ^<remote>... --not --remotes=<name>`, and after an
+`rev-list <pushed>... ^<remote>...` (no local ref is excluded), and after an
 accepted audit decides `push_admission(authenticated, required)`: admit when
 every protected file was authenticated, otherwise refuse when
 `transcrypt.requireAuthenticatedPush` is set (any value but an explicit

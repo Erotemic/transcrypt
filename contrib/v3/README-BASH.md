@@ -77,7 +77,9 @@ back again is `transcrypt-bash install`.
   under a configuration this checkout has no key for (before a rekey) are
   checked by envelope; set `git config transcrypt.requireAuthenticatedPush
   true` to refuse those instead. A pushed tag of a tree or blob (not a
-  commit) is refused.
+  commit) is refused. Only the remote's current commits of the pushed refs
+  (as Git reports them) bound the audit; remote-tracking refs are local and
+  trusted for nothing, so a new branch's first push audits its history.
 - **No downgrade.** The profile comes from the committed config, which the
   passphrase authenticates; an unknown or unsupported profile is refused by
   name before anything changes, and a failed key derivation or OpenSSL call

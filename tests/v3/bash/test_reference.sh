@@ -442,6 +442,34 @@ printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin 2>"$SCRATCH/other.err
 grep -qx '\*\.env transcrypt' .gitattributes || die 'init did not protect what its record holds'
 ok 'an unfinished setup record refuses the other command and binds its own'
 
+# Push: no local ref bounds the audit (H-98). A remote-tracking ref is a
+# local ref: planted, or stale after the remote's URL changed, it names
+# commits the remote does not have.
+newrepo tracking
+printf 'pub\n' >pub.txt; git add pub.txt; git commit -qm base
+printf '%s\n' "$PASSPHRASE" | "$CLI" init --password-stdin '*.env' 2>/dev/null
+printf 'protected\n' >s.env; git add .gitattributes .transcrypt s.env; git commit -qm protect
+git init -q --bare "$SCRATCH/tracking.git"; git remote add origin "$SCRATCH/tracking.git"
+git push -q origin HEAD:refs/heads/main 2>/dev/null || die 'first push'
+printf 'MARK-poison-plaintext\n' >s.env
+git -c filter.transcrypt-v3.clean=cat -c filter.transcrypt-v3.required=false add s.env
+git -c core.hooksPath=/dev/null commit -qm 'unsafe, hooks bypassed'
+git update-ref refs/remotes/origin/poison HEAD
+if git push -q origin HEAD:refs/heads/main 2>"$SCRATCH/push.log"; then die 'pre-push trusted a planted tracking ref'; fi
+grep -q 'refusing to push' "$SCRATCH/push.log" || die 'pre-push refusal message (planted tracking ref)'
+git init -q --bare "$SCRATCH/moved.git"; git remote set-url origin "$SCRATCH/moved.git"
+for strict in false true; do
+    git config transcrypt.requireAuthenticatedPush "$strict"
+    if git push -q origin HEAD:refs/heads/main 2>"$SCRATCH/push.log"; then die "pre-push trusted a stale tracking ref (strict=$strict)"; fi
+    grep -q 'refusing to push' "$SCRATCH/push.log" || die 'pre-push refusal message (stale tracking ref)'
+done
+git reset -q --hard HEAD~1
+git push -q origin HEAD:refs/heads/main 2>"$SCRATCH/push.log" || die 'pre-push refused clean history to a new remote'
+for remote in tracking moved; do
+    ! git -C "$SCRATCH/$remote.git" cat-file --batch-all-objects --batch | grep -q MARK-poison || die "plaintext reached $remote"
+done
+ok 'pre-push trusts no remote-tracking ref, planted or stale'
+
 # ---------------------------------------------------------------------------
 # v2 migration (needs the repository's Bash v2 script).
 # ---------------------------------------------------------------------------
