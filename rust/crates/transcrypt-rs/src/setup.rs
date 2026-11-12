@@ -374,13 +374,14 @@ pub(crate) fn unlock(repo: &Repository, args: &UnlockArgs) -> Result<(), String>
         return Ok(());
     }
     // Unlocking is complete; hydration is a separate, all-or-nothing step
-    // whose refusal must not hide that the checkout is now unlocked.
+    // whose refusal must not hide that the checkout is now unlocked, nor let
+    // a script go on as if the worktree were decrypted (the exit status is
+    // non-zero, as in transcrypt-bash).
     match hydrate(repo) {
-        Ok(n) => eprintln!("Unlocked ({mode}); decrypted {n} file(s)."),
-        Err(e) => eprintln!("Unlocked ({mode}), but decryption changed nothing: {e}\n\
-            Inspect with `transcrypt-rs status`, then run `transcrypt-rs hydrate`."),
+        Ok(n) => { eprintln!("Unlocked ({mode}); decrypted {n} file(s)."); Ok(()) },
+        Err(e) => Err(format!("unlocked ({mode}), but decryption changed nothing: {e}\n\
+            Inspect with `transcrypt-rs status`, then run `transcrypt-rs hydrate`.")),
     }
-    Ok(())
 }
 
 /// Remove v3 from this checkout. The worktree must be (or is first made, by
@@ -444,10 +445,22 @@ pub(crate) fn status(repo: &Repository) -> Result<(), String> {
         Unlock::Locked => "locked",
         Unlock::Stale => "locked: the stored key does not match .transcrypt/config (rekeyed?, or damaged); run unlock",
     });
+    // A staged config other than the worktree's: a rekey staged but not
+    // finished (interrupted before the worktree config was written).
+    let staged_config = git(repo, &["cat-file", "blob", ":.transcrypt/config"]).ok().filter(|staged| *staged != config);
+    let staged_id = staged_config.as_deref().map(transcrypt_rs::config_id);
+    if let Some(staged) = &staged_id {
+        println!("note:       the staged .transcrypt/config ({}) differs from the worktree's: an interrupted rekey? \
+            to finish it, `git checkout -- .transcrypt/config` and unlock with the new passphrase; to undo it, \
+            `git read-tree HEAD && git checkout HEAD -- .transcrypt/config` and unlock with the old one",
+            short_id(staged));
+    }
     let key = unlock.key();
     let mut counts = [0usize; BUCKETS];
+    let mut rekeyed = 0usize;
     let mut count = |state: FileState, name: &str| {
         counts[state.bucket() as usize] += 1;
+        rekeyed += usize::from(matches!(state, FileState::StagedConfig));
         println!("  {:<LABEL_WIDTH$} {name}", state.label());
     };
     let index = index_with_conflicts(repo)?;
@@ -455,11 +468,11 @@ pub(crate) fn status(repo: &Repository) -> Result<(), String> {
         count(FileState::Conflicted, &String::from_utf8_lossy(&path));
     }
     for staged in protected_entries(repo, index.merged, Attributes::Staged)? {
-        count(file_state(repo, &id, key, &staged).unwrap_or(FileState::Error), &staged.name());
+        count(file_state(repo, &id, staged_id.as_ref(), key, &staged).unwrap_or(FileState::Error), &staged.name());
     }
     let [ciphertext, plaintext, modified, other] = counts;
     println!("protected:  {ciphertext} ciphertext, {plaintext} plaintext, {modified} modified, {other} other");
-    if other > 0 && key.is_some() {
+    if other > rekeyed && key.is_some() {
         println!("note:       the pre-commit hook encrypts files you staged unencrypted and re-encrypts files you \
             renamed; files encrypted under an earlier config (cherry-picked or rebased across a rekey) need \
             `transcrypt-rs reencrypt`");
@@ -485,6 +498,8 @@ enum FileState {
     Conflicted,
     Unsupported,
     OtherConfig,
+    /// A record of the staged config, which differs from the worktree's.
+    StagedConfig,
     Unencrypted,
     Deleted,
     Ciphertext,
@@ -509,6 +524,7 @@ impl FileState {
             FileState::Conflicted => "conflicted",
             FileState::Unsupported => "unsupported mode",
             FileState::OtherConfig => "other config (reencrypt)",
+            FileState::StagedConfig => "staged config (rekey)",
             FileState::Unencrypted => "staged unencrypted",
             FileState::Deleted => "deleted",
             FileState::Ciphertext => "ciphertext",
@@ -526,20 +542,24 @@ impl FileState {
             FileState::Plaintext => Bucket::Plaintext,
             FileState::Conflicted | FileState::Modified | FileState::ModifiedOrPlaintext | FileState::Deleted =>
                 Bucket::Modified,
-            FileState::Unsupported | FileState::OtherConfig | FileState::Unencrypted | FileState::RenamedOrInvalid
+            FileState::Unsupported | FileState::OtherConfig | FileState::StagedConfig | FileState::Unencrypted | FileState::RenamedOrInvalid
                 | FileState::Error => Bucket::Other,
         }
     }
 }
 
 /// What `status` says of one staged protected file.
-fn file_state(repo: &Repository, id: &[u8; transcrypt_v3_core::ID_LEN], key: Option<&Key>, staged: &Staged)
-    -> Result<FileState, String>
+fn file_state(repo: &Repository, id: &[u8; transcrypt_v3_core::ID_LEN], staged_id: Option<&[u8; transcrypt_v3_core::ID_LEN]>,
+    key: Option<&Key>, staged: &Staged) -> Result<FileState, String>
 {
     if !staged.regular() { return Ok(FileState::Unsupported); }
     let object = git_blob(repo, &staged.oid)?;
     if !record_envelope_ok(&object, id) {
-        return Ok(if parse_file_header(&object).is_ok() { FileState::OtherConfig } else { FileState::Unencrypted });
+        return Ok(match parse_file_header(&object) {
+            Ok(found) if Some(&found) == staged_id => FileState::StagedConfig,
+            Ok(_) => FileState::OtherConfig,
+            Err(_) => FileState::Unencrypted,
+        });
     }
     let Some(target) = find_protected(repo.root(), &indexed_path(&staged.path)?)? else { return Ok(FileState::Deleted) };
     let (worktree, _) = target.read()?;

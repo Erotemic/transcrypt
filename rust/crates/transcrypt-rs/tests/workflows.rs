@@ -901,9 +901,12 @@ fn old_branches_stay_usable_and_reencrypt_only_goes_forward() {
     run(&linked, "git", &["cherry-pick", main.trim()], None);
     assert_eq!(fs::read(linked.join("b.env")).unwrap(), b"created after the rekey\n");
     assert!(run(&linked, "git", &["status", "--porcelain"], None).is_empty());
-    // Unlocking with the old passphrase, then trying to pull the newer
-    // record back under the old config, is refused.
-    unlock(&linked);
+    // Unlocking with the old passphrase unlocks but cannot decrypt (the
+    // newer record is under another config), and says so with a failure;
+    // trying to pull the newer record back under the old config is refused.
+    let err = run_fails(&linked, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert!(err.contains("decryption changed nothing") && err.contains("reencrypt"), "{err}");
+    assert!(unlocked(&repo)); // the key is shared, in the main repository
     let err = run_fails(&linked, bin(), &["reencrypt", "--yes", "--password-stdin"], Some(NEW));
     assert!(err.contains("never had before"), "{err}");
 }

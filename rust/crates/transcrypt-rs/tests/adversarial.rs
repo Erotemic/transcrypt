@@ -324,13 +324,16 @@ fn unlock_hydrates_by_default_and_reports_refusals() {
     fs::write(clone.join("dir/b.secret"), b"beta plaintext\n").unwrap();
     run(&clone, bin(), &["lock"], None);
     // A refusal (a protected file replaced by a symlink) leaves everything
-    // unchanged, and unlock still succeeds and says so.
+    // unchanged; unlock says the checkout is unlocked but fails, so a script
+    // does not go on with ciphertext.
     let record = fs::read(clone.join("a.secret")).unwrap();
     fs::remove_file(clone.join("dir/b.secret")).unwrap();
     symlink(Path::new("../a.secret"), &clone.join("dir/b.secret"));
     let out = exec(&clone, bin(), &["unlock", "--password-stdin"], Some(PASS));
-    assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("decryption changed nothing"));
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unlocked") && err.contains("decryption changed nothing"), "{err}");
+    assert!(unlocked(&clone));
     assert_eq!(fs::read(clone.join("a.secret")).unwrap(), record);
     fs::remove_file(clone.join("dir/b.secret")).unwrap();
     run(&clone, "git", &["checkout", "--", "dir/b.secret"], None);
@@ -1032,6 +1035,50 @@ fn rekey_rotates_the_passphrase() {
     assert_ne!(old_config, fs::read(repo.join(".transcrypt/config")).unwrap());
 }
 
+/// A rekey interrupted after its index update (the new config and records
+/// staged, the worktree config and the stored key still the old ones):
+/// `status` says so and labels the records as the staged config's, not as
+/// work to re-encrypt; committing is refused; the documented steps finish
+/// it with the new passphrase or undo it with the old one.
+#[test]
+fn interrupted_rekey_is_reported_and_recoverable() {
+    const NEW: &[u8] = b"a completely different long passphrase\n";
+    let mut scratch = Scratch::new("rekey-interrupted");
+    // A rekey, then back to the state of a crash between its index update
+    // and the worktree config.
+    let mut interrupted = |name: &str| {
+        let repo = scratch.repo(name);
+        let key = repo.join(".git/transcrypt-v3/key");
+        let (old_key, old_config) = (fs::read(&key).unwrap(), fs::read(repo.join(".transcrypt/config")).unwrap());
+        run(&repo, bin(), &["rekey", "--password-stdin"], Some(NEW));
+        fs::write(repo.join(".transcrypt/config"), &old_config).unwrap();
+        fs::write(&key, &old_key).unwrap();
+        (repo, old_config)
+    };
+    let (repo, _) = interrupted("finish");
+    let status = String::from_utf8(run(&repo, bin(), &["status"], None)).unwrap();
+    assert!(status.contains("interrupted rekey") && status.contains("git read-tree HEAD"), "{status}");
+    assert!(status.contains("staged config (rekey)") && !status.contains("reencrypt"), "{status}");
+    let err = run_fails(&repo, "git", &["commit", "-qm", "half a rekey"], None);
+    assert!(err.contains("interrupted `rekey`"), "{err}");
+    // Finish: the staged config in the worktree, the new passphrase.
+    run(&repo, "git", &["checkout", "--", ".transcrypt/config"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(NEW));
+    run(&repo, bin(), &["verify-index"], None);
+    run(&repo, "git", &["commit", "-qm", "rekey"], None);
+    assert_eq!(fs::read(repo.join("a.secret")).unwrap(), b"alpha plaintext\n");
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+    // Undo: index and config from HEAD (no refresh), the old passphrase.
+    let (repo, old_config) = interrupted("undo");
+    run(&repo, "git", &["read-tree", "HEAD"], None);
+    run(&repo, "git", &["checkout", "HEAD", "--", ".transcrypt/config"], None);
+    run(&repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    run(&repo, bin(), &["verify-index"], None);
+    assert_eq!(fs::read(repo.join(".transcrypt/config")).unwrap(), old_config);
+    assert_eq!(fs::read(repo.join("dir/b.secret")).unwrap(), b"beta plaintext\n");
+    assert!(run(&repo, "git", &["status", "--porcelain"], None).is_empty());
+}
+
 /// A protected file deleted in the worktree (or absent in a sparse
 /// checkout) holds no plaintext: it no longer blocks `lock`, `hydrate` or
 /// `unlock` for every other file, and stays deleted.
@@ -1437,7 +1484,12 @@ fn without_key<T>(repo: &Path, f: impl FnOnce() -> T) -> T {
 fn locked<T>(repo: &Path, f: impl FnOnce() -> T) -> T {
     run(repo, bin(), &["lock"], None);
     let result = f();
-    unlock(repo);
+    // A forged record that `f` brought in makes the decryption, and so
+    // `unlock`, fail; the checkout is unlocked all the same.
+    let out = exec(repo, bin(), &["unlock", "--password-stdin"], Some(PASS));
+    assert!(out.status.success() || String::from_utf8_lossy(&out.stderr).contains("decryption changed nothing"),
+        "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(unlocked(repo));
     result
 }
 
