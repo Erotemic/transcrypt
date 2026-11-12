@@ -261,3 +261,8 @@ open Transcrypt.V3Verification
 #print axioms Transcrypt.V3Policy.other_config_needs_same_id_or_collision
 #print axioms open_record_of_other_context_needs_collision
 #print axioms seal_record_deterministic
+-- No output under an unknown profile
+#print axioms Transcrypt.V3Policy.configAuthentic_known_profile
+#print axioms Transcrypt.V3Policy.not_configAuthentic_unknown_profile
+#print axioms seal_record_refuses_unknown_profile
+#print axioms open_record_refuses_unknown_profile

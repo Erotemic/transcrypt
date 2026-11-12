@@ -134,4 +134,25 @@ theorem config_profile_bound {s : Suite} {p q : Profile} {salt tag : List Nat}
     exact configMagic_injective (List.append_cancel_right hm)
   · rw [h₁, h₂]
 
+/-- An authentic configuration has a known profile: its profile byte names
+    one of the three, and it is that profile's encoding. -/
+theorem configAuthentic_known_profile {s : Suite} {config : List Nat}
+    (h : ConfigAuthentic s config) :
+    ∃ p salt tag, config = encodeConfig p salt tag ∧ profileOfByte (config.getD configFamilyLen 0) = some p := by
+  obtain ⟨p, salt, tag, hd, -⟩ := h
+  obtain ⟨he, -, -⟩ := encode_of_decodeConfigShape hd
+  refine ⟨p, salt, tag, he, ?_⟩
+  rw [he]
+  simp [encodeConfig, configMagic, configFamily, profileOfByte_profileByte]
+
+/-- A configuration whose profile byte names no profile never authenticates:
+    nothing can be sealed or opened under it, so an unknown profile cannot
+    fall through to any output. -/
+theorem not_configAuthentic_unknown_profile (s : Suite) {config : List Nat}
+    (h : profileOfByte (config.getD configFamilyLen 0) = none) : ¬ ConfigAuthentic s config := by
+  intro ha
+  obtain ⟨p, -, -, -, hp⟩ := configAuthentic_known_profile ha
+  rw [h] at hp
+  cases hp
+
 end Transcrypt.V3Policy

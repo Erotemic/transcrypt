@@ -248,4 +248,35 @@ theorem seal_record_deterministic {config : Std.Array U8 55#usize} {path p1 p2 o
 
 end Binding
 
+/-! ## No output under an unknown profile -/
+
+section UnknownProfile
+
+variable {P : Type} {inst : V3Primitives P} {prims : P} {σ : Transcrypt.V3Policy.Suite}
+
+/-- The production `seal_record` never succeeds under a configuration whose
+    profile byte names no profile: no record (and no pass-through of the
+    input) is produced. -/
+theorem seal_record_refuses_unknown_profile (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
+    (path plaintext out : Slice U8)
+    (hunknown : Transcrypt.V3Wire.profileOfByte ((wireBytes config).getD Transcrypt.V3Wire.configFamilyLen 0) = none) :
+    seal_record inst prims config path plaintext out ⦃ r => ∀ x, r.1 ≠ core.result.Result.Ok x ⦄ := by
+  apply WP.spec_mono (seal_record_spec h config path plaintext out)
+  intro r hr x hx
+  rw [hx] at hr
+  exact Transcrypt.V3Policy.not_configAuthentic_unknown_profile σ hunknown hr.1.2.1
+
+/-- The production `open_record` never releases plaintext under a
+    configuration whose profile byte names no profile. -/
+theorem open_record_refuses_unknown_profile (h : Realizes inst prims σ) (config : Std.Array U8 55#usize)
+    (path record out : Slice U8)
+    (hunknown : Transcrypt.V3Wire.profileOfByte ((wireBytes config).getD Transcrypt.V3Wire.configFamilyLen 0) = none) :
+    open_record inst prims config path record out ⦃ r => ∀ x, r.1 ≠ core.result.Result.Ok x ⦄ := by
+  apply WP.spec_mono (open_record_spec h config path record out)
+  intro r hr x hx
+  rw [hx] at hr
+  exact Transcrypt.V3Policy.not_configAuthentic_unknown_profile σ hunknown hr.2.1
+
+end UnknownProfile
+
 end Transcrypt.V3Verification
