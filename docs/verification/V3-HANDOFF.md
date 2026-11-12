@@ -1,5 +1,33 @@
 # Transcrypt v3: durable handoff for the next contributor or agent
 
+> **Update (2026-11-12, evening): publication repairs H-99 and H-100.** An
+> external review reproduced two plaintext publications with the hooks
+> installed. **H-99:** a local attribute source (`.git/info/attributes`,
+> a redefined macro, `GIT_ATTR_SOURCE`) unprotected a committed rule for
+> the checks as well as for Git's filter. Every check that reads the
+> staged or a commit's attributes now also asks Git with only those
+> `.gitattributes` files in an isolated Git directory (`Policy` in
+> `git/checkattr.rs`, Bash `tc_policy_git`; A31) and combines the answers
+> with the verified `admission_selected` (committed or effective). **H-100:**
+> locked, plaintext appended to a record kept its envelope and was pushed
+> after a warning. Authenticated pushes are now the default (verified
+> `authenticated_push_required`; only an explicit
+> `transcrypt.requireAuthenticatedPush=false` admits envelope-only
+> records, with a warning). So that new tags and branches stay pushable
+> locked or after a rekey, the hook asks the push URL which commits the
+> remote has (`git ls-remote`, A30) and does not audit those. Proofs:
+> `push_dispatch`, `admission_selected_committed`, and in
+> `Publication.lean` `push_sends_no_protected_plaintext` (by default every
+> protected path of a sent commit authenticates at its path under its
+> configuration's key, whatever local attributes say) with the opt-out's
+> envelope-only guarantee separate (`push_sends_only_records`); History
+> gained `keyless_dag_audit_authenticated_under`. Tests: Rust
+> `local_attribute_sources_never_unprotect_committed_files`,
+> `appended_plaintext_in_a_locked_record_is_never_pushed_by_default`;
+> Bash checks 33, 34; conformance 31 (both directions). A consequence
+> users see: commits made before a `rekey` that the remote does not have
+> yet need the opt-out (their key is gone); push before rekeying.
+
 > **Update (2026-11-12):** interrupted commands and publication are
 > **proved**, not only tested. The setup record (H-93) and the rekey
 > journal (H-94) are decided by verified core functions
@@ -11,8 +39,8 @@
 > (`interrupted_setup_completes_with_its_policy`), and that `rekey --abort`
 > restores exactly what `rekey` found and keeps every unrelated (index-only
 > included) change (`interrupted_rekey_abort_restores`). `Publication.lean`
-> proves that every commit `git push` sends after the hook admitted it keeps
-> the record invariant (`push_publishes_no_protected_plaintext`), under
+> proves what every commit `git push` sends after the hook admitted it
+> keeps (`push_sends_no_protected_plaintext`), under
 > Git's push contract (A30), with the remote's own history as the boundary
 > (A13). Found and fixed on the way: H-95 (a rollback deleted an earlier
 > run's record), H-96 (Bash wrote the config non-atomically), H-97 (a pushed
@@ -21,8 +49,8 @@
 > excluded `--not --remotes=<name>`, so a planted or stale remote-tracking
 > ref let a plaintext commit be pushed unaudited, and the proof's boundary
 > assumption covered those refs. Fixed: the range excludes only the remote
-> commits Git reports on the hook's stdin, and the boundary assumption is
-> `RemoteAdmitted` (commits the remote advertised). Regressions:
+> commits the remote itself reports, and the boundary assumption is the
+> remote's own history (commits it advertised). Regressions:
 > `remote_tracking_refs_bound_no_push_audit`, Bash check 32.
 
 > **Update (2026-11-11, evening):** configuration **profiles** are

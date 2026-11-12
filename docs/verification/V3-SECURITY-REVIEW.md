@@ -318,9 +318,10 @@ Attack review of the new surface:
   `parse_attr_record`, which is proved to accept exactly the requested
   paths in order. A malformed answer fails closed.
 - **Local overrides.** A `filter` rule in `.git/info/attributes` or a global
-  attributes file can unprotect files locally. That is an informed user's
-  choice (A19): `doctor` fails on it, the hook warns, and a server audit
-  still refuses the plaintext.
+  attributes file can unprotect files locally. That was accepted as an
+  informed user's choice (A19) until H-99: publication checks now combine
+  the committed policy with the local sources, which can add protection but
+  never remove it.
 - **Stored key.**
   - It is created exclusively with mode 0600 in the checked 0700 directory,
     renamed into place, and read with `O_NOFOLLOW` at exactly 64 bytes.
@@ -355,7 +356,7 @@ in the Bash client; the Rust client handled all four correctly.
 Suspected items, dispositions: the pre-push audit no longer runs in a
 subshell where `set -e` is off (a config that fails to parse is refused);
 `transcrypt.requireAuthenticatedPush` counts any value but an explicit false
-as set; the locked moved-record check also considers other index paths.
+as set (and, since H-100, an unset one too); the locked moved-record check also considers other index paths.
 Not changed (same in Rust, outside the publication threat): a merge driver
 input that is an empty blob counts as empty plaintext.
 
@@ -385,6 +386,8 @@ fixed with regression tests:
 | H-96 | Medium (recovery) | transcrypt-bash wrote the worktree `.transcrypt/config` (rekey and its recovery) and relocked files with `cat >`: a kill between truncation and write left an empty config, which `--continue`/`--abort` then refused as changed (only a manual fix recovered). The fault campaign could not see it (it injects faults at `git`/`openssl` calls). | Every such write is a rename of a complete file next to it, with the file's mode (`tc_replace_file`), as in Rust; the model's atomic-write assumption (A28) now holds for both clients. |
 | H-97 | Medium | A pushed tag naming a tree or blob was admitted unaudited by both clients' pre-push hooks (`rev-list` walks commits only): a tree whose own attributes protect a path, holding that path's plaintext, reached the remote (formerly a documented limitation). | The hook refuses a pushed tip that is not a commit (`<oid>^{commit}`), before the audit; tags of commits and deletions push as before. Tested in both clients (`pushes_of_trees_and_blobs_are_refused`, Bash check 15); this is what lets `push_publishes_no_protected_plaintext` speak of commits only. |
 | H-98 | High | Both clients' pre-push hooks excluded every commit reachable from this remote's tracking refs (`--not --remotes=<name>`) from the audit, and `Publication.lean` assumed those commits admitted (`PublishedAdmitted`). A tracking ref is a local ref: one created by hand (`refs/remotes/origin/poison`) at a commit made with the hooks bypassed, or left stale after `git remote set-url`, let that commit's protected plaintext be pushed unaudited, with or without `transcrypt.requireAuthenticatedPush`. Found by an external review of the publication proof (reproduced against the Bash client; Rust had the same exclusion). | The range now excludes only the remote's current commit of each pushed ref that Git reports on the hook's stdin (one the remote advertised, so Git does not send it); no local ref bounds it, and the first push of a new branch audits its whole history. The proof's boundary assumption is narrowed to match (`RemoteAdmitted`: commits reachable from a commit the remote advertised, `knownRemote_advertised`), and `sent_audited` shows every sent commit is in the audited range. Tested in both clients (`remote_tracking_refs_bound_no_push_audit`, Bash check 32), each failing before the fix. |
+| H-99 | High | A local attribute source overrode the committed protection policy for publication checks. With `*.env transcrypt` committed, `*.env -transcrypt -filter` in `.git/info/attributes` (or a redefined `[attr]transcrypt` there, a nested `dir/*.env -filter`, `GIT_ATTR_SOURCE` naming a tree without the rule) made Git's filter skip the file, and the hooks and the audit, which asked Git's effective attributes, agreed: plaintext was committed and pushed with the hooks installed, `transcrypt.requireAuthenticatedPush` on or off. Found by an external review (reproduced with Bash; Rust asked Git the same way). Previously documented as an accepted local choice. | Every check that reads the staged or a commit's attributes also asks Git with only those `.gitattributes` files, in an isolated Git directory with no local attribute source or config (`Policy`, `tc_policy_git`, A31), and treats a path as protected when either answer selects it (the verified `admission_selected`). The pre-commit hook encrypts plaintext Git's filter skipped (or refuses a broken macro, naming it); the push refuses a plaintext commit made with the hooks bypassed. The macro must resolve both ways. Proved: `admission_selected_committed`, `selected_admissionFilter`, `committed_protection_published`. Tested in both clients and across them (`local_attribute_sources_never_unprotect_committed_files`, Bash check 33, conformance), each failing before. |
+| H-100 | High | Locked, plaintext appended to a protected file's ciphertext keeps the record envelope; the keyless pre-commit check accepted it, and the pre-push hook, unable to authenticate it, only warned by default, so the push published the plaintext (`transcrypt.requireAuthenticatedPush` defaulted to off). Found by an external review (reproduced with Bash; Rust the same). | Authenticated pushes are the default: unless `transcrypt.requireAuthenticatedPush` is explicitly false, a push whose new or changed records could not be authenticated is refused, saying that the key is missing and how to unlock (a record that does not authenticate with the key is refused as such). Explicitly false, it warns and pushes, and the docs say that this publishes envelope-checked records, plaintext appended included. To keep pushes of new refs (tags, branches) possible locked or after a rekey, the hook asks the push URL which commits the remote has (`ls-remote`) and audits none of those: they are not sent. Proved: `authenticated_push_required_spec`, `push_dispatch`, `push_publishes_authenticated`, `push_sends_no_protected_plaintext` (every protected path of a sent commit authenticates there). Tested in both clients and across them (`appended_plaintext_in_a_locked_record_is_never_pushed_by_default`, `pushes_checked_by_envelope_only_are_refused_unless_explicitly_allowed`, Bash check 34, conformance), each failing before. |
 
 **Interruption and lifecycle (2026-11-11).** `tests/v3/conformance/lifecycle.sh`
 kills (SIGKILL of the process group) or fails each client's `init`, `rekey`, `lock`,
@@ -416,7 +419,15 @@ level (`Publication.lean`): every commit `git push` sends after the hook
 admitted it keeps the record invariant, under Git's push contract and with
 the remote's own history as the only trusted boundary; that proof needed
 H-97, and an external review of it found H-98 (the proof had assumed this
-remote's tracking refs were admitted, which no client checked).
+remote's tracking refs were admitted, which no client checked). The same
+review found H-99 and H-100: the theorem then concluded only that a sent
+commit's protected paths held record envelopes under the selection Git's
+effective attributes gave, which a local override and appended plaintext
+both satisfy. It now concludes, by default, that every path a sent
+commit's committed policy protects authenticates there
+(`push_sends_no_protected_plaintext`), and the envelope-only statement is
+kept, named for what it is, as the guarantee of the explicit opt-out
+(`push_sends_only_records`).
 
 Shared with the Rust client and not changed (documented limitations): an empty blob on a merge
 side counts as empty plaintext; `git merge --squash`, `cherry-pick -n` and

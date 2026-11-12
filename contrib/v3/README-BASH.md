@@ -75,11 +75,14 @@ back again is `transcrypt-bash install`.
   not only the last one, using each commit's own `.gitattributes` and
   config: a plaintext commit hidden behind a later fix is refused. Commits
   under a configuration this checkout has no key for (before a rekey) are
-  checked by envelope; set `git config transcrypt.requireAuthenticatedPush
-  true` to refuse those instead. A pushed tag of a tree or blob (not a
-  commit) is refused. Only the remote's current commits of the pushed refs
-  (as Git reports them) bound the audit; remote-tracking refs are local and
-  trusted for nothing, so a new branch's first push audits its history.
+  refused unless `transcrypt.requireAuthenticatedPush` is explicitly
+  `false` (then checked by envelope only, with a warning; that accepts a
+  record with plaintext appended). A pushed tag of a tree or blob (not a
+  commit) is refused. Only the remote's own answers (its commits of the
+  pushed refs, and `git ls-remote` on the push URL) bound the audit;
+  remote-tracking refs are local and trusted for nothing. Local attribute
+  sources cannot unprotect a committed rule: the checks also evaluate the
+  committed `.gitattributes` alone (`tc_policy_git`).
 - **No downgrade.** The profile comes from the committed config, which the
   passphrase authenticates; an unknown or unsupported profile is refused by
   name before anything changes, and a failed key derivation or OpenSSL call

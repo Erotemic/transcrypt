@@ -285,7 +285,9 @@ trusted state and is outside this POC.
     be in progress. Content that came from a commit is never re-sealed, so
     a hostile move is refused rather than laundered.
   - It warns when a local attribute file outside the repository mentions
-    `filter`.
+    `filter`. Such a file cannot unprotect a committed rule: the hook's
+    selection is the staged policy's, evaluated alone, or the effective
+    one (see "The selection of publication checks").
 - `audit [<rev-list arguments>]`: for every selected commit (default
   `HEAD`), every file that the commit's own attributes protect must be a
   regular file whose blob has the v3 envelope of the `.transcrypt/config`
@@ -493,11 +495,22 @@ key, and keeps every other entry, including changes only in the index.
 
 **The pre-push verdict.** The hook refuses any pushed tip that is not a
 commit (a tag of a tree or blob: `rev-list` walks commits only), audits
-`rev-list <pushed>... ^<remote>...` (no local ref is excluded), and after an
-accepted audit decides `push_admission(authenticated, required)`: admit when
-every protected file was authenticated, otherwise refuse when
-`transcrypt.requireAuthenticatedPush` is set (any value but an explicit
-false) and warn when it is not.
+`rev-list <pushed>... ^<remote>...`, excluding also every commit `git
+ls-remote` on the push URL (the hook's second argument) lists that this
+repository has; no local ref is excluded. After an accepted audit it
+decides `push_admission(authenticated, authenticated_push_required(s))`
+with `s` the state of `transcrypt.requireAuthenticatedPush` (unset, a value
+`git config --bool` reads as false, anything else): admit when every new
+or changed record was authenticated; otherwise refuse unless `s` is the
+explicit false, then warn and admit.
+
+**The selection of publication checks.** Every check that reads the
+staged or a commit's attributes asks Git twice: with every local source
+(the effective attributes), and with only the policy's `.gitattributes`
+files in an isolated Git directory (no `info/attributes`, no config, no
+global or system attributes, no `GIT_ATTR_SOURCE` or `GIT_CONFIG_*`). A
+path is protected when `admission_selected(committed, effective)`, that
+is, when either selects it. The `transcrypt` macro must resolve both ways.
 
 ## Machine checkability and implementation correspondence
 

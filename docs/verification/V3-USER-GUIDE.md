@@ -293,17 +293,30 @@ catch this:
 
 - The `pre-push` hook installed by `init`/`unlock` audits every commit you
   push, including merges, rebases and `--no-verify` commits. A merge commit
-  is also verified before it is made (`pre-merge-commit`). It warns only
-  when a pushed record actually could not be authenticated: the checkout is
-  locked, or the push carries history from before a `rekey`, whose key you
-  no longer have, **and** a pushed commit changes a protected file or adds a
-  record of its configuration at an unprotected path. It then still checks
-  every envelope, and warns that it did no more. A commit that needs no key
-  (say, a locked checkout pushing edits to unprotected files only) pushes
-  without a warning. To refuse the pushes that warn instead, set
-  `git config transcrypt.requireAuthenticatedPush true`. A pushed tag that
-  names a tree or a blob instead of a commit is refused: its files could
-  not be audited.
+  is also verified before it is made (`pre-merge-commit`). **It refuses a
+  push whose new or changed protected records it cannot authenticate**:
+  the checkout is locked, or the push carries history from before a
+  `rekey` that the remote does not have yet (whose key you no longer have),
+  **and** a pushed commit changes a protected file or adds a record of its
+  configuration at an unprotected path. The message says the key is
+  missing; unlock and push again. (Push your branches before a `rekey`, or
+  their older commits can only be pushed with the opt-out below.) A record
+  that does not authenticate with the key is refused as such. A commit that
+  needs no key (say, a locked checkout pushing edits to unprotected files
+  only) pushes as usual, and so does a new tag or branch whose history the
+  remote already has: the hook asks the remote which commits it has
+  (`git ls-remote` on the push URL) and does not audit those, since Git
+  does not send them. Your remote-tracking refs (`origin/main` and the
+  like) are never trusted: they are local refs and can be stale or wrong.
+  A pushed tag that names a tree or a blob instead of a commit is refused:
+  its files could not be audited.
+- **The opt-out.** `git -c transcrypt.requireAuthenticatedPush=false push
+  ...` (or the same in `git config`) pushes such records after checking
+  only their envelope, with a warning. An envelope is no authentication:
+  this **publishes a record with plaintext appended to it** (made, say,
+  by editing a locked file), and a forged one. Use it only for history
+  you have checked another way, for example old commits from before a
+  `rekey`.
 - `transcrypt-rs audit <rev-list arguments>` needs no key. Run it in CI or a
   server hook to refuse plaintext from any checkout. Each commit is judged
   by its own `.gitattributes`. Without the key, the audit checks that every
@@ -378,11 +391,15 @@ secrets themselves. Multiple v2 contexts become one v3 passphrase.
   `unlock`, or a server without `transcrypt-rs audit` is not checked. If
   `core.hooksPath` is set, Git ignores `.git/hooks`; `status` and `doctor`
   warn.
-- **Local attribute files apply.** A `filter` rule in
-  `.git/info/attributes` or your global attributes file can unprotect files
-  in this checkout only. `doctor` reports it, the pre-commit hook warns, and
-  a server-side audit (which uses the committed rules) still refuses the
-  plaintext.
+- **Local attribute files cannot unprotect a committed rule.** A `filter`
+  rule in `.git/info/attributes` (or a redefined `transcrypt` macro there,
+  or `GIT_ATTR_SOURCE`) can stop Git's own filter from encrypting a file
+  that the committed `.gitattributes` protect. The checks do not follow
+  it: they protect what the committed rules protect, plus anything a local
+  file adds. The pre-commit hook encrypts such a file before it is
+  committed (or refuses, naming a broken macro), and the push refuses a
+  plaintext commit made with `--no-verify`. `doctor` still reports such
+  files.
 - **Records at unprotected names.** With the key, `verify-index`, `lock`,
   `rekey`, `doctor` and any commit that changes a `.gitattributes` file or
   `.transcrypt/config` refuse a record of this repository at a name nothing
@@ -467,12 +484,13 @@ specification:
   exactly what `rekey` found (the staged entries it changed, the config,
   the key, locked files) and leaves every other staged change, including
   changes that exist only in the index, exactly as you left it;
-- that every commit `git push` sends after the pre-push hook accepted it
-  holds only v3 records at the paths its own attributes select, assuming
-  Git sends what its push protocol says and that what the remote already
-  has was itself checked. Your remote-tracking refs (`origin/main` and the
-  like) are not trusted: they are local refs and can be stale or wrong, so
-  pushing a new branch audits its whole history.
+- that in every commit `git push` sends after the pre-push hook accepted
+  it, every file its committed `.gitattributes` protect holds a v3 record
+  that authenticates at its path, whatever your local attribute files say,
+  assuming Git sends what its push protocol says and that what the remote
+  already has was itself checked. With
+  `transcrypt.requireAuthenticatedPush=false`, only that each such file has
+  a record's envelope.
 
 The last three are proved about models of the commands' steps, which the
 programs follow (checked by killing them at every step, not proved).
@@ -480,7 +498,11 @@ programs follow (checked by killing them at every step, not proved).
 These guarantees assume:
 - the cryptographic primitives behave as AES-SIV, SHA-256 and the profile's
   key derivation (Argon2id, scrypt or PBKDF2), as implemented by RustCrypto;
-- Git evaluates attributes and invokes the filters as documented;
+- Git evaluates attributes and invokes the filters as documented, including
+  its evaluation of the committed `.gitattributes` alone in the isolated
+  directory the checks use;
+- the remote answers the hook's `git ls-remote` with the refs it shows the
+  push itself;
 - the unverified Git/OS adapter follows the modeled steps.
 
 Not proved, only tested:

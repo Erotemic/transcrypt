@@ -79,6 +79,23 @@ system, you must also run the `--upgrade` command in each repository:
 
 ### Fixed
 
+- Experimental v3 (H-99): a local attribute source (`.git/info/attributes`,
+  a redefined `transcrypt` macro there, `GIT_ATTR_SOURCE`) no longer
+  unprotects a file that the committed `.gitattributes` protect. Git's
+  filter may still skip it, but the pre-commit hook encrypts it (or refuses
+  a broken macro) and the push refuses a plaintext commit made with the
+  hooks bypassed: checks protect what the committed policy, evaluated by
+  Git without any local source, or the local sources protect. Both clients.
+- Experimental v3 (H-100): **authenticated pushes are the default.** The
+  pre-push hook refuses new or changed protected records it cannot
+  authenticate (a locked checkout, or commits from before a `rekey` that
+  the remote lacks), instead of warning; locked, plaintext appended to a
+  record was pushed that way. `git -c transcrypt.requireAuthenticatedPush=false
+  push` restores the old behavior for one push: it checks only envelopes,
+  which accepts a record with plaintext appended. The hook now also asks
+  the push URL which commits the remote has (`git ls-remote`) and does not
+  audit those, so new tags and branches of published history push as
+  before. Both clients.
 - Experimental v3 (H-98): the pre-push hook no longer excludes commits on
   the remote's tracking refs (`--not --remotes=<name>`) from its audit. A
   tracking ref is a local ref: one planted by hand, or left stale after the

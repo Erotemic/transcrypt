@@ -313,8 +313,8 @@ Bash 5.2):
 - `cargo test --workspace` (Rust, all suites incl. `portable_vectors.rs`),
   `cargo clippy --workspace --all-targets -D warnings`;
 - `python3 tests/v3/reference/portable_vectors.py` (independent vectors);
-- `bash tests/v3/bash/test_reference.sh` (33 checks, Bash alone);
-- `bash tests/v3/conformance/run.sh` (30 checks, Bash vs Rust);
+- `bash tests/v3/bash/test_reference.sh` (35 checks, Bash alone);
+- `bash tests/v3/conformance/run.sh` (32 checks, Bash vs Rust);
 - `bash tests/v3/conformance/lifecycle.sh` (rebase, cherry-pick and stash
   across clients; `init`, `rekey`, `rekey --continue`, `rekey --abort`,
   `lock`, `unlock` and `migrate` of both clients killed or failing at
@@ -357,7 +357,9 @@ Bash 5.2):
 | Interrupted `init`, `rekey`, `rekey --continue`, `rekey --abort`, `lock`, `unlock`, `migrate` (SIGKILL or a failing call at every `git`/`openssl` call): no plaintext in Git, a pushed remote or `$TMPDIR`; rerun completes `init` (with its recorded patterns, even when the rerun names none)/`migrate`/`lock`/`unlock`; the rekey journal is finished or undone by either client, keeping unrelated index-only changes exactly | yes | yes | lifecycle 7–20; bash 28–31; review H-88 to H-96; proved (model) for the shared decisions, `V3Policy/Interruption.lean` |
 | Damaged or removed key file, wrong passphrase | yes | yes | lifecycle 21–22 |
 | Pre-push refuses a pushed tag of a tree or blob; what an admitted push sends is proved (model) to hold only v3 records at protected paths (`Publication.lean`) | yes | yes | bash 15; `pushes_of_trees_and_blobs_are_refused`; review H-97 |
-| Pre-push trusts no remote-tracking ref (planted, or stale after a URL change): only the remote commits on the hook's stdin bound the audit | yes | yes | bash 32; `remote_tracking_refs_bound_no_push_audit`; review H-98 |
+| Pre-push trusts no remote-tracking ref (planted, or stale after a URL change): only the remote's own answers (the hook's stdin, `ls-remote` on the push URL) bound the audit | yes | yes | bash 32; `remote_tracking_refs_bound_no_push_audit`; review H-98 |
+| Local attribute sources cannot unprotect a committed rule: checks combine the committed policy (isolated `check-attr`) with the effective attributes (`admission_selected`) | yes | yes | bash 33; conformance; `local_attribute_sources_never_unprotect_committed_files`; review H-99 |
+| Authenticated pushes by default: new or changed records the hook cannot authenticate are refused unless `transcrypt.requireAuthenticatedPush=false` (`authenticated_push_required`) | yes | yes | bash 34; conformance; `appended_plaintext_in_a_locked_record_is_never_pushed_by_default`; review H-100 |
 | `--private` agent, zeroization, long-running filter | **Rust-only** (local hardening / performance) | yes | by design |
 
 Known shared limitation: an empty protected file makes `git merge` stop with
@@ -381,7 +383,10 @@ rollback deleting an earlier run's record, Rust) and H-96 (a non-atomic
 config write in Bash recovery), and proving what a push sends found H-97
 (tags of trees or blobs pushed unaudited, both clients), all fixed. An
 external review of that proof found H-98 (both pre-push hooks trusted this
-remote's tracking refs, which a local ref can fake), fixed. Bash
+remote's tracking refs, which a local ref can fake), H-99 (a local
+attribute source unprotected a committed rule) and H-100 (locked, a record
+with plaintext appended was pushed after an envelope check), all fixed in
+both clients. Bash
 performance, 100 protected and 200 other files: `git status` 0.1 s, checkout
 of 10 protected files 1.4 to 1.8 s, `lock`/`unlock` about 16 s (37 s and 27 s
 before the reindex hand-off and single-pass lock, measured back to back),

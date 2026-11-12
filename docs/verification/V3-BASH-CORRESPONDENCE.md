@@ -109,7 +109,9 @@ that they agree (assumption A27; no theorem covers the Bash source):
 | `entry_recovery` | `tc_rekey_resume`: `case ${now[$path]}` (mode and want: done; mode and other: todo; else changed) |
 | `config_recovery` | `tc_rekey_resume`: the `cmp -s` of the worktree config against both configs |
 | `file_recovery` | `tc_rekey_resume`: relock on `cmp` with the replaced record, keep on the wanted one, else the plaintext check |
-| `push_admission` | `tc_cmd_pre_push`: refuse when keyless records needed the key and `transcrypt.requireAuthenticatedPush` is set |
+| `push_admission` | `tc_cmd_pre_push`: refuse when keyless records needed the key (`TC_AUDIT_NEEDS_KEY`) and authenticated pushes are required, else warn |
+| `authenticated_push_required` | `tc_push_required`: required unless `transcrypt.requireAuthenticatedPush` is set and `git config --bool` reads it as `false` |
+| `admission_selected` | `tc_selected` with `--cached`: a path is selected when Git's effective answer or the isolated policy answer (`tc_policy_git`) selects it |
 
 ## Legacy review, retained security guarantees and migration boundary
 

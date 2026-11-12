@@ -91,9 +91,11 @@ A document is not evidence. Only the theorems and tests it names are.
   exact path. This is the only check that stops forged or misplaced records.
 - **Keyless check:** used in a locked checkout, a CI job without the
   passphrase, or a server hook. It looks only at the envelope: the v3
-  header and this configuration's id. That stops plaintext from being
-  published by accident, but a forged envelope with the right header passes
-  (A14).
+  header and this configuration's id. That stops a plain file from being
+  published by accident, but it is not authentication: a forged envelope
+  with the right header passes (A14), and so does a real record with
+  plaintext appended (H-100). The pre-push hook therefore refuses, by
+  default, any new or changed record it could only check this way.
 
 The hook and `verify-index` say which kind of check they ran. Without the
 key they print "checked staged record envelopes only, which does not
@@ -112,7 +114,7 @@ them and any record at an unprotected path"
 no key: one that changes no protected file and adds no record of its
 configuration at an unprotected path (for example, a locked checkout that
 edits only public files). Nothing of it needed opening, so the audit counts
-it as authenticated, and the pre-push hook does not warn about it
+it as authenticated, and the pre-push hook admits it
 (`keyless_audit_needing_no_key_authenticates`). That conclusion trusts the
 adapter's answer to "is this blob a record?" (it reads the blob's size and
 first bytes by object id) and the parents outside the pushed range, as the
@@ -431,7 +433,8 @@ What the graph theorem covers, and what it leaves out:
 - **Keyless epochs.** `Key::load` finds a key only for the configuration
   that the checkout's key file (or agent) holds. One audit run after a
   rekey therefore checks the earlier epochs by envelope only, and says so
-  (`pushes_checked_by_envelope_only_warn_or_refuse_when_required`). The
+  (`pushes_checked_by_envelope_only_are_refused_unless_explicitly_allowed`:
+  the pre-push hook refuses such records by default). The
   authenticated conclusion is restricted to commits whose configuration has
   a validated key. The theorem's keys are stored keys (`StoredKeysUnlocked`).
   The private agent's key is not part of the statement (A6).
@@ -439,33 +442,56 @@ What the graph theorem covers, and what it leaves out:
 ## What a push sends (`Publication.lean`)
 
 The audit theorems above are about the commits an audit walked. What the
-pre-push hook guards is a push, so `push_publishes_no_protected_plaintext`
-states the guarantee about what `git push` actually sends:
+pre-push hook guards is a push, so `push_sends_no_protected_plaintext`
+states the guarantee about what `git push` actually sends, by default:
 
-> If the pre-push hook's audit accepted every commit of its `rev-list`
-> range, then every commit Git sends keeps the record invariant under its
-> own configuration and attributes: with that configuration's key, its
-> records and every selected path authenticate; without it, every selected
-> path has the configuration's envelope. In particular
-> (`push_sends_no_protected_plaintext`) no path a sent commit's own
-> attributes select holds anything but a v3 record.
+> If the pre-push hook admitted a push with
+> `transcrypt.requireAuthenticatedPush` anything but an explicit false
+> (unset included), then in every commit Git sends, every path that the
+> commit's committed `.gitattributes` protect (or a local attribute source
+> protects), unless it is repository metadata, is a regular file whose blob
+> **authenticates at that path** under its configuration's key.
 
-Hypotheses: Git's push contract (A30: Git sends only commits reachable from
-the pushed commits and from no ref the remote advertised that this
-repository has); the audit is of the hook's range with each commit's own
-tree, attributes and configuration (`HookAudit`, A19, A20); and the
-remote's own history was admitted (`RemoteAdmitted`, A13): the commits the
-remote advertised it has, and their ancestors, keep the invariant. The last
-replaces the earlier, weaker form of A13 (any first parent outside the
-range): `boundary_outside` and `knownRemote_advertised` prove that every
-such parent is reachable from a commit the remote advertised, so it is
-already on the remote and Git does not send it. No local ref is trusted: a
-remote-tracking ref, planted or stale after the remote's URL changed, is no
-evidence that the remote has a commit, and the hook no longer excludes
-them (H-98). The hook refuses a pushed tip that is not a commit (H-97),
-which is what lets the statement speak of commits only. With
-`transcrypt.requireAuthenticatedPush`, `push_admission_required` adds that
-the push proceeds only when every protected file was authenticated.
+So plaintext at a protected path is never sent, and neither is a record
+that only looks like one: plaintext appended to a record keeps its
+envelope but does not authenticate (H-100). A local attribute source
+(`.git/info/attributes`, a redefined macro, `GIT_ATTR_SOURCE`, ...) cannot
+unprotect a committed path: the selection the checks use is the committed
+policy's or the local sources', never less (`admissionFilter`,
+`selected_admissionFilter`, `committed_protection_published`; H-99).
+
+Hypotheses:
+- Git's push contract (A30): Git sends only commits reachable from the
+  pushed commits and from no ref the remote advertised that this
+  repository has; the remote answers the hook's `ls-remote` with what it
+  advertised to the push.
+- The audit is of the hook's range with each commit's own tree, attributes
+  and configuration (`HookAudit`, A19, A20); the committed half of the
+  selection is Git's answer for the commit's `.gitattributes` alone (A31),
+  combined by the verified `admission_selected` (`admissionFilter_flag`).
+- The verdict: the adapter reports the run authenticated only when every
+  keyless commit's verified `commit_needs_no_key` answered `true`, and the
+  verified `authenticated_push_required` and `push_admission` decided
+  (`push_dispatch`).
+- The remote's own history authenticates (`RemoteAuthentic`, A13): the
+  commits the remote advertised it has, and their ancestors.
+  `boundary_outside` and `knownRemote_advertised` prove that every parent
+  the audit did not walk is such a commit, which Git does not send. No
+  local ref is trusted: a remote-tracking ref, planted or stale after the
+  remote's URL changed, is no evidence that the remote has a commit
+  (H-98). The hook refuses a pushed tip that is not a commit (H-97).
+
+"Its configuration's key" is this checkout's key when it has one, and
+otherwise the configuration's genuine key (`epochSuite`): a commit whose
+configuration has no key here is admitted only when it needed none (it
+changes no protected record relative to a parent that authenticates), so
+its records authenticate under whatever key genuinely made them.
+
+**The explicit opt-out.** With `transcrypt.requireAuthenticatedPush=false`
+the hook admits, with a warning, records it could not authenticate. Then
+`push_sends_only_records` is all that holds: every protected path of a sent
+commit holds a record with its configuration's envelope. That includes a
+record with plaintext appended, which is what the opt-out accepts.
 
 ## Interrupted commands (`V3Policy/Interruption.lean`)
 

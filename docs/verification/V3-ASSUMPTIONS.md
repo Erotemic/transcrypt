@@ -52,13 +52,13 @@ one.
 | A10 | AES-SIV, Argon2id, scrypt, PBKDF2-HMAC-SHA256, SHA-256 security | ASSUMED (standard) |
 | A11 | A Git object id names exactly one content | ASSUMED (Git's hash) |
 | A12 | File stamps change on modification; v3 processes honor the staging lock | TESTED |
-| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`; a keyless commit that needed no key, `commit_needs_no_key`, authenticates: `keyless_dag_audit_authenticated`): only the boundary remains; for a push PROVED (model) that the boundary is the remote's own history (commits it advertised; no local ref, H-98), and that every commit Git sends keeps the record invariant (`push_publishes_no_protected_plaintext`, with A30) |
+| A13 | History is audited before it reaches others (deployment) | REVIEWED + TESTED; depends on deployment. What a keyed audit of one commit establishes is PROVED (model) (`keyed_audit_authenticates_commit`: records and selection authenticate given the parent's; the per-entry check `audit_check` is source-derived); the keyless audit checks envelopes only (`keyless_audit_checks_envelopes`); over a commit graph with rekeys PROVED (model) (`keyed_dag_audit_authenticated`, `keyless_dag_audit_enveloped`; a keyless commit that needed no key, `commit_needs_no_key`, authenticates: `keyless_dag_audit_authenticated`): only the boundary remains; for a push PROVED (model) that the boundary is the remote's own history (commits it advertised; no local ref, H-98), and that by default every protected path of every commit Git sends authenticates there (`push_sends_no_protected_plaintext`, with A30, A31; the explicit opt-out guarantees envelopes only, `push_sends_only_records`) |
 | A14 | Keyless envelope checks only stop accidental plaintext | ACCEPTED RISK (by design) |
 | A15 | Git creates worktree files with the umask its filters inherit | TESTED (Git 2.43; CI 2.34, Apple Git); private mode only |
 | A16 | Git-attribute selection: every decision uses Git's own answer for the exact path | Parsing PROVED (against the listing's own paths); selection by Git ASSUMED (A19); TESTED end to end |
 | A17 | The stored key is local-only, used only for the config it authenticates and with its own check value, with primitives built from exactly its bytes, and mode-independent | Selection, pairing and the check value PROVED relative to the key-schedule contract (`unlock_stored_key_spec`, `authenticate_key_spec`, `key_check_opens_spec`, `stored_key_binds_file_operations`; `ValidatedKey` is the only file-operation interface); that the check value detects damage to either key half ASSUMED (A10, the cipher's property) and TESTED for every bit; key schedule TESTED (A5); file I/O TESTED + REVIEWED; local-account exposure ACCEPTED RISK (by charter) |
 | A18 | Path-bound renames are re-encrypted for the new path, never laundered | Decision and inputs PROVED (`repair_plan`, `needs_record`, `entry_provenance`, `next_move_source`, `hook_repairs_only_local_changes`, `hook_skips_only_unrepairable`); TESTED (real Git) + REVIEWED |
-| A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local override files ACCEPTED RISK (they can unprotect a file locally); no longer a hypothesis of the A24 history (2026-11-02) |
+| A19 | Git evaluates `filter` the same way for its filters, `check-attr --cached` and a commit's attribute files | TESTED (Git 2.43; CI 2.34); local attribute sources no longer an accepted risk (H-99, 2026-11-12): publication checks combine the committed policy (A31) with them, so they can add protection, never remove it; no longer a hypothesis of the A24 history (2026-11-02) |
 | A20 | Git prints its index and tree listings exactly (`ls-files --stage -z`; `ls-tree -r -z`, rewritten record by record), in byte order of paths, each path once | TESTED; parsing and order PROVED (`parse_listing_spec`: anything else is refused) |
 | A21 | `cat-file --batch` answers the requested object, and the adapter reads exactly the announced content | Header and read decision PROVED (`parse_batch_header_spec`, `blob_read_spec`); content read TESTED |
 | A22 | Git commits the index the pre-commit hook checked last | TESTED; ASSUMED (Git's commit flow) |
@@ -69,7 +69,8 @@ one.
 | A27 | The portable Bash client behaves as the specification and the Rust client | Not proved (Bash source is not verified). TESTED: independent byte vectors, real-Git workflows (`tests/v3/bash/test_reference.sh`), two-way conformance with the Rust client (`tests/v3/conformance/run.sh`), OpenSSL known-answer probes at run time; on OpenSSL 3.0.13 (Ubuntu 24.04) |
 | A28 | Interrupted setups and rekey recoveries: one `transcrypt` process at a time per checkout; each makes its durable writes in the order the models give (`SetupStep`, `Interrupted`), each one atomic (rename; Git's `index.lock`), and only after its own refusals and passphrase check | Decisions PROVED (`setup_record_use_spec`, `entry_recovery_spec`, `config_recovery_spec`, `file_recovery_spec`); the persistence and lossless-recovery theorems PROVED (model) over every interruption point (`interrupted_setup_completes_with_its_policy`, `interrupted_init_completes_with_its_patterns`, `interrupted_rekey_recovers`, `interrupted_rekey_abort_restores`); the adapter's write order TESTED at every Git and OpenSSL call of both clients (`tests/v3/conformance/lifecycle.sh`) + REVIEWED |
 | A29 | The rekey journal names exactly the entries `rekey` replaces, as the index held them (`RekeyStart`), and Git's index update replaces exactly the entries it is given | TESTED (`tests/v3/conformance/lifecycle.sh`: every staged record and both configs compared after `--abort`; `stage_objects` reads the index back) |
-| A30 | Git's push contract: after the pre-push hook succeeds, Git sends only commits reachable from a pushed commit and from no ref the remote advertised that this repository has; the hook is told the remote's current commit of each updated ref | ASSUMED (Git's documented push protocol); TESTED (`pre_push_and_audit_refuse_plaintext_in_history`, `pushes_of_trees_and_blobs_are_refused`, Bash check 14); used by `push_publishes_no_protected_plaintext` (PROVED (model)) |
+| A30 | Git's push contract: after the pre-push hook succeeds, Git sends only commits reachable from a pushed commit and from no ref the remote advertised that this repository has; the hook is told the remote's current commit of each updated ref; the remote answers the hook's `ls-remote` with refs it advertised to the push (no equivocation) | ASSUMED (Git's documented push protocol); TESTED (`pre_push_and_audit_refuse_plaintext_in_history`, `pushes_of_trees_and_blobs_are_refused`, `remote_tracking_refs_bound_no_push_audit`, Bash checks 14, 15, 32) |
+| A31 | Git's `check-attr --cached`, run in an isolated Git directory whose index holds only a policy's `.gitattributes` files (no `info/attributes`, no config, `HOME`/`XDG_CONFIG_HOME` inside it, system attributes and config off, `GIT_ATTR_SOURCE` and `GIT_CONFIG_*` cleared), evaluates exactly those files | TESTED (`local_attribute_sources_never_unprotect_committed_files`, Bash check 33, conformance: `info/attributes`, a redefined macro, a nested override, `GIT_ATTR_SOURCE`, a linked worktree; `core.attributesFile` in the adversarial suite) |
 
 ## Detailed register
 
@@ -528,9 +529,12 @@ one.
 - **Keyless pre-push is visible (2026-11-02; narrowed 2026-11-03).** A
   pre-push audit that could not authenticate every record (locked, or
   history under a configuration whose key is gone after a `rekey`) checked
-  envelopes only; it says so on stderr, and refuses the push when
-  `transcrypt.requireAuthenticatedPush` is set (a value Git cannot read as a
-  boolean counts as set). A commit audited without its configuration's key
+  envelopes only. Since 2026-11-12 (H-100) it refuses such a push unless
+  `transcrypt.requireAuthenticatedPush` is explicitly false (unset, or a
+  value Git cannot read as a boolean, requires authentication: the verified
+  `authenticated_push_required`); explicitly false, it warns and pushes. An
+  envelope is no authentication: plaintext appended to a record keeps it,
+  which is what the opt-out accepts. A commit audited without its configuration's key
   counts as authenticated exactly when its keyed audit would have needed
   the key for nothing: the verified `commit_needs_no_key`, asked once the
   keyless `commit_verdict` accepted, finds every examined entry's keyed
@@ -925,11 +929,20 @@ one.
   `core.ignorecase=false`, so selection never depends on the file system;
   while a v3 config exists, the top-level `.gitattributes` must define the
   `transcrypt` macro (hook, audit, doctor).
-- **Residual (ACCEPTED):** local override files apply only locally: a
-  `filter` rule in `.git/info/attributes` or the global attributes file can
-  unprotect a file in this checkout, so local checks pass while a server
-  audit (without those files) refuses the plaintext. `doctor` fails on such
-  files and the pre-commit hook warns.
+- **Local sources (H-99, 2026-11-12; previously an accepted risk):** a
+  `filter` rule in `.git/info/attributes`, a redefined `transcrypt` macro
+  there, `GIT_ATTR_SOURCE` or `attr.tree` can stop Git's own filter from
+  encrypting a file the committed `.gitattributes` protect. That used to
+  be accepted as an informed user's choice, and the review reproduced the
+  consequence: plaintext committed and pushed with the hooks installed.
+  Every check that reads the staged or a commit's attributes (pre-commit,
+  `verify-index`, `lock`, `audit`, pre-push) now treats a path as
+  protected when the committed policy alone selects it (A31) or the
+  effective attributes do (the verified `admission_selected`). Git's
+  filter may still stage plaintext in this checkout; the pre-commit hook
+  encrypts it (or, for a broken macro, refuses), and the push refuses a
+  plaintext commit made with the hooks bypassed. What `git add` applies to
+  a new file (`init`, `protect`) is still Git's effective answer.
 - **Not a hypothesis of the history (2026-11-02):** the history
   theorem used to assume Git's selection a fixed function of the committed
   policy entries (`SelectionByPolicy`), which `.git/info/attributes`,
@@ -939,7 +952,8 @@ one.
   contract and its exclusion of local sources are gone. Each run still
   takes `GitAttributes` (its `check-attr --cached` answer is the selection
   Git's filters apply), which local sources do not affect.
-- **Status:** TESTED; overrides ACCEPTED RISK (an informed user's choice).
+- **Status:** TESTED; local sources cannot remove protection from
+  publication checks (A31).
 
 ### A20 — Git's listings (new)
 
@@ -1272,18 +1286,50 @@ replaces exactly the entries given (Rust reads the index back and checks).
 What `git push` sends after its pre-push hook succeeded: the commits
 reachable from the pushed commits and from no ref the remote advertised
 that this repository has (`PushContract`). The hook is given, for each
-updated ref, the remote's current commit; the adapter excludes it from the
-audit only when this repository has it. A pushed tip that is no commit (a
-tag of a tree or blob) is refused by both clients, so every object sent
-belongs to a sent commit (or is a tag object). No local ref bounds the
-audit: a remote-tracking ref is no evidence that the remote has a commit
-(H-98). With A13 for the remote's own history only (`RemoteAdmitted`: the
-commits the remote advertised and their ancestors, already public and not
-sent), `push_publishes_no_protected_plaintext` proves that every commit
-sent keeps the record invariant. If the remote's own history breaks the
-invariant (it was pushed with `--no-verify` and the remote runs no
-`pre-receive` audit), a new commit that keeps such a file unchanged is not
-re-examined; that file is already public.
+updated ref, the remote's current commit, and asks the push URL itself
+(`git ls-remote`, Git passes the URL to the hook) for every commit the
+remote has; the adapter excludes those this repository has. The contract
+assumes the remote answers that `ls-remote` with refs it advertised to the
+push. A remote that equivocates could have the hook skip a commit Git then
+sends, but only one whose id it already knows. If the remote cannot be
+asked without a prompt (offline, credentials), nothing is excluded (the
+whole history of the pushed commits is audited). A pushed tip that is no
+commit (a tag of a tree or blob) is refused by both clients, so every
+object sent belongs to a sent commit (or is a tag object). No local ref
+bounds the audit: a remote-tracking ref is no evidence that the remote has
+a commit (H-98). With A13 for the remote's own history only
+(`RemoteAuthentic`: the commits the remote advertised and their ancestors,
+already public and not sent, authenticate under their configuration's
+key), `push_sends_no_protected_plaintext` proves that by default every
+protected path of every sent commit authenticates there; under the explicit
+opt-out, `push_sends_only_records` proves only that it holds a record
+envelope. If the remote's own history breaks the invariant (it was pushed
+with `--no-verify` or with the opt-out and the remote runs no `pre-receive`
+audit), a new commit that keeps such a file unchanged is not re-examined;
+that file is already public.
+
+### A31 — Git's attribute evaluation of a policy alone (new, 2026-11-12)
+
+- **Claim:** `git check-attr --cached`, run in an isolated Git directory
+  (`Policy` in `checkattr.rs`; Bash `tc_policy_git`) whose index holds only
+  a policy's `.gitattributes` files (a commit's, or the staged ones), with
+  no `info/attributes`, no config, `HOME` and `XDG_CONFIG_HOME` inside it
+  (so no global attributes file), `GIT_CONFIG_NOSYSTEM`,
+  `GIT_ATTR_NOSYSTEM`, and `GIT_ATTR_SOURCE` and `GIT_CONFIG_*` cleared,
+  evaluates exactly those files, with Git's own matching, nesting and
+  macros. v3 still never parses a pattern.
+- **Trust boundary:** Git (`attr.c`, environment handling).
+- **Consequence if false:** a local attribute source could weaken the
+  committed policy in publication checks again (H-99).
+- **Evidence:** TESTED on Git 2.43 with `.git/info/attributes`, a
+  redefined macro there, a nested override, `GIT_ATTR_SOURCE`, a linked
+  worktree (`local_attribute_sources_never_unprotect_committed_files`, Bash
+  check 33, conformance) and `core.attributesFile` (adversarial suite).
+- **Decision:** the combination is the verified `admission_selected`
+  (`admission_selected_spec`: committed or effective), connected to the
+  publication model by `admissionFilter_flag`; `committed_protection_published`
+  is the publication theorem for committed paths.
+- **Status:** TESTED (Git's evaluation); decision PROVED.
 
 ## Ranked unresolved risks and *product* opportunities
 
