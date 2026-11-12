@@ -15,7 +15,17 @@ RS=${1:-${TRANSCRYPT_RS:-$ROOT/rust/target/release/transcrypt-rs}}
 [[ -x $RS ]] || { echo "missing $RS: run (cd rust && cargo build --release) or pass the binary" >&2; exit 2; }
 RS=$(cd -- "$(dirname -- "$RS")" && pwd -P)/$(basename -- "$RS")
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/transcrypt-conformance.XXXXXXXX")
-[[ -n ${KEEP-} ]] || [[ -n ${KEEP-} ]] || trap 'rm -rf -- "$SCRATCH"' EXIT
+[[ -n ${KEEP-} ]] || trap 'rm -rf -- "$SCRATCH"' EXIT
+# Independent of the caller's Git configuration (default branch name, commit
+# signing, hooksPath, pull.rebase, ...): every run has its own empty global
+# config and no system config. The branch name is a variable throughout;
+# TRANSCRYPT_TEST_BRANCH picks it (CI runs a non-default one).
+export HOME=$SCRATCH/home GIT_CONFIG_NOSYSTEM=1
+unset XDG_CONFIG_HOME GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS \
+    GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES
+mkdir -p "$HOME"
+BRANCH=${TRANSCRYPT_TEST_BRANCH:-main}
+git config --global init.defaultBranch "$BRANCH"
 PASS=0
 ok() { PASS=$((PASS + 1)); printf 'ok %d - %s\n' "$PASS" "$*"; }
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -49,7 +59,7 @@ seed() {
         printf '%s\n' "$P1" | rs_ init --password-stdin "--profile=$profile" '*.env' 'raw/**'
     fi
     git commit -qm 'enable v3'
-    remote "$name"; git push -q "$SCRATCH/$name.git" master 2>/dev/null
+    remote "$name"; git push -q "$SCRATCH/$name.git" "$BRANCH" 2>/dev/null
 }
 # Every protected file at HEAD authenticates with both clients' audits.
 audits() {
@@ -84,9 +94,9 @@ for profile in scrypt pbkdf2; do
         git mv 'sub dir/clé.env' 'sub dir/moved.env'
         git commit -qm "edit and rename by $second"
         audits HEAD
-        git push -q origin master 2>/dev/null
+        git push -q origin "$BRANCH" 2>/dev/null
         cd "$SCRATCH/$name-seed"
-        git pull -q --no-rebase "$SCRATCH/$name.git" master 2>/dev/null
+        git pull -q --no-rebase "$SCRATCH/$name.git" "$BRANCH" 2>/dev/null
         [[ $(cat .env) == API_KEY=2 && $(cat 'sub dir/moved.env') == 'unicode ✓' ]] || die "$name: $first could not read $second's commit"
         [[ -z $(git status --porcelain) ]] || die "$name: $first's checkout not clean after pull"
         ok "$profile: $second edits and renames (re-encrypted for the new path by its hook), $first pulls and reads it; both audits pass"
@@ -95,9 +105,9 @@ for profile in scrypt pbkdf2; do
         # file makes `git merge` die with "stash failed": a Git bug with any
         # clean filter that maps empty to non-empty content; see the guide.)
         git rm -qf empty.env
-        printf 'line1\nline2\nline3\n' >notes.env; git add notes.env; git commit -qm notes; git push -q "$SCRATCH/$name.git" master
-        cd "$SCRATCH/$name-a"; git pull -q --no-rebase origin master 2>/dev/null
-        printf 'line1\nline2 by second\nline3\n' >notes.env; git commit -qam "second's edit"; git push -q origin master:side 2>/dev/null
+        printf 'line1\nline2\nline3\n' >notes.env; git add notes.env; git commit -qm notes; git push -q "$SCRATCH/$name.git" "$BRANCH"
+        cd "$SCRATCH/$name-a"; git pull -q --no-rebase origin "$BRANCH" 2>/dev/null
+        printf 'line1\nline2 by second\nline3\n' >notes.env; git commit -qam "second's edit"; git push -q origin "$BRANCH":side 2>/dev/null
         cd "$SCRATCH/$name-seed"
         printf 'line1\nline2\nline3\nline4 by first\n' >notes.env; git commit -qam "first's edit"
         git fetch -q "$SCRATCH/$name.git" side
@@ -116,7 +126,7 @@ for profile in scrypt pbkdf2; do
         ok "$profile: one checkout switches clients without re-unlocking or re-encrypting"
 
         # Rekey by the second client; the first must unlock again.
-        cd "$SCRATCH/$name-a"; git pull -q --no-rebase "$SCRATCH/$name-seed" master 2>/dev/null
+        cd "$SCRATCH/$name-a"; git pull -q --no-rebase "$SCRATCH/$name-seed" "$BRANCH" 2>/dev/null
         printf '%s\n' "$P2" | "${second}_" rekey --password-stdin
         git commit -qm "rekey by $second"
         git push -q "$SCRATCH/$name.git" HEAD:rekeyed 2>/dev/null
@@ -187,7 +197,7 @@ for client in sh rs; do
     git update-index --cacheinfo "100644,$bad,.env"
     if "$bin" verify-index >/dev/null 2>&1; then die "$client: tampered record accepted"; fi
     if git -c core.hooksPath=/dev/null commit -qm tampered >/dev/null 2>&1 && "$bin" audit HEAD >/dev/null 2>&1; then die "$client: audit accepted a tampered commit"; fi
-    git reset -q --hard origin/master 2>/dev/null
+    git reset -q --hard "origin/$BRANCH" 2>/dev/null
     # An unknown profile byte: refused before anything changes.
     { head -c 6 .transcrypt/config; printf '\x07'; tail -c +8 .transcrypt/config; } >"$SCRATCH/cfg7"
     cp "$SCRATCH/cfg7" .transcrypt/config
@@ -206,9 +216,9 @@ for client in sh rs; do
     git -c filter.transcrypt-v3.clean=cat -c filter.transcrypt-v3.process= -c filter.transcrypt-v3.required=false add .env
     git -c core.hooksPath=/dev/null commit -qm 'plaintext, hooks bypassed'
     printf 'fixed\n' >.env; git add .env; git commit -qm fixed
-    if git push -q origin master 2>/dev/null; then die "$client: pre-push accepted an intermediate plaintext commit"; fi
-    if "$SH" audit origin/master..HEAD >/dev/null 2>&1; then die 'Bash audit missed the plaintext commit'; fi
-    if "$RS" audit origin/master..HEAD >/dev/null 2>&1; then die 'Rust audit missed the plaintext commit'; fi
+    if git push -q origin "$BRANCH" 2>/dev/null; then die "$client: pre-push accepted an intermediate plaintext commit"; fi
+    if "$SH" audit "origin/$BRANCH"..HEAD >/dev/null 2>&1; then die 'Bash audit missed the plaintext commit'; fi
+    if "$RS" audit "origin/$BRANCH"..HEAD >/dev/null 2>&1; then die 'Rust audit missed the plaintext commit'; fi
     ok "$client: pre-push refuses a plaintext commit hidden behind a later fix; both audits flag it"
 done
 
@@ -224,7 +234,7 @@ for pair in "sh rs" "rs sh"; do
     printf 'old branch\n' >old.env
     git add old.env
     git commit -qm 'old config'
-    git checkout -q master
+    git checkout -q "$BRANCH"
     printf '%s\n' "$P2" | "${first}_" rekey --password-stdin
     git commit -qm rekey
     git checkout -q old -- old.env

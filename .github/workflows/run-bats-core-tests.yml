@@ -168,11 +168,16 @@ jobs:
       - name: Test the portable Bash v3 client (independent vectors, Git workflows)
         # ubuntu-24.04 has OpenSSL 3.0.13 (the portable target), 22.04 3.0.2.
         if: ${{ !cancelled() && runner.os != 'Windows' }}
+        # Neither master nor main: the suites must not depend on the name.
+        env:
+          TRANSCRYPT_TEST_BRANCH: topic/ci
         run: |
           openssl version
           bash tests/v3/bash/test_reference.sh
       - name: Bash/Rust conformance in both directions
         if: ${{ !cancelled() && runner.os != 'Windows' }}
+        env:
+          TRANSCRYPT_TEST_BRANCH: topic/ci
         run: |
           (cd rust && cargo build --locked --release)
           bash tests/v3/conformance/run.sh rust/target/release/transcrypt-rs

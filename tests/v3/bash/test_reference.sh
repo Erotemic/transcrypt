@@ -10,6 +10,16 @@ CLI=$SOURCE_ROOT/contrib/v3/transcrypt-bash
 VECTORS=$SOURCE_ROOT/tests/v3/reference/portable-vectors.tsv
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/transcrypt-bash-test.XXXXXXXX")
 trap 'rm -rf -- "$SCRATCH"' EXIT
+# Independent of the caller's Git configuration (default branch name, commit
+# signing, hooksPath, pull.rebase, ...): every run has its own empty global
+# config and no system config. The branch name is a variable throughout;
+# TRANSCRYPT_TEST_BRANCH picks it (CI runs a non-default one).
+export HOME=$SCRATCH/home GIT_CONFIG_NOSYSTEM=1
+unset XDG_CONFIG_HOME GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS \
+    GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES
+mkdir -p "$HOME"
+BRANCH=${TRANSCRYPT_TEST_BRANCH:-main}
+git config --global init.defaultBranch "$BRANCH"
 PASS=0
 ok() { PASS=$((PASS + 1)); printf 'ok %d - %s\n' "$PASS" "$*"; }
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -145,13 +155,13 @@ ok 'lock refuses (and keeps) uncommitted edits'
 # Merge of protected files: clean, and conflicted with markers.
 git checkout -q -b side
 printf 'a\nb\nc\nside\n' >m.env; git add m.env; git commit -qm 'm base'
-git checkout -q master; git merge -q side
+git checkout -q "$BRANCH"; git merge -q side
 git checkout -q side; printf 'a\nB\nc\nside\n' >m.env; git commit -qam side-edit
-git checkout -q master; printf 'a\nb\nc\nside\nmaster\n' >m.env; git commit -qam master-edit
+git checkout -q "$BRANCH"; printf 'a\nb\nc\nside\nmaster\n' >m.env; git commit -qam master-edit
 git merge -q side -m merge 2>/dev/null
 [[ $(cat m.env) == $'a\nB\nc\nside\nmaster' ]] || die 'clean merge of a protected file'
 git checkout -q side; printf 'x\n' >m.env; git commit -qam side-x
-git checkout -q master; printf 'y\n' >m.env; git commit -qam master-y
+git checkout -q "$BRANCH"; printf 'y\n' >m.env; git commit -qam master-y
 if git merge -q side 2>/dev/null; then die 'conflict expected'; fi
 grep -q '<<<<<<< ours' m.env || die 'conflict markers missing in the worktree'
 [[ $(git cat-file blob :2:m.env | head -c 4) == TV3F ]] || die 'conflict stage not encrypted'
@@ -171,12 +181,12 @@ ok 'rekey --profile=pbkdf2 converts and re-encrypts; old commits audit keylessly
 # Push: an intermediate plaintext commit is refused even after a fix.
 git init -q --bare "$SCRATCH/remote.git"
 git remote add origin "$SCRATCH/remote.git"
-git push -q origin master 2>/dev/null
+git push -q origin "$BRANCH" 2>/dev/null
 printf 'leak\n' >two.env
 git -c filter.transcrypt-v3.clean=cat -c filter.transcrypt-v3.required=false add two.env
 git -c core.hooksPath=/dev/null commit -qm 'unsafe, hooks bypassed'
 printf 'fixed\n' >two.env; git add two.env; git commit -qm fixed
-if git push -q origin master 2>"$SCRATCH/push.log"; then die 'pre-push accepted an intermediate plaintext commit'; fi
+if git push -q origin "$BRANCH" 2>"$SCRATCH/push.log"; then die 'pre-push accepted an intermediate plaintext commit'; fi
 grep -q 'refusing to push' "$SCRATCH/push.log" || die 'pre-push refusal message'
 git reset -q --hard HEAD~2
 ok 'pre-push refuses a plaintext commit hidden behind a later fix'
@@ -188,7 +198,7 @@ git commit -qm unprotect
 ok 'unprotect stages plaintext'
 
 # Fresh clone: install, unlock, files decrypt; a missing key keeps records.
-git push -q origin master 2>/dev/null
+git push -q origin "$BRANCH" 2>/dev/null
 git clone -q "$SCRATCH/remote.git" "$SCRATCH/clone" 2>/dev/null
 cd "$SCRATCH/clone"
 git config user.email t@example.invalid; git config user.name Test
@@ -277,7 +287,7 @@ git checkout -q -b old
 printf 'from the old branch\n' >old.env
 git add old.env
 git commit -qm 'old config'
-git checkout -q master
+git checkout -q "$BRANCH"
 printf 'rekey passphrase number two\n' | "$CLI" rekey --password-stdin 2>/dev/null
 git commit -qm rekey
 # Staging the old branch's file brings its record, of the earlier config.
@@ -290,9 +300,9 @@ git commit -qm 'brought forward'
 ok 'reencrypt re-encrypts a record of an earlier config under the current one'
 # Bare repositories audit (server-side hooks); --max-commits refuses.
 git init -q --bare "$SCRATCH/policy.git"
-git push -q "$SCRATCH/policy.git" master 2>/dev/null
-(cd "$SCRATCH/policy.git" && "$CLI" audit master >/dev/null 2>"$SCRATCH/err") || die "audit in a bare repository: $(cat "$SCRATCH/err")"
-if (cd "$SCRATCH/policy.git" && "$CLI" audit --max-commits=1 master >/dev/null 2>&1); then die '--max-commits did not refuse'; fi
+git push -q "$SCRATCH/policy.git" "$BRANCH" 2>/dev/null
+(cd "$SCRATCH/policy.git" && "$CLI" audit "$BRANCH" >/dev/null 2>"$SCRATCH/err") || die "audit in a bare repository: $(cat "$SCRATCH/err")"
+if (cd "$SCRATCH/policy.git" && "$CLI" audit --max-commits=1 "$BRANCH" >/dev/null 2>&1); then die '--max-commits did not refuse'; fi
 ok 'audit runs in a bare repository; --max-commits refuses larger ranges'
 
 # ---------------------------------------------------------------------------
@@ -315,7 +325,7 @@ rm new.env
 git checkout -q -b side
 printf 'SECRET=side\n' >secret.env
 git commit -qam side
-git checkout -q master
+git checkout -q "$BRANCH"
 printf 'SECRET=master\n' >secret.env
 git commit -qam master
 git merge -q side >/dev/null 2>&1 || true
@@ -338,7 +348,7 @@ ok 'lock refuses untracked, conflicted and stale-key plaintext without changing 
 git checkout -q -b pre HEAD~3
 printf 'more\n' >>pub.txt
 git commit -qam 'unprotected edit before v3' || die 'commit on a pre-v3 branch'
-git checkout -q master
+git checkout -q "$BRANCH"
 ok 'commits on a branch from before init are accepted when nothing is protected'
 # A forged record at an unprotected path that HEAD holds fails verify-index.
 { head -c 22 secret.env 2>/dev/null; git show HEAD:secret.env | head -c 22; } >/dev/null
