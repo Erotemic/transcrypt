@@ -2446,5 +2446,190 @@ pub fn derive_config_key<K: V3Kdf>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Interrupted commands: the setup record and the rekey journal
+// ---------------------------------------------------------------------------
+
+/// The command a setup record (`.git/transcrypt-v3-setup`) is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupKind {
+    Init,
+    Migrate,
+}
+
+/// Whether two setup kinds are the same command.
+pub fn same_setup_kind(a: SetupKind, b: SetupKind) -> bool {
+    match a {
+        SetupKind::Init => match b {
+            SetupKind::Init => true,
+            SetupKind::Migrate => false,
+        },
+        SetupKind::Migrate => match b {
+            SetupKind::Init => false,
+            SetupKind::Migrate => true,
+        },
+    }
+}
+
+/// What `init` or `migrate` does with the setup record it finds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordUse {
+    /// No record that still binds: protect what this run was asked to.
+    Fresh,
+    /// Protect what this run was asked to and everything recorded.
+    Merge,
+    /// The record is another command's setup, unfinished or not yet
+    /// committed: refused (rerun that command, or start over).
+    OtherSetup,
+    /// Resuming a setup that left no record, and asked to protect nothing:
+    /// refused, since what the setup was to protect is unknown.
+    Unrecorded,
+}
+
+/// What a run of `kind` does with the setup record. `resuming`: this
+/// checkout has `.transcrypt` but `HEAD` has no config (an earlier setup
+/// was interrupted, or finished and is not yet committed); `recorded`: the
+/// record exists, of `recorded_kind`, finished (`recorded_complete`) or
+/// not; `named`: this run was asked to protect something.
+///
+/// A record binds every later run until its setup is finished and the
+/// checkout no longer holds it: so a setup interrupted at any point is
+/// resumed with at least what it was asked to protect, and only by the same
+/// command. Only an operator's start over (which removes the record)
+/// releases it.
+pub fn setup_record_use(
+    kind: SetupKind,
+    resuming: bool,
+    recorded: bool,
+    recorded_kind: SetupKind,
+    recorded_complete: bool,
+    named: bool,
+) -> RecordUse {
+    if !recorded {
+        if resuming && !named {
+            return RecordUse::Unrecorded;
+        }
+        return RecordUse::Fresh;
+    }
+    if !resuming && recorded_complete {
+        return RecordUse::Fresh;
+    }
+    if same_setup_kind(kind, recorded_kind) {
+        RecordUse::Merge
+    } else {
+        RecordUse::OtherSetup
+    }
+}
+
+/// Where an index entry that an interrupted rekey journaled stands, for a
+/// recovery that ends at `want` (`rekey --continue`: the new object;
+/// `--abort`: the old one) from `from` (the other one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryRecovery {
+    /// Already `want`: nothing to do.
+    Done,
+    /// Still `from`: to be staged as `want`.
+    Todo,
+    /// Anything else (removed, another mode or another object): changed
+    /// since the rekey, so the recovery is refused and changes nothing.
+    Changed,
+}
+
+/// Classify a journaled index entry. `staged`: the index holds a stage-0
+/// entry at the journaled path with the journaled mode, with object id
+/// `oid`. `want` and `from` are the journal's two object ids.
+pub fn entry_recovery(staged: bool, oid: &[u8], want: &[u8], from: &[u8]) -> EntryRecovery {
+    if !staged {
+        return EntryRecovery::Changed;
+    }
+    if bytes_eq(oid, want) {
+        return EntryRecovery::Done;
+    }
+    if bytes_eq(oid, from) {
+        return EntryRecovery::Todo;
+    }
+    EntryRecovery::Changed
+}
+
+/// Where the worktree `.transcrypt/config` stands for a recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigRecovery {
+    /// Already the config the recovery ends with.
+    Done,
+    /// Missing, or the other config: to be written.
+    Write,
+    /// Anything else: changed since the rekey; the recovery is refused.
+    Changed,
+}
+
+/// Classify the worktree config: `present` with bytes `worktree`, for a
+/// recovery that ends with config `want` from config `from`.
+pub fn config_recovery(present: bool, worktree: &[u8], want: &[u8], from: &[u8]) -> ConfigRecovery {
+    if !present {
+        return ConfigRecovery::Write;
+    }
+    if bytes_eq(worktree, want) {
+        return ConfigRecovery::Done;
+    }
+    if bytes_eq(worktree, from) {
+        return ConfigRecovery::Write;
+    }
+    ConfigRecovery::Changed
+}
+
+/// What a recovery does with the worktree file at a journaled path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileRecovery {
+    /// It is exactly the record being replaced (a locked file): it becomes
+    /// the record the recovery ends with.
+    Relock,
+    /// It is already that record: nothing to do.
+    Keep,
+    /// Anything else (plaintext, or the user's edit) is never written; it
+    /// is only re-indexed if it is the plaintext of that record.
+    Check,
+}
+
+/// Classify a journaled worktree file `worktree` against the record the
+/// recovery ends with (`want_record`) and the one it replaces
+/// (`from_record`).
+pub fn file_recovery(worktree: &[u8], want_record: &[u8], from_record: &[u8]) -> FileRecovery {
+    if bytes_eq(worktree, from_record) {
+        return FileRecovery::Relock;
+    }
+    if bytes_eq(worktree, want_record) {
+        return FileRecovery::Keep;
+    }
+    FileRecovery::Check
+}
+
+/// The pre-push hook's verdict on an audit that accepted every pushed
+/// commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushAdmission {
+    /// Every protected file was authenticated.
+    Admit,
+    /// Some were checked for their envelope only; the push proceeds with a
+    /// warning.
+    Warn,
+    /// Some were checked for their envelope only and the repository
+    /// requires authenticated pushes.
+    Refuse,
+}
+
+/// The verdict for an accepted audit: `authenticated` whether it
+/// authenticated every protected file (or needed no key), `required`
+/// whether `transcrypt.requireAuthenticatedPush` is set (any value but an
+/// explicit false).
+pub fn push_admission(authenticated: bool, required: bool) -> PushAdmission {
+    if authenticated {
+        return PushAdmission::Admit;
+    }
+    if required {
+        return PushAdmission::Refuse;
+    }
+    PushAdmission::Warn
+}
+
 #[cfg(test)]
 mod tests;

@@ -1389,3 +1389,69 @@ fn audit_checks_match_their_definition() {
         }
     }
 }
+
+/// `setup_record_use` on every combination: no record refuses only a
+/// resumption asked to protect nothing; a finished record binds only while
+/// its setup is still in this checkout; a binding record is merged by the
+/// same command and refuses the other.
+#[test]
+fn setup_record_use_matches_its_definition() {
+    let kinds = [SetupKind::Init, SetupKind::Migrate];
+    for kind in kinds {
+        for recorded_kind in kinds {
+            for bits in 0..(1u32 << 4) {
+                let bit = |k: u32| bits & (1 << k) != 0;
+                let (resuming, recorded, complete, named) = (bit(0), bit(1), bit(2), bit(3));
+                let expected = if !recorded {
+                    if resuming && !named { RecordUse::Unrecorded } else { RecordUse::Fresh }
+                } else if !resuming && complete {
+                    RecordUse::Fresh
+                } else if kind == recorded_kind {
+                    RecordUse::Merge
+                } else {
+                    RecordUse::OtherSetup
+                };
+                assert_eq!(setup_record_use(kind, resuming, recorded, recorded_kind, complete, named), expected);
+                // An unfinished record is never ignored.
+                if recorded && !complete {
+                    assert_ne!(expected, RecordUse::Fresh);
+                }
+            }
+        }
+    }
+}
+
+/// The recovery classifications: an entry is done at `want`, to do at
+/// `from`, changed otherwise (or when not staged with its mode); the
+/// worktree config likewise, a missing one written; a worktree file is
+/// relocked only when it is exactly the replaced record.
+#[test]
+fn recovery_classifications_match_their_definition() {
+    let (want, from, other): (&[u8], &[u8], &[u8]) = (b"aaaa", b"bbbb", b"cccc");
+    for staged in [false, true] {
+        for (oid, expected) in [(want, EntryRecovery::Done), (from, EntryRecovery::Todo), (other, EntryRecovery::Changed)] {
+            let expected = if staged { expected } else { EntryRecovery::Changed };
+            assert_eq!(entry_recovery(staged, oid, want, from), expected);
+        }
+    }
+    assert_eq!(entry_recovery(true, b"aaa", want, from), EntryRecovery::Changed);
+    assert_eq!(config_recovery(false, b"", want, from), ConfigRecovery::Write);
+    assert_eq!(config_recovery(true, want, want, from), ConfigRecovery::Done);
+    assert_eq!(config_recovery(true, from, want, from), ConfigRecovery::Write);
+    assert_eq!(config_recovery(true, other, want, from), ConfigRecovery::Changed);
+    assert_eq!(config_recovery(true, b"", want, from), ConfigRecovery::Changed);
+    assert_eq!(file_recovery(from, want, from), FileRecovery::Relock);
+    assert_eq!(file_recovery(want, want, from), FileRecovery::Keep);
+    assert_eq!(file_recovery(other, want, from), FileRecovery::Check);
+    assert_eq!(file_recovery(b"", want, from), FileRecovery::Check);
+}
+
+/// The pre-push verdict: authenticated pushes are admitted; others warn,
+/// or are refused when authenticated pushes are required.
+#[test]
+fn push_admission_matches_its_definition() {
+    assert_eq!(push_admission(true, false), PushAdmission::Admit);
+    assert_eq!(push_admission(true, true), PushAdmission::Admit);
+    assert_eq!(push_admission(false, false), PushAdmission::Warn);
+    assert_eq!(push_admission(false, true), PushAdmission::Refuse);
+}

@@ -269,3 +269,32 @@ open Transcrypt.V3Verification
 -- Unlocking with a passphrase (model of ValidatedKey::unlock)
 #print axioms unlock_uses_the_profile_key_and_authenticates
 #print axioms init_creates_the_profile_config
+-- Interrupted commands: the setup record (production decision and model)
+#print axioms setup_record_use_spec
+#print axioms setup_record_use_unfinished
+#print axioms Transcrypt.V3Policy.recordUseSpec_unfinished
+#print axioms Transcrypt.V3Policy.recordUseSpec_unrecorded
+#print axioms Transcrypt.V3Policy.owes_step
+#print axioms Transcrypt.V3Policy.interrupted_setup_completes_with_its_policy
+#print axioms Transcrypt.V3Policy.interrupted_init_completes_with_its_patterns
+-- Interrupted commands: the rekey journal (production decisions and model)
+#print axioms entry_recovery_spec
+#print axioms config_recovery_spec
+#print axioms file_recovery_spec
+#print axioms file_recovery_relock
+#print axioms Transcrypt.V3Policy.admissible_iff
+#print axioms Transcrypt.V3Policy.recoverAll_spec
+#print axioms Transcrypt.V3Policy.recoverAll_transition
+#print axioms Transcrypt.V3Policy.interrupted_rekey_recovers
+#print axioms Transcrypt.V3Policy.interrupted_rekey_abort_restores
+#print axioms Transcrypt.V3Policy.interrupted_rekey_abort_restores_exactly
+#print axioms Transcrypt.V3Policy.interrupted_rekey_continue_finishes
+-- Publication: the pre-push verdict and what a push sends
+#print axioms push_admission_spec
+#print axioms push_admission_required
+#print axioms sent_audited_or_tracked
+#print axioms boundary_outside
+#print axioms keyed_boundary_of_published
+#print axioms keyless_boundary_of_published
+#print axioms push_publishes_no_protected_plaintext
+#print axioms push_sends_no_protected_plaintext

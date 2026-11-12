@@ -23,3 +23,5 @@ import V3Wire.Verification.Audit
 import V3Wire.Verification.ProductAssurance
 import V3Wire.Verification.History
 import V3Wire.Verification.UnlockFlow
+import V3Wire.Verification.Recovery
+import V3Wire.Verification.Publication

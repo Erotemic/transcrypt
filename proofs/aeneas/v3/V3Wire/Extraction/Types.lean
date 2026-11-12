@@ -303,4 +303,58 @@ structure V3Kdf (Self : Type) where
   derive : Self → Kdf → Slice Std.U8 → Array Std.U8 32#usize → Array
     Std.U8 64#usize → RustM (Bool × (Array Std.U8 64#usize))
 
+/-- [transcrypt_v3_core::SetupKind]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2455:0-2458:1
+    Visibility: public -/
+@[discriminant isize]
+inductive SetupKind where
+| Init : SetupKind
+| Migrate : SetupKind
+
+/-- [transcrypt_v3_core::RecordUse]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2476:0-2487:1
+    Visibility: public -/
+@[discriminant isize]
+inductive RecordUse where
+| Fresh : RecordUse
+| Merge : RecordUse
+| OtherSetup : RecordUse
+| Unrecorded : RecordUse
+
+/-- [transcrypt_v3_core::EntryRecovery]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2528:0-2536:1
+    Visibility: public -/
+@[discriminant isize]
+inductive EntryRecovery where
+| Done : EntryRecovery
+| Todo : EntryRecovery
+| Changed : EntryRecovery
+
+/-- [transcrypt_v3_core::ConfigRecovery]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2556:0-2563:1
+    Visibility: public -/
+@[discriminant isize]
+inductive ConfigRecovery where
+| Done : ConfigRecovery
+| Write : ConfigRecovery
+| Changed : ConfigRecovery
+
+/-- [transcrypt_v3_core::FileRecovery]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2582:0-2591:1
+    Visibility: public -/
+@[discriminant isize]
+inductive FileRecovery where
+| Relock : FileRecovery
+| Keep : FileRecovery
+| Check : FileRecovery
+
+/-- [transcrypt_v3_core::PushAdmission]
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2609:0-2618:1
+    Visibility: public -/
+@[discriminant isize]
+inductive PushAdmission where
+| Admit : PushAdmission
+| Warn : PushAdmission
+| Refuse : PushAdmission
+
 end transcrypt_v3_core

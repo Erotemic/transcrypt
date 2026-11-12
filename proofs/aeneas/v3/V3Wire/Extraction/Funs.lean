@@ -3959,4 +3959,117 @@ def derive_config_key
       ok (core.result.Result.Err refusal, key1)
   | core.result.Result.Err _ => ok (core.result.Result.Err Refusal.Config, key)
 
+/-- [transcrypt_v3_core::same_setup_kind]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2461:0-2472:1
+    Visibility: public -/
+def same_setup_kind (a : SetupKind) (b : SetupKind) : RustM Bool := do
+  match a with
+  | SetupKind.Init =>
+    match b with
+    | SetupKind.Init => ok true
+    | SetupKind.Migrate => ok false
+  | SetupKind.Migrate =>
+    match b with
+    | SetupKind.Init => ok false
+    | SetupKind.Migrate => ok true
+
+/-- [transcrypt_v3_core::setup_record_use]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2500:0-2522:1
+    Visibility: public -/
+def setup_record_use
+  (kind : SetupKind) (resuming : Bool) (recorded : Bool)
+  (recorded_kind : SetupKind) (recorded_complete : Bool) (named : Bool) :
+  RustM RecordUse
+  := do
+  if recorded
+  then
+    if resuming
+    then
+      let b ← same_setup_kind kind recorded_kind
+      if b
+      then ok RecordUse.Merge
+      else ok RecordUse.OtherSetup
+    else
+      if recorded_complete
+      then ok RecordUse.Fresh
+      else
+        let b ← same_setup_kind kind recorded_kind
+        if b
+        then ok RecordUse.Merge
+        else ok RecordUse.OtherSetup
+  else
+    if resuming
+    then if named
+         then ok RecordUse.Fresh
+         else ok RecordUse.Unrecorded
+    else ok RecordUse.Fresh
+
+/-- [transcrypt_v3_core::entry_recovery]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2541:0-2552:1
+    Visibility: public -/
+def entry_recovery
+  (staged : Bool) (oid : Slice Std.U8) (want : Slice Std.U8)
+  («from» : Slice Std.U8) :
+  RustM EntryRecovery
+  := do
+  if staged
+  then
+    let b ← bytes_eq oid want
+    if b
+    then ok EntryRecovery.Done
+    else
+      let b1 ← bytes_eq oid «from»
+      if b1
+      then ok EntryRecovery.Todo
+      else ok EntryRecovery.Changed
+  else ok EntryRecovery.Changed
+
+/-- [transcrypt_v3_core::config_recovery]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2567:0-2578:1
+    Visibility: public -/
+def config_recovery
+  (present : Bool) (worktree : Slice Std.U8) (want : Slice Std.U8)
+  («from» : Slice Std.U8) :
+  RustM ConfigRecovery
+  := do
+  if present
+  then
+    let b ← bytes_eq worktree want
+    if b
+    then ok ConfigRecovery.Done
+    else
+      let b1 ← bytes_eq worktree «from»
+      if b1
+      then ok ConfigRecovery.Write
+      else ok ConfigRecovery.Changed
+  else ok ConfigRecovery.Write
+
+/-- [transcrypt_v3_core::file_recovery]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2596:0-2604:1
+    Visibility: public -/
+def file_recovery
+  (worktree : Slice Std.U8) (want_record : Slice Std.U8)
+  (from_record : Slice Std.U8) :
+  RustM FileRecovery
+  := do
+  let b ← bytes_eq worktree from_record
+  if b
+  then ok FileRecovery.Relock
+  else
+    let b1 ← bytes_eq worktree want_record
+    if b1
+    then ok FileRecovery.Keep
+    else ok FileRecovery.Check
+
+/-- [transcrypt_v3_core::push_admission]:
+    Source: 'crates/transcrypt-v3-core/src/lib.rs', lines 2624:0-2632:1
+    Visibility: public -/
+def push_admission
+  (authenticated : Bool) (required : Bool) : RustM PushAdmission := do
+  if authenticated
+  then ok PushAdmission.Admit
+  else if required
+       then ok PushAdmission.Refuse
+       else ok PushAdmission.Warn
+
 end transcrypt_v3_core

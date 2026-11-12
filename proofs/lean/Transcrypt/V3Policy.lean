@@ -6,6 +6,7 @@ import Transcrypt.V3Policy.Git
 import Transcrypt.V3Policy.Credentials
 import Transcrypt.V3Policy.Profiles
 import Transcrypt.V3Policy.Binding
+import Transcrypt.V3Policy.Interruption
 
 /-!
 Independent specification of the v3 protocol *decisions*. This module only
@@ -23,6 +24,10 @@ gathers its parts, each importing only what it builds on:
 * `Profiles`: the key-derivation function a configuration's profile selects.
 * `Binding`: what deterministic records leak (equality), and that moving a
   record to another path or configuration needs an AES-SIV collision.
+* `Interruption`: the setup record and the rekey journal (the decisions
+  the core makes when a command is resumed, and models of every durable
+  step in which an interrupted setup keeps its policy and `rekey --abort`
+  is lossless), and the pre-push verdict.
 
 Written from `docs/verification/specs/V3-AUTHENTICATED-P0.md`, not from the
 Rust source. Aeneas refinement theorems in `proofs/aeneas/v3` relate the
