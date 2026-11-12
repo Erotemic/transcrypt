@@ -17,7 +17,7 @@ use crate::{
         push_index_record, read_record, tree_files, Attributes, Mode, ObjectId, Repository, Staged, SHORT_OUTPUT_LIMIT},
 };
 use transcrypt_v3_core::{
-    commit_needs_no_key, commit_verdict, is_object_id, is_reserved_path, AuditBase, AuditRefusal, AuditedEntries, AuditedEntry,
+    commit_needs_no_key, commit_verdict, is_object_id, push_admission, PushAdmission, is_reserved_path, AuditBase, AuditRefusal, AuditedEntries, AuditedEntry,
     StagedEvidence, StagedRefusal, ATTRIBUTES_NAME, ID_LEN,
 };
 
@@ -519,6 +519,14 @@ pub(crate) fn pre_push(repo: &Repository, remote: Option<&OsStr>) -> Result<(), 
         }
         let zero = |oid: &[u8]| oid.iter().all(|b| *b == b'0');
         if zero(local) { continue; } // deleting a remote ref pushes nothing
+        // `rev-list` walks commits only: a pushed tree or blob (a tag
+        // naming one) would be published without being audited.
+        let mut tip = local.to_vec();
+        tip.extend_from_slice(b"^{commit}");
+        if git(repo, &["cat-file", "-e", &String::from_utf8_lossy(&tip)]).is_err() {
+            return Err(format!("{} names no commit (a tag of a tree or blob?): its files cannot be audited\n\
+                refusing to push", String::from_utf8_lossy(fields[0])));
+        }
         revs.push(String::from_utf8_lossy(local).into_owned().into());
         let mut known = remote_oid.to_vec();
         known.extend_from_slice(b"^{commit}");
@@ -540,20 +548,23 @@ pub(crate) fn pre_push(repo: &Repository, remote: Option<&OsStr>) -> Result<(), 
     }
     let audited = audit(repo, &revs, true, None)
         .map_err(|e| format!("{e}\nrefusing to push; see `transcrypt-rs audit`"))?;
-    if audited.authenticated { return Ok(()); }
-    // Some records were checked for their envelope only: this checkout is
-    // locked, or the pushed history holds a configuration it has no key
-    // for (before a rekey). Say so, and refuse when the repository asks for
-    // authenticated pushes.
+    // Some records may have been checked for their envelope only: this
+    // checkout is locked, or the pushed history holds a configuration it
+    // has no key for (before a rekey). Say so, and refuse when the
+    // repository asks for authenticated pushes.
     let unchecked = "the pushed history's records were checked for their v3 envelope only, not \
         authenticated: this checkout is locked or has no key for an older configuration";
-    if require_authenticated_push(repo) {
-        return Err(format!("{unchecked}, and {REQUIRE_AUTHENTICATED_PUSH} is set\nrefusing to push; \
-            unlock, or run `transcrypt-rs audit` with the key of every configuration pushed"));
+    let required = !audited.authenticated && require_authenticated_push(repo);
+    match push_admission(audited.authenticated, required) {
+        PushAdmission::Admit => Ok(()),
+        PushAdmission::Refuse => Err(format!("{unchecked}, and {REQUIRE_AUTHENTICATED_PUSH} is set\nrefusing to \
+            push; unlock, or run `transcrypt-rs audit` with the key of every configuration pushed")),
+        PushAdmission::Warn => {
+            eprintln!("transcrypt-rs: warning: {unchecked}; set `git config {REQUIRE_AUTHENTICATED_PUSH} true` \
+                to refuse such pushes");
+            Ok(())
+        },
     }
-    eprintln!("transcrypt-rs: warning: {unchecked}; set `git config {REQUIRE_AUTHENTICATED_PUSH} true` \
-        to refuse such pushes");
-    Ok(())
 }
 
 /// The Git setting that makes the pre-push hook refuse a push whose

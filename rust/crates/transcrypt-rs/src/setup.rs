@@ -20,7 +20,7 @@ use crate::{
     load_config, os, passphrase, session,
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
     cli::{InitArgs, KeyMode, UnlockArgs},
-    journal::{RekeyJournal, SetupKind, SetupRecord, REKEY_PENDING},
+    journal::{record_use, RecordUse, RekeyJournal, SetupKind, SetupRecord, REKEY_PENDING},
 };
 
 const HOOKS_BYPASSED: &str = "core.hooksPath is set, so Git does not run the v3 pre-commit and \
@@ -268,13 +268,12 @@ const INIT_COMMITTED: &str = ".transcrypt already exists: this repository is set
 /// config) was asked to protect, so that resuming cannot drop them.
 fn init_patterns(repo: &Repository, resuming: bool, given: &[std::ffi::OsString]) -> Result<Vec<std::ffi::OsString>, String> {
     let mut patterns = given.to_vec();
-    match SetupRecord::load(repo)? {
-        Some(record) if resuming && record.kind != SetupKind::Init => {
-            return Err("an interrupted `migrate` set up this checkout; rerun migrate to complete it".into());
-        },
-        Some(record) if resuming || (record.kind == SetupKind::Init && !record.complete) => {
+    let record = SetupRecord::load(repo)?;
+    match record_use(SetupKind::Init, resuming, record.as_ref(), !patterns.is_empty()) {
+        RecordUse::Fresh => {},
+        RecordUse::Merge => {
             let mut recorded = Vec::new();
-            for item in &record.items {
+            for item in record.iter().flat_map(|r| &r.items) {
                 let pattern = os::os_string(item)?;
                 if !patterns.contains(&pattern) {
                     recorded.push(pattern.to_string_lossy().into_owned());
@@ -285,11 +284,14 @@ fn init_patterns(repo: &Repository, resuming: bool, given: &[std::ffi::OsString]
                 eprintln!("Also protecting what the interrupted init was asked to: {}", recorded.join(" "));
             }
         },
-        None if resuming && patterns.is_empty() => {
+        RecordUse::OtherSetup => {
+            return Err(format!("an interrupted `migrate` set up this checkout; rerun migrate to complete it, \
+                or start over: {START_OVER}"));
+        },
+        RecordUse::Unrecorded => {
             return Err(format!("an interrupted setup left .transcrypt, but no record of what it was to protect; \
                 rerun init naming the patterns to protect, or start over: {START_OVER}"));
         },
-        _ => {},
     }
     Ok(patterns)
 }
@@ -301,6 +303,8 @@ pub(crate) struct Rollback {
     config: Vec<u8>,
     attributes_before: Option<Vec<u8>>,
     hook_preexisted: [bool; HOOKS.len()],
+    /// The setup record before this run saved its own.
+    record_before: Option<SetupRecord>,
 }
 
 impl Rollback {
@@ -321,7 +325,14 @@ impl Rollback {
         remove_filters(repo);
         let _ = credential::forget(repo);
         let _ = session::stop(repo, &self.config);
-        let _ = SetupRecord::remove(repo);
+        // The record goes back to what this run found: an earlier
+        // interrupted setup's record stays. None is removed while the
+        // config it describes is still there.
+        let _ = match &self.record_before {
+            Some(record) => record.save(repo),
+            None if fs::symlink_metadata(repo.root().join(CONFIG_PATH)).is_err() => SetupRecord::remove(repo),
+            None => Ok(()),
+        };
     }
 }
 
@@ -366,6 +377,7 @@ pub(crate) fn init_with_rollback(repo: &Repository, mode: KeyMode, profile: Prof
         config: config.to_vec(),
         attributes_before: worktree_attributes(repo)?,
         hook_preexisted: HOOKS.map(|(name, _)| fs::symlink_metadata(hook_path(repo, name)).is_ok()),
+        record_before: SetupRecord::load(repo)?,
     };
     // What this setup protects is recorded before it changes anything.
     record.save(repo)?;

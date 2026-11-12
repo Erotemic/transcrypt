@@ -1377,6 +1377,33 @@ fn push_head(repo: &std::path::Path) -> (bool, String) {
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// A pushed tip that is no commit (a tag of a tree or blob) is refused:
+/// `rev-list` would walk none of its files, so a tree holding a protected
+/// file's plaintext would reach the remote unaudited. Tags of commits and
+/// deletions push as usual.
+#[test]
+fn pushes_of_trees_and_blobs_are_refused() {
+    let mut scratch = Scratch::new("treepush");
+    let repo = pushed_repo(&mut scratch);
+    // A tree whose own attributes protect a.secret, holding its plaintext.
+    let plaintext = run(&repo, "git", &["hash-object", "-w", "--stdin"], Some(b"MARK-tree-plaintext\n"));
+    let attributes = run(&repo, "git", &["rev-parse", "HEAD:.gitattributes"], None);
+    let listing = format!("100644 blob {}\t.gitattributes\n100644 blob {}\ta.secret\n",
+        String::from_utf8_lossy(&attributes).trim(), String::from_utf8_lossy(&plaintext).trim());
+    let tree = run(&repo, "git", &["mktree"], Some(listing.as_bytes()));
+    let tree = String::from_utf8_lossy(&tree).trim().to_owned();
+    for (tag, target) in [("tree-tag", tree.clone()), ("blob-tag", String::from_utf8_lossy(&plaintext).trim().to_owned())] {
+        run(&repo, "git", &["update-ref", &format!("refs/tags/{tag}"), &target], None);
+        let out = exec(&repo, "git", &["push", "-q", "origin", &format!("refs/tags/{tag}")], None);
+        assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("names no commit"), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    run(&repo, "git", &["tag", "-a", "-m", "release", "v1"], None);
+    let out = exec(&repo, "git", &["push", "-q", "origin", "refs/tags/v1"], None);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let objects = run(&scratch.root.join("origin.git"), "git", &["cat-file", "--batch-all-objects", "--batch"], None);
+    assert!(!objects.windows(10).any(|w| w == b"MARK-tree-"), "plaintext reached the remote");
+}
+
 /// Locked, a push of commits that change only unprotected files needs no
 /// key: it neither warns nor, with `transcrypt.requireAuthenticatedPush`,
 /// refuses.

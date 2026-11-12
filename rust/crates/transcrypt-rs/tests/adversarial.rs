@@ -1148,6 +1148,59 @@ fn interrupted_init_keeps_its_patterns_when_resumed() {
     run(&repo, bin(), &["init", "--password-stdin", "*.env"], Some(PASS));
 }
 
+/// An unfinished setup record binds every later run: a run of the other
+/// command is refused, and a run that fails and rolls back puts back the
+/// record it found, so a later run still protects what the interrupted one
+/// was asked to.
+#[test]
+fn unfinished_setup_records_survive_other_commands_and_rollbacks() {
+    let mut scratch = Scratch::new("setup-record");
+    let record = |kind: &str| format!("transcrypt-v3-setup 1\0{kind}\0started\0*.env\0").into_bytes();
+    // An interrupted migrate refuses init, and the other way round.
+    let repo = scratch.git_repo("other-kind");
+    fs::write(repo.join(".git/transcrypt-v3-setup"), record("migrate")).unwrap();
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin", "*.secret"], Some(PASS));
+    assert!(err.contains("interrupted `migrate`"), "{err}");
+    assert!(!repo.join(".transcrypt").exists());
+    fs::write(repo.join(".git/transcrypt-v3-setup"), record("init")).unwrap();
+    run(&repo, "git", &["config", "filter.crypt.clean", "cat"], None);
+    let err = run_fails(&repo, bin(), &["migrate", "--password-stdin"], Some(PASS));
+    assert!(err.contains("interrupted `init`"), "{err}");
+    assert!(!repo.join(".transcrypt").exists());
+    // A failing init (an invalid pattern) rolls back to the record it found.
+    let repo = scratch.git_repo("rollback");
+    fs::write(repo.join(".git/transcrypt-v3-setup"), record("init")).unwrap();
+    let err = run_fails(&repo, bin(), &["init", "--password-stdin", "#not-a-pattern"], Some(PASS));
+    assert!(err.contains("rolled back"), "{err}");
+    assert!(!repo.join(".transcrypt").exists());
+    assert_eq!(fs::read(repo.join(".git/transcrypt-v3-setup")).unwrap(), record("init"));
+    // The next run, naming nothing, still protects *.env.
+    let out = run_err(&repo, bin(), &["init", "--password-stdin"], Some(PASS));
+    assert!(out.contains("*.env"), "{out}");
+    assert!(fs::read_to_string(repo.join(".gitattributes")).unwrap().lines().any(|l| l == "*.env transcrypt"));
+}
+
+/// A rekey journal that names a path twice is refused, never acted on:
+/// a recovery decides and writes per path.
+#[test]
+fn rekey_journals_with_a_path_twice_are_refused() {
+    let mut scratch = Scratch::new("journal-twice");
+    let repo = scratch.repo("repo");
+    let oid = String::from_utf8(run(&repo, "git", &["rev-parse", "HEAD:a.secret"], None)).unwrap();
+    let oid = oid.trim();
+    let mut journal = format!("transcrypt-v3-rekey 1\0{oid}\0{oid}\0").into_bytes();
+    for _ in 0..2 {
+        journal.extend_from_slice(format!("100644\0{oid}\0{oid}\0a.secret\0").as_bytes());
+    }
+    fs::write(repo.join(".git/transcrypt-v3-rekey"), &journal).unwrap();
+    let index = run(&repo, "git", &["ls-files", "-s"], None);
+    for flag in ["--continue", "--abort"] {
+        let err = run_fails(&repo, bin(), &["rekey", flag, "--password-stdin"], Some(PASS));
+        assert!(err.contains("unrecognized"), "{err}");
+    }
+    assert_eq!(run(&repo, "git", &["ls-files", "-s"], None), index);
+}
+
 /// A protected file deleted in the worktree (or absent in a sparse
 /// checkout) holds no plaintext: it no longer blocks `lock`, `hydrate` or
 /// `unlock` for every other file, and stays deleted.

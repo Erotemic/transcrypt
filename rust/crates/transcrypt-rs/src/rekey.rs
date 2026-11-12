@@ -3,7 +3,7 @@
 //! brought forward).
 
 use transcrypt_rs::{Profile, ValidatedKey};
-use transcrypt_v3_core::parse_file_header;
+use transcrypt_v3_core::{config_recovery, entry_recovery, file_recovery, parse_file_header, ConfigRecovery, EntryRecovery, FileRecovery};
 use crate::{
     attributes::owned_paths,
     credential::Key,
@@ -138,16 +138,20 @@ pub(crate) fn resume(repo: &Repository, password_stdin: bool, resume: Resume) ->
     let mut changed = Vec::new();
     for entry in &journal.entries {
         let (want, from) = ends(entry);
-        match now.get(&entry.path[..]) {
-            Some((mode, oid)) if *mode == entry.mode && **oid == want => {},
-            Some((mode, oid)) if *mode == entry.mode && **oid == from => todo.push((entry.mode, want, entry.path.clone())),
-            _ => changed.push(format!("{} (staged)", String::from_utf8_lossy(&entry.path))),
+        let staged = now.get(&entry.path[..]).filter(|(mode, _)| *mode == entry.mode);
+        let oid = staged.map_or(&[][..], |(_, oid)| oid.as_str().as_bytes());
+        match entry_recovery(staged.is_some(), oid, want.as_str().as_bytes(), from.as_str().as_bytes()) {
+            EntryRecovery::Done => {},
+            EntryRecovery::Todo => todo.push((entry.mode, want, entry.path.clone())),
+            EntryRecovery::Changed => changed.push(format!("{} (staged)", String::from_utf8_lossy(&entry.path))),
         }
     }
     let worktree_config = find_protected(repo.root(), Path::new(CONFIG_PATH))
         .map_err(|_| "unsafe .transcrypt/config (a symlink or not a regular file)".to_owned())?
         .map(|file| file.read().map(|(bytes, _)| bytes.to_vec())).transpose()?;
-    if worktree_config.as_ref().is_some_and(|c| *c != want_config && *c != from_config) {
+    let config_state = config_recovery(worktree_config.is_some(), worktree_config.as_deref().unwrap_or_default(),
+        &want_config, &from_config);
+    if config_state == ConfigRecovery::Changed {
         changed.push(".transcrypt/config (worktree)".into());
     }
     if !changed.is_empty() {
@@ -180,10 +184,13 @@ pub(crate) fn resume(repo: &Repository, password_stdin: bool, resume: Resume) ->
         let (worktree, _) = target.read()?;
         let (want, from) = ends(entry);
         let (want_record, from_record) = (git_blob(repo, &want)?, git_blob(repo, &from)?);
-        if *worktree == *from_record {
-            relock.push((entry.path.clone(), from_record, want_record));
-        } else if *worktree != *want_record && open(&entry.path, &want_record).is_ok_and(|p| *p == *worktree) {
-            reindexed.push(entry.path.clone());
+        match file_recovery(&worktree, &want_record, &from_record) {
+            FileRecovery::Relock => relock.push((entry.path.clone(), from_record, want_record)),
+            FileRecovery::Keep => {},
+            // Never written; re-indexed if it is the plaintext of the record.
+            FileRecovery::Check => if open(&entry.path, &want_record).is_ok_and(|p| *p == *worktree) {
+                reindexed.push(entry.path.clone());
+            },
         }
     }
     let private = Key::load(repo, &from_config)?.is_some_and(|k| k.private());
@@ -191,7 +198,7 @@ pub(crate) fn resume(repo: &Repository, password_stdin: bool, resume: Resume) ->
         if private { session::stop(repo, &from_config)?; }
         activate(repo, key, if private { KeyMode::Private { idle: None } } else { KeyMode::Stored })?;
     }
-    if worktree_config.as_deref() != Some(&want_config[..]) {
+    if config_state == ConfigRecovery::Write {
         write_repository_file(repo.root(), &staging, Path::new(CONFIG_PATH), &want_config)?;
     }
     stage_objects(repo, &todo, &[])?;

@@ -17,7 +17,7 @@ use crate::{
     setup::{init_with_rollback, uncommitted_setup},
     worktree::{find_protected, indexed_path, staging_dir, write_repository_file},
     cli::MigrateArgs,
-    journal::{SetupKind, SetupRecord},
+    journal::{record_use, RecordUse, SetupKind, SetupRecord},
 };
 
 /// How a Bash transcrypt (v2) record starts: OpenSSL's `Salted__`, in
@@ -105,16 +105,25 @@ pub(crate) fn migrate(repo: &Repository, args: &MigrateArgs) -> Result<(), Strin
     let mut selected: Vec<&[u8]> = paths.iter().zip(filter_values(repo, &paths, Attributes::Worktree)?)
         .filter(|(_, value)| v2_value(value) || (resuming && value == b"transcrypt-v3"))
         .map(|(path, _)| *path).collect();
-    let record = if resuming { SetupRecord::load(repo)? } else { None };
-    if let Some(record) = &record {
-        if record.kind != SetupKind::Migrate {
-            return Err("an interrupted `init` set up this checkout; rerun init to complete it".into());
-        }
-        for item in &record.items {
-            if let Some(path) = paths.iter().find(|p| ***p == item[..]) {
-                if !selected.contains(path) { selected.push(path); }
+    let record = SetupRecord::load(repo)?;
+    match record_use(SetupKind::Migrate, resuming, record.as_ref(), !selected.is_empty()) {
+        RecordUse::Fresh => {},
+        RecordUse::Merge => {
+            // A recorded path no longer in the index was removed by the user.
+            for item in record.iter().flat_map(|r| &r.items) {
+                if let Some(path) = paths.iter().find(|p| ***p == item[..]) {
+                    if !selected.contains(path) { selected.push(path); }
+                }
             }
-        }
+        },
+        RecordUse::OtherSetup => {
+            return Err(format!("an interrupted `init` set up this checkout; rerun init to complete it, or start \
+                over: {}", crate::setup::START_OVER));
+        },
+        RecordUse::Unrecorded => {
+            return Err(format!("an interrupted setup left .transcrypt, but no record of what it was to convert \
+                and no Bash transcrypt rules select anything; start over: {}", crate::setup::START_OVER));
+        },
     }
     // A committed state, except for an interrupted migration's own changes.
     let status = git(repo, &["status", "--porcelain", "-z", "--untracked-files=no"])?;

@@ -72,22 +72,26 @@ fn remove(repo: &Repository, name: &str) -> Result<(), String> {
     }
 }
 
-/// The command a setup record is for.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SetupKind {
-    Init,
-    Migrate,
+pub(crate) use transcrypt_v3_core::{RecordUse, SetupKind};
+
+fn kind_name(kind: SetupKind) -> &'static [u8] {
+    match kind { SetupKind::Init => b"init", SetupKind::Migrate => b"migrate" }
 }
 
-impl SetupKind {
-    fn name(self) -> &'static [u8] {
-        match self { SetupKind::Init => b"init", SetupKind::Migrate => b"migrate" }
+/// What a run of `kind` does with `record`: the verified
+/// `setup_record_use`. `resuming`: `.transcrypt` exists and `HEAD` has no
+/// config; `named`: the run was asked to protect something.
+pub(crate) fn record_use(kind: SetupKind, resuming: bool, record: Option<&SetupRecord>, named: bool) -> RecordUse {
+    match record {
+        Some(r) => transcrypt_v3_core::setup_record_use(kind, resuming, true, r.kind, r.complete, named),
+        None => transcrypt_v3_core::setup_record_use(kind, resuming, false, kind, false, named),
     }
 }
 
 /// What `init` (its patterns, as given) or `migrate` (the paths it
 /// converts) was asked to protect, and whether it finished (`complete`: a
 /// fresh setup then ignores it).
+#[derive(Clone)]
 pub(crate) struct SetupRecord {
     pub(crate) kind: SetupKind,
     pub(crate) complete: bool,
@@ -115,7 +119,7 @@ impl SetupRecord {
 
     pub(crate) fn save(&self, repo: &Repository) -> Result<(), String> {
         let state: &[u8] = if self.complete { b"complete" } else { b"started" };
-        let mut fields: Vec<&[u8]> = vec![SETUP_MAGIC, self.kind.name(), state];
+        let mut fields: Vec<&[u8]> = vec![SETUP_MAGIC, kind_name(self.kind), state];
         fields.extend(self.items.iter().map(Vec::as_slice));
         write_fields(repo, SETUP_FILE, &fields)
     }
@@ -163,6 +167,9 @@ impl RekeyJournal {
             new: oid(&e[2])?,
             path: e[3].clone(),
         })).collect::<Result<Vec<_>, String>>()?;
+        // Each path once: a recovery decides and writes per path.
+        let mut paths = std::collections::HashSet::new();
+        if !entries.iter().all(|e| paths.insert(&e.path[..])) { return Err(unrecognized()); }
         Ok(Some(RekeyJournal { old_config: oid(old_config)?, new_config: oid(new_config)?, entries }))
     }
 
