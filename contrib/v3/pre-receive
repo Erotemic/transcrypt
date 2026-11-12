@@ -4,7 +4,8 @@
 # `filter=transcrypt-v3`) to this repository.
 #
 # Install in a bare repository as hooks/pre-receive (mode 0755) with
-# `transcrypt-rs` on the hook's PATH, or set TRANSCRYPT_RS to its path. No
+# `transcrypt-rs` on the hook's PATH, or set TRANSCRYPT_RS to its path (the
+# portable `transcrypt-bash` works too: same arguments, same checks). No
 # key is needed: every protected blob in the new commits must be a v3 record
 # for the .transcrypt/config committed alongside it. This is a keyless
 # envelope check: it stops plaintext, not a deliberately forged record. See
